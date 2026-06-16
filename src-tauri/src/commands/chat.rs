@@ -138,26 +138,34 @@ pub async fn load_agent_chat_transcript_for_state(
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
+    let archive_context = conversation_archive_context(ConversationArchiveContextInput {
+        session_id: &session_id,
+        provider: &provider,
+        agent_name: &agent_name,
+        agent_class: &agent_class,
+        workspace: &workspace,
+        resume_session: resume_session.as_deref(),
+        fresh_provider_session_id: fresh_provider_session_id.as_deref(),
+        log_path: log_path.as_deref(),
+    });
     if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
         == ConversationLoggingSetting::Enabled
     {
-        if let Err(error) = state.conversation_archive.append_chat_events_with_context(
-            conversation_archive_context(ConversationArchiveContextInput {
-                session_id: &session_id,
-                provider: &provider,
-                agent_name: &agent_name,
-                agent_class: &agent_class,
-                workspace: &workspace,
-                resume_session: resume_session.as_deref(),
-                fresh_provider_session_id: fresh_provider_session_id.as_deref(),
-                log_path: log_path.as_deref(),
-            }),
-            &events,
-        ) {
+        if let Err(error) = state
+            .conversation_archive
+            .append_chat_events_with_context(archive_context, &events)
+        {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive append failed for {session_id}: {error}"
             ));
         }
+    } else if let Err(error) = state
+        .conversation_archive
+        .discard_agent_with_context(archive_context, &events)
+    {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive disabled cutoff failed for {session_id}: {error}"
+        ));
     }
 
     Ok(events)

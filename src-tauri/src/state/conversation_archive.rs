@@ -4,6 +4,8 @@ use std::{
     sync::Mutex,
 };
 
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, materialize_text_payload, read_jsonl_records,
     read_latest_index_entries, write_json_atomic, AgentConversationLoggingSetting,
@@ -12,7 +14,9 @@ use wardian_core::conversations::{
     ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, ConversationStatus,
     CONVERSATION_SCHEMA,
 };
-use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
+use wardian_core::models::chat::{
+    AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+};
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
 
 #[derive(Debug, Default)]
@@ -50,6 +54,54 @@ impl ConversationArchiveContext {
             provider_session_ids: Vec::new(),
             provider_source_key: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ConversationCaptureState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skip_events_at_or_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skip_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skip_event_scopes: Vec<ConversationCaptureEventScope>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ConversationCaptureEventScope {
+    provider_source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skip_events_at_or_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    event_ids: Vec<String>,
+}
+
+impl ConversationCaptureState {
+    fn should_skip_event(&self, event: &AgentChatEvent, provider_source_key: Option<&str>) -> bool {
+        let legacy_unscoped_match =
+            provider_source_key.is_none() && self.skip_event_ids.iter().any(|id| id == &event.id);
+        let scoped_match = self.skip_event_scopes.iter().any(|scope| {
+            scope.provider_source_key.as_deref() == provider_source_key
+                && (scope.event_ids.iter().any(|id| id == &event.id)
+                    || scope
+                        .skip_events_at_or_before
+                        .as_deref()
+                        .zip(event.created_at.as_deref())
+                        .is_some_and(|(cutoff, created_at)| created_at <= cutoff))
+        });
+        if legacy_unscoped_match || scoped_match {
+            return true;
+        }
+        if provider_source_key.is_some() {
+            return false;
+        }
+        let Some(cutoff) = self.skip_events_at_or_before.as_deref() else {
+            return false;
+        };
+        event
+            .created_at
+            .as_deref()
+            .is_some_and(|created_at| created_at <= cutoff)
     }
 }
 
@@ -160,12 +212,14 @@ impl ConversationArchiveState {
         if context.provider_session_ids.is_empty() {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
-        let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
+        let mut handle =
+            active_handle_for_context(&mut active, &context, provider_source_key.clone())?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
+        let capture_state = read_capture_state(&context.agent_id)?;
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut seen_event_ids = existing_records
@@ -185,6 +239,9 @@ impl ConversationArchiveState {
         let mut source_records = Vec::new();
 
         for event in events {
+            if capture_state.should_skip_event(event, provider_source_key.as_deref()) {
+                continue;
+            }
             if !seen_event_ids.insert(event.id.clone()) {
                 continue;
             }
@@ -315,6 +372,8 @@ impl ConversationArchiveState {
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
+        let events_path = conversation_dir.join("events.jsonl");
+        let sources_path = conversation_dir.join("sources.jsonl");
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let next_seq = handle.next_seq.max(
@@ -327,6 +386,13 @@ impl ConversationArchiveState {
         );
         let mut record = make_record(next_seq);
         materialize_record_text(&conversation_dir, &mut record)?;
+        let generated_event =
+            generated_event_from_record(&effective_context, &handle.conversation_id, &mut record);
+        let generated_sources = generated_sources_from_record(&effective_context, &mut record);
+        append_jsonl_record(&events_path, &generated_event)?;
+        for source in &generated_sources {
+            append_jsonl_record(&sources_path, source)?;
+        }
         append_jsonl_record(&conversation_path, &record)?;
 
         let first_record = existing_records.first().unwrap_or(&record);
@@ -370,8 +436,79 @@ impl ConversationArchiveState {
     }
 
     pub fn discard_agent(&self, agent_id: &str) -> io::Result<Option<String>> {
+        self.discard_agent_with_events(agent_id, &[])
+    }
+
+    pub fn discard_agent_with_events(
+        &self,
+        agent_id: &str,
+        events: &[AgentChatEvent],
+    ) -> io::Result<Option<String>> {
+        self.discard_agent_capture(agent_id, None, events)
+    }
+
+    pub fn discard_agent_with_context(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+    ) -> io::Result<Option<String>> {
+        self.discard_agent_capture(
+            &context.agent_id,
+            context.provider_source_key.as_deref(),
+            events,
+        )
+    }
+
+    fn discard_agent_capture(
+        &self,
+        agent_id: &str,
+        provider_source_key: Option<&str>,
+        events: &[AgentChatEvent],
+    ) -> io::Result<Option<String>> {
         let mut active = lock_active(&self.active)?;
-        Ok(active.remove(agent_id).map(|handle| handle.conversation_id))
+        let removed = active.remove(agent_id).map(|handle| handle.conversation_id);
+        let mut capture_state = read_capture_state(agent_id)?;
+        let cutoff = current_rfc3339_millis();
+
+        if let Some(provider_source_key) = provider_source_key {
+            let provider_source_key = Some(provider_source_key.to_string());
+            let scope_index = capture_state
+                .skip_event_scopes
+                .iter()
+                .position(|scope| scope.provider_source_key == provider_source_key)
+                .unwrap_or_else(|| {
+                    capture_state
+                        .skip_event_scopes
+                        .push(ConversationCaptureEventScope {
+                            provider_source_key: provider_source_key.clone(),
+                            skip_events_at_or_before: None,
+                            event_ids: Vec::new(),
+                        });
+                    capture_state.skip_event_scopes.len() - 1
+                });
+            let scope = &mut capture_state.skip_event_scopes[scope_index];
+            scope.skip_events_at_or_before = Some(cutoff);
+            let mut seen = scope.event_ids.iter().cloned().collect::<HashSet<_>>();
+            for event in events {
+                if !event.id.trim().is_empty() && seen.insert(event.id.clone()) {
+                    scope.event_ids.push(event.id.clone());
+                }
+            }
+        } else {
+            capture_state.skip_events_at_or_before = Some(cutoff);
+            let mut seen = capture_state
+                .skip_event_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            for event in events {
+                if !event.id.trim().is_empty() && seen.insert(event.id.clone()) {
+                    capture_state.skip_event_ids.push(event.id.clone());
+                }
+            }
+        }
+        write_capture_state(agent_id, &capture_state)?;
+        Ok(removed)
     }
 
     #[cfg(test)]
@@ -451,6 +588,119 @@ fn source_record_from_chat_event(
         hash: metadata_string(&event.metadata, "hash"),
         artifact_ref: metadata_string(&event.metadata, "artifact_ref"),
     })
+}
+
+fn generated_event_from_record(
+    context: &ConversationArchiveContext,
+    conversation_id: &str,
+    record: &mut ConversationNarrativeRecord,
+) -> AgentChatEvent {
+    let event_id = format!("generated:{conversation_id}:{}", record.seq);
+    if record.event_refs.is_empty() {
+        record.event_refs.push(event_id.clone());
+    }
+
+    AgentChatEvent {
+        id: event_id,
+        session_id: context.agent_id.clone(),
+        provider: context.provider.clone(),
+        kind: match record.kind {
+            ConversationRecordKind::Message => AgentChatEventKind::Message,
+            ConversationRecordKind::ToolCall => AgentChatEventKind::ToolCall,
+            ConversationRecordKind::ToolResult => AgentChatEventKind::ToolResult,
+            ConversationRecordKind::Approval => AgentChatEventKind::Approval,
+            ConversationRecordKind::Error => AgentChatEventKind::Error,
+            ConversationRecordKind::Lifecycle | ConversationRecordKind::Status => {
+                AgentChatEventKind::Status
+            }
+        },
+        role: record.role.as_deref().and_then(agent_role_from_record_role),
+        text: record.text.clone(),
+        title: record.summary.clone(),
+        status: (record.kind == ConversationRecordKind::Lifecycle).then_some(AgentChatStatus::Idle),
+        turn_id: context.provider_source_key.clone(),
+        source: record.source_refs.first().cloned(),
+        command: record.tool.clone(),
+        exit_code: None,
+        path: None,
+        language: None,
+        created_at: Some(record.at.clone()),
+        sequence: Some(record.seq),
+        metadata: serde_json::json!({
+            "generated": true,
+            "conversation_record_kind": record_kind_to_string(record.kind),
+        }),
+    }
+}
+
+fn generated_sources_from_record(
+    context: &ConversationArchiveContext,
+    record: &mut ConversationNarrativeRecord,
+) -> Vec<ConversationSourceRecord> {
+    let mut sources = Vec::new();
+    for source_ref in record.source_refs.clone() {
+        if let Some(sender_agent_id) = source_ref.strip_prefix("agent:").map(ToString::to_string) {
+            sources.push(ConversationSourceRecord {
+                schema: CONVERSATION_SCHEMA,
+                source_id: source_ref,
+                provider: "wardian".to_string(),
+                provider_session_id: Some(sender_agent_id),
+                source_kind: "wardian_agent".to_string(),
+                source_path: None,
+                cursor: Some(record.seq.to_string()),
+                offset: None,
+                row_id: None,
+                provider_event_type: Some("delivered_input".to_string()),
+                hash: None,
+                artifact_ref: None,
+            });
+        }
+    }
+
+    if record.kind == ConversationRecordKind::Lifecycle {
+        let source_id = format!("src_{}", record.seq);
+        if !record.source_refs.iter().any(|source| source == &source_id) {
+            record.source_refs.push(source_id.clone());
+        }
+        sources.push(ConversationSourceRecord {
+            schema: CONVERSATION_SCHEMA,
+            source_id,
+            provider: context.provider.clone(),
+            provider_session_id: context.provider_source_key.clone(),
+            source_kind: "wardian_lifecycle".to_string(),
+            source_path: None,
+            cursor: Some(record.seq.to_string()),
+            offset: None,
+            row_id: None,
+            provider_event_type: record.status.clone(),
+            hash: None,
+            artifact_ref: None,
+        });
+    }
+
+    sources
+}
+
+fn agent_role_from_record_role(role: &str) -> Option<AgentChatRole> {
+    match role {
+        "user" => Some(AgentChatRole::User),
+        "assistant" => Some(AgentChatRole::Assistant),
+        "system" => Some(AgentChatRole::System),
+        "tool" => Some(AgentChatRole::Tool),
+        _ => None,
+    }
+}
+
+fn record_kind_to_string(kind: ConversationRecordKind) -> &'static str {
+    match kind {
+        ConversationRecordKind::Message => "message",
+        ConversationRecordKind::ToolCall => "tool_call",
+        ConversationRecordKind::ToolResult => "tool_result",
+        ConversationRecordKind::Approval => "approval",
+        ConversationRecordKind::Error => "error",
+        ConversationRecordKind::Lifecycle => "lifecycle",
+        ConversationRecordKind::Status => "status",
+    }
 }
 
 pub fn narrative_from_delivered_input(
@@ -640,6 +890,28 @@ fn index_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe agent path"))
 }
 
+fn capture_state_path(agent_id: &str) -> io::Result<std::path::PathBuf> {
+    agent_conversations_dir(agent_id)
+        .and_then(|dir| {
+            dir.parent()
+                .map(|agent_dir| agent_dir.join("conversation-capture.json"))
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe agent path"))
+}
+
+fn read_capture_state(agent_id: &str) -> io::Result<ConversationCaptureState> {
+    let path = capture_state_path(agent_id)?;
+    if !path.exists() {
+        return Ok(ConversationCaptureState::default());
+    }
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str(&content).map_err(io::Error::other)
+}
+
+fn write_capture_state(agent_id: &str, state: &ConversationCaptureState) -> io::Result<()> {
+    write_json_atomic(&capture_state_path(agent_id)?, state)
+}
+
 fn read_agent_index(agent_id: &str) -> io::Result<Vec<ConversationIndexEntry>> {
     read_latest_index_entries(&index_path(agent_id)?)
 }
@@ -678,7 +950,8 @@ fn sort_conversation_entries(entries: &mut [ConversationIndexEntry]) {
 
 fn new_conversation_id(agent_id: &str) -> String {
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
-    format!("conv_{timestamp}_{}", safe_agent_suffix(agent_id))
+    let nonce = Uuid::new_v4().simple();
+    format!("conv_{timestamp}_{nonce}_{}", safe_agent_suffix(agent_id))
 }
 
 fn safe_agent_suffix(agent_id: &str) -> String {
@@ -805,7 +1078,7 @@ fn hydrate_open_handle(
         if manifest.status != ConversationStatus::Open {
             continue;
         }
-        if manifest.provider != context.provider {
+        if context.provider != "unknown" && manifest.provider != context.provider {
             continue;
         }
         let keys_are_compatible =
@@ -859,8 +1132,20 @@ fn effective_context_for_handle(
         });
     }
 
-    if effective.provider_session_ids.is_empty() {
-        if let Some(manifest) = existing_manifest.as_ref() {
+    if let Some(manifest) = existing_manifest.as_ref() {
+        if effective.provider == "unknown" {
+            effective.provider = manifest.provider.clone();
+        }
+        if effective.agent_name.trim().is_empty() || effective.agent_name == effective.agent_id {
+            effective.agent_name = manifest.agent_name.clone();
+        }
+        if effective.agent_class.trim().is_empty() {
+            effective.agent_class = manifest.agent_class.clone();
+        }
+        if effective.workspace.trim().is_empty() {
+            effective.workspace = manifest.workspace.clone();
+        }
+        if effective.provider_session_ids.is_empty() {
             effective.provider_session_ids = manifest.provider_session_ids.clone();
         }
     }
@@ -1062,8 +1347,8 @@ fn status_for_boundary_reason(reason: ConversationBoundaryReason) -> Conversatio
 mod tests {
     use super::{
         effective_conversation_logging, lifecycle_record, narrative_from_chat_event,
-        narrative_from_delivered_input, ActiveConversationHandle, ConversationArchiveContext,
-        ConversationArchiveState,
+        narrative_from_delivered_input, new_conversation_id, ActiveConversationHandle,
+        ConversationArchiveContext, ConversationArchiveState,
     };
     use wardian_core::conversations::{
         read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
@@ -1725,6 +2010,276 @@ mod tests {
     }
 
     #[test]
+    fn append_lifecycle_boundary_after_restart_hydrates_open_conversation_and_preserves_manifest_metadata(
+    ) {
+        let (_guard, _temp) = isolated_home();
+        let first_archive = ConversationArchiveState::default();
+        first_archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[chat_event(
+                    "event-1",
+                    AgentChatEventKind::Message,
+                    Some(AgentChatRole::Assistant),
+                    Some("Before clear."),
+                )],
+            )
+            .expect("append provider event");
+        let conversation_id = first_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+
+        let second_archive = ConversationArchiveState::default();
+        second_archive
+            .append_lifecycle_boundary("agent-1", ConversationBoundaryReason::Clear)
+            .expect("append lifecycle after restart");
+
+        assert_eq!(
+            second_archive.active_conversation_id_for_test("agent-1"),
+            Some(conversation_id.clone())
+        );
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, ConversationRecordKind::Lifecycle);
+        assert_eq!(manifest.provider, "codex");
+        assert_eq!(manifest.agent_name, "CoderOne");
+        assert_eq!(manifest.agent_class, "Coder");
+        assert_eq!(manifest.workspace, "<absolute-workspace-path>");
+        assert_eq!(
+            manifest.provider_source_key.as_deref(),
+            Some("codex:session:session-one")
+        );
+    }
+
+    #[test]
+    fn discarded_logging_state_skips_disabled_transcript_events_when_reenabled() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[chat_event_at(
+                    "event-a",
+                    "2026-01-01T00:00:00.000Z",
+                    "Before disabled.",
+                )],
+            )
+            .expect("append enabled event");
+        archive
+            .discard_agent_with_context(archive_context("session-one"), &[])
+            .expect("discard active capture state");
+
+        let disabled_event =
+            chat_event_at("event-b", "2026-01-01T00:00:01.000Z", "While disabled.");
+        let enabled_event =
+            chat_event_at("event-c", "2999-01-01T00:00:00.000Z", "After re-enabled.");
+        archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[disabled_event, enabled_event],
+            )
+            .expect("append after re-enabled");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let texts = records
+            .iter()
+            .filter_map(|record| record.text.as_deref())
+            .collect::<Vec<_>>();
+
+        assert!(texts.contains(&"Before disabled."));
+        assert!(!texts.contains(&"While disabled."));
+        assert!(texts.contains(&"After re-enabled."));
+    }
+
+    #[test]
+    fn disabled_capture_state_skips_observed_events_without_timestamps_when_reenabled() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[chat_event_at(
+                    "event-a",
+                    "2026-01-01T00:00:00.000Z",
+                    "Before disabled.",
+                )],
+            )
+            .expect("append enabled event");
+
+        let disabled_event = chat_event_without_created_at("event-b", "While disabled.");
+        archive
+            .discard_agent_with_context(
+                archive_context("session-one"),
+                std::slice::from_ref(&disabled_event),
+            )
+            .expect("discard active capture state with observed event");
+        let enabled_event = chat_event_without_created_at("event-c", "After re-enabled.");
+        archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[disabled_event, enabled_event],
+            )
+            .expect("append after re-enabled");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let texts = records
+            .iter()
+            .filter_map(|record| record.text.as_deref())
+            .collect::<Vec<_>>();
+
+        assert!(texts.contains(&"Before disabled."));
+        assert!(!texts.contains(&"While disabled."));
+        assert!(texts.contains(&"After re-enabled."));
+    }
+
+    #[test]
+    fn disabled_capture_state_does_not_skip_reused_event_ids_from_new_provider_source() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let disabled_event = chat_event_without_created_at("agent-1:1", "While disabled.");
+        archive
+            .discard_agent_with_context(
+                archive_context("session-one"),
+                std::slice::from_ref(&disabled_event),
+            )
+            .expect("discard disabled event for session one");
+
+        let reused_id_event = chat_event_without_created_at("agent-1:1", "Fresh session event.");
+        archive
+            .append_chat_events_with_context(archive_context("session-two"), &[reused_id_event])
+            .expect("append reused id from new source");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+
+        assert!(records
+            .iter()
+            .any(|record| record.text.as_deref() == Some("Fresh session event.")));
+        assert!(!records
+            .iter()
+            .any(|record| record.text.as_deref() == Some("While disabled.")));
+    }
+
+    #[test]
+    fn disabled_capture_state_does_not_skip_timestamped_events_from_new_provider_source() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let disabled_event =
+            chat_event_at("agent-1:1", "2026-01-01T00:00:00.000Z", "While disabled.");
+        archive
+            .discard_agent_with_context(
+                archive_context("session-one"),
+                std::slice::from_ref(&disabled_event),
+            )
+            .expect("discard disabled event for session one");
+
+        let reused_id_event = chat_event_at(
+            "agent-1:1",
+            "2026-01-01T00:00:00.000Z",
+            "Fresh session timestamped event.",
+        );
+        archive
+            .append_chat_events_with_context(archive_context("session-two"), &[reused_id_event])
+            .expect("append reused timestamped id from new source");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+
+        assert!(records
+            .iter()
+            .any(|record| record.text.as_deref() == Some("Fresh session timestamped event.")));
+        assert!(!records
+            .iter()
+            .any(|record| record.text.as_deref() == Some("While disabled.")));
+    }
+
+    #[test]
+    fn conversation_ids_include_collision_resistant_nonce() {
+        let id = new_conversation_id("agent-1");
+        let has_uuid_nonce = id
+            .split('_')
+            .any(|part| part.len() == 32 && part.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+        assert!(
+            has_uuid_nonce,
+            "conversation id should include a UUID nonce: {id}"
+        );
+    }
+
+    #[test]
+    fn generated_records_write_event_and_source_records() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input("agent-1", "Prompt from peer.", Some("source-agent"))
+            .expect("append delivered input");
+        archive
+            .append_lifecycle_boundary("agent-1", ConversationBoundaryReason::Clear)
+            .expect("append lifecycle boundary");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let events: Vec<AgentChatEvent> =
+            read_jsonl_records(&conversation_path.join("events.jsonl"))
+                .expect("read event records");
+        let sources: Vec<ConversationSourceRecord> =
+            read_jsonl_records(&conversation_path.join("sources.jsonl"))
+                .expect("read source records");
+
+        assert_eq!(events.len(), 2);
+        assert!(records.iter().all(|record| !record.event_refs.is_empty()));
+        assert!(records.iter().all(|record| !record.source_refs.is_empty()));
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "wardian_agent"
+                && source.provider_session_id.as_deref() == Some("source-agent")));
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "wardian_lifecycle"));
+    }
+
+    #[test]
     fn list_conversation_archive_reads_requested_agent_only() {
         let (_guard, _temp) = isolated_home();
         let archive = ConversationArchiveState::default();
@@ -1868,6 +2423,30 @@ mod tests {
             created_at: Some("2026-06-15T00:00:00.000Z".to_string()),
             sequence: None,
             metadata: serde_json::json!({}),
+        }
+    }
+
+    fn chat_event_at(id: &str, created_at: &str, text: &str) -> AgentChatEvent {
+        AgentChatEvent {
+            created_at: Some(created_at.to_string()),
+            ..chat_event(
+                id,
+                AgentChatEventKind::Message,
+                Some(AgentChatRole::Assistant),
+                Some(text),
+            )
+        }
+    }
+
+    fn chat_event_without_created_at(id: &str, text: &str) -> AgentChatEvent {
+        AgentChatEvent {
+            created_at: None,
+            ..chat_event(
+                id,
+                AgentChatEventKind::Message,
+                Some(AgentChatRole::Assistant),
+                Some(text),
+            )
         }
     }
 
