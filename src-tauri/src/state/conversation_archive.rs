@@ -378,7 +378,7 @@ pub fn narrative_from_chat_event(
         speaker_type: event.role.as_ref().map(speaker_type_from_role),
         text: event.text.clone(),
         tool: event.title.clone().or_else(|| event.command.clone()),
-        status: event.status.as_ref().map(|status| status_to_string(status)),
+        status: event.status.as_ref().map(status_to_string),
         summary: event.title.clone(),
         excerpt: None,
         event_refs: vec![event.id.clone()],
@@ -964,7 +964,7 @@ mod tests {
         );
 
         let first_count = archive
-            .append_chat_events("agent-1", &[event.clone()])
+            .append_chat_events("agent-1", std::slice::from_ref(&event))
             .expect("first append succeeds");
         let second_count = archive
             .append_chat_events("agent-1", &[event])
@@ -1052,7 +1052,7 @@ mod tests {
         );
 
         let appended = archive
-            .append_chat_events("agent-1", &[event.clone()])
+            .append_chat_events("agent-1", std::slice::from_ref(&event))
             .expect("append succeeds");
 
         assert_eq!(appended, 1);

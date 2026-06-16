@@ -2770,10 +2770,8 @@ async fn record_conversation_delivery(
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
-    let sender_agent_id = match origin {
-        Some(MessageOrigin::WardianAgent { session_id }) => Some(session_id.as_str()),
-        None => None,
-    };
+    let sender_agent_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
     let target_settings = {
         let agents = state.agents.lock().await;
         delivery
