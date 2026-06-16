@@ -753,15 +753,28 @@ fn active_handle_for_context(
     provider_source_key: Option<String>,
 ) -> io::Result<ActiveConversationHandle> {
     if let Some(existing) = active.get(&context.agent_id).cloned() {
-        if existing.provider_source_key == provider_source_key {
-            return Ok(existing);
+        match (
+            existing.provider_source_key.as_deref(),
+            provider_source_key.as_deref(),
+        ) {
+            (Some(existing_key), Some(next_key)) if existing_key != next_key => {
+                close_conversation_handle(
+                    &context.agent_id,
+                    &existing,
+                    ConversationBoundaryReason::ProviderSourceChanged,
+                )?;
+                active.remove(&context.agent_id);
+            }
+            (None, Some(_)) => {
+                return Ok(ActiveConversationHandle {
+                    provider_source_key,
+                    ..existing
+                });
+            }
+            _ => {
+                return Ok(existing);
+            }
         }
-        close_conversation_handle(
-            &context.agent_id,
-            &existing,
-            ConversationBoundaryReason::ProviderSourceChanged,
-        )?;
-        active.remove(&context.agent_id);
     }
 
     if let Some(hydrated) = hydrate_open_handle(context, provider_source_key.as_deref())? {
@@ -793,7 +806,12 @@ fn hydrate_open_handle(
         if manifest.provider != context.provider {
             continue;
         }
-        if manifest.provider_source_key.as_deref() != provider_source_key {
+        let keys_are_compatible =
+            match (manifest.provider_source_key.as_deref(), provider_source_key) {
+                (Some(existing_key), Some(next_key)) => existing_key == next_key,
+                (None, Some(_)) | (Some(_), None) | (None, None) => true,
+            };
+        if !keys_are_compatible {
             continue;
         }
         let records: Vec<ConversationNarrativeRecord> =
@@ -807,7 +825,9 @@ fn hydrate_open_handle(
         return Ok(Some(ActiveConversationHandle {
             conversation_id: manifest.conversation_id,
             next_seq,
-            provider_source_key: manifest.provider_source_key,
+            provider_source_key: provider_source_key
+                .map(ToString::to_string)
+                .or(manifest.provider_source_key),
         }));
     }
     Ok(None)
@@ -1349,6 +1369,54 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].seq, 2);
+    }
+
+    #[test]
+    fn append_chat_events_adopts_late_provider_source_key_for_existing_input() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let input_context = ConversationArchiveContext {
+            provider_source_key: None,
+            provider_session_ids: Vec::new(),
+            ..archive_context("session-one")
+        };
+        archive
+            .append_delivered_input_with_context(input_context, "User prompt before source.", None)
+            .expect("append delivered input");
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("input conversation id");
+        let response = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Assistant response after source discovery."),
+        );
+
+        archive
+            .append_chat_events_with_context(archive_context("session-one"), &[response])
+            .expect("append response");
+
+        assert_eq!(
+            archive.active_conversation_id_for_test("agent-1"),
+            Some(conversation_id.clone())
+        );
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 2);
+        assert_eq!(
+            manifest.provider_source_key.as_deref(),
+            Some("codex:session:session-one")
+        );
     }
 
     #[test]
