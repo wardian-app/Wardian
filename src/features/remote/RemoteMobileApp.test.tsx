@@ -714,13 +714,15 @@ describe("RemoteMobileApp", () => {
       .find((body) => body.stream === "terminal_attach");
     expect(terminalTicketCall).toEqual({ stream: "terminal_attach" });
     expect(terminalCalls).toBe(0);
-    expect(screen.getByTestId("remote-terminal-attach")).toBeVisible();
+    const terminalHost = screen.getByTestId("remote-terminal-attach");
+    expect(terminalHost).toBeVisible();
+    expect(terminalHost).toHaveClass("remote-terminal-hide-composition");
     expect(screen.getByTestId("remote-agent-detail")).toHaveClass("h-dvh", "overflow-hidden");
     expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("flex", "min-h-0", "flex-col", "overflow-hidden");
     expect(screen.getByTestId("remote-terminal-scroll-surface")).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
     expect(screen.getByTestId("remote-terminal-scroll-surface")).not.toHaveClass("h-full");
-    expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("overflow-hidden");
-    expect(screen.getByTestId("remote-terminal-attach")).not.toHaveClass("min-h-[280px]");
+    expect(terminalHost).not.toHaveClass("overflow-hidden");
+    expect(terminalHost).not.toHaveClass("min-h-[280px]");
     const terminalCallsForOptions = vi.mocked(Terminal).mock.calls;
     const terminalOptions = terminalCallsForOptions[terminalCallsForOptions.length - 1]?.[0] as Record<string, unknown> | undefined;
     const terminalResults = vi.mocked(Terminal).mock.results;
