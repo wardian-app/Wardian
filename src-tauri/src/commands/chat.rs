@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::manager::{self, opencode::opencode_database_path};
 use crate::providers::chat_transcript::{normalize_chat_lines, visible_chat_text};
-use crate::state::AppState;
 use crate::state::conversation_archive::effective_conversation_logging;
+use crate::state::AppState;
 use tauri::State;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
 use wardian_core::conversations::ConversationLoggingSetting;
@@ -492,6 +492,9 @@ fn opencode_db_part_to_chat_event(
         metadata: serde_json::json!({
             "provider_log": true,
             "opencode_session_id": opencode_session_id,
+            "part_id": row.part_id,
+            "raw_type": "text",
+            "sequence": sequence,
             "part_time_created": row.part_time_created,
             "message_time_created": row.message_time_created,
         }),
@@ -1307,6 +1310,9 @@ Do you want to proceed?
         assert_eq!(chat_events[1].role, Some(AgentChatRole::Assistant));
         assert_eq!(chat_events[1].text.as_deref(), Some("1, 2, 3"));
         assert_eq!(chat_events[1].source.as_deref(), Some("opencode_db"));
+        assert_eq!(chat_events[1].metadata["opencode_session_id"], "ses_test");
+        assert_eq!(chat_events[1].metadata["part_id"], "part-assistant");
+        assert_eq!(chat_events[1].metadata["raw_type"], "text");
     }
 
     #[test]

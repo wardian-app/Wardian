@@ -127,6 +127,22 @@ pub struct ConversationNarrativeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationSourceRecord {
+    pub schema: u8,
+    pub source_id: String,
+    pub provider: String,
+    pub provider_session_id: Option<String>,
+    pub source_kind: String,
+    pub source_path: Option<String>,
+    pub cursor: Option<String>,
+    pub offset: Option<u64>,
+    pub row_id: Option<String>,
+    pub provider_event_type: Option<String>,
+    pub hash: Option<String>,
+    pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationIndexEntry {
     pub schema: u8,
     pub conversation_id: String,
@@ -392,6 +408,42 @@ mod tests {
         assert_eq!(json["speaker_type"], "tool");
         assert_eq!(json["tool"], "shell_command");
         assert_eq!(json["artifact_refs"][0], "artifacts/tool-result-7.txt");
+    }
+
+    #[test]
+    fn source_record_serializes_provider_cursor() {
+        let record = ConversationSourceRecord {
+            schema: CONVERSATION_SCHEMA,
+            source_id: "src_42".to_string(),
+            provider: "opencode".to_string(),
+            provider_session_id: Some("ses_abc123".to_string()),
+            source_kind: "opencode_db".to_string(),
+            source_path: Some("<absolute-workspace-path>/state/opencode.db".to_string()),
+            cursor: Some("provider-cursor-42".to_string()),
+            offset: Some(128),
+            row_id: Some("part_123".to_string()),
+            provider_event_type: Some("text".to_string()),
+            hash: Some("sha256:abc123".to_string()),
+            artifact_ref: Some("artifacts/source-42.json".to_string()),
+        };
+
+        let json = serde_json::to_value(&record).unwrap();
+
+        assert_eq!(json["schema"], CONVERSATION_SCHEMA);
+        assert_eq!(json["source_id"], "src_42");
+        assert_eq!(json["provider"], "opencode");
+        assert_eq!(json["provider_session_id"], "ses_abc123");
+        assert_eq!(json["source_kind"], "opencode_db");
+        assert_eq!(
+            json["source_path"],
+            "<absolute-workspace-path>/state/opencode.db"
+        );
+        assert_eq!(json["cursor"], "provider-cursor-42");
+        assert_eq!(json["offset"], 128);
+        assert_eq!(json["row_id"], "part_123");
+        assert_eq!(json["provider_event_type"], "text");
+        assert_eq!(json["hash"], "sha256:abc123");
+        assert_eq!(json["artifact_ref"], "artifacts/source-42.json");
     }
 
     #[test]

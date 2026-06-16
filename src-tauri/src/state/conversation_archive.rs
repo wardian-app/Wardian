@@ -9,7 +9,7 @@ use wardian_core::conversations::{
     write_json_atomic, AgentConversationLoggingSetting, ConversationBoundaryReason,
     ConversationFormatVersions, ConversationIndexEntry, ConversationLoggingSetting,
     ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
-    ConversationSpeakerType, ConversationStatus, CONVERSATION_SCHEMA,
+    ConversationSourceRecord, ConversationSpeakerType, ConversationStatus, CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
@@ -121,6 +121,7 @@ impl ConversationArchiveState {
                 });
         let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
+        let sources_path = conversation_dir.join("sources.jsonl");
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut seen_event_ids = existing_records
@@ -136,14 +137,21 @@ impl ConversationArchiveState {
                 .saturating_add(1),
         );
         let mut appended = Vec::new();
+        let mut source_records = Vec::new();
 
         for event in events {
             if !seen_event_ids.insert(event.id.clone()) {
                 continue;
             }
-            let Some(record) = narrative_from_chat_event(event, next_seq) else {
+            let Some(mut record) = narrative_from_chat_event(event, next_seq) else {
                 continue;
             };
+            if let Some(source_record) = source_record_from_chat_event(event, next_seq) {
+                record.source_refs = vec![source_record.source_id.clone()];
+                source_records.push(Some(source_record));
+            } else {
+                source_records.push(None);
+            }
             next_seq = next_seq.saturating_add(1);
             appended.push(record);
         }
@@ -154,7 +162,10 @@ impl ConversationArchiveState {
             return Ok(0);
         }
 
-        for record in &appended {
+        for (index, record) in appended.iter().enumerate() {
+            if let Some(Some(source_record)) = source_records.get(index) {
+                append_jsonl_record(&sources_path, source_record)?;
+            }
             append_jsonl_record(&conversation_path, record)?;
         }
 
@@ -364,6 +375,39 @@ pub fn narrative_from_chat_event(
     })
 }
 
+fn source_record_from_chat_event(
+    event: &AgentChatEvent,
+    seq: u64,
+) -> Option<ConversationSourceRecord> {
+    let source_kind = event
+        .source
+        .clone()
+        .or_else(|| metadata_source_kind(&event.provider, &event.metadata))?;
+
+    Some(ConversationSourceRecord {
+        schema: CONVERSATION_SCHEMA,
+        source_id: format!("src_{seq}"),
+        provider: event.provider.clone(),
+        provider_session_id: metadata_string(&event.metadata, "opencode_session_id")
+            .or_else(|| event.turn_id.clone()),
+        source_kind,
+        source_path: event
+            .path
+            .clone()
+            .or_else(|| metadata_string(&event.metadata, "source_path"))
+            .or_else(|| metadata_string(&event.metadata, "path"))
+            .or_else(|| metadata_string(&event.metadata, "log_path")),
+        cursor: metadata_string(&event.metadata, "cursor")
+            .or_else(|| event.sequence.map(|sequence| sequence.to_string())),
+        offset: metadata_u64(&event.metadata, "offset"),
+        row_id: metadata_string(&event.metadata, "part_id"),
+        provider_event_type: metadata_string(&event.metadata, "raw_type")
+            .or_else(|| metadata_string(&event.metadata, "provider_type")),
+        hash: metadata_string(&event.metadata, "hash"),
+        artifact_ref: metadata_string(&event.metadata, "artifact_ref"),
+    })
+}
+
 pub fn narrative_from_delivered_input(
     at: &str,
     text: &str,
@@ -463,6 +507,57 @@ fn status_to_string(status: &wardian_core::models::chat::AgentChatStatus) -> Str
         wardian_core::models::chat::AgentChatStatus::Unknown => "unknown",
     }
     .to_string()
+}
+
+fn has_provider_metadata(metadata: &serde_json::Value) -> bool {
+    [
+        "opencode_session_id",
+        "part_id",
+        "raw_type",
+        "provider_type",
+        "cursor",
+        "offset",
+        "provider_log",
+        "provider_source",
+        "log_source",
+        "source_path",
+        "log_path",
+        "hash",
+        "artifact_ref",
+    ]
+    .iter()
+    .any(|key| metadata.get(*key).is_some())
+}
+
+fn metadata_source_kind(provider: &str, metadata: &serde_json::Value) -> Option<String> {
+    metadata_string(metadata, "log_source")
+        .or_else(|| metadata_string(metadata, "provider_source"))
+        .or_else(|| metadata_string(metadata, "provider_type"))
+        .or_else(|| metadata_string(metadata, "raw_type"))
+        .or_else(|| has_provider_metadata(metadata).then(|| format!("{provider}_metadata")))
+}
+
+fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    let value = metadata.get(key)?;
+    match value {
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn metadata_u64(metadata: &serde_json::Value, key: &str) -> Option<u64> {
+    let value = metadata.get(key)?;
+    value.as_u64().or_else(|| {
+        value
+            .as_i64()
+            .and_then(|number| u64::try_from(number).ok())
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+    })
 }
 
 fn boundary_reason_to_string(reason: ConversationBoundaryReason) -> String {
@@ -684,7 +779,7 @@ mod tests {
     use wardian_core::conversations::{
         read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
         ConversationLoggingSetting, ConversationNarrativeRecord, ConversationRecordKind,
-        ConversationSpeakerType, CONVERSATION_SCHEMA,
+        ConversationSourceRecord, ConversationSpeakerType, CONVERSATION_SCHEMA,
     };
     use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
     use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
@@ -834,6 +929,62 @@ mod tests {
                 .expect("read narrative records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].event_refs, vec!["event-1".to_string()]);
+    }
+
+    #[test]
+    fn append_chat_events_writes_source_records_for_provider_metadata() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let mut event = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Rendered from the opencode database."),
+        );
+        event.provider = "opencode".to_string();
+        event.turn_id = Some("message-1".to_string());
+        event.source = Some("opencode_db".to_string());
+        event.sequence = Some(42);
+        event.metadata = serde_json::json!({
+            "opencode_session_id": "ses_opencode",
+            "part_id": "part_42",
+            "raw_type": "text",
+            "cursor": "opencode:part_42",
+            "sequence": 42,
+            "offset": 128
+        });
+
+        let appended = archive
+            .append_chat_events("agent-1", &[event])
+            .expect("append succeeds");
+
+        assert_eq!(appended, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let sources: Vec<ConversationSourceRecord> =
+            read_jsonl_records(&conversation_path.join("sources.jsonl"))
+                .expect("read source records");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_id, "src_1");
+        assert_eq!(sources[0].provider, "opencode");
+        assert_eq!(
+            sources[0].provider_session_id.as_deref(),
+            Some("ses_opencode")
+        );
+        assert_eq!(sources[0].source_kind, "opencode_db");
+        assert_eq!(sources[0].cursor.as_deref(), Some("opencode:part_42"));
+        assert_eq!(sources[0].offset, Some(128));
+        assert_eq!(sources[0].row_id.as_deref(), Some("part_42"));
+        assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
     }
 
     #[test]
