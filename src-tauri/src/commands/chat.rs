@@ -4,7 +4,9 @@ use std::path::Path;
 
 use crate::manager::{self, opencode::opencode_database_path};
 use crate::providers::chat_transcript::{normalize_chat_lines, visible_chat_text};
-use crate::state::conversation_archive::effective_conversation_logging;
+use crate::state::conversation_archive::{
+    effective_conversation_logging, ConversationArchiveContext,
+};
 use crate::state::AppState;
 use tauri::State;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
@@ -40,6 +42,10 @@ pub async fn load_agent_chat_transcript_for_state(
         current_status,
         last_status_at,
         log_path,
+        agent_name,
+        agent_class,
+        workspace,
+        fresh_provider_session_id,
         cleared_provider_sessions,
         agent_conversation_logging,
     ) = {
@@ -52,8 +58,15 @@ pub async fn load_agent_chat_transcript_for_state(
             .lock()
             .map_err(|_| "agent config lock poisoned".to_string())?;
         let provider = config.provider.clone();
+        let agent_name = config.session_name.clone();
+        let agent_class = config.agent_class.clone();
+        let workspace = config
+            .git_worktree_folder
+            .clone()
+            .unwrap_or_else(|| config.folder.clone());
         let agent_conversation_logging = config.conversation_logging;
         let resume_session = config.resume_session.clone();
+        let fresh_provider_session_id = config.fresh_provider_session_id.clone();
         let cleared_provider_sessions = if provider == "codex" {
             config.codex_config().cleared_provider_sessions
         } else {
@@ -81,6 +94,10 @@ pub async fn load_agent_chat_transcript_for_state(
             current_status,
             last_status_at,
             log_path,
+            agent_name,
+            agent_class,
+            workspace,
+            fresh_provider_session_id,
             cleared_provider_sessions,
             agent_conversation_logging,
         )
@@ -124,10 +141,19 @@ pub async fn load_agent_chat_transcript_for_state(
     if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
         == ConversationLoggingSetting::Enabled
     {
-        if let Err(error) = state
-            .conversation_archive
-            .append_chat_events(&session_id, &events)
-        {
+        if let Err(error) = state.conversation_archive.append_chat_events_with_context(
+            conversation_archive_context(ConversationArchiveContextInput {
+                session_id: &session_id,
+                provider: &provider,
+                agent_name: &agent_name,
+                agent_class: &agent_class,
+                workspace: &workspace,
+                resume_session: resume_session.as_deref(),
+                fresh_provider_session_id: fresh_provider_session_id.as_deref(),
+                log_path: log_path.as_deref(),
+            }),
+            &events,
+        ) {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive append failed for {session_id}: {error}"
             ));
@@ -315,6 +341,11 @@ fn load_provider_log_chat_events(
         .map(|mut event| {
             set_metadata(&mut event.metadata, "provider_log", true);
             set_metadata(&mut event.metadata, "log_source", "active_agent_log_path");
+            set_metadata(
+                &mut event.metadata,
+                "log_path",
+                path.to_string_lossy().to_string(),
+            );
             event
         })
         .collect()
@@ -360,6 +391,51 @@ fn read_provider_log_tail_with_limit(path: &Path, tail_bytes: u64) -> std::io::R
         .split_once('\n')
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_default())
+}
+
+struct ConversationArchiveContextInput<'a> {
+    session_id: &'a str,
+    provider: &'a str,
+    agent_name: &'a str,
+    agent_class: &'a str,
+    workspace: &'a str,
+    resume_session: Option<&'a str>,
+    fresh_provider_session_id: Option<&'a str>,
+    log_path: Option<&'a Path>,
+}
+
+fn conversation_archive_context(
+    input: ConversationArchiveContextInput<'_>,
+) -> ConversationArchiveContext {
+    let provider_session_ids = [input.resume_session, input.fresh_provider_session_id]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let provider_source_key = provider_session_ids
+        .first()
+        .map(|session| format!("{}:session:{session}", input.provider))
+        .or_else(|| {
+            input
+                .log_path
+                .map(|path| format!("{}:source:{}", input.provider, path.to_string_lossy()))
+        });
+
+    ConversationArchiveContext {
+        agent_id: input.session_id.to_string(),
+        agent_name: if input.agent_name.trim().is_empty() {
+            input.session_id.to_string()
+        } else {
+            input.agent_name.to_string()
+        },
+        agent_class: input.agent_class.to_string(),
+        workspace: input.workspace.to_string(),
+        provider: input.provider.to_string(),
+        provider_session_ids,
+        provider_source_key,
+    }
 }
 
 fn load_opencode_db_chat_events(
@@ -1034,6 +1110,10 @@ Do you want to proceed?
             Some("Rendered from the provider log")
         );
         assert_eq!(chat_events[0].metadata["provider_log"], true);
+        assert_eq!(
+            chat_events[0].metadata["log_path"].as_str(),
+            Some(log_path.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

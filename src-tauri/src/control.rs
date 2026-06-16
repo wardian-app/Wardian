@@ -1,5 +1,7 @@
 use crate::manager;
-use crate::state::conversation_archive::effective_conversation_logging;
+use crate::state::conversation_archive::{
+    effective_conversation_logging, ConversationArchiveContext,
+};
 use crate::state::{AppState, MailboxMessageDraft};
 use std::{
     fmt,
@@ -2778,27 +2780,59 @@ async fn record_conversation_delivery(
             .iter()
             .filter(|detail| conversation_delivery_state_is_recordable(&detail.delivery_state))
             .filter_map(|detail| {
-                let setting = agents
-                    .get(&detail.uuid)?
-                    .config
-                    .lock()
-                    .ok()
-                    .map(|config| config.conversation_logging)?;
-                Some((detail.uuid.clone(), setting))
+                let agent = agents.get(&detail.uuid)?;
+                let config = agent.config.lock().ok()?;
+                let setting = config.conversation_logging;
+                let workspace = config
+                    .git_worktree_folder
+                    .clone()
+                    .unwrap_or_else(|| config.folder.clone());
+                let provider_session_ids = [
+                    config.resume_session.as_deref(),
+                    config.fresh_provider_session_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+                let log_path =
+                    agent.log_path.lock().ok().and_then(|path| {
+                        path.as_ref().map(|path| path.to_string_lossy().to_string())
+                    });
+                let provider_source_key = provider_session_ids
+                    .first()
+                    .map(|session| format!("{}:session:{session}", config.provider))
+                    .or_else(|| log_path.map(|path| format!("{}:source:{path}", config.provider)));
+                let context = ConversationArchiveContext {
+                    agent_id: detail.uuid.clone(),
+                    agent_name: if config.session_name.trim().is_empty() {
+                        detail.uuid.clone()
+                    } else {
+                        config.session_name.clone()
+                    },
+                    agent_class: config.agent_class.clone(),
+                    workspace,
+                    provider: config.provider.clone(),
+                    provider_session_ids,
+                    provider_source_key,
+                };
+                Some((context, setting))
             })
             .collect::<Vec<_>>()
     };
 
-    for (agent_id, agent_conversation_logging) in target_settings {
+    for (context, agent_conversation_logging) in target_settings {
         if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
             != ConversationLoggingSetting::Enabled
         {
             continue;
         }
-        if let Err(error) =
-            state
-                .conversation_archive
-                .append_delivered_input(&agent_id, message, sender_agent_id)
+        let agent_id = context.agent_id.clone();
+        if let Err(error) = state
+            .conversation_archive
+            .append_delivered_input_with_context(context, message, sender_agent_id)
         {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive delivery append failed for {agent_id}: {error}"
@@ -2808,10 +2842,7 @@ async fn record_conversation_delivery(
 }
 
 fn conversation_delivery_state_is_recordable(delivery_state: &str) -> bool {
-    matches!(
-        delivery_state,
-        "submitted" | "submit_sent_unverified" | "queued" | "submit_started"
-    )
+    matches!(delivery_state, "submitted" | "submit_sent_unverified")
 }
 
 pub(crate) fn spawn_mailbox_drain_if_idle(
@@ -3647,6 +3678,35 @@ mod tests {
             Some(wardian_core::conversations::ConversationSpeakerType::Agent)
         );
         assert_eq!(records[0].text.as_deref(), Some("Review this change."));
+    }
+
+    #[tokio::test]
+    async fn message_delivery_does_not_archive_queued_input() {
+        let _home = TestWardianHome::new();
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let delivery = vec![DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "mock".to_string(),
+            runtime_state: "queued_not_live".to_string(),
+            delivery_state: "queued".to_string(),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            message_id: Some("msg-1".to_string()),
+            delivery_phase: Some("queued".to_string()),
+            observed_state: None,
+            reason: Some("queued message remains pending for retry".to_string()),
+            profile: None,
+            error: None,
+        }];
+
+        record_conversation_delivery(&state, &delivery, "Queue this change.", None).await;
+
+        assert!(state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-1")
+            .is_none());
     }
 
     #[tokio::test]

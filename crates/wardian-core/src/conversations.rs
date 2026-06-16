@@ -99,6 +99,8 @@ pub struct ConversationManifest {
     pub workspace: String,
     pub provider: String,
     pub provider_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source_key: Option<String>,
     pub effective_logging: ConversationLoggingSetting,
     pub created_at: String,
     pub updated_at: String,
@@ -228,7 +230,15 @@ pub fn materialize_text_payload(
     }
 
     fs::create_dir_all(artifacts_dir)?;
-    let artifact_ref = format!("{}-0001.txt", sanitize_artifact_stem(stem));
+    let artifact_stem = sanitize_artifact_stem(stem);
+    let mut suffix = 1_u32;
+    let artifact_ref = loop {
+        let candidate = format!("{artifact_stem}-{suffix:04}.txt");
+        if !artifacts_dir.join(&candidate).exists() {
+            break candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    };
     fs::write(artifacts_dir.join(&artifact_ref), text)?;
 
     Ok(MaterializedTextPayload {
@@ -366,6 +376,7 @@ mod tests {
             workspace: "<absolute-workspace-path>".to_string(),
             provider: "codex".to_string(),
             provider_session_ids: vec!["session-1".to_string()],
+            provider_source_key: Some("codex:session:session-1".to_string()),
             effective_logging: ConversationLoggingSetting::Enabled,
             created_at: "2026-06-15T00:00:00.000Z".to_string(),
             updated_at: "2026-06-15T00:01:00.000Z".to_string(),
@@ -546,6 +557,29 @@ mod tests {
     }
 
     #[test]
+    fn materialize_text_payload_uses_next_suffix_when_artifact_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts_dir = dir.path().join("artifacts");
+        let first = "x".repeat(CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
+        let second = "y".repeat(CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
+
+        let first_payload = materialize_text_payload(&artifacts_dir, "tool result", &first).unwrap();
+        let second_payload =
+            materialize_text_payload(&artifacts_dir, "tool result", &second).unwrap();
+
+        assert_eq!(first_payload.artifact_refs, vec!["tool-result-0001.txt"]);
+        assert_eq!(second_payload.artifact_refs, vec!["tool-result-0002.txt"]);
+        assert_eq!(
+            fs::read_to_string(artifacts_dir.join("tool-result-0001.txt")).unwrap(),
+            first
+        );
+        assert_eq!(
+            fs::read_to_string(artifacts_dir.join("tool-result-0002.txt")).unwrap(),
+            second
+        );
+    }
+
+    #[test]
     fn index_upsert_reads_latest_entry_per_conversation_sorted_by_started_at() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("conversations").join("index.jsonl");
@@ -612,6 +646,7 @@ mod tests {
             workspace: "<absolute-workspace-path>".to_string(),
             provider: "codex".to_string(),
             provider_session_ids: vec!["session-1".to_string()],
+            provider_source_key: Some("codex:session:session-1".to_string()),
             effective_logging: ConversationLoggingSetting::Enabled,
             created_at: "2026-06-15T00:00:00.000Z".to_string(),
             updated_at: "2026-06-15T00:01:00.000Z".to_string(),

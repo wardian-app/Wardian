@@ -2561,9 +2561,9 @@ pub async fn clear_agent_session_with_reason(
         let global_conversation_logging = crate::utils::shell::load_shell_settings()
             .unwrap_or_default()
             .conversation_logging;
-        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
-            == ConversationLoggingSetting::Enabled
-        {
+        let effective_logging =
+            effective_conversation_logging(global_conversation_logging, agent_conversation_logging);
+        if effective_logging == ConversationLoggingSetting::Enabled {
             if let Err(error) = state
                 .conversation_archive
                 .append_lifecycle_boundary(&session_id, boundary_reason)
@@ -2572,15 +2572,19 @@ pub async fn clear_agent_session_with_reason(
                     "[WARDIAN] conversation archive lifecycle append failed for {session_id}: {error}"
                 ));
             }
+            if let Err(error) = state
+                .conversation_archive
+                .rollover_agent(&session_id, boundary_reason)
+            {
+                manager::log_debug(&format!(
+                    "[WARDIAN] conversation archive rollover failed for {session_id}: {error}"
+                ));
+            }
+        } else if let Err(error) = state.conversation_archive.discard_agent(&session_id) {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive discard failed for {session_id}: {error}"
+            ));
         }
-    }
-    if let Err(error) = state
-        .conversation_archive
-        .rollover_agent(&session_id, boundary_reason)
-    {
-        manager::log_debug(&format!(
-            "[WARDIAN] conversation archive rollover failed for {session_id}: {error}"
-        ));
     }
     let mut prepared = {
         let mut agents = state.agents.lock().await;

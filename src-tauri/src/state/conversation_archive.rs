@@ -25,6 +25,32 @@ pub struct ConversationArchiveState {
 pub struct ActiveConversationHandle {
     pub conversation_id: String,
     pub next_seq: u64,
+    pub provider_source_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationArchiveContext {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub agent_class: String,
+    pub workspace: String,
+    pub provider: String,
+    pub provider_session_ids: Vec<String>,
+    pub provider_source_key: Option<String>,
+}
+
+impl ConversationArchiveContext {
+    pub fn for_agent_id(agent_id: &str, provider: &str) -> Self {
+        Self {
+            agent_id: agent_id.to_string(),
+            agent_name: agent_id.to_string(),
+            agent_class: String::new(),
+            workspace: String::new(),
+            provider: provider.to_string(),
+            provider_session_ids: Vec::new(),
+            provider_source_key: None,
+        }
+    }
 }
 
 pub fn effective_conversation_logging(
@@ -104,6 +130,18 @@ impl ConversationArchiveState {
         agent_id: &str,
         events: &[AgentChatEvent],
     ) -> io::Result<usize> {
+        let provider = provider_from_events(events).unwrap_or_else(|| "unknown".to_string());
+        self.append_chat_events_with_context(
+            ConversationArchiveContext::for_agent_id(agent_id, &provider),
+            events,
+        )
+    }
+
+    pub fn append_chat_events_with_context(
+        &self,
+        mut context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+    ) -> io::Result<usize> {
         if !events
             .iter()
             .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
@@ -112,15 +150,18 @@ impl ConversationArchiveState {
         }
 
         let mut active = lock_active(&self.active)?;
-        let mut handle =
-            active
-                .get(agent_id)
-                .cloned()
-                .unwrap_or_else(|| ActiveConversationHandle {
-                    conversation_id: new_conversation_id(agent_id),
-                    next_seq: 1,
-                });
-        let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
+        let provider_source_key = context
+            .provider_source_key
+            .clone()
+            .or_else(|| provider_source_key_from_events(events));
+        if context.provider_source_key.is_none() {
+            context.provider_source_key = provider_source_key.clone();
+        }
+        if context.provider_session_ids.is_empty() {
+            context.provider_session_ids = provider_session_ids_from_events(events);
+        }
+        let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
+        let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
@@ -163,7 +204,7 @@ impl ConversationArchiveState {
 
         if appended.is_empty() {
             handle.next_seq = next_seq;
-            active.insert(agent_id.to_string(), handle);
+            active.insert(context.agent_id.clone(), handle);
             return Ok(0);
         }
 
@@ -186,17 +227,15 @@ impl ConversationArchiveState {
             .or_else(|| existing_records.last())
             .expect("conversation has at least one record");
         let record_count = (existing_records.len() + appended.len()) as u64;
-        let provider = provider_from_events(events).unwrap_or_else(|| "unknown".to_string());
         let manifest = open_manifest(
-            agent_id,
+            &context,
             &handle.conversation_id,
-            &provider,
             first_record.at.clone(),
             last_record.at.clone(),
         );
         write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
         append_index_upsert(
-            &index_path(agent_id)?,
+            &index_path(&context.agent_id)?,
             &index_entry_from_manifest(
                 &manifest,
                 None,
@@ -208,7 +247,7 @@ impl ConversationArchiveState {
         )?;
 
         handle.next_seq = next_seq;
-        active.insert(agent_id.to_string(), handle);
+        active.insert(context.agent_id.clone(), handle);
         Ok(appended.len())
     }
 
@@ -218,11 +257,24 @@ impl ConversationArchiveState {
         text: &str,
         sender_agent_id: Option<&str>,
     ) -> io::Result<usize> {
+        self.append_delivered_input_with_context(
+            ConversationArchiveContext::for_agent_id(agent_id, "unknown"),
+            text,
+            sender_agent_id,
+        )
+    }
+
+    pub fn append_delivered_input_with_context(
+        &self,
+        context: ConversationArchiveContext,
+        text: &str,
+        sender_agent_id: Option<&str>,
+    ) -> io::Result<usize> {
         if text.trim().is_empty() {
             return Ok(0);
         }
 
-        self.append_generated_record(agent_id, "unknown", |seq| {
+        self.append_generated_record(context, |seq| {
             narrative_from_delivered_input(&current_rfc3339_millis(), text, sender_agent_id, seq)
         })
     }
@@ -232,27 +284,34 @@ impl ConversationArchiveState {
         agent_id: &str,
         reason: ConversationBoundaryReason,
     ) -> io::Result<usize> {
-        self.append_generated_record(agent_id, "unknown", |seq| {
+        self.append_lifecycle_boundary_with_context(
+            ConversationArchiveContext::for_agent_id(agent_id, "unknown"),
+            reason,
+        )
+    }
+
+    pub fn append_lifecycle_boundary_with_context(
+        &self,
+        context: ConversationArchiveContext,
+        reason: ConversationBoundaryReason,
+    ) -> io::Result<usize> {
+        self.append_generated_record(context, |seq| {
             lifecycle_record(seq, reason, &current_rfc3339_millis())
         })
     }
 
     fn append_generated_record(
         &self,
-        agent_id: &str,
-        provider: &str,
+        mut context: ConversationArchiveContext,
         make_record: impl FnOnce(u64) -> ConversationNarrativeRecord,
     ) -> io::Result<usize> {
         let mut active = lock_active(&self.active)?;
-        let mut handle =
-            active
-                .get(agent_id)
-                .cloned()
-                .unwrap_or_else(|| ActiveConversationHandle {
-                    conversation_id: new_conversation_id(agent_id),
-                    next_seq: 1,
-                });
-        let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
+        let provider_source_key = context.provider_source_key.clone();
+        if context.provider_source_key.is_none() {
+            context.provider_source_key = provider_source_key.clone();
+        }
+        let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
+        let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
@@ -271,15 +330,14 @@ impl ConversationArchiveState {
         let first_record = existing_records.first().unwrap_or(&record);
         let record_count = (existing_records.len() + 1) as u64;
         let manifest = open_manifest(
-            agent_id,
+            &context,
             &handle.conversation_id,
-            provider,
             first_record.at.clone(),
             record.at.clone(),
         );
         write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
         append_index_upsert(
-            &index_path(agent_id)?,
+            &index_path(&context.agent_id)?,
             &index_entry_from_manifest(
                 &manifest,
                 None,
@@ -291,7 +349,7 @@ impl ConversationArchiveState {
         )?;
 
         handle.next_seq = next_seq.saturating_add(1);
-        active.insert(agent_id.to_string(), handle);
+        active.insert(context.agent_id.clone(), handle);
         Ok(1)
     }
 
@@ -305,40 +363,13 @@ impl ConversationArchiveState {
             return Ok(None);
         };
         let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
-        let conversation_path = conversation_dir.join("conversation.jsonl");
-        let records: Vec<ConversationNarrativeRecord> = read_jsonl_records(&conversation_path)?;
-        let now = current_rfc3339_millis();
-        let mut manifest =
-            read_manifest(&conversation_dir.join("manifest.json"))?.unwrap_or_else(|| {
-                let created_at = records
-                    .first()
-                    .map(|record| record.at.clone())
-                    .unwrap_or_else(|| now.clone());
-                open_manifest(
-                    agent_id,
-                    &handle.conversation_id,
-                    "unknown",
-                    created_at,
-                    now.clone(),
-                )
-            });
-        manifest.updated_at = now.clone();
-        manifest.closed_at = Some(now.clone());
-        manifest.status = status_for_boundary_reason(reason);
-        manifest.boundary_reason = reason;
-        write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
-        append_index_upsert(
-            &index_path(agent_id)?,
-            &index_entry_from_manifest(
-                &manifest,
-                Some(now),
-                records.first().and_then(excerpt_from_record),
-                records.last().and_then(excerpt_from_record),
-                records.len() as u64,
-                artifact_count_for_records(records.iter()),
-            ),
-        )?;
+        close_conversation_dir(agent_id, &handle.conversation_id, &conversation_dir, reason)?;
         Ok(Some(handle.conversation_id))
+    }
+
+    pub fn discard_agent(&self, agent_id: &str) -> io::Result<Option<String>> {
+        let mut active = lock_active(&self.active)?;
+        Ok(active.remove(agent_id).map(|handle| handle.conversation_id))
     }
 
     #[cfg(test)]
@@ -482,7 +513,7 @@ fn record_kind_from_chat_event_kind(kind: &AgentChatEventKind) -> Option<Convers
         AgentChatEventKind::ToolCall => Some(ConversationRecordKind::ToolCall),
         AgentChatEventKind::ToolResult => Some(ConversationRecordKind::ToolResult),
         AgentChatEventKind::Approval => Some(ConversationRecordKind::Approval),
-        AgentChatEventKind::Status => Some(ConversationRecordKind::Status),
+        AgentChatEventKind::Status => None,
         AgentChatEventKind::Error => Some(ConversationRecordKind::Error),
         AgentChatEventKind::TerminalOutput => None,
     }
@@ -678,6 +709,155 @@ fn provider_from_events(events: &[AgentChatEvent]) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn provider_source_key_from_events(events: &[AgentChatEvent]) -> Option<String> {
+    events.iter().find_map(|event| {
+        let provider = event.provider.trim();
+        if provider.is_empty() {
+            return None;
+        }
+        provider_session_id_from_event(event)
+            .map(|session_id| format!("{provider}:session:{session_id}"))
+            .or_else(|| {
+                source_path_from_event(event).map(|path| format!("{provider}:source:{path}"))
+            })
+    })
+}
+
+fn provider_session_ids_from_events(events: &[AgentChatEvent]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    events
+        .iter()
+        .filter_map(provider_session_id_from_event)
+        .filter(|session_id| seen.insert(session_id.clone()))
+        .collect()
+}
+
+fn provider_session_id_from_event(event: &AgentChatEvent) -> Option<String> {
+    metadata_string(&event.metadata, "opencode_session_id")
+        .or_else(|| metadata_string(&event.metadata, "provider_session_id"))
+        .or_else(|| event.turn_id.clone())
+}
+
+fn source_path_from_event(event: &AgentChatEvent) -> Option<String> {
+    event
+        .path
+        .clone()
+        .or_else(|| metadata_string(&event.metadata, "source_path"))
+        .or_else(|| metadata_string(&event.metadata, "path"))
+        .or_else(|| metadata_string(&event.metadata, "log_path"))
+}
+
+fn active_handle_for_context(
+    active: &mut HashMap<String, ActiveConversationHandle>,
+    context: &ConversationArchiveContext,
+    provider_source_key: Option<String>,
+) -> io::Result<ActiveConversationHandle> {
+    if let Some(existing) = active.get(&context.agent_id).cloned() {
+        if existing.provider_source_key == provider_source_key {
+            return Ok(existing);
+        }
+        close_conversation_handle(
+            &context.agent_id,
+            &existing,
+            ConversationBoundaryReason::ProviderSourceChanged,
+        )?;
+        active.remove(&context.agent_id);
+    }
+
+    if let Some(hydrated) = hydrate_open_handle(context, provider_source_key.as_deref())? {
+        return Ok(hydrated);
+    }
+
+    Ok(ActiveConversationHandle {
+        conversation_id: new_conversation_id(&context.agent_id),
+        next_seq: 1,
+        provider_source_key,
+    })
+}
+
+fn hydrate_open_handle(
+    context: &ConversationArchiveContext,
+    provider_source_key: Option<&str>,
+) -> io::Result<Option<ActiveConversationHandle>> {
+    for entry in read_agent_index(&context.agent_id)? {
+        if entry.status != ConversationStatus::Open {
+            continue;
+        }
+        let conversation_dir = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
+        let Some(manifest) = read_manifest(&conversation_dir.join("manifest.json"))? else {
+            continue;
+        };
+        if manifest.status != ConversationStatus::Open {
+            continue;
+        }
+        if manifest.provider != context.provider {
+            continue;
+        }
+        if manifest.provider_source_key.as_deref() != provider_source_key {
+            continue;
+        }
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_dir.join("conversation.jsonl"))?;
+        let next_seq = records
+            .iter()
+            .map(|record| record.seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        return Ok(Some(ActiveConversationHandle {
+            conversation_id: manifest.conversation_id,
+            next_seq,
+            provider_source_key: manifest.provider_source_key,
+        }));
+    }
+    Ok(None)
+}
+
+fn close_conversation_handle(
+    agent_id: &str,
+    handle: &ActiveConversationHandle,
+    reason: ConversationBoundaryReason,
+) -> io::Result<()> {
+    let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
+    close_conversation_dir(agent_id, &handle.conversation_id, &conversation_dir, reason)
+}
+
+fn close_conversation_dir(
+    agent_id: &str,
+    conversation_id: &str,
+    conversation_dir: &std::path::Path,
+    reason: ConversationBoundaryReason,
+) -> io::Result<()> {
+    let conversation_path = conversation_dir.join("conversation.jsonl");
+    let records: Vec<ConversationNarrativeRecord> = read_jsonl_records(&conversation_path)?;
+    let now = current_rfc3339_millis();
+    let mut manifest =
+        read_manifest(&conversation_dir.join("manifest.json"))?.unwrap_or_else(|| {
+            let created_at = records
+                .first()
+                .map(|record| record.at.clone())
+                .unwrap_or_else(|| now.clone());
+            let context = ConversationArchiveContext::for_agent_id(agent_id, "unknown");
+            open_manifest(&context, conversation_id, created_at, now.clone())
+        });
+    manifest.updated_at = now.clone();
+    manifest.closed_at = Some(now.clone());
+    manifest.status = status_for_boundary_reason(reason);
+    manifest.boundary_reason = reason;
+    write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
+    append_index_upsert(
+        &index_path(agent_id)?,
+        &index_entry_from_manifest(
+            &manifest,
+            Some(now),
+            records.first().and_then(excerpt_from_record),
+            records.last().and_then(excerpt_from_record),
+            records.len() as u64,
+            artifact_count_for_records(records.iter()),
+        ),
+    )
+}
+
 fn read_manifest(path: &std::path::Path) -> io::Result<Option<ConversationManifest>> {
     if !path.exists() {
         return Ok(None);
@@ -689,21 +869,21 @@ fn read_manifest(path: &std::path::Path) -> io::Result<Option<ConversationManife
 }
 
 fn open_manifest(
-    agent_id: &str,
+    context: &ConversationArchiveContext,
     conversation_id: &str,
-    provider: &str,
     created_at: String,
     updated_at: String,
 ) -> ConversationManifest {
     ConversationManifest {
         schema: CONVERSATION_SCHEMA,
         conversation_id: conversation_id.to_string(),
-        agent_id: agent_id.to_string(),
-        agent_name: agent_id.to_string(),
-        agent_class: String::new(),
-        workspace: String::new(),
-        provider: provider.to_string(),
-        provider_session_ids: Vec::new(),
+        agent_id: context.agent_id.clone(),
+        agent_name: context.agent_name.clone(),
+        agent_class: context.agent_class.clone(),
+        workspace: context.workspace.clone(),
+        provider: context.provider.clone(),
+        provider_session_ids: context.provider_session_ids.clone(),
+        provider_source_key: context.provider_source_key.clone(),
         effective_logging: ConversationLoggingSetting::Enabled,
         created_at,
         updated_at,
@@ -827,12 +1007,14 @@ fn status_for_boundary_reason(reason: ConversationBoundaryReason) -> Conversatio
 mod tests {
     use super::{
         effective_conversation_logging, lifecycle_record, narrative_from_chat_event,
-        narrative_from_delivered_input, ActiveConversationHandle, ConversationArchiveState,
+        narrative_from_delivered_input, ActiveConversationHandle, ConversationArchiveContext,
+        ConversationArchiveState,
     };
     use wardian_core::conversations::{
         read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
-        ConversationLoggingSetting, ConversationNarrativeRecord, ConversationRecordKind,
-        ConversationSourceRecord, ConversationSpeakerType, CONVERSATION_SCHEMA,
+        ConversationLoggingSetting, ConversationManifest, ConversationNarrativeRecord,
+        ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType,
+        ConversationStatus, CONVERSATION_SCHEMA,
     };
     use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
     use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
@@ -868,6 +1050,18 @@ mod tests {
             AgentChatEventKind::TerminalOutput,
             None,
             Some("raw terminal output"),
+        );
+
+        assert!(narrative_from_chat_event(&event, 1).is_none());
+    }
+
+    #[test]
+    fn status_events_are_not_primary_narrative() {
+        let event = chat_event(
+            "event-status",
+            AgentChatEventKind::Status,
+            None,
+            Some("Idle"),
         );
 
         assert!(narrative_from_chat_event(&event, 1).is_none());
@@ -941,6 +1135,7 @@ mod tests {
             ActiveConversationHandle {
                 conversation_id: "conv_existing_agent_1".to_string(),
                 next_seq: 1,
+                provider_source_key: None,
             },
         );
 
@@ -950,6 +1145,28 @@ mod tests {
 
         assert_eq!(conversation_id.as_deref(), Some("conv_existing_agent_1"));
         assert_eq!(archive.active_conversation_id_for_test("agent-1"), None);
+    }
+
+    #[test]
+    fn discard_agent_drops_active_handle_without_creating_archive_files() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive.set_active_for_test(
+            "agent-1",
+            ActiveConversationHandle {
+                conversation_id: "conv_existing_agent_1".to_string(),
+                next_seq: 1,
+                provider_source_key: None,
+            },
+        );
+
+        let conversation_id = archive.discard_agent("agent-1").expect("discard succeeds");
+
+        assert_eq!(conversation_id.as_deref(), Some("conv_existing_agent_1"));
+        assert_eq!(archive.active_conversation_id_for_test("agent-1"), None);
+        assert!(!agent_conversations_dir("agent-1")
+            .expect("conversations dir")
+            .exists());
     }
 
     #[test]
@@ -1038,6 +1255,100 @@ mod tests {
         assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+    }
+
+    #[test]
+    fn append_chat_events_rolls_over_when_provider_source_changes() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let first = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("First provider source."),
+        );
+        let second = chat_event(
+            "event-2",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Second provider source."),
+        );
+
+        archive
+            .append_chat_events_with_context(archive_context("session-one"), &[first])
+            .expect("append first source");
+        let first_conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("first conversation");
+        archive
+            .append_chat_events_with_context(archive_context("session-two"), &[second])
+            .expect("append second source");
+        let second_conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("second conversation");
+
+        assert_ne!(first_conversation_id, second_conversation_id);
+        let first_manifest_path = agent_conversation_dir("agent-1", &first_conversation_id)
+            .expect("first conversation dir")
+            .join("manifest.json");
+        let first_manifest: ConversationManifest =
+            serde_json::from_str(&std::fs::read_to_string(first_manifest_path).unwrap())
+                .expect("read first manifest");
+        assert_eq!(first_manifest.status, ConversationStatus::Interrupted);
+        assert_eq!(
+            first_manifest.boundary_reason,
+            ConversationBoundaryReason::ProviderSourceChanged
+        );
+        assert_eq!(
+            first_manifest.provider_session_ids,
+            vec!["session-one".to_string()]
+        );
+        assert_eq!(
+            first_manifest.provider_source_key.as_deref(),
+            Some("codex:session:session-one")
+        );
+    }
+
+    #[test]
+    fn append_chat_events_hydrates_open_conversation_for_same_provider_source() {
+        let (_guard, _temp) = isolated_home();
+        let first_archive = ConversationArchiveState::default();
+        let first = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Before restart."),
+        );
+        first_archive
+            .append_chat_events_with_context(archive_context("session-one"), &[first])
+            .expect("append before restart");
+        let conversation_id = first_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("conversation id before restart");
+        let second_archive = ConversationArchiveState::default();
+        let second = chat_event(
+            "event-2",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("After restart."),
+        );
+
+        second_archive
+            .append_chat_events_with_context(archive_context("session-one"), &[second])
+            .expect("append after restart");
+
+        assert_eq!(
+            second_archive.active_conversation_id_for_test("agent-1"),
+            Some(conversation_id.clone())
+        );
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 2);
     }
 
     #[test]
@@ -1380,6 +1691,18 @@ mod tests {
             created_at: Some("2026-06-15T00:00:00.000Z".to_string()),
             sequence: None,
             metadata: serde_json::json!({}),
+        }
+    }
+
+    fn archive_context(provider_session_id: &str) -> ConversationArchiveContext {
+        ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "CoderOne".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec![provider_session_id.to_string()],
+            provider_source_key: Some(format!("codex:session:{provider_session_id}")),
         }
     }
 

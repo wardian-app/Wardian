@@ -101,6 +101,7 @@ Stores conversation-level metadata:
 - workspace
 - provider
 - provider session/source ids
+- provider source key used for continuity rollover and open-archive hydration
 - effective logging setting
 - created, updated, and closed timestamps
 - status: `open`, `closed`, or `interrupted`
