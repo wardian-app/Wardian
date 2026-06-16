@@ -979,14 +979,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     // Re-verifying the session id requires reading the whole
                     // log, so only do it when the file changed (or vanished)
                     // since the last parse; unchanged content cannot go stale.
-                    let last_parsed_mtime = snap
-                        .log_last_modified
-                        .lock()
-                        .ok()
-                        .and_then(|last| *last);
+                    let last_parsed_mtime =
+                        snap.log_last_modified.lock().ok().and_then(|last| *last);
                     let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
-                        let current_mtime =
-                            std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+                        let current_mtime = std::fs::metadata(path)
+                            .and_then(|meta| meta.modified())
+                            .ok();
                         match (current_mtime, last_parsed_mtime) {
                             (Some(current), Some(last)) if current == last => false,
                             _ => std::fs::read_to_string(path).ok().is_none_or(|content| {
@@ -1831,7 +1829,10 @@ mod tests {
         content.push_str("gemini-session-1\"]}");
         std::fs::write(&path, content).expect("write big chat");
 
-        assert!(!super::gemini_log_prefix_contains(&path, "gemini-session-1"));
+        assert!(!super::gemini_log_prefix_contains(
+            &path,
+            "gemini-session-1"
+        ));
         assert!(!super::gemini_log_prefix_contains(&path, ""));
     }
 
