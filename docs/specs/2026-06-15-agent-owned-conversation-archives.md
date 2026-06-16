@@ -1,7 +1,7 @@
 # Agent-Owned Conversation Archives
 
 - **Date:** 2026-06-15
-- **Status:** Proposed
+- **Status:** Implemented
 - **Context branch:** `feat/conversation-logs`
 
 ## Context

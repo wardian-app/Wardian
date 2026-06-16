@@ -203,6 +203,11 @@ resumed from `Off`:
 Workflow Agent nodes use their own node-level run mode and do not inherit this
 global regular-agent setting.
 
+**Conversation logging** controls whether Wardian writes new agent-owned
+conversation archive records. It defaults to enabled. When disabled, Wardian
+writes no new conversation records and does not backfill missed activity after
+the setting is re-enabled.
+
 The **Codex** subsection contains Codex-specific runtime defaults. These apply
 when Codex agents do not set explicit advanced sandbox or approval overrides.
 Wardian's default Codex policy is workspace write access with approval prompts

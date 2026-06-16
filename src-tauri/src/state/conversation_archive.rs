@@ -5,11 +5,12 @@ use std::{
 };
 
 use wardian_core::conversations::{
-    append_index_upsert, append_jsonl_record, read_jsonl_records, read_latest_index_entries,
-    write_json_atomic, AgentConversationLoggingSetting, ConversationBoundaryReason,
-    ConversationFormatVersions, ConversationIndexEntry, ConversationLoggingSetting,
-    ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
-    ConversationSourceRecord, ConversationSpeakerType, ConversationStatus, CONVERSATION_SCHEMA,
+    append_index_upsert, append_jsonl_record, materialize_text_payload, read_jsonl_records,
+    read_latest_index_entries, write_json_atomic, AgentConversationLoggingSetting,
+    ConversationBoundaryReason, ConversationFormatVersions, ConversationIndexEntry,
+    ConversationLoggingSetting, ConversationManifest, ConversationNarrativeRecord,
+    ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, ConversationStatus,
+    CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
@@ -121,6 +122,7 @@ impl ConversationArchiveState {
                 });
         let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
+        let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
         let existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
@@ -137,6 +139,7 @@ impl ConversationArchiveState {
                 .saturating_add(1),
         );
         let mut appended = Vec::new();
+        let mut event_records = Vec::new();
         let mut source_records = Vec::new();
 
         for event in events {
@@ -146,12 +149,14 @@ impl ConversationArchiveState {
             let Some(mut record) = narrative_from_chat_event(event, next_seq) else {
                 continue;
             };
+            materialize_record_text(&conversation_dir, &mut record)?;
             if let Some(source_record) = source_record_from_chat_event(event, next_seq) {
                 record.source_refs = vec![source_record.source_id.clone()];
                 source_records.push(Some(source_record));
             } else {
                 source_records.push(None);
             }
+            event_records.push(event.clone());
             next_seq = next_seq.saturating_add(1);
             appended.push(record);
         }
@@ -163,6 +168,9 @@ impl ConversationArchiveState {
         }
 
         for (index, record) in appended.iter().enumerate() {
+            if let Some(event_record) = event_records.get(index) {
+                append_jsonl_record(&events_path, event_record)?;
+            }
             if let Some(Some(source_record)) = source_records.get(index) {
                 append_jsonl_record(&sources_path, source_record)?;
             }
@@ -195,6 +203,7 @@ impl ConversationArchiveState {
                 excerpt_from_record(first_record),
                 excerpt_from_record(last_record),
                 record_count,
+                artifact_count_for_records(existing_records.iter().chain(appended.iter())),
             ),
         )?;
 
@@ -255,7 +264,8 @@ impl ConversationArchiveState {
                 .unwrap_or(0)
                 .saturating_add(1),
         );
-        let record = make_record(next_seq);
+        let mut record = make_record(next_seq);
+        materialize_record_text(&conversation_dir, &mut record)?;
         append_jsonl_record(&conversation_path, &record)?;
 
         let first_record = existing_records.first().unwrap_or(&record);
@@ -276,6 +286,7 @@ impl ConversationArchiveState {
                 excerpt_from_record(first_record),
                 excerpt_from_record(&record),
                 record_count,
+                artifact_count_for_records(existing_records.iter().chain(std::iter::once(&record))),
             ),
         )?;
 
@@ -324,6 +335,7 @@ impl ConversationArchiveState {
                 records.first().and_then(excerpt_from_record),
                 records.last().and_then(excerpt_from_record),
                 records.len() as u64,
+                artifact_count_for_records(records.iter()),
             ),
         )?;
         Ok(Some(handle.conversation_id))
@@ -708,6 +720,7 @@ fn index_entry_from_manifest(
     first_prompt_excerpt: Option<String>,
     last_record_excerpt: Option<String>,
     record_count: u64,
+    artifact_count: u64,
 ) -> ConversationIndexEntry {
     ConversationIndexEntry {
         schema: CONVERSATION_SCHEMA,
@@ -725,12 +738,52 @@ fn index_entry_from_manifest(
         first_prompt_excerpt,
         last_record_excerpt,
         record_count,
-        artifact_count: 0,
+        artifact_count,
         path: format!(
             "agents/{}/conversations/{}",
             manifest.agent_id, manifest.conversation_id
         ),
     }
+}
+
+fn materialize_record_text(
+    conversation_dir: &std::path::Path,
+    record: &mut ConversationNarrativeRecord,
+) -> io::Result<()> {
+    let Some(text) = record.text.as_deref() else {
+        return Ok(());
+    };
+    let payload = materialize_text_payload(
+        &conversation_dir.join("artifacts"),
+        &artifact_stem_for_record(record),
+        text,
+    )?;
+    record.text = payload.text;
+    record.excerpt = payload.excerpt;
+    record.artifact_refs = payload.artifact_refs;
+    Ok(())
+}
+
+fn artifact_stem_for_record(record: &ConversationNarrativeRecord) -> String {
+    if let Some(event_ref) = record.event_refs.first() {
+        return event_ref.clone();
+    }
+
+    match (record.kind, record.role.as_deref()) {
+        (ConversationRecordKind::Message, Some("user")) => {
+            format!("delivered-input-{}", record.seq)
+        }
+        (ConversationRecordKind::Lifecycle, _) => format!("lifecycle-{}", record.seq),
+        _ => format!("record-{}", record.seq),
+    }
+}
+
+fn artifact_count_for_records<'a>(
+    records: impl Iterator<Item = &'a ConversationNarrativeRecord>,
+) -> u64 {
+    records
+        .map(|record| record.artifact_refs.len() as u64)
+        .sum()
 }
 
 fn excerpt_from_record(record: &ConversationNarrativeRecord) -> Option<String> {
@@ -985,6 +1038,124 @@ mod tests {
         assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+    }
+
+    #[test]
+    fn append_chat_events_writes_event_records_for_completed_provider_events() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let event = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Persist this provider event."),
+        );
+
+        let appended = archive
+            .append_chat_events("agent-1", &[event.clone()])
+            .expect("append succeeds");
+
+        assert_eq!(appended, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let events: Vec<AgentChatEvent> =
+            read_jsonl_records(&conversation_path.join("events.jsonl"))
+                .expect("read event records");
+
+        assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn append_chat_events_materializes_large_text_payloads() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let large_text =
+            "x".repeat(wardian_core::conversations::CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
+        let event = chat_event(
+            "event-large",
+            AgentChatEventKind::ToolResult,
+            Some(AgentChatRole::Tool),
+            Some(&large_text),
+        );
+
+        let appended = archive
+            .append_chat_events("agent-1", &[event])
+            .expect("append succeeds");
+
+        assert_eq!(appended, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, None);
+        assert!(records[0]
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| large_text.starts_with(excerpt)));
+        assert_eq!(
+            records[0].artifact_refs,
+            vec!["event-large-0001.txt".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                conversation_path
+                    .join("artifacts")
+                    .join("event-large-0001.txt")
+            )
+            .expect("read artifact"),
+            large_text
+        );
+    }
+
+    #[test]
+    fn append_delivered_input_materializes_large_text_payloads() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let large_text =
+            "y".repeat(wardian_core::conversations::CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
+
+        let appended = archive
+            .append_delivered_input("agent-1", &large_text, None)
+            .expect("append succeeds");
+
+        assert_eq!(appended, 1);
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, None);
+        assert!(records[0]
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| large_text.starts_with(excerpt)));
+        assert_eq!(
+            records[0].artifact_refs,
+            vec!["delivered-input-1-0001.txt".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                conversation_path
+                    .join("artifacts")
+                    .join("delivered-input-1-0001.txt")
+            )
+            .expect("read artifact"),
+            large_text
+        );
     }
 
     #[test]

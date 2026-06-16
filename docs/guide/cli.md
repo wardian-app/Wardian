@@ -89,6 +89,10 @@ wardian workflow runs
 wardian workflow run-show <blueprint-id> <run-id>
 wardian workflow replay <blueprint-id> <run-id>
 wardian workflow schedule list
+wardian conversation list
+wardian conversation list --agent <agent-id-or-name>
+wardian conversation list --scope all
+wardian conversation show <conversation-id>
 wardian ask reviewer-a1 --stdin --timeout 10m
 wardian reply ask_0123456789abcdef --status done --stdin
 wardian send "review this" --to coder-a1
@@ -178,9 +182,11 @@ By default, `workflow exec` is a live-control command: it requires the desktop a
 
 Use `workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and `workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under `<wardian-home>/logs/workflows`.
 
+Use `conversation list` and `conversation show <conversation-id>` to inspect durable agent-owned conversation archives. Inside a Wardian-managed agent terminal, `conversation list` defaults to that agent through `WARDIAN_SESSION_ID`. Outside a managed agent terminal, pass `--agent <agent-id-or-name>` or `--scope all`. `show` returns the manifest and agent-readable `conversation.jsonl` narrative, not provider-private raw logs.
+
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
 
-`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, and `workflow replay` can run from disk without the desktop app.
+`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `conversation list`, and `conversation show` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 
