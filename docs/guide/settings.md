@@ -8,7 +8,7 @@ Open Settings from the gear icon on the left icon rail. It opens as a
 near-full-screen app modal and does not change the currently selected sidebar
 pane or main workspace view.
 
-![Wardian Settings modal showing agent runtime defaults and concise setting descriptions](../assets/screenshots/settings/runtime-settings.png)
+![Wardian Settings modal showing agent runtime defaults and the conversation logging control](../assets/screenshots/settings/conversation-logging.png)
 
 ## Storage
 
