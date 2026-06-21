@@ -234,11 +234,10 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG_CONTENT` first.
 - If interactive spawn works but telemetry is thin, that is expected today; OpenCode does not expose one stable per-session JSONL path the way Claude and Codex do.
-- On Windows, Wardian should prefer a native `opencode.exe` or packaged
-  OpenCode binary over `.cmd`/script shims during PATH resolution. If only an
-  extensionless or script shim exists, interactive and headless launch must wrap
-  it through `cmd /d /c ...` because direct process spawning does not get shell
-  dispatch semantics.
+- On Windows, Wardian should launch the `opencode` command resolved from PATH,
+  matching how a user terminal starts OpenCode. Interactive and headless launch
+  wrap that command through the configured shell because npm and PowerShell
+  shims need shell dispatch semantics.
 
 ## Choosing Where to Debug
 
