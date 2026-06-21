@@ -79,6 +79,106 @@ enum OutputReadyEmitAction {
     Suppress,
 }
 
+#[derive(Default)]
+struct CodexTerminalThemeProbeResponder {
+    answered_light_dark: bool,
+    answered_foreground: bool,
+    answered_background: bool,
+    answered_palette_zero: bool,
+    tail: Vec<u8>,
+}
+
+impl CodexTerminalThemeProbeResponder {
+    fn responses_for_chunk(
+        &mut self,
+        provider_name: &str,
+        chunk: &[u8],
+        theme: &str,
+    ) -> Vec<Vec<u8>> {
+        if provider_name != "codex" || chunk.is_empty() {
+            self.remember_tail(chunk);
+            return Vec::new();
+        }
+
+        let mut data = self.tail.clone();
+        data.extend_from_slice(chunk);
+        let terminal_theme = CodexTerminalTheme::from_wardian_theme(theme);
+        let mut responses = Vec::new();
+
+        if !self.answered_light_dark && contains_bytes(&data, b"\x1b[?996n") {
+            self.answered_light_dark = true;
+            responses.push(
+                format!(
+                    "\x1b[?997;{}n",
+                    if terminal_theme.prefers_light { 2 } else { 1 }
+                )
+                .into_bytes(),
+            );
+        }
+
+        if !self.answered_foreground
+            && (contains_bytes(&data, b"\x1b]10;?\x07")
+                || contains_bytes(&data, b"\x1b]10;?\x1b\\"))
+        {
+            self.answered_foreground = true;
+            responses.push(format!("\x1b]10;rgb:{}\x1b\\", terminal_theme.foreground).into_bytes());
+        }
+
+        if !self.answered_background
+            && (contains_bytes(&data, b"\x1b]11;?\x07")
+                || contains_bytes(&data, b"\x1b]11;?\x1b\\"))
+        {
+            self.answered_background = true;
+            responses.push(format!("\x1b]11;rgb:{}\x1b\\", terminal_theme.background).into_bytes());
+        }
+
+        if !self.answered_palette_zero && contains_bytes(&data, b"\x1b]4;0;?\x07") {
+            self.answered_palette_zero = true;
+            responses.push(format!("\x1b]4;0;rgb:{}\x07", terminal_theme.background).into_bytes());
+        }
+
+        self.remember_tail(&data);
+        responses
+    }
+
+    fn remember_tail(&mut self, data: &[u8]) {
+        const MAX_TERMINAL_PROBE_TAIL: usize = 32;
+        let start = data.len().saturating_sub(MAX_TERMINAL_PROBE_TAIL);
+        self.tail.clear();
+        self.tail.extend_from_slice(&data[start..]);
+    }
+}
+
+struct CodexTerminalTheme {
+    foreground: &'static str,
+    background: &'static str,
+    prefers_light: bool,
+}
+
+impl CodexTerminalTheme {
+    fn from_wardian_theme(theme: &str) -> Self {
+        if theme.trim() == "light" {
+            Self {
+                foreground: "11/18/27",
+                background: "fc/fa/f5",
+                prefers_light: true,
+            }
+        } else {
+            Self {
+                foreground: "ee/f2/ee",
+                background: "02/04/02",
+                prefers_light: false,
+            }
+        }
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|candidate| candidate == needle)
+}
+
 fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
     config.codex_config().cleared_provider_sessions
 }
@@ -326,6 +426,20 @@ pub async fn spawn_agent(
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
+    // Record the size the PTY was actually opened at so `resize_pty` can drop
+    // redundant no-op resizes. ConPTY's `ResizePseudoConsole` is unconditional:
+    // a resize to the identical dimensions still makes inline-viewport TUIs
+    // (notably codex) do a full clear-and-redraw, and codex's redraw emits
+    // `ESC[3J` (purge scrollback) — so a spurious identical resize silently
+    // wipes the terminal's scrollback. Seeding the baseline here lets us skip
+    // those.
+    {
+        let app_state = app.state::<AppState>();
+        if let Ok(mut sizes) = app_state.pty_sizes.write() {
+            sizes.insert(config.session_id.clone(), (initial_cols, initial_rows));
+        };
+    }
+
     let (bin, mut provider_args) = provider.get_executable();
     let claude_hook = if config.provider == "claude" {
         Some(ensure_claude_permission_hook(&config.session_id)?)
@@ -530,12 +644,15 @@ pub async fn spawn_agent(
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
     let terminal_attach = app.state::<AppState>().terminal_attach.clone();
+    let terminal_theme_for_pty = app_state.terminal_theme();
+    let tx_for_terminal_probe = tx.clone();
     let config_lock_clone = config_lock.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
+        let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
@@ -581,6 +698,13 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
+                    for response in codex_terminal_theme_responder.responses_for_chunk(
+                        &provider_name_for_pty,
+                        &buf[0..n],
+                        &terminal_theme_for_pty,
+                    ) {
+                        let _ = tx_for_terminal_probe.blocking_send(response);
+                    }
                     terminal_attach.process_output(&sid_for_pty, &buf[0..n]);
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
@@ -924,9 +1048,16 @@ pub async fn spawn_agent(
             .map(|path| path.to_string_lossy().to_string());
 
         std::thread::spawn(move || {
+            // Tail-follow the resolved session log every iteration, but run
+            // session discovery (which walks and samples every rollout file in
+            // the agent's codex home) only on this interval.
+            const CODEX_SESSION_DISCOVERY_INTERVAL: std::time::Duration =
+                std::time::Duration::from_secs(5);
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
             let mut positioned_initial_log = !watcher_skip_existing_log;
+            let mut cached_latest_session: Option<String> = None;
+            let mut last_discovery: Option<std::time::Instant> = None;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -937,10 +1068,16 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
-                    let latest_session = latest_codex_session_index_entry(&watcher_session)
-                        .ok()
-                        .flatten()
-                        .map(|(session_id, _updated_at)| session_id);
+                    let discovery_due = last_discovery
+                        .is_none_or(|at| at.elapsed() >= CODEX_SESSION_DISCOVERY_INTERVAL);
+                    if discovery_due {
+                        cached_latest_session = latest_codex_session_index_entry(&watcher_session)
+                            .ok()
+                            .flatten()
+                            .map(|(session_id, _updated_at)| session_id);
+                        last_discovery = Some(std::time::Instant::now());
+                    }
+                    let latest_session = cached_latest_session.clone();
                     let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
                         let previous_resume = cfg.resume_session.clone();
                         let previous_cleared = codex_cleared_provider_sessions(&cfg);
@@ -1463,6 +1600,25 @@ pub async fn resize_pty(
     if cols < 10 {
         return Ok(());
     }
+
+    // Drop redundant no-op resizes. ConPTY's `ResizePseudoConsole` is
+    // unconditional, and an identical-dimension resize still forces inline
+    // TUIs like codex into a full clear-and-redraw whose `ESC[3J` purges the
+    // terminal's scrollback. The frontend's fit loop can re-report a size that
+    // already matches (e.g. `reportTerminalSize(..., force: true)` for an
+    // unchanged fit), so guard here at the authoritative PTY boundary. Only
+    // skip when we have a recorded size that matches exactly; an absent record
+    // means the PTY size is unknown, so let the resize through.
+    if state
+        .pty_sizes
+        .read()
+        .ok()
+        .and_then(|sizes| sizes.get(&session_id).copied())
+        == Some((cols, rows))
+    {
+        return Ok(());
+    }
+
     let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
@@ -1479,10 +1635,22 @@ pub async fn resize_pty(
                     &format!("resize cols={} rows={}", cols, rows),
                 );
             }
-            agent
-                .pty_master
-                .clone()
-                .ok_or_else(|| format!("Agent {} is off", session_id))?
+            match agent.pty_master.clone() {
+                Some(master) => master,
+                None => {
+                    drop(agents);
+                    // No live PTY yet: the agent is a startup "Restoring"
+                    // placeholder or is off. Record the requested size so
+                    // spawn_agent opens the PTY at it; dropping the report here
+                    // left restored TUIs laid out for the 80x24 default inside
+                    // a larger terminal grid, because nothing re-reports after
+                    // the placeholder is replaced.
+                    if let Ok(mut sizes) = state.pty_sizes.write() {
+                        sizes.insert(session_id, (cols, rows));
+                    }
+                    return Ok(());
+                }
+            }
         } else {
             return Err(format!("Agent {} not found", session_id));
         }
@@ -1543,6 +1711,84 @@ mod tests {
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
     }
 
+    fn agent_without_pty() -> crate::state::ActiveAgent {
+        crate::state::ActiveAgent {
+            config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            process_id: None,
+            query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_status: std::sync::Arc::new(std::sync::Mutex::new("Restoring".to_string())),
+            last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::state::AgentWatchState::new("restoring-agent".to_string(), 4096, 262_144),
+            )),
+            terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    // A resize that arrives while the agent is still a "Restoring" placeholder
+    // (or off) has no PTY to apply to, but spawn_agent seeds new PTYs from
+    // pty_sizes. Dropping the report left restored TUIs laid out for the 80x24
+    // default inside a larger terminal grid.
+    #[tokio::test]
+    async fn resize_without_pty_records_size_for_spawn() {
+        let state = AppState::new();
+        state
+            .agents
+            .lock()
+            .await
+            .insert("restoring-agent".to_string(), agent_without_pty());
+
+        let result = resize_pty("restoring-agent".to_string(), 124, 30, &state).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            state.pty_sizes.read().unwrap().get("restoring-agent"),
+            Some(&(124, 30))
+        );
+    }
+
+    #[tokio::test]
+    async fn resize_unknown_agent_still_errors() {
+        let state = AppState::new();
+        let result = resize_pty("missing".to_string(), 124, 30, &state).await;
+        assert!(result.is_err());
+        assert!(state.pty_sizes.read().unwrap().is_empty());
+    }
+
+    // A resize to the exact size already recorded is a no-op: it must not reach
+    // the PTY (ConPTY's unconditional `ResizePseudoConsole` would make codex
+    // purge its scrollback). The dedup short-circuits before the agent lookup,
+    // so even a missing agent returns Ok when the size already matches.
+    #[tokio::test]
+    async fn resize_to_recorded_size_is_skipped() {
+        let state = AppState::new();
+        state
+            .pty_sizes
+            .write()
+            .unwrap()
+            .insert("agent".to_string(), (124, 30));
+
+        // No agent registered: without the dedup this would error "not found".
+        let result = resize_pty("agent".to_string(), 124, 30, &state).await;
+        assert!(result.is_ok());
+
+        // A genuinely different size is not skipped and still reaches the
+        // (missing) agent lookup, surfacing the not-found error.
+        let changed = resize_pty("agent".to_string(), 125, 30, &state).await;
+        assert!(changed.is_err());
+    }
+
     #[test]
     fn codex_line_status_preserves_action_needed_until_completion() {
         assert_eq!(
@@ -1587,6 +1833,54 @@ mod tests {
             OutputReadyEmitAction::Suppress
         );
         assert!(gate.finish_delayed_emit(true, start + OUTPUT_READY_EMIT_MIN_INTERVAL));
+    }
+
+    #[test]
+    fn codex_terminal_theme_probe_responder_answers_light_theme_queries() {
+        let mut responder = CodexTerminalThemeProbeResponder::default();
+
+        let responses = responder.responses_for_chunk(
+            "codex",
+            b"\x1b[?996n\x1b]10;?\x1b\\\x1b]11;?\x1b\\",
+            "light",
+        );
+
+        let responses: Vec<String> = responses
+            .into_iter()
+            .map(|response| String::from_utf8(response).expect("utf8 response"))
+            .collect();
+        assert_eq!(
+            responses,
+            vec![
+                "\x1b[?997;2n".to_string(),
+                "\x1b]10;rgb:11/18/27\x1b\\".to_string(),
+                "\x1b]11;rgb:fc/fa/f5\x1b\\".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_terminal_theme_probe_responder_handles_split_background_query() {
+        let mut responder = CodexTerminalThemeProbeResponder::default();
+
+        assert!(responder
+            .responses_for_chunk("codex", b"\x1b]11", "dark")
+            .is_empty());
+        let responses = responder.responses_for_chunk("codex", b";?\x1b\\", "dark");
+
+        assert_eq!(responses, vec![b"\x1b]11;rgb:02/04/02\x1b\\".to_vec()]);
+        assert!(responder
+            .responses_for_chunk("codex", b"\x1b]11;?\x1b\\", "dark")
+            .is_empty());
+    }
+
+    #[test]
+    fn codex_terminal_theme_probe_responder_ignores_other_providers() {
+        let mut responder = CodexTerminalThemeProbeResponder::default();
+
+        let responses = responder.responses_for_chunk("opencode", b"\x1b]11;?\x1b\\", "light");
+
+        assert!(responses.is_empty());
     }
 
     #[test]

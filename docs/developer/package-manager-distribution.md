@@ -10,11 +10,17 @@ Phase 1 covers:
 
 - winget for Windows, using the NSIS `.exe`.
 - Homebrew Cask for macOS, using the Apple Silicon and Intel `.dmg` files.
-- Linux direct-install docs for `.deb` and AppImage artifacts.
+- A signed APT repository for Debian/Ubuntu x64, using the stable `.deb`.
+- Linux direct-install fallback docs for `.deb` and AppImage artifacts.
 
-npm bootstrap, standalone CLI-only distribution, signed APT repositories,
-Flathub, and Snap are out of scope for Phase 1. Linux package-manager publishing
-is tracked in [#324](https://github.com/wardian-app/Wardian/issues/324).
+npm bootstrap and standalone CLI-only distribution are out of scope for Phase 1.
+Linux package-manager publishing is tracked in
+[#324](https://github.com/wardian-app/Wardian/issues/324). The Phase 2 decision
+is documented in
+[Linux Package Manager Distribution](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-06-11-linux-package-manager-distribution.md):
+use a signed APT repository as the first Linux package-manager channel, defer
+Flathub and Snap until Wardian has a deliberate sandbox/permission design, and
+keep AppImage as a direct-download artifact.
 The Phase 1 implementation is tracked in
 [#325](https://github.com/wardian-app/Wardian/issues/325).
 
@@ -77,9 +83,11 @@ Submit through the normal `microsoft/winget-pkgs` PR flow or with
 The `wardian-app/homebrew-tap` repository owns the published Homebrew Cask.
 After a stable release, its **Update Wardian Cask** workflow can be run with a
 release tag such as `v0.3.6`. The main Wardian release workflow also dispatches
-that tap workflow after stable publication when the Wardian repository has a
-`HOMEBREW_TAP_DISPATCH_TOKEN` secret with access to create dispatch events in
-the tap repository.
+that tap workflow after stable publication when the Wardian repository has the
+Wardian release dispatch GitHub App configured. Set
+`WARDIAN_RELEASE_DISPATCH_APP_ID` as a repository variable and
+`WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY` as a repository secret. The app must be
+installed on `wardian-app/homebrew-tap` with Actions write permission.
 
 The tap workflow reads the published Wardian release assets, rewrites
 `Casks/wardian.rb`, runs Homebrew audit, and opens a pull request in the tap.
@@ -101,9 +109,190 @@ they must never point at prerelease or draft artifacts.
 ## Linux Direct Install
 
 Use `dist/package-managers/v0.3.6/linux/install.md` as the hash-verified Linux
-install snippet for release notes and documentation. Do not present it as an
-APT, Flatpak, Snap, or AppImageUpdate channel. Those choices belong to the
-Phase 2 Linux package-manager work.
+install fallback for release notes and documentation. Debian/Ubuntu users should
+prefer the signed APT repository. Do not present direct `.deb` downloads as
+Flatpak, Snap, or AppImageUpdate.
+
+## Linux APT Repository
+
+The selected Linux package-manager channel is a signed APT repository that
+mirrors stable `.deb` assets from GitHub Releases. GitHub Releases remain the
+canonical artifact source; APT metadata is the Linux package-manager integrity
+surface and must be generated only after the stable release assets and updater
+metadata have been published and validated.
+
+The public repository is `https://packages.wardian.org/apt`. The package host
+can later add sibling package-manager paths such as `/rpm` without changing the
+APT URL. The first backend is GitHub Pages behind `packages.wardian.org`.
+
+Public Debian/Ubuntu install instructions:
+
+```bash
+curl -fsSL https://packages.wardian.org/apt/wardian-archive-keyring.gpg \
+  | sudo install -D -m 0644 /dev/stdin /etc/apt/keyrings/wardian.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/wardian.gpg] https://packages.wardian.org/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/wardian.list >/dev/null
+sudo apt update
+sudo apt install wardian
+```
+
+Archive key fingerprint:
+
+```text
+C956 3C05 D88D B483 748A 5F8B 66E5 FF51 0BCE 9193
+```
+
+Local dry runs from Windows should use WSL Ubuntu or another Linux environment
+for Debian tooling. Published automation runs in the separate
+`wardian-app/packages` repository after stable release publication and:
+
+1. read `gh release view vX.Y.Z --json tagName,assets`;
+2. verify the `Wardian_X.Y.Z_amd64.deb` asset name, tag URL, and SHA-256 digest;
+3. verify package identity with `dpkg-deb -f`;
+4. stage the `.deb` under `pool/main/w/wardian/`;
+5. generate `Packages`, `Packages.gz`, and `Release`;
+6. sign `Release` as both `InRelease` and `Release.gpg`;
+7. validate the repository before upload.
+
+This repository includes an **APT Repository** GitHub Actions workflow for
+manual validation. It generates a signed dry-run repository with a temporary
+key, validates it with local `file://` APT sources, and uploads the repository
+tree as a workflow artifact. It does not publish to the public package host.
+
+Publishing is owned by `wardian-app/packages`. That repository's
+`publish-apt.yml` workflow consumes the published Wardian release assets, signs
+the repository with the real archive signing key, writes `CNAME`, commits the
+`apt/` tree, and publishes `https://packages.wardian.org/apt` through GitHub
+Pages. Configure these in `wardian-app/packages`:
+
+- `WARDIAN_APT_SIGNING_PRIVATE_KEY`: armored private archive signing key.
+- `WARDIAN_APT_SIGNING_KEY_PASSPHRASE`: optional passphrase for the archive
+  signing key.
+
+Configure these in `wardian-app/Wardian` so stable releases can dispatch the
+package repository workflow:
+
+- `WARDIAN_RELEASE_DISPATCH_APP_ID`: release dispatch GitHub App ID.
+- `WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY`: release dispatch GitHub App private
+  key. The app must be installed on `wardian-app/packages` with Actions write
+  permission.
+
+Do not use this repository's GitHub Pages deployment for the package repository;
+the Wardian docs site already owns that deployment. Use a separate static host
+or a separate repository with Pages enabled behind `https://packages.wardian.org`.
+
+Expected static host shape:
+
+```text
+CNAME
+apt/
+  pool/main/w/wardian/Wardian_X.Y.Z_amd64.deb
+  dists/stable/main/binary-amd64/Packages
+  dists/stable/main/binary-amd64/Packages.gz
+  dists/stable/Release
+  dists/stable/InRelease
+  dists/stable/Release.gpg
+  wardian-archive-keyring.gpg
+```
+
+Package identity validation:
+
+```bash
+dpkg-deb -f Wardian_X.Y.Z_amd64.deb Package Version Architecture
+```
+
+Expected values:
+
+- `Package`: `wardian`
+- `Version`: `X.Y.Z`
+- `Architecture`: `amd64`
+
+Keep previously published `.deb` files in `pool/`; do not overwrite an already
+published package version with different contents. If a package must be
+republished for packaging-only reasons, publish a new Debian package version
+instead of reusing the same version string.
+
+Dry-run repository generation:
+
+```bash
+npm run release:apt-repo -- \
+  --release-assets dist/package-managers/vX.Y.Z/assets.json \
+  --deb Wardian_X.Y.Z_amd64.deb \
+  --out dist/apt \
+  --signing-key "$WARDIAN_APT_SIGNING_KEY"
+```
+
+Manual Wardian repository validation:
+
+```bash
+gh workflow run apt-repository.yml \
+  -f release_tag=vX.Y.Z
+```
+
+Manual package repository publish run, after the package workflow and signing
+secrets are configured:
+
+```bash
+gh workflow run publish-apt.yml \
+  --repo wardian-app/packages \
+  -f release_tag=vX.Y.Z
+```
+
+The underlying metadata generation commands are:
+
+```bash
+apt-ftparchive packages pool/main > dists/stable/main/binary-amd64/Packages
+gzip -k -f dists/stable/main/binary-amd64/Packages
+apt-ftparchive release dists/stable > dists/stable/Release
+gpg --batch --yes --local-user "$WARDIAN_APT_SIGNING_KEY" --clearsign \
+  -o dists/stable/InRelease dists/stable/Release
+gpg --batch --yes --local-user "$WARDIAN_APT_SIGNING_KEY" -abs \
+  -o dists/stable/Release.gpg dists/stable/Release
+```
+
+PowerShell should not be the primary form for repository generation because APT
+metadata generation and validation depend on Debian/Ubuntu tooling.
+
+Validation before upload:
+
+```bash
+test -s dists/stable/main/binary-amd64/Packages
+test -s dists/stable/main/binary-amd64/Packages.gz
+gpg --verify dists/stable/Release.gpg dists/stable/Release
+gpg --verify dists/stable/InRelease
+```
+
+End-to-end install validation in a disposable Debian or Ubuntu container or VM:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://packages.wardian.org/apt/wardian-archive-keyring.gpg \
+  | sudo tee /etc/apt/keyrings/wardian.gpg >/dev/null
+sudo tee /etc/apt/sources.list.d/wardian.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://packages.wardian.org/apt
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/wardian.gpg
+EOF
+sudo apt update
+apt-cache policy wardian
+sudo apt install wardian
+```
+
+When Wardian is installed through APT, APT owns desktop app updates. Any future
+Linux in-app installer behavior must detect package-manager installs before
+replacing files outside the package database.
+
+## Deferred Linux Channels
+
+Flathub is deferred until Wardian has a small, intentional Flatpak permission
+surface for PTYs, provider CLIs, workspace files, WebKit, and external editors.
+Snap is deferred until Wardian can prove strict confinement is practical or
+maintainers decide that classic confinement review is worth the support burden.
+AppImage remains a direct-download artifact unless Wardian later adopts a real
+AppImage update mechanism.
 
 ## Verification
 

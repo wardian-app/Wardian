@@ -30,6 +30,7 @@ docs/.vitepress/dist/
 .claude/*
 .antigravitycli/*
 .superpowers/*
+.wardian-review/
 
 # Backup and test files
 *.bak
@@ -44,6 +45,7 @@ docs/.vitepress/dist/
 .eslintcache
 .stylelintcache
 .tmp/
+.tmp-rendering-audit-*/
 
 # Windows
 Thumbs.db

@@ -19,6 +19,7 @@ This is the main container component for the file explorer tab.
 A recursive, lazy-loading component responsible for accurately representing nested directory structures.
 - **Lazy Loading**: Instead of indexing the entire workspace at once, it fetches child nodes only when a directory is expanded, ensuring optimal performance for large projects.
 - **Targeted Refresh**: Each mounted tree refetches its directory when the refresh token changes and one of the changed paths directly affects that directory. Expanded state stays local to the component, so refreshes do not collapse the visible tree.
+- **Path Identity**: Explorer path comparisons use `normalizeExplorerPathForCompare` so Windows-specific watcher paths such as `\\?\<absolute-windows-path>` match ordinary display paths from directory reads without rewriting POSIX path spelling, case, or significant whitespace.
 - **Theming**: Integrates seamlessly with Wardian typography and spacing. Nested items have fixed padding metrics to align correctly underneath parent elements without succumbing to horizontal flex contraction (`shrink-0`). Directory rows use only their expansion chevron; file rows use `lucide-react` icons with colors mapped explicitly to `wardian-*` CSS variables based on file extensions.
 
 ### 3. Backend Commands (`src-tauri/src/commands/fs.rs`)

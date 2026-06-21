@@ -9,30 +9,24 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
+  normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
-  shouldHomeCursorBeforeTransientResize,
-  type TerminalOutputState,
+  stripTerminalColorReportInputs,
+  type AntigravityRenderState,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
-
-const DARK_TERM_THEME = {
-  background: "#020402",
-  foreground: "#EEF2EE",
-  cursor: "#F1D382",
-  selectionBackground: "#1E261E",
-};
-
-const LIGHT_TERM_THEME = {
-  background: "#fcfaf5",
-  foreground: "#111827",
-  cursor: "#b8860b",
-  selectionBackground: "#e5e7eb",
-};
+import {
+  DARK_TERM_THEME,
+  LIGHT_TERM_THEME,
+  terminalMinimumContrastRatio,
+  terminalThemeForProvider,
+  type WardianTerminalTheme,
+} from "./terminalThemes";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -68,6 +62,10 @@ type TerminalRendererEntry = {
   webglAddon: WebglAddon | null;
   webglAttempted: boolean;
   host: HTMLDivElement;
+  // Pixel-perfect still of the last WebGL frame, overlaid while the terminal
+  // is demoted to the DOM renderer. Strictly cosmetic (pointer-events: none);
+  // removed on promotion or when fresh output arrives.
+  snapshotOverlay: HTMLCanvasElement | null;
 };
 
 type TerminalSessionEntry = {
@@ -77,11 +75,16 @@ type TerminalSessionEntry = {
   lastMeasuredHostSize: { width: number; height: number } | null;
   recentWritePreviews: string[];
   recentNormalizedWritePreviews: string[];
+  // Debug-only (shouldExposeTerminalDebug): full raw PTY chunks in arrival
+  // order so a live rendering failure can be replayed offline with the exact
+  // chunk boundaries. Capped at RAW_OUTPUT_LOG_MAX_CHARS.
+  rawOutputLog: string[];
+  rawOutputLogChars: number;
   opencodeFocusReported: boolean;
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
   provider?: string;
-  currentTheme: typeof DARK_TERM_THEME;
+  currentTheme: WardianTerminalTheme;
   renderer: TerminalRendererEntry | null;
   rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
@@ -96,7 +99,7 @@ type TerminalSessionEntry = {
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
-} & TerminalOutputState;
+} & AntigravityRenderState;
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
 
@@ -104,12 +107,24 @@ type TerminalOptionTarget = {
   options: {
     scrollOnUserInput?: boolean;
     scrollOnEraseInDisplay?: boolean;
+    minimumContrastRatio?: number;
     windowsPty?: { backend?: "conpty" | "winpty"; buildNumber?: number };
   };
 };
 
 function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
-  term.options.scrollOnEraseInDisplay = provider === "codex";
+  // scrollOnEraseInDisplay must stay OFF for every provider, codex included.
+  // Codex (ratatui inline viewport) already scrolls its conversation history
+  // into scrollback the way a real terminal does: it sets a top-anchored scroll
+  // region (`ESC[1;<top>r`, so xterm's scrollTop === 0) and line-feeds history
+  // through it, which xterm commits to scrollback natively. The non-standard
+  // scrollOnEraseInDisplay additionally pushed the *entire visible screen* —
+  // the pinned composer/status viewport included — into scrollback on every
+  // `ESC[2J` full repaint, leaving frozen composer snapshots stranded in
+  // history (a standalone terminal never does this). Disabled so codex matches
+  // native rendering.
+  term.options.scrollOnEraseInDisplay = false;
+  term.options.minimumContrastRatio = terminalMinimumContrastRatio(provider);
 }
 
 function providerFromAgentConfig(agent: AgentConfig | undefined) {
@@ -161,6 +176,8 @@ export function shouldExposeTerminalDebug(env: TerminalDebugEnv = import.meta.en
   return env.DEV === true || env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
 }
 
+const RAW_OUTPUT_LOG_MAX_CHARS = 4_000_000;
+
 declare global {
   interface Window {
     __wardianTerminalDebug?: {
@@ -182,6 +199,20 @@ declare global {
         renderer: {
           cols: number;
           rows: number;
+          baseY: number;
+          viewportY: number;
+          bufferType: string;
+          mouseTrackingMode: string | null;
+          scrollableElement: {
+            scrollTop: number;
+            scrollHeight: number;
+            clientHeight: number;
+          } | null;
+          viewportScrollState: {
+            scrollTop: number | null;
+            dimensions: { height: number; scrollHeight: number } | null;
+            latestYDisp: number | null;
+          } | null;
           fontFamily: string;
           fontSize: number | null;
           webglActive: boolean;
@@ -195,6 +226,15 @@ declare global {
           allLines: string[];
         } | null;
         provider: string | null;
+        wheelStats: {
+          events: number;
+          handled: number;
+          opencode_owned: number;
+          no_scrollback: number;
+          zero_rows: number;
+          viewport_unchanged: number;
+        } | null;
+        scrollTraces: { position: number; at: number; stack: string }[] | null;
         usesViewportRedraws: boolean;
         supportsViewportRedrawInPlace: boolean;
         lines: string[];
@@ -202,6 +242,7 @@ declare global {
         recentWritePreviews: string[];
         recentNormalizedWritePreviews: string[];
       } | null;
+      rawOutputLog: (sessionId: string) => string[] | null;
     };
   }
 }
@@ -308,6 +349,51 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
             ? {
                 cols: rendererTerm.cols,
                 rows: rendererTerm.rows,
+                baseY: rendererBuffer?.baseY ?? 0,
+                viewportY: rendererBuffer?.viewportY ?? 0,
+                bufferType: String(rendererBuffer?.type ?? ""),
+                mouseTrackingMode: (() => {
+                  try {
+                    return String(rendererTerm.modes?.mouseTrackingMode ?? "");
+                  } catch {
+                    return null;
+                  }
+                })(),
+                scrollableElement: (() => {
+                  const node = rendererTerm.element?.querySelector(".xterm-scrollable-element");
+                  return node
+                    ? {
+                        scrollTop: node.scrollTop,
+                        scrollHeight: node.scrollHeight,
+                        clientHeight: node.clientHeight,
+                      }
+                    : null;
+                })(),
+                viewportScrollState: (() => {
+                  try {
+                    const viewport = (rendererTerm as unknown as {
+                      _core?: {
+                        _viewport?: {
+                          _scrollableElement?: {
+                            getScrollPosition?: () => { scrollTop: number };
+                            getScrollDimensions?: () => { height: number; scrollHeight: number };
+                          };
+                          _latestYDisp?: number;
+                        };
+                      };
+                    })._core?._viewport;
+                    if (!viewport?._scrollableElement) {
+                      return null;
+                    }
+                    return {
+                      scrollTop: viewport._scrollableElement.getScrollPosition?.()?.scrollTop ?? null,
+                      dimensions: viewport._scrollableElement.getScrollDimensions?.() ?? null,
+                      latestYDisp: viewport._latestYDisp ?? null,
+                    };
+                  } catch {
+                    return null;
+                  }
+                })(),
                 fontFamily: String(rendererTerm.options.fontFamily ?? ""),
                 fontSize: nullableNumber(rendererTerm.options.fontSize),
                 webglActive: renderer.webglAddon !== null,
@@ -322,6 +408,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
               }
             : null,
           provider: entry.provider ?? null,
+          wheelStats: wheelDebugStats.get(sessionId) ?? null,
+          scrollTraces: scrollTraces.get(sessionId) ?? null,
           usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
           supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
@@ -329,6 +417,10 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         recentWritePreviews: [...entry.recentWritePreviews],
         recentNormalizedWritePreviews: [...entry.recentNormalizedWritePreviews],
       };
+      },
+      rawOutputLog: (sessionId: string) => {
+        const entry = terminalSessionMap.get(sessionId);
+        return entry ? [...entry.rawOutputLog] : null;
       },
     }),
   });
@@ -356,13 +448,16 @@ function terminalCursorPositionReply(entry: TerminalSessionEntry) {
 }
 
 function readParserKnownLineSet(entry: TerminalSessionEntry) {
-  // Include both scrollback (0..baseY-1) and the viewport (baseY..length-1).
-  // Codex home-redraw reconstruction uses this set to decide whether a "dropped"
-  // line is already represented somewhere in the parser buffer. Without viewport
-  // coverage, a content shuffle that the drop heuristic misidentifies can push a
-  // still-visible line into scrollback, duplicating it.
+  // Scrollback only (0..baseY-1) — deliberately NOT the viewport. A Codex
+  // sliding-window drop is still visible in the viewport when its drop frame
+  // arrives (the repaint that removes it is in this very batch), so including
+  // viewport rows suppresses genuine drops and loses output whenever a window
+  // row was already painted by an earlier batch (observed live with Codex
+  // 0.139.0: rows vanished or survived depending on PTY chunk boundaries).
+  // Shuffle protection (line moved but still visible after the repaint) is
+  // handled in reconstructHomeRedrawScrollback against the new frame's lines.
   const buffer = entry.parser.buffer.active;
-  const lineCount = Math.max(0, buffer.length ?? 0);
+  const lineCount = Math.max(0, buffer.baseY ?? 0);
   return new Set(
     Array.from({ length: lineCount }, (_, index) =>
       buffer.getLine(index)?.translateToString(true).replace(/\s+/g, " ").trim() || "",
@@ -553,22 +648,6 @@ async function applyViewportRedrawInPlace(
 
 const SYNTHETIC_SCROLLBACK_PREFIX = "\u001b[999;1H";
 
-function splitSyntheticScrollbackPrefix(data: string) {
-  if (!data.startsWith(SYNTHETIC_SCROLLBACK_PREFIX)) {
-    return { scrollbackData: "", viewportData: data };
-  }
-
-  const viewportStart = data.indexOf("\u001b", SYNTHETIC_SCROLLBACK_PREFIX.length);
-  if (viewportStart <= SYNTHETIC_SCROLLBACK_PREFIX.length) {
-    return { scrollbackData: "", viewportData: data };
-  }
-
-  return {
-    scrollbackData: data.slice(0, viewportStart),
-    viewportData: data.slice(viewportStart),
-  };
-}
-
 const ANSI_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b[PX^_].*?(?:\u001b\\|\u0007)|\u001b[@-_]/g;
 
 function normalizePotentialHistoryLine(line: string) {
@@ -642,8 +721,21 @@ function appendSyntheticScrollbackRows(scrollbackData: string, rows: string[] | 
     : `${SYNTHETIC_SCROLLBACK_PREFIX}${renderedRows}`;
 }
 
-function providerUsesViewportRedraws(provider: string | undefined) {
-  return provider === "codex" || provider === "claude" || provider === "gemini";
+// Disabled for every provider. Modern provider TUIs (verified live against
+// Claude Code 2.1.173 and Codex 0.139.0) are diff renderers: they
+// cursor-address just the changed cells of a row and assume the terminal
+// retained their previous frame. Routing such frames through the
+// scratch-screen replacement corrupts cells both ways — a blank scratch wipes
+// every cell the frame didn't write (mostly black terminals with only the
+// status row), and a preserved scratch merges the frame with rows the TUI
+// believes it already replaced (numbered output interleaved with stale
+// banner/status cells, dropped and duplicated rows). xterm itself honors the
+// retained-frame contract, so provider streams are written natively. The
+// machinery is kept behind this switch for one release in case a provider
+// ships a true full-frame repainter again; the live rendering audit is the
+// gate for re-enabling it.
+function providerUsesViewportRedraws(_provider: string | undefined) {
+  return false;
 }
 
 const TOP_LEFT_CURSOR_REPOSITION = /\u001b\[(?:|1|;|1;|;1|1;1)[Hf]/;
@@ -673,6 +765,56 @@ function wheelEventRows(
   return event.deltaY / Math.max(lineHeight, 1);
 }
 
+// Diagnostic counters for user wheel handling, surfaced through the debug
+// snapshot so native E2E failures can tell which branch swallowed the event.
+type WheelDebugStats = {
+  events: number;
+  handled: number;
+  opencode_owned: number;
+  no_scrollback: number;
+  zero_rows: number;
+  viewport_unchanged: number;
+};
+const wheelDebugStats = new Map<string, WheelDebugStats>();
+
+// Ring buffer of renderer viewport scroll events with call stacks (debug
+// builds only) so native E2E can identify what moved the viewport.
+type ScrollTraceEntry = { position: number; at: number; stack: string };
+const scrollTraces = new Map<string, ScrollTraceEntry[]>();
+
+function recordScrollTrace(sessionId: string, position: number) {
+  const trace = scrollTraces.get(sessionId) ?? [];
+  trace.push({
+    position,
+    at: Date.now(),
+    stack: String(new Error().stack ?? "")
+      .split("\n")
+      .slice(2, 10)
+      .map((line) => line.trim())
+      .join(" | "),
+  });
+  if (trace.length > 8) {
+    trace.splice(0, trace.length - 8);
+  }
+  scrollTraces.set(sessionId, trace);
+}
+
+function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) {
+  if (!sessionId) {
+    return;
+  }
+  const stats = wheelDebugStats.get(sessionId) ?? {
+    events: 0,
+    handled: 0,
+    opencode_owned: 0,
+    no_scrollback: 0,
+    zero_rows: 0,
+    viewport_unchanged: 0,
+  };
+  stats[key] += 1;
+  wheelDebugStats.set(sessionId, stats);
+}
+
 function scrollTerminalFromWheel(
   term: Terminal,
   provider: string | undefined,
@@ -683,13 +825,17 @@ function scrollTerminalFromWheel(
     stopPropagation: () => void;
   },
   rowRemainder: { current: number },
+  sessionId?: string,
 ) {
+  recordWheel(sessionId, "events");
   if (provider === "opencode") {
+    recordWheel(sessionId, "opencode_owned");
     return false;
   }
 
   const buffer = term.buffer.active;
   if ((buffer.baseY ?? 0) <= 0) {
+    recordWheel(sessionId, "no_scrollback");
     return false;
   }
 
@@ -697,6 +843,7 @@ function scrollTerminalFromWheel(
   const scrollRows = rowDelta > 0 ? Math.floor(rowDelta) : Math.ceil(rowDelta);
   if (scrollRows === 0) {
     rowRemainder.current = rowDelta;
+    recordWheel(sessionId, "zero_rows");
     return false;
   }
 
@@ -705,9 +852,11 @@ function scrollTerminalFromWheel(
   term.scrollLines(scrollRows);
   const afterViewportY = term.buffer.active.viewportY ?? 0;
   if (afterViewportY === beforeViewportY) {
+    recordWheel(sessionId, "viewport_unchanged");
     return false;
   }
 
+  recordWheel(sessionId, "handled");
   event.preventDefault();
   event.stopPropagation();
   term.refresh(0, Math.max(term.rows - 1, 0));
@@ -722,9 +871,14 @@ function syncParserViewportToRenderer(entry: TerminalSessionEntry) {
   (entry.parser as unknown as { scrollToLine?: (line: number) => void }).scrollToLine?.(rendererViewportY);
 }
 
-function queueTerminalCapabilityResponses(sessionId: string, data: string, entry: TerminalSessionEntry) {
+function planTerminalOutputChunk(
+  sessionId: string,
+  data: string,
+  entry: TerminalSessionEntry,
+  options?: { queueCapabilityResponses?: boolean },
+) {
   if (!data) {
-    return;
+    return data;
   }
   const { row, col } = terminalCursorPositionReply(entry);
   const { width, height } = terminalPixelSizeReply(entry);
@@ -735,11 +889,11 @@ function queueTerminalCapabilityResponses(sessionId: string, data: string, entry
   const backgroundRgb =
     background.length === 6
       ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
-      : "02/04/02";
+      : "1a/1a/1a";
   const foregroundRgb =
     foreground.length === 6
       ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
-      : "ee/f2/ee";
+      : "eb/eb/eb";
 
   const plan = planTerminalCapabilityResponses(entry.provider, data, {
     cursorRow: row,
@@ -753,9 +907,13 @@ function queueTerminalCapabilityResponses(sessionId: string, data: string, entry
   });
 
   entry.opencodeFocusReported = plan.focusReported;
-  for (const input of plan.outgoingInputs) {
-    queueAgentInput(sessionId, input);
+  if (options?.queueCapabilityResponses !== false) {
+    for (const input of plan.outgoingInputs) {
+      queueAgentInput(sessionId, input);
+    }
   }
+
+  return plan.normalizedOutput;
 }
 
 function disposeTerminalSession(sessionId: string) {
@@ -780,10 +938,50 @@ function disposeTerminalSession(sessionId: string) {
 function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   clearRendererTimers(renderer);
   webglPool.delete(sessionId);
+  removeSnapshotOverlay(renderer);
   renderer.serializeAddon.dispose();
-  renderer.webglAddon?.dispose();
-  renderer.webglAddon = null;
+  disposeWebglAddonAndReleaseContext(renderer);
   renderer.term.dispose();
+}
+
+// @xterm/addon-webgl removes its canvas on dispose but never calls
+// WEBGL_lose_context, so Chromium keeps counting the context as live until the
+// detached canvas is garbage-collected. Under pool churn (LRU eviction, grace
+// disposal, re-promotion) those zombie contexts stack on top of the live pool
+// and trip the browser's ~16-context cap, which force-loses a context that may
+// belong to a terminal the user is looking at. Lose the context explicitly so
+// disposal frees the slot immediately instead of at GC time.
+function disposeWebglAddonAndReleaseContext(renderer: TerminalRendererEntry) {
+  const addon = renderer.webglAddon;
+  if (!addon) {
+    return;
+  }
+  // Snapshot every canvas under the terminal element before dispose detaches
+  // them. @xterm/addon-webgl creates a WebGL2 context when available and
+  // silently falls back to WebGL1 otherwise (common once the browser is near
+  // its context cap), so we must probe BOTH context types — querying only
+  // "webgl2" misses every fallback context, leaving zombies that re-trip the
+  // "too many active WebGL contexts" cap. Re-`getContext` with the type that
+  // created the context returns that same context; the other type returns null.
+  const canvases = renderer.term.element
+    ? Array.from(renderer.term.element.querySelectorAll("canvas"))
+    : [];
+  renderer.webglAddon = null;
+  addon.dispose();
+  for (const canvas of canvases) {
+    releaseCanvasWebglContext(canvas);
+  }
+}
+
+function releaseCanvasWebglContext(canvas: HTMLCanvasElement) {
+  try {
+    const gl =
+      (canvas.getContext("webgl2") as WebGL2RenderingContext | null) ??
+      (canvas.getContext("webgl") as WebGLRenderingContext | null);
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    // Best effort; GC remains the fallback.
+  }
 }
 
 // Chrome caps active WebGL contexts (~16); exceeding it force-evicts the oldest
@@ -793,9 +991,59 @@ function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
 const MAX_WEBGL_CONTEXTS = 12;
 const webglPool = new Set<string>();
 
+// Grace before an off-screen terminal releases its WebGL context: long enough
+// to survive drag/maximize/view-switch layout churn, short enough to free the
+// slot promptly while the user scrolls a large grid.
+const VISIBILITY_DEMOTE_GRACE_MS = 1000;
+
 function touchWebglPool(sessionId: string) {
   if (webglPool.delete(sessionId)) {
     webglPool.add(sessionId);
+  }
+}
+
+// Freeze the demoted terminal's last WebGL frame into a 2D canvas overlay so
+// the card keeps showing pixel-perfect content instead of the DOM renderer's
+// font-fallback rendering (custom glyphs — Claude's half-block logo and TUI
+// borders — are canvas/WebGL-only and garble in the DOM renderer). 2D canvases
+// do not count against Chromium's ~16 WebGL context cap. The overlay is
+// cosmetic: it never intercepts input, and it is removed the moment the
+// terminal re-promotes or new output arrives (live DOM rendering then shows
+// through, trading glyph fidelity for liveness).
+function captureSnapshotOverlay(renderer: TerminalRendererEntry) {
+  removeSnapshotOverlay(renderer);
+  const source = renderer.term.element?.querySelector("canvas");
+  if (!(source instanceof HTMLCanvasElement) || source.width === 0 || source.height === 0) {
+    return;
+  }
+  try {
+    const overlay = document.createElement("canvas");
+    overlay.width = source.width;
+    overlay.height = source.height;
+    overlay.dataset.testid = "terminal-snapshot-overlay";
+    overlay.style.position = "absolute";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = source.style.width || "100%";
+    overlay.style.height = source.style.height || "100%";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "5";
+    const context = overlay.getContext("2d");
+    if (!context) {
+      return;
+    }
+    context.drawImage(source, 0, 0);
+    renderer.host.appendChild(overlay);
+    renderer.snapshotOverlay = overlay;
+  } catch {
+    // Snapshot is best-effort; the DOM renderer underneath stays functional.
+  }
+}
+
+function removeSnapshotOverlay(renderer: TerminalRendererEntry) {
+  if (renderer.snapshotOverlay) {
+    renderer.snapshotOverlay.remove();
+    renderer.snapshotOverlay = null;
   }
 }
 
@@ -803,8 +1051,8 @@ function demoteSessionToDom(sessionId: string) {
   webglPool.delete(sessionId);
   const renderer = terminalSessionMap.get(sessionId)?.renderer;
   if (renderer?.webglAddon) {
-    renderer.webglAddon.dispose();
-    renderer.webglAddon = null;
+    captureSnapshotOverlay(renderer);
+    disposeWebglAddonAndReleaseContext(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   }
 }
@@ -831,7 +1079,10 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
   }
   evictLruWebglIfNeeded(sessionId);
   try {
-    const webglAddon = new WebglAddon();
+    // preserveDrawingBuffer keeps the last composited frame readable so
+    // demotion can snapshot it (drawImage on a non-preserved WebGL canvas
+    // outside the frame callback reads back cleared pixels).
+    const webglAddon = new WebglAddon(true);
     webglAddon.onContextLoss(() => {
       webglAddon.dispose();
       webglPool.delete(sessionId);
@@ -843,6 +1094,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     renderer.term.loadAddon(webglAddon);
     renderer.webglAddon = webglAddon;
     webglPool.add(sessionId);
+    removeSnapshotOverlay(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   } catch (error) {
     renderer.webglAddon = null;
@@ -904,6 +1156,8 @@ function clearTerminalSession(sessionId: string) {
 
   entry.recentWritePreviews = [];
   entry.recentNormalizedWritePreviews = [];
+  entry.rawOutputLog = [];
+  entry.rawOutputLogChars = 0;
   entry.drainQueued = false;
   entry.initialPtyBackfillComplete = false;
   entry.initialPtyBackfillInFlight = false;
@@ -948,6 +1202,42 @@ async function reportTerminalSize(
   }
 }
 
+// xterm's FitAddon reserves a flat 14px gutter for an overview ruler whenever
+// scrollback is enabled (`overviewRuler?.width || 14`) — and `0` is falsy, so
+// the reservation can't be disabled via options. We never render an overview
+// ruler, so that gutter just costs ~2 columns on every terminal, leaving TUIs
+// rendering short of the card's right edge. Compute dimensions directly from
+// the measured CSS cell size (the same field FitAddon reads) against the host's
+// full content box, with FitAddon as the fallback if the internals move.
+function proposeTerminalDimensions(
+  renderer: TerminalRendererEntry,
+): { cols: number; rows: number } | null {
+  try {
+    const cell = (
+      renderer.term as unknown as {
+        _core?: {
+          _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } };
+        };
+      }
+    )._core?._renderService?.dimensions?.css?.cell;
+    const cellWidth = cell?.width ?? 0;
+    const cellHeight = cell?.height ?? 0;
+    const hostWidth = renderer.host.clientWidth;
+    const hostHeight = renderer.host.clientHeight;
+    if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
+      const cols = Math.floor(hostWidth / cellWidth);
+      const rows = Math.floor(hostHeight / cellHeight);
+      if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
+        return { cols, rows };
+      }
+    }
+  } catch {
+    // Fall through to the addon below.
+  }
+  const proposed = renderer.fitAddon.proposeDimensions();
+  return proposed ? { cols: proposed.cols, rows: proposed.rows } : null;
+}
+
 async function fitTerminalToContainer(
   sessionId: string,
   entry: TerminalSessionEntry,
@@ -976,19 +1266,13 @@ async function fitTerminalToContainer(
   entry.lastMeasuredHostSize = { width, height };
 
   try {
-    const proposedDimensions = renderer.fitAddon.proposeDimensions();
+    const proposedDimensions = proposeTerminalDimensions(renderer);
     entry.fitCount += 1;
     if (!proposedDimensions) {
       return;
     }
     const nextCols = Math.max(MIN_TERMINAL_COLS, proposedDimensions.cols);
     const nextRows = Math.max(MIN_TERMINAL_ROWS, proposedDimensions.rows);
-    if (shouldHomeCursorBeforeTransientResize(entry, renderer.term.rows, nextRows)) {
-      await Promise.all([
-        new Promise<void>((resolve) => renderer.term.write("\u001b[H", () => resolve())),
-        new Promise<void>((resolve) => entry.parser.write("\u001b[H", () => resolve())),
-      ]);
-    }
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
     } else if (options?.reportUnchanged !== false) {
@@ -1009,15 +1293,48 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
   (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
 
   if (entry.renderer) {
+    removeSnapshotOverlay(entry.renderer);
     entry.renderer.term.reset();
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
   }
+}
 
-  entry.lastHomeRedrawLines = null;
-  entry.homeRedrawScrollbackSeen?.clear();
-  entry.transientHomeRedrawActive = false;
-  entry.existingKnownLines = undefined;
+function rgbTripletFromHex(hex: string, fallback: string) {
+  const cleaned = String(hex ?? "").replace("#", "");
+  if (cleaned.length !== 6) {
+    return fallback;
+  }
+  const values = [cleaned.slice(0, 2), cleaned.slice(2, 4), cleaned.slice(4, 6)]
+    .map((component) => Number.parseInt(component, 16));
+  return values.every(Number.isFinite) ? values.join(";") : fallback;
+}
+
+function codexVisibleComposerBlockRepaint(entry: TerminalSessionEntry) {
+  const renderer = entry.renderer;
+  if (!renderer) {
+    return null;
+  }
+
+  const term = renderer.term;
+  const buffer = term.buffer.active;
+  const cursorY = Math.max(0, Math.min(term.rows - 1, buffer.cursorY ?? term.rows - 1));
+  const firstRow = Math.max(0, cursorY - 1);
+  const lastRow = Math.min(term.rows - 1, cursorY + 1);
+  const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+  const background = termTheme === LIGHT_TERM_THEME ? "242;240;235" : "41;41;41";
+  const foreground = rgbTripletFromHex(termTheme.foreground, "235;235;235");
+  const rows = [];
+  for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex += 1) {
+    const lineIndex = (buffer.baseY ?? 0) + rowIndex;
+    const lineText = buffer.getLine(lineIndex)?.translateToString(false) ?? "";
+    const visibleText = lineText.slice(0, term.cols).padEnd(term.cols, " ");
+    rows.push(
+      `\u001b[${rowIndex + 1};1H\u001b[48;2;${background}m\u001b[38;2;${foreground}m\u001b[2K${visibleText}`,
+    );
+  }
+
+  return `\u001b7\u001b[?25l${rows.join("")}\u001b[m\u001b8\u001b[?25h`;
 }
 
 async function writeTerminalOutputBatch(
@@ -1038,10 +1355,21 @@ async function writeTerminalOutputBatch(
     resetTerminalOutputBuffers(entry);
   }
 
-  if (options?.queueCapabilityResponses !== false) {
-    rawChunks.forEach((data) => queueTerminalCapabilityResponses(sessionId, data, entry));
-  }
+  const renderChunks = rawChunks.map((data) =>
+    planTerminalOutputChunk(sessionId, data, entry, {
+      queueCapabilityResponses: options?.queueCapabilityResponses,
+    }),
+  );
 
+  if (shouldExposeTerminalDebug()) {
+    for (const data of rawChunks) {
+      if (entry.rawOutputLogChars >= RAW_OUTPUT_LOG_MAX_CHARS) {
+        break;
+      }
+      entry.rawOutputLog.push(data);
+      entry.rawOutputLogChars += data.length;
+    }
+  }
   rawChunks.forEach((data) => {
     entry.recentWritePreviews.push(
       data
@@ -1055,11 +1383,27 @@ async function writeTerminalOutputBatch(
     entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
   }
 
-  entry.existingKnownLines = readParserKnownLineSet(entry);
-  const batchedWrite = normalizeTerminalOutputBatch(rawChunks, entry.provider, entry);
-  const rendererWasAtBottom = entry.renderer
-    ? entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY
-    : false;
+  const antigravityPrimaryForeground =
+    entry.currentTheme === LIGHT_TERM_THEME ? entry.currentTheme.foreground : "#ffffff";
+  entry.antigravityForegroundRgb =
+    entry.provider === "antigravity"
+      ? rgbTripletFromHex(antigravityPrimaryForeground, "255;255;255")
+      : undefined;
+  const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
+  // Sampled before the awaited writes below. While a provider streams, drain
+  // batches run nearly back-to-back, so a user wheel-scroll usually lands in
+  // the middle of one — if we only consulted this stale sample afterwards we
+  // would snap the viewport straight back to the bottom and the terminal
+  // would feel unscrollable until the provider went quiet (observed live with
+  // Claude). scrollRendererToBottomAfterWrite re-checks against this baseline
+  // and skips the snap when the user scrolled away mid-batch.
+  const rendererBottomBeforeWrite = entry.renderer
+    ? {
+        atBottom:
+          entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY,
+        baseY: entry.renderer.term.buffer.active.baseY,
+      }
+    : null;
   entry.recentNormalizedWritePreviews.push(
     batchedWrite
       .replace(/\u001b/g, "\\x1b")
@@ -1073,14 +1417,15 @@ async function writeTerminalOutputBatch(
   if (options?.recordOutput !== false) {
     useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
   }
-  const knownLines = entry.existingKnownLines;
-  let { scrollbackData, viewportData } = splitSyntheticScrollbackPrefix(batchedWrite);
+  let scrollbackData = "";
+  const viewportData = batchedWrite;
   const renderer = entry.renderer;
   if (
     isProviderViewportRedraw(entry.provider, viewportData) &&
     supportsViewportRedrawInPlace(entry.parser) &&
     (!renderer || supportsViewportRedrawInPlace(renderer.term))
   ) {
+    const knownLines = readParserKnownLineSet(entry);
     scrollbackData = appendSyntheticScrollbackRows(
       scrollbackData,
       syntheticScrollbackRowsForViewportRedraw(viewportData, knownLines),
@@ -1100,20 +1445,118 @@ async function writeTerminalOutputBatch(
         preserveExistingViewport: false,
       });
       renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-      if (!entry.disposed && rendererWasAtBottom) {
-        renderer.term.scrollToBottom();
+      if (!entry.disposed) {
+        scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
       }
     }
-    entry.existingKnownLines = undefined;
     return;
   }
-  entry.existingKnownLines = undefined;
-  await writeTerminalControl(entry.parser, batchedWrite);
+  await writeTerminalControl(entry.parser, viewportData);
   if (entry.renderer) {
-    await writeTerminalControl(entry.renderer.term, batchedWrite);
-    if (!entry.disposed && rendererWasAtBottom) {
-      entry.renderer?.term.scrollToBottom();
+    // A frozen snapshot must never mask live output: drop it and let the DOM
+    // renderer underneath show the stream until the terminal re-promotes.
+    removeSnapshotOverlay(entry.renderer);
+    await writeTerminalControl(entry.renderer.term, viewportData);
+    if (!entry.disposed) {
+      scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
     }
+  }
+  // NOTE: Claude/Gemini resize repaints scroll part of the pre-repaint
+  // viewport into scrollback, leaving duplicate rows there — the same
+  // artifact a standalone terminal shows for those TUIs. Scrollback
+  // dedup heuristics were tried here (trimOverlappingScrollbackBeforeViewport
+  // after repaint batches) and rejected: after a column reflow the exact-match
+  // path cannot fire, and the fuzzy fallback deletes legitimate history.
+  // Cosmetic duplicates are preferred over data loss.
+}
+
+function scrollRendererToBottomAfterWrite(
+  renderer: TerminalRendererEntry,
+  bottomBeforeWrite: { atBottom: boolean; baseY: number } | null,
+) {
+  if (!bottomBeforeWrite?.atBottom) {
+    return;
+  }
+  // The viewport followed the output (or the write didn't scroll) — keep it
+  // pinned to the bottom. If it now sits above the pre-write base, the user
+  // scrolled up while this batch was being written; respect that.
+  const buffer = renderer.term.buffer.active;
+  if ((buffer.viewportY ?? 0) >= bottomBeforeWrite.baseY) {
+    renderer.term.scrollToBottom();
+  }
+}
+
+async function replayCodexTerminalPreviewWithCurrentTheme(
+  sessionId: string,
+  entry: TerminalSessionEntry,
+) {
+  const generation = entry.generation;
+  try {
+    const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
+    const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
+    const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
+    const backgroundRgb =
+      background.length === 6
+        ? `${background.slice(0, 2)}/${background.slice(2, 4)}/${background.slice(4, 6)}`
+        : "1a/1a/1a";
+    const foregroundRgb =
+      foreground.length === 6
+        ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
+        : "eb/eb/eb";
+    const serializedState =
+      entry.renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
+      entry.parserSerializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES });
+    if (serializedState) {
+      const themedState = normalizeCodexComposerBackgroundForTheme(serializedState, {
+        cursorRow: 1,
+        cursorCol: 1,
+        pixelWidth: 1,
+        pixelHeight: 1,
+        backgroundRgb,
+        foregroundRgb,
+        prefersLight: termTheme === LIGHT_TERM_THEME,
+        focusReported: entry.opencodeFocusReported,
+      });
+      resetTerminalOutputBuffers(entry);
+      await writeTerminalControl(entry.parser, themedState);
+      if (entry.renderer && !entry.disposed) {
+        await writeTerminalControl(entry.renderer.term, themedState);
+        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      }
+      const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+      if (rowRepaint && entry.renderer && !entry.disposed) {
+        await writeTerminalControl(entry.renderer.term, rowRepaint);
+        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      }
+      return;
+    }
+
+    const preview = await readAgentPty(sessionId, {
+      max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
+      peek: true,
+    });
+    if (
+      !preview ||
+      entry.disposed ||
+      entry.generation !== generation ||
+      terminalSessionMap.get(sessionId) !== entry
+    ) {
+      return;
+    }
+    await writeTerminalOutputBatch(sessionId, entry, [preview], {
+      resetBeforeWrite: true,
+      recordOutput: false,
+    });
+    if (entry.renderer && !entry.disposed) {
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
+    const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+    if (rowRepaint && entry.renderer && !entry.disposed) {
+      await writeTerminalControl(entry.renderer.term, rowRepaint);
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
+  } catch (error) {
+    console.warn("Codex terminal theme replay failed:", error);
   }
 }
 
@@ -1205,7 +1648,6 @@ async function drainPty(sessionId: string) {
       if (preview) {
         await writeTerminalOutputBatch(sessionId, entry, [preview], {
           recordOutput: false,
-          queueCapabilityResponses: false,
         });
       }
 
@@ -1265,7 +1707,7 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   const parser = new HeadlessTerminal({
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
-    scrollOnEraseInDisplay: resolvedProvider === "codex",
+    scrollOnEraseInDisplay: false,
   });
   applyProviderTerminalOptions(parser, resolvedProvider);
   const parserSerializeAddon = new SerializeAddon();
@@ -1278,6 +1720,8 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     lastMeasuredHostSize: null,
     recentWritePreviews: [],
     recentNormalizedWritePreviews: [],
+    rawOutputLog: [],
+    rawOutputLogChars: 0,
     opencodeFocusReported: false,
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
@@ -1297,9 +1741,6 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     generation: 0,
     disposed: false,
     pendingForceResize: false,
-    lastHomeRedrawLines: null,
-    homeRedrawScrollbackSeen: new Set(),
-    transientHomeRedrawActive: false,
   };
 
   terminalSessionMap.set(sessionId, entry);
@@ -1349,8 +1790,40 @@ function clearRendererTimers(renderer: TerminalRendererEntry) {
 }
 
 function resizeParser(entry: TerminalSessionEntry, cols: number, rows: number) {
-  if (entry.parser.cols !== cols || entry.parser.rows !== rows) {
+  if (entry.parser.cols === cols && entry.parser.rows === rows) {
+    return;
+  }
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
+    return;
+  }
+  try {
     entry.parser.resize(cols, rows);
+  } catch (error) {
+    // xterm 6.0.0's reflow can throw mid-resize on large headless buffers,
+    // leaving the buffer half-resized — every later write (setCellFromCodepoint)
+    // and serialize (isWrapped) then throws on the undefined trailing lines,
+    // turning one bad reflow into a permanently dead terminal that floods the
+    // console. Reset the parser to a consistent buffer and re-apply the size so
+    // the session keeps working; the cost is lost off-screen scrollback, which
+    // the renderer re-seeds from live output. See [[wardian-telemetry-perf]].
+    console.warn("Parser resize failed; resetting parser buffer to recover.", error);
+    recoverCorruptedParser(entry, cols, rows);
+  }
+}
+
+function recoverCorruptedParser(entry: TerminalSessionEntry, cols: number, rows: number) {
+  try {
+    const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
+    if (typeof parserWithReset.reset === "function") {
+      parserWithReset.reset();
+    } else {
+      entry.parser.write("c");
+    }
+    if (entry.parser.cols !== cols || entry.parser.rows !== rows) {
+      entry.parser.resize(cols, rows);
+    }
+  } catch (error) {
+    console.warn("Parser recovery resize failed; leaving parser at prior size.", error);
   }
 }
 
@@ -1369,6 +1842,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
     theme: entry.currentTheme,
+    minimumContrastRatio: terminalMinimumContrastRatio(entry.provider),
     fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
     fontSize: terminalFontSize,
     customGlyphs: true,
@@ -1380,7 +1854,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     convertEol: false,
     disableStdin: false,
     reflowCursorLine: false,
-    scrollOnEraseInDisplay: entry.provider === "codex",
+    scrollOnEraseInDisplay: false,
     windowsPty: IS_WINDOWS ? { backend: "conpty", buildNumber: 22621 } : undefined,
     windowOptions: {
       getCellSizePixels: true,
@@ -1421,11 +1895,13 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   host.className = "w-full h-full";
   host.style.width = "100%";
   host.style.height = "100%";
+  // Anchor for the absolute-positioned snapshot overlay.
+  host.style.position = "relative";
   const wheelRowRemainder = { current: 0 };
   host.addEventListener(
     "wheel",
     (event) => {
-      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder)) {
+      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, sessionId)) {
         syncParserViewportToRenderer(entry);
       }
     },
@@ -1441,10 +1917,19 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     webglAddon: null,
     webglAttempted: false,
     host,
+    snapshotOverlay: null,
   };
 
   term.onData((data) => {
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
+      return;
+    }
+    // The modern ConPTY answers codex's color/light-dark probes natively, so
+    // xterm's duplicate auto-reply must not be forwarded -- ConPTY echoes it back
+    // into codex's output as visible ]11;rgb / ?997;1n garbage (worst on
+    // maximize/resize). Drop the reply; if nothing else remains, skip the send.
+    const input = entry.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+    if (input.length === 0) {
       return;
     }
     if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
@@ -1452,7 +1937,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     }
     invoke("send_input_to_agent", {
       sessionId,
-      input: data,
+      input,
     }).catch(() => {});
   });
 
@@ -1465,6 +1950,12 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     entry.latestTitle = title;
     entry.titleHandlerRef.current?.(title);
   });
+
+  if (shouldExposeTerminalDebug()) {
+    term.onScroll((position) => {
+      recordScrollTrace(sessionId, position);
+    });
+  }
 
   term.onResize((size) => {
     entry.resizeCount += 1;
@@ -1529,9 +2020,19 @@ function mountRenderer(
 
     renderer.term.open(renderer.host);
 
-    const seedState = session.parserSerializeAddon.serialize({
-      scrollback: TERMINAL_SCROLLBACK_LINES,
-    });
+    // Seeding the fresh renderer from the parser's scrollback is best-effort:
+    // if the parser buffer is transiently inconsistent (xterm reflow edge
+    // cases), serialize() can throw — that must not abort the whole renderer
+    // mount and leave the card in an error state. Skip the seed and let live
+    // output repaint instead.
+    let seedState = "";
+    try {
+      seedState = session.parserSerializeAddon.serialize({
+        scrollback: TERMINAL_SCROLLBACK_LINES,
+      });
+    } catch (error) {
+      console.warn("Parser serialize failed during renderer seed; skipping seed.", error);
+    }
     if (seedState) {
       renderer.term.write(seedState);
     }
@@ -1562,6 +2063,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
+  const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
@@ -1586,7 +2088,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => mediaQuery.removeEventListener("change", handler);
   }, [theme]);
 
-  const termTheme = effectiveTheme === "light" ? LIGHT_TERM_THEME : DARK_TERM_THEME;
+  const termTheme = terminalThemeForProvider(effectiveTheme, provider);
 
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
@@ -1623,7 +2125,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry || !term) {
       return;
     }
-    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef)) {
+    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, sessionId)) {
       syncParserViewportToRenderer(entry);
     }
   }, [sessionId]);
@@ -1635,6 +2137,8 @@ export const AgentTerminal = memo(function AgentTerminal({
 
     let isMounted = true;
     let resizeObserver: ResizeObserver | null = null;
+    let visibilityObserver: IntersectionObserver | null = null;
+    let visibilityDemoteTimer: ReturnType<typeof setTimeout> | null = null;
     let entry: TerminalSessionEntry | null = null;
 
     const attach = async () => {
@@ -1651,14 +2155,16 @@ export const AgentTerminal = memo(function AgentTerminal({
           basePath: workspacePath,
           onOpenError: setLinkOpenError,
         };
-        session.currentTheme = termTheme;
+        const sessionTermTheme = terminalThemeForProvider(effectiveTheme, session.provider ?? provider);
+        session.currentTheme = sessionTermTheme;
+        lastThemeSignalRef.current = sessionTermTheme;
 
         const renderer = mountRenderer(sessionId, session, terminalRef.current);
         if (!renderer) {
           return;
         }
 
-        renderer.term.options.theme = termTheme;
+        renderer.term.options.theme = sessionTermTheme;
         attachRendererHost(session, terminalRef.current);
 
         xtermRef.current = renderer.term;
@@ -1679,9 +2185,64 @@ export const AgentTerminal = memo(function AgentTerminal({
 
         void drainPty(sessionId);
         checkSizing({ force: true, reportUnchanged: false });
-        activateWebglRenderer(renderer, sessionId);
+        if (typeof IntersectionObserver === "undefined") {
+          activateWebglRenderer(renderer, sessionId);
+        } else {
+          // Scope WebGL contexts to terminals actually on screen: a card
+          // scrolled out of view (or in a hidden view) releases its context
+          // after a grace period and freezes its last frame as a snapshot, so
+          // the browser's ~16-context cap binds on simultaneously visible
+          // terminals instead of total agent count. Promotion on re-entry,
+          // focus, and maximize wins the LRU slot back.
+          visibilityObserver = new IntersectionObserver(
+            (entries) => {
+              const lastObservation = entries[entries.length - 1];
+              if (!isMounted || !lastObservation) {
+                return;
+              }
+              if (lastObservation.isIntersecting) {
+                if (visibilityDemoteTimer) {
+                  clearTimeout(visibilityDemoteTimer);
+                  visibilityDemoteTimer = null;
+                }
+                renderer.webglAttempted = true;
+                const hadWebgl = Boolean(renderer.webglAddon);
+                promoteSessionToWebgl(sessionId);
+                // Loading the WebGL addon rebuilds xterm's render layers and
+                // re-measures the cell grid. The mount fits above can run before
+                // that (against pre-WebGL metrics), so re-fit once the GPU
+                // renderer is live — otherwise the terminal keeps stale columns
+                // and renders narrow until the user manually resizes the window.
+                if (!hadWebgl && renderer.webglAddon) {
+                  requestAnimationFrame(() => checkSizing({ force: true }));
+                }
+              } else if (!visibilityDemoteTimer) {
+                // Debounced: drag, maximize, and view-switch churn briefly
+                // report zero intersection before the layout settles.
+                visibilityDemoteTimer = setTimeout(() => {
+                  visibilityDemoteTimer = null;
+                  if (isMounted) {
+                    demoteSessionToDom(sessionId);
+                  }
+                }, VISIBILITY_DEMOTE_GRACE_MS);
+              }
+            },
+            { rootMargin: "64px" },
+          );
+          visibilityObserver.observe(terminalRef.current);
+        }
         requestAnimationFrame(() => checkSizing({ force: true, reportUnchanged: false }));
-        setTimeout(() => checkSizing({ force: true, reportUnchanged: false }), 50);
+        // Later fits report the size unconditionally so the backend PTY is
+        // synced to the settled measurement even when the renderer already
+        // matches it (e.g. restored agents whose PTY opened at a stale size) —
+        // otherwise the terminal only converges on the first manual resize.
+        setTimeout(() => checkSizing({ force: true }), 50);
+        setTimeout(() => checkSizing({ force: true }), 300);
+        // Web/custom terminal fonts can finish loading after mount, changing the
+        // cell metrics; re-fit once they're ready so columns don't stay stale.
+        if (typeof document !== "undefined" && document.fonts?.ready) {
+          void document.fonts.ready.then(() => checkSizing({ force: true }));
+        }
 
         resizeObserver = new ResizeObserver(() => {
           if (!isMounted) {
@@ -1709,6 +2270,11 @@ export const AgentTerminal = memo(function AgentTerminal({
     return () => {
       isMounted = false;
       resizeObserver?.disconnect();
+      visibilityObserver?.disconnect();
+      if (visibilityDemoteTimer) {
+        clearTimeout(visibilityDemoteTimer);
+        visibilityDemoteTimer = null;
+      }
       if (entry && !entry.disposed && entry.renderer) {
         scheduleRendererDisposal(sessionId);
       }
@@ -1724,34 +2290,56 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, [performFit, provider, sessionId, workspacePath]);
 
   useEffect(() => {
+    const entry = terminalSessionMap.get(sessionId);
+    const activeTermTheme = terminalThemeForProvider(effectiveTheme, entry?.provider ?? provider);
     const term = xtermRef.current;
     if (term) {
-      term.options.theme = termTheme;
+      term.options.theme = activeTermTheme;
       term.refresh(0, Math.max(term.rows - 1, 0));
     }
-    const entry = terminalSessionMap.get(sessionId);
     if (!entry) {
       return;
     }
-    entry.currentTheme = termTheme;
-    if (entry.provider === "opencode") {
+    const previousSignaledTheme = lastThemeSignalRef.current;
+    lastThemeSignalRef.current = activeTermTheme;
+    entry.currentTheme = activeTermTheme;
+    // A genuine light<->dark swap, as opposed to a maximize/minimize re-render
+    // (which re-runs this effect with the SAME theme). terminalThemeForProvider
+    // returns shared LIGHT/DARK constants, so reference inequality reliably means a
+    // real theme change rather than layout churn.
+    const isCodexThemeChange =
+      entry.provider === "codex" &&
+      previousSignaledTheme !== null &&
+      previousSignaledTheme !== activeTermTheme;
+    // Push ?997 + OSC color replies as input so the TUI repaints in the new scheme.
+    // ONLY opencode/antigravity: these are terminal->application REPLIES, valid only
+    // as answers to a probe the app made. Codex sits at an interactive prompt under
+    // the bundled modern ConPTY, so injecting them into its stdin just types them
+    // into the composer as literal "[?997;1n]11;rgb:..." text -- they are never
+    // interpreted as a theme signal. Codex has no "theme changed" input command, so
+    // its recoloring is done entirely Wardian-side via the preview replay below
+    // (plus normalizeCodexComposerBackgroundForTheme on streamed output).
+    if (entry.provider === "opencode" || entry.provider === "antigravity") {
       const toRgbTriplet = (hex: string, fallback: string) => {
         const cleaned = String(hex ?? "").replace("#", "");
         return cleaned.length === 6
           ? `${cleaned.slice(0, 2)}/${cleaned.slice(2, 4)}/${cleaned.slice(4, 6)}`
           : fallback;
       };
-      const background = toRgbTriplet(termTheme.background, "02/04/02");
-      const foreground = toRgbTriplet(termTheme.foreground, "ee/f2/ee");
-      const prefersLight = termTheme === LIGHT_TERM_THEME;
-      // OpenTUI treats ?997 as a request to infer mode from subsequent OSC
-      // color replies, so send it before the current Wardian colors.
+      const background = toRgbTriplet(activeTermTheme.background, "1a/1a/1a");
+      const foreground = toRgbTriplet(activeTermTheme.foreground, "eb/eb/eb");
+      const prefersLight = activeTermTheme === LIGHT_TERM_THEME;
+      // TUIs that probe terminal colors infer their visible mode from ?997 and
+      // subsequent OSC color replies, so send mode first and colors second.
       queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
       queueAgentInput(sessionId, `]11;rgb:${background}\\`);
       queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
       queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
     }
-  }, [sessionId, termTheme]);
+    if (isCodexThemeChange) {
+      void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
+    }
+  }, [effectiveTheme, provider, sessionId, termTheme]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1812,8 +2400,13 @@ export const AgentTerminal = memo(function AgentTerminal({
 export const __terminalTesting = {
   applyViewportRedrawInPlace,
   appendSyntheticScrollbackRows,
+  captureSnapshotOverlay,
+  demoteSessionToDom,
+  promoteSessionToWebgl,
+  proposeTerminalDimensions,
+  removeSnapshotOverlay,
+  resizeParser,
   isProviderViewportRedraw,
-  splitSyntheticScrollbackPrefix,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,
 };

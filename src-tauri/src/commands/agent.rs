@@ -965,7 +965,10 @@ fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
                 .find_map(|dir| manager::opencode_log_path_in(&dir, &config.session_id))
         });
         if let Some(log_path) = log_path_snap {
-            if let Some(ses_id) = manager::opencode_extract_created_session_id(&log_path) {
+            if let Some(ses_id) = manager::opencode_extract_created_session_id_for_agent(
+                &log_path,
+                &config.session_id,
+            ) {
                 config.resume_session = Some(ses_id);
             }
         }
@@ -2956,9 +2959,10 @@ fn strip_claude_embedded_stream_flags(args: Vec<String>) -> Vec<String> {
         if arg == "--verbose" {
             continue;
         }
-        if matches!(arg.as_str(), "--input-format" | "--output-format")
-            && iter.peek().is_some_and(|value| value == "stream-json")
-        {
+        if arg.starts_with("--input-format=") || arg.starts_with("--output-format=") {
+            continue;
+        }
+        if matches!(arg.as_str(), "--input-format" | "--output-format") && iter.peek().is_some() {
             let _ = iter.next();
             continue;
         }
@@ -3262,7 +3266,8 @@ mod tests {
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
+        strip_claude_embedded_stream_flags, sync_resumed_input_sender,
+        take_agent_runtime_for_termination, terminal_cleared_payload,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DiscoveredGitWorktree, GIT_WORKTREE_DISCOVERY_CONCURRENCY,
@@ -3538,6 +3543,26 @@ mod tests {
         assert!(command.contains("sonnet"));
         assert!(!command.contains("stream-json"));
         assert!(!command.contains("--verbose"));
+    }
+
+    #[test]
+    fn external_terminal_strips_claude_equals_form_stream_flags() {
+        let args = strip_claude_embedded_stream_flags(vec![
+            "--input-format=stream-json".to_string(),
+            "--output-format=stream-json".to_string(),
+            "--model".to_string(),
+            "sonnet".to_string(),
+            "--mcp-config=server.json".to_string(),
+        ]);
+
+        assert_eq!(
+            args,
+            vec![
+                "--model".to_string(),
+                "sonnet".to_string(),
+                "--mcp-config=server.json".to_string(),
+            ]
+        );
     }
 
     #[test]

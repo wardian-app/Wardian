@@ -31,7 +31,7 @@ jobs:
       release_id: ${{ steps.create.outputs.result }}
       is_prerelease: ${{ steps.detect.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Detect prerelease
         id: detect
         run: |
@@ -150,12 +150,12 @@ jobs:
             name: linux
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && inputs.release_tag || github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: "npm"
@@ -228,7 +228,7 @@ jobs:
 
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wardian-${{ matrix.platform.name }}
           path: |
@@ -385,33 +385,62 @@ jobs:
               draft: false,
             });
 
-  update-homebrew-cask:
-    name: Update Homebrew cask
+  dispatch-package-workflows:
+    name: Dispatch package workflows
     needs: [create-release, resolve-release, publish]
     if: always() && needs.publish.result == 'success' && ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-      TAP_DISPATCH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+      RELEASE_DISPATCH_APP_ID: ${{ vars.WARDIAN_RELEASE_DISPATCH_APP_ID }}
+      RELEASE_DISPATCH_PRIVATE_KEY: ${{ secrets.WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY }}
     steps:
-      - name: Skip tap dispatch when token is unavailable
-        if: env.TAP_DISPATCH_TOKEN == ''
+      - name: Skip package dispatch when GitHub App is unavailable
+        if: env.RELEASE_DISPATCH_APP_ID == '' || env.RELEASE_DISPATCH_PRIVATE_KEY == ''
         run: |
-          echo "::notice::HOMEBREW_TAP_DISPATCH_TOKEN is not configured; skipping homebrew-tap update dispatch."
+          echo "::notice::WARDIAN_RELEASE_DISPATCH_APP_ID or WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY is not configured; skipping package workflow dispatch."
+
+      - name: Create package dispatch token
+        id: app-token
+        if: env.RELEASE_DISPATCH_APP_ID != '' && env.RELEASE_DISPATCH_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.WARDIAN_RELEASE_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY }}
+          owner: wardian-app
+          repositories: |
+            homebrew-tap
+            packages
+          permission-actions: write
 
       - name: Dispatch tap cask update
-        if: env.TAP_DISPATCH_TOKEN != ''
+        if: steps.app-token.outputs.token != ''
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            await github.rest.repos.createDispatchEvent({
+            await github.rest.actions.createWorkflowDispatch({
               owner: 'wardian-app',
               repo: 'homebrew-tap',
-              event_type: 'wardian-release-published',
-              client_payload: {
+              workflow_id: 'update-cask.yml',
+              ref: 'main',
+              inputs: {
                 tag: process.env.RELEASE_TAG,
-                source_repo: context.repo.repo,
-                source_run_id: String(context.runId),
+              },
+            });
+
+      - name: Dispatch APT repository update
+        if: steps.app-token.outputs.token != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'wardian-app',
+              repo: 'packages',
+              workflow_id: 'publish-apt.yml',
+              ref: 'main',
+              inputs: {
+                release_tag: process.env.RELEASE_TAG,
               },
             });

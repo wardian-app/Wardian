@@ -7,6 +7,12 @@ export default defineConfig({
   description:
     "Public documentation for Wardian, the local command center for multi-agent CLI workflows.",
   base,
+  vite: {
+    build: {
+      // Keep docs compatible with the patched esbuild used by the app build.
+      target: "es2022",
+    },
+  },
   srcExclude: ["specs/**/*.md", "research/**/*.md"],
   cleanUrls: true,
   lastUpdated: true,

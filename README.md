@@ -28,10 +28,18 @@ Wardian is built for malleable agent work. Prompts, classes, skills, workflows, 
 
 ---
 
-## Download
+## Install
 
-Pre-built binaries for Windows, macOS (Apple Silicon + Intel), and Linux are available from the [Releases page](https://github.com/wardian-app/Wardian/releases).
+Use the supported install path for your platform:
 
+| System | Install |
+| :--- | :--- |
+| Windows x64 | `winget install WardianApp.Wardian` |
+| macOS Apple Silicon or Intel | `brew install --cask wardian-app/tap/wardian` |
+| Linux Debian/Ubuntu x64 | Download `Wardian_X.Y.Z_amd64.deb` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `sudo apt install ./Wardian_X.Y.Z_amd64.deb`. |
+| Linux other x64 | Download `Wardian_X.Y.Z_amd64.AppImage` from [Releases](https://github.com/wardian-app/Wardian/releases/latest), then run `chmod +x Wardian_X.Y.Z_amd64.AppImage && ./Wardian_X.Y.Z_amd64.AppImage`. |
+
+Manual downloads are also available from the [Releases page](https://github.com/wardian-app/Wardian/releases).
 Choose the asset for your operating system and CPU:
 
 | System | Download asset | Notes |
@@ -44,10 +52,13 @@ Choose the asset for your operating system and CPU:
 
 `x64` and `amd64` both mean 64-bit Intel/AMD CPUs. On macOS, Apple Silicon uses `aarch64`, not `x64`. Ignore updater-only assets such as `latest.json`, `.app.tar.gz`, or `.sig` files when installing manually.
 
+Debian/Ubuntu users who want package-manager updates can use the optional
+[Wardian APT repository](docs/developer/package-manager-distribution.md#linux-apt-repository).
+
 > **Note:** Wardian binaries are currently unsigned. On first launch:
 > - **Windows:** SmartScreen will show a warning. Click "More info" → "Run anyway."
 > - **macOS:** Gatekeeper will refuse to open the app. Right-click the app and choose "Open," or run `xattr -cr /Applications/Wardian.app` from Terminal.
-> - **Linux:** `.AppImage` is portable (`chmod +x` and run); `.deb` installs via `sudo apt install ./Wardian_*.deb`.
+> - **Linux:** APT installs update through the system package manager. `.AppImage` is portable (`chmod +x` and run); direct `.deb` downloads install via `sudo apt install ./Wardian_*.deb`.
 
 ---
 

@@ -136,6 +136,16 @@ describe("deriveCurrentThought", () => {
     expect(result.status).toBe("Processing...");
   });
 
+  it("passes Restoring through without uptime-based Idle fallback", () => {
+    const result = deriveCurrentThought("", undefined, {
+      ...baseMetrics,
+      current_status: "Restoring",
+      uptime_seconds: 9999,
+    });
+    expect(result.thought).toBe("Restoring...");
+    expect(result.status).toBe("Restoring");
+  });
+
   it("falls back to title when no live thought", () => {
     const result = deriveCurrentThought("✦ Running tests", undefined, { ...baseMetrics, current_status: "Pending..." });
     expect(result.thought).toBe("Running tests");
@@ -394,6 +404,11 @@ describe("getStatusColorClass", () => {
 
   it("returns gray for unknown status", () => {
     expect(getStatusColorClass("Something Else")).toContain("bg-wardian-off");
+  });
+
+  it("returns gray pulse for Restoring", () => {
+    expect(getStatusColorClass("Restoring")).toContain("bg-wardian-off");
+    expect(getStatusColorClass("Restoring")).toContain("animate-pulse");
   });
 });
 

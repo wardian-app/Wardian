@@ -53,7 +53,7 @@ Wardian-managed roots usually live under hidden `.wardian` directories. Antigrav
 
 Wardian launches visible Antigravity agents with `agy --prompt-interactive ""` so the CLI starts in interactive mode without an initial task. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.
 
-Antigravity stores runtime state under `~/.gemini/antigravity-cli`. Wardian discovers the conversation ID from the provider cache and reads `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` for status and assistant transcript text. `wardian agent watch` uses completed `MODEL` `PLANNER_RESPONSE` transcript records as provider-adapted assistant output.
+Antigravity stores runtime state under `~/.gemini/antigravity-cli`. Wardian discovers the conversation ID from the provider cache and reads `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` for status, assistant transcript text, and tool activity. `wardian agent watch` uses completed `MODEL` `PLANNER_RESPONSE` transcript records as provider-adapted assistant output, planner `tool_calls` as tool-call rows, and model action records such as `RUN_COMMAND`, `VIEW_FILE`, `CODE_ACTION`, `SEARCH_WEB`, `LIST_DIRECTORY`, `GREP_SEARCH`, `READ_URL_CONTENT`, `ASK_QUESTION`, and `GENERIC` as tool-result rows.
 
 ### Debug First
 
@@ -70,6 +70,8 @@ Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and mai
 ### Session and Status Handling
 
 Wardian assigns fresh Claude session IDs up front and uses explicit resume flags for resumed provider sessions. Claude permission requests are captured through a generated hook under the Wardian agent directory, which lets the UI surface `Action Needed` with request details.
+
+Visible Claude agents run through Claude Code's interactive mode. Do not pass `--input-format stream-json` or `--output-format stream-json` to interactive launches; Claude Code treats those as print-mode flags. Wardian keeps stream-json output only for headless/bootstrap flows that also pass `--print`.
 
 ### Debug First
 

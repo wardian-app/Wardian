@@ -507,9 +507,27 @@ fn merge_chat_events(
     provider_events: Vec<AgentChatEvent>,
 ) -> Vec<AgentChatEvent> {
     let mut seen = HashSet::new();
+    let mut provider_message_text_seen = HashSet::new();
     let mut merged = Vec::with_capacity(watch_events.len() + provider_events.len());
 
-    for event in provider_events.into_iter().chain(watch_events) {
+    for event in provider_events {
+        let key = chat_event_dedupe_key(&event);
+        if seen.insert(key) {
+            if let Some(message_key) = chat_message_text_key(&event) {
+                provider_message_text_seen.insert(message_key);
+            }
+            merged.push(event);
+        }
+    }
+
+    for event in watch_events {
+        if chat_message_text_key(&event)
+            .as_ref()
+            .is_some_and(|key| provider_message_text_seen.contains(key))
+        {
+            continue;
+        }
+
         let key = chat_event_dedupe_key(&event);
         if seen.insert(key) {
             merged.push(event);
@@ -557,6 +575,24 @@ fn chat_event_dedupe_key(event: &AgentChatEvent) -> String {
         event.text.as_deref().unwrap_or(""),
         event.source.as_deref().unwrap_or("")
     )
+}
+
+fn chat_message_text_key(event: &AgentChatEvent) -> Option<String> {
+    if event.kind != AgentChatEventKind::Message {
+        return None;
+    }
+    let text = normalized_dedupe_text(event.text.as_deref().unwrap_or(""));
+    if text.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{:?}|{:?}|{}|{}",
+        event.kind, event.role, event.provider, text
+    ))
+}
+
+fn normalized_dedupe_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn status_event_from_watch_event(
@@ -1134,10 +1170,78 @@ Do you want to proceed?
         duplicate.id = "agent-1:provider:2".to_string();
         duplicate.source = Some("item.completed".to_string());
 
-        let chat_events = merge_chat_events(Vec::new(), vec![first, duplicate]);
+        let chat_events = merge_chat_events(vec![duplicate], vec![first]);
 
         assert_eq!(chat_events.len(), 1);
         assert_eq!(chat_events[0].text.as_deref(), Some("Same answer"));
+    }
+
+    #[test]
+    fn merge_deduplicates_same_message_text_across_distinct_turn_ids() {
+        let first = AgentChatEvent {
+            id: "agent-1:provider:1".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some(
+                "OK. It seems like you have lots of tiny positions. Are you exiting ever"
+                    .to_string(),
+            ),
+            title: None,
+            status: None,
+            turn_id: Some("live-input".to_string()),
+            source: Some("watch_transcript".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({}),
+        };
+        let mut duplicate = first.clone();
+        duplicate.id = "agent-1:provider:2".to_string();
+        duplicate.turn_id = Some("provider-history".to_string());
+        duplicate.source = Some("transcript".to_string());
+
+        let chat_events = merge_chat_events(vec![first], vec![duplicate]);
+
+        assert_eq!(chat_events.len(), 1);
+        assert_eq!(
+            chat_events[0].text.as_deref(),
+            Some("OK. It seems like you have lots of tiny positions. Are you exiting ever")
+        );
+    }
+
+    #[test]
+    fn merge_preserves_repeated_same_text_messages_from_the_same_source() {
+        let first = AgentChatEvent {
+            id: "agent-1:provider:1".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("run tests".to_string()),
+            title: None,
+            status: None,
+            turn_id: Some("turn-1".to_string()),
+            source: Some("response_item".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({}),
+        };
+        let mut repeated = first.clone();
+        repeated.id = "agent-1:provider:2".to_string();
+        repeated.turn_id = Some("turn-2".to_string());
+
+        let chat_events = merge_chat_events(Vec::new(), vec![first, repeated]);
+
+        assert_eq!(chat_events.len(), 2);
     }
 
     #[test]

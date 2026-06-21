@@ -10,6 +10,13 @@ import {
   terminalTextIncludes,
 } from "../lib/rendering-audit.mjs";
 
+const fixtureRoots = [];
+test.after(() => {
+  for (const root of fixtureRoots) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function writeJson(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -76,6 +83,7 @@ function createRenderingEvidenceFixture({
   providerSessionId = null,
 } = {}) {
   const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-rendering-audit-"));
+  fixtureRoots.push(root);
   const wardianRunId = "wardian-run";
   const outsideRunId = "outside-run";
   const wardianHome = path.join(root, "target", "wardian-home");
@@ -321,7 +329,7 @@ test("auditRenderingEvidence does not require column changes when the terminal s
 });
 
 test("auditRenderingEvidence rejects Wardian resized states that lose the fixed audit text", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -404,7 +412,7 @@ test("auditRenderingEvidence can use an expected response marker for submitted p
 });
 
 test("auditRenderingEvidence rejects submitted response markers that survive only in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -447,7 +455,7 @@ test("auditRenderingEvidence rejects submitted response markers that survive onl
 });
 
 test("auditRenderingEvidence rejects repeated numbered response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -490,12 +498,13 @@ test("auditRenderingEvidence rejects repeated numbered response rows in parser h
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence rejects repeated plain numeric response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -533,12 +542,13 @@ test("auditRenderingEvidence rejects repeated plain numeric response rows in par
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence rejects missing plain numeric response rows in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -624,7 +634,7 @@ test("auditRenderingEvidence does not count the submitted prompt as a duplicated
 });
 
 test("auditRenderingEvidence rejects duplicated numbered rows immediately after a submitted prompt", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -664,8 +674,9 @@ test("auditRenderingEvidence rejects duplicated numbered rows immediately after 
     requireOutsideEvidence: false,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  // Codex output is written natively; duplicated rows are warnings, not failures.
+  assert.match(audit.warnings.join("\n"), /Wardian numbered response rows are not duplicated: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /numbered response rows are not duplicated/);
 });
 
 test("auditRenderingEvidence credits literal submitted prompt markers once before duplicate checks", () => {
@@ -712,7 +723,7 @@ test("auditRenderingEvidence credits literal submitted prompt markers once befor
 });
 
 test("auditRenderingEvidence rejects resized audit text that is only preserved in parser history", () => {
-  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture({ provider: "claude" });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -777,7 +788,12 @@ test("auditRenderingEvidence rejects Wardian states with unstable rendered rows"
 });
 
 test("auditRenderingEvidence rejects obvious duplicated terminal content rows", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  // Codex is now an in-place TUI (its scrollback-content checks are skipped),
+  // so the duplicate-as-warning policy is exercised against Claude, a
+  // natively-written diff renderer that still gets the check.
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({
+    provider: "claude",
+  });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -816,12 +832,17 @@ test("auditRenderingEvidence rejects obvious duplicated terminal content rows", 
     requireWardianLabMetrics: true,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  // Codex streams are written natively, so resize-repaint duplicates are
+  // real-terminal-equivalent behavior: warning, not failure.
+  assert.equal(audit.ok, true);
+  assert.match(audit.warnings.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
 });
 
 test("auditRenderingEvidence rejects duplicated submitted prompt anchors in parser history", () => {
-  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture();
+  // Codex is in-place now; exercise the duplicate-warning policy against Claude.
+  const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({
+    provider: "claude",
+  });
   const manifestPath = path.join(
     root,
     "e2e",
@@ -871,8 +892,10 @@ test("auditRenderingEvidence rejects duplicated submitted prompt anchors in pars
     requireWardianLabMetrics: true,
   });
 
-  assert.equal(audit.ok, false);
-  assert.match(audit.failures.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  // Same policy as above: duplicated prompt anchors in a natively-written
+  // provider's history surface as warnings.
+  assert.match(audit.warnings.join("\n"), /Wardian terminal content has no obvious duplicated rows: resized/);
+  assert.doesNotMatch(audit.failures.join("\n"), /terminal content has no obvious duplicated rows/);
 });
 
 test("auditRenderingEvidence rejects Wardian screen rects that do not match xterm cells", () => {
@@ -1220,14 +1243,15 @@ test("outside Codex capture disables provider-owned rotating startup tips", () =
   assert.match(script, /-c tui\.show_tooltips=false/);
 });
 
-test("outside Claude capture mirrors Wardian named stream-json launch", () => {
+test("outside Claude capture mirrors Wardian named interactive launch", () => {
   const script = fs.readFileSync(
     path.join(process.cwd(), "scripts", "capture-outside-provider-rendering.ps1"),
     "utf8",
   );
 
   assert.match(script, /Get-Command "claude\.exe"/);
-  assert.match(script, /--verbose --input-format stream-json --output-format stream-json/);
+  assert.doesNotMatch(script, /--input-format stream-json/);
+  assert.doesNotMatch(script, /--output-format stream-json/);
   assert.match(script, /--session-id '\$escapedSessionId' --name '\$escapedSessionName'/);
 });
 

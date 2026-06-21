@@ -292,6 +292,9 @@ describe('ExplorerPanel', () => {
     render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
 
     expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+    // The change listener registers in an async effect; dispatching before it
+    // resolves would silently no-op and leave the refresh token at 0.
+    await waitFor(() => expect(handler).toBeDefined());
 
     await act(async () => {
       handler?.({
@@ -304,6 +307,35 @@ describe('ExplorerPanel', () => {
 
     expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('1');
     expect(screen.getByTestId('file-tree-changed-paths')).toHaveTextContent('C:\\Users\\test\\repo\\src\\new-file.ts');
+  });
+
+  it('passes explorer change events when the watcher reports a Windows verbatim root path', async () => {
+    let handler: ((event: { payload: { root_path: string; changed_paths: string[] } }) => void) | undefined;
+    mockListen.mockImplementation(async (_event, callback) => {
+      handler = callback as typeof handler;
+      return () => {};
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          root_path: '\\\\?\\C:\\Users\\test\\repo',
+          changed_paths: ['\\\\?\\C:\\Users\\test\\repo\\src\\new-file.ts'],
+        },
+      });
+    });
+
+    expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('1');
+    expect(screen.getByTestId('file-tree-changed-paths')).toHaveTextContent('\\\\?\\C:\\Users\\test\\repo\\src\\new-file.ts');
   });
 
   it('ignores explorer change events from other roots', async () => {
@@ -321,6 +353,7 @@ describe('ExplorerPanel', () => {
     render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
 
     expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+    await waitFor(() => expect(handler).toBeDefined());
 
     await act(async () => {
       handler?.({

@@ -113,7 +113,24 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     renderer.on("leaveEdge", () => setTooltip(null));
 
     return () => {
+      // Sigma creates three WebGL contexts (edges, nodes, hoverNodes) and its
+      // kill() only detaches the canvases without WEBGL_lose_context, so
+      // Chromium keeps counting them against its ~16-context cap until GC.
+      // Combined with the terminal WebGL pool this tripped the cap and
+      // force-lost contexts belonging to visible terminals. Lose them
+      // explicitly so each Graph view visit returns its context budget.
+      const canvases = Object.values(renderer.getCanvases());
       renderer.kill();
+      for (const canvas of canvases) {
+        try {
+          const gl = canvas.getContext("webgl2") ?? canvas.getContext("webgl");
+          (gl as WebGLRenderingContext | null)
+            ?.getExtension("WEBGL_lose_context")
+            ?.loseContext();
+        } catch {
+          // Best effort; GC remains the fallback.
+        }
+      }
       rendererRef.current = null;
       graphRef.current = null;
     };

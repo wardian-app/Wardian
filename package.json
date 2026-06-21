@@ -1,7 +1,7 @@
 {
   "name": "wardian",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "A local desktop command center for supervising and shaping AI agent teams.",
   "license": "MIT",
@@ -22,6 +22,7 @@
     "tauri": "tauri",
     "stage-cli": "node scripts/stage-cli.mjs",
     "stage-cli:dev": "node scripts/stage-cli.mjs --profile dev",
+    "release:apt-repo": "node scripts/package-managers/generate-apt-repo.mjs",
     "release:package-manifests": "node scripts/package-managers/generate-manifests.mjs",
     "lint": "tsc --noEmit",
     "check:frontend-screenshot": "node scripts/verify-frontend-screenshot.mjs",
@@ -64,12 +65,14 @@
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "sigma": "^3.0.3",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
-    "@tailwindcss/vite": "^4.2.0",
+    "@tailwindcss/vite": "^4.3.1",
     "@tauri-apps/cli": "2.11.2",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -86,18 +89,19 @@
     "lucide-react": "^0.577.0",
     "postcss": "^8.5.12",
     "selenium-webdriver": "^4.34.0",
-    "tailwindcss": "^4.2.0",
+    "tailwindcss": "^4.3.1",
     "terser": "^5.46.1",
     "typescript": "~5.8.3",
-    "vite": "6.4.2",
+    "vite": "6.4.3",
     "vitepress": "^1.6.4",
     "vitest": "^4.1.8"
   },
   "overrides": {
+    "esbuild": "0.28.1",
     "minimatch@10.2.5": {
       "brace-expansion": "5.0.6"
     },
-    "vite": "6.4.2",
-    "ws": "8.20.1"
+    "vite": "6.4.3",
+    "ws": "8.21.0"
   }
 }
