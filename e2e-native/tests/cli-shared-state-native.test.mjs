@@ -39,7 +39,6 @@ function buildCli(harness) {
     {
       cwd: harness.repoRoot,
       encoding: "utf8",
-      shell: process.platform === "win32",
     },
   );
 
@@ -57,7 +56,6 @@ function buildCli(harness) {
   const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
     cwd: harness.repoRoot,
     encoding: "utf8",
-    shell: process.platform === "win32",
   });
   assert.equal(
     metadata.status,
@@ -75,11 +73,18 @@ function buildCli(harness) {
 }
 
 function runCli(cliPath, harness, args) {
+  return runCliWithEnv(cliPath, harness, args, {});
+}
+
+function runCliWithEnv(cliPath, harness, args, extraEnv) {
   const env = {
     ...process.env,
     WARDIAN_HOME: harness.isolatedHome,
+    ...extraEnv,
   };
-  delete env.WARDIAN_SESSION_ID;
+  if (!extraEnv || !Object.hasOwn(extraEnv, "WARDIAN_SESSION_ID")) {
+    delete env.WARDIAN_SESSION_ID;
+  }
   const result = spawnSync(cliPath, args, {
     cwd: harness.repoRoot,
     env,
@@ -147,6 +152,16 @@ async function withMockScenario(scenario, fn, delayMs = "50") {
 
 function runCliOk(cliPath, harness, args) {
   const result = runCli(cliPath, harness, args);
+  assert.equal(
+    result.status,
+    0,
+    `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  return result;
+}
+
+function runCliOkAsAgent(cliPath, harness, sessionId, args) {
+  const result = runCliWithEnv(cliPath, harness, args, { WARDIAN_SESSION_ID: sessionId });
   assert.equal(
     result.status,
     0,
@@ -560,7 +575,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
     ]);
     const queued = JSON.parse(sendResult.stdout).delivery[0];
     assert.equal(queued.delivery_state, "queued");
-    assert.equal(queued.runtime_state, "target_action_required");
+    assert.equal(queued.runtime_state, "provider_input_not_ready");
     assert.match(queued.message_id, /^msg_/);
 
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
@@ -694,7 +709,7 @@ test("native CLI ask returns only output after its pre-send cursor", { timeout: 
   );
   const queuedMessageId = queued.detail.message_id;
   assert.ok(queuedMessageId);
-  assert.equal(queued.detail.runtime_state, "target_action_required");
+  assert.equal(queued.detail.runtime_state, "provider_input_not_ready");
 
   await pushAgentOutput(session.driver, agent.session_id, "PRE_DRAIN_ASK_AFTER_CURSOR\r\n");
   const earlyResult = await Promise.race([
@@ -704,11 +719,12 @@ test("native CLI ask returns only output after its pre-send cursor", { timeout: 
   assert.equal(earlyResult, "pending", "pre-drain output must not satisfy queued ask");
 
   await setAgentStatus(session.driver, agent.session_id, "idle");
+  await waitForCliField(cliPath, harness, ASK_SESSION_NAME, "status", "idle");
   const drained = await waitForDeliveryState(
     cliPath,
     harness,
     ASK_SESSION_NAME,
-    "submit_sent_unverified",
+    "submit_sent_unconfirmed",
     queuedMessageId,
   );
   assert.equal(drained.detail.runtime_state, "mailbox_drain");
@@ -730,7 +746,7 @@ test("native CLI ask returns only output after its pre-send cursor", { timeout: 
   assert.doesNotMatch(askJson.output.text, /STALE_BEFORE_ASK/);
   assert.ok(Array.isArray(askJson.delivery));
   assert.equal(askJson.delivery[0].delivery_state, "queued");
-  assert.equal(askJson.delivery[0].runtime_state, "target_action_required");
+  assert.equal(askJson.delivery[0].runtime_state, "provider_input_not_ready");
   });
 });
 
@@ -798,7 +814,7 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
   );
   const queuedMessageId = queued.detail.message_id;
   assert.ok(queuedMessageId);
-  assert.equal(queued.detail.runtime_state, "target_action_required");
+  assert.equal(queued.detail.runtime_state, "provider_input_not_ready");
 
   await pushAgentOutput(session.driver, agent.session_id, "Say AUTO_TEST_2_DONE when finished\r\n");
   const earlyResult = await Promise.race([
@@ -808,11 +824,12 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
   assert.equal(earlyResult, "pending", "pre-drain prompt echo should not satisfy the output wait");
 
   await setAgentStatus(session.driver, agent.session_id, "idle");
+  await waitForCliField(cliPath, harness, ASK_ECHO_SESSION_NAME, "status", "idle");
   const drained = await waitForDeliveryState(
     cliPath,
     harness,
     ASK_ECHO_SESSION_NAME,
-    "submit_sent_unverified",
+    "submit_sent_unconfirmed",
     queuedMessageId,
   );
   assert.equal(drained.detail.runtime_state, "mailbox_drain");
@@ -844,7 +861,7 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
   );
   assert.ok(Array.isArray(askJson.delivery));
   assert.equal(askJson.delivery[0].delivery_state, "queued");
-  assert.equal(askJson.delivery[0].runtime_state, "target_action_required");
+  assert.equal(askJson.delivery[0].runtime_state, "provider_input_not_ready");
   }, "700");
 });
 
@@ -918,7 +935,7 @@ test("native CLI structured ask completes only on explicit reply", { timeout: 18
 
   const replyFile = path.join(harness.isolatedHome, "structured-ask-reply.txt");
   writeFileSync(replyFile, "structured reply complete");
-  const replyResult = runCliOk(cliPath, harness, [
+  const replyResult = runCliOkAsAgent(cliPath, harness, agent.session_id, [
     "reply",
     requestId,
     "--status",

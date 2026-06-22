@@ -38,7 +38,6 @@ function cargoTargetDirectory(root) {
   const result = spawnSync('cargo', ['metadata', '--format-version=1', '--no-deps'], {
     cwd: root,
     encoding: 'utf8',
-    shell: isWindows,
   });
 
   if (result.status !== 0) {
@@ -76,7 +75,6 @@ export function main() {
   const result = spawnSync('cargo', buildArgs, {
     cwd: root,
     stdio: 'inherit',
-    shell: isWindows,
   });
 
   if (result.status !== 0) {

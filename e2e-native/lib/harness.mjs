@@ -30,7 +30,6 @@ function cargoTargetDirectory() {
     {
       cwd: repoRoot,
       encoding: "utf8",
-      shell: process.platform === "win32",
     },
   );
 
@@ -291,6 +290,27 @@ function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
+function npmInvocation(args) {
+  if (process.platform === "win32" && process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) {
+    return {
+      command: process.execPath,
+      args: [process.env.npm_execpath, ...args],
+    };
+  }
+
+  if (process.platform === "win32") {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", npmCommand(), ...args],
+    };
+  }
+
+  return {
+    command: npmCommand(),
+    args,
+  };
+}
+
 export function nativeAppBuildArgs() {
   const args = ["run", "tauri", "--", "build", "--debug", "--no-bundle"];
   const features = (process.env.WARDIAN_NATIVE_BUILD_FEATURES || "").trim();
@@ -301,13 +321,13 @@ export function nativeAppBuildArgs() {
 }
 
 export function ensureNativeAppBuilt(harness) {
+  const buildInvocation = npmInvocation(nativeAppBuildArgs());
   const build = spawnSync(
-    npmCommand(),
-    nativeAppBuildArgs(),
+    buildInvocation.command,
+    buildInvocation.args,
     {
       cwd: harness.repoRoot,
       stdio: "inherit",
-      shell: process.platform === "win32",
     },
   );
 
@@ -357,6 +377,31 @@ export function prepareIsolatedHome(harness) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function terminateChildProcess(child, signal = "SIGTERM", timeoutMs = 5000) {
+  if (!child || child.exitCode !== null) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(killTimer);
+      clearTimeout(doneTimer);
+      resolve();
+    };
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, Math.max(500, Math.floor(timeoutMs / 2)));
+    const doneTimer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+    child.kill(signal);
+  });
 }
 
 export async function watchStep(harness, label) {
@@ -411,13 +456,7 @@ function waitForPort({ port, host = "127.0.0.1", timeoutMs = 15000, processRef, 
   });
 }
 
-export async function startNativeSession(harness) {
-  try {
-    assertNativePreflight(harness);
-  } catch (error) {
-    throw nativeInfrastructureError(error);
-  }
-
+async function startNativeSessionAttempt(harness) {
   const tauriDriverArgs = [];
   if (harness.nativeDriverPath) {
     tauriDriverArgs.push("--native-driver", harness.nativeDriverPath);
@@ -450,8 +489,8 @@ export async function startNativeSession(harness) {
       logs,
     });
   } catch (error) {
-    tauriDriver.kill();
-    throw nativeInfrastructureError(error);
+    await terminateChildProcess(tauriDriver);
+    throw error;
   }
 
   const capabilities = new Capabilities();
@@ -489,19 +528,52 @@ export async function startNativeSession(harness) {
         try {
           await driver.quit();
         } finally {
-          tauriDriver.kill();
+          await terminateChildProcess(tauriDriver);
         }
       },
       logs,
     };
   } catch (error) {
-    tauriDriver.kill();
-    throw nativeInfrastructureError(
-      new Error(
-        `Failed to start native Tauri session: ${error}\n--- tauri-driver stdout ---\n${stdout}\n--- tauri-driver stderr ---\n${stderr}`,
-      ),
+    await terminateChildProcess(tauriDriver);
+    throw new Error(
+      `Failed to start native Tauri session: ${error}\n--- tauri-driver stdout ---\n${stdout}\n--- tauri-driver stderr ---\n${stderr}`,
     );
   }
+}
+
+function isRetryableNativeSessionStartError(error) {
+  const text = String(error instanceof Error ? error.message : error).toLowerCase();
+  return (
+    text.includes("sessionnotcreatederror") ||
+    text.includes("chrome not reachable") ||
+    text.includes("microsoft edge failed to start") ||
+    text.includes("can not listen to address") ||
+    text.includes("timed out waiting for tauri-driver")
+  );
+}
+
+export async function startNativeSession(harness) {
+  try {
+    assertNativePreflight(harness);
+  } catch (error) {
+    throw nativeInfrastructureError(error);
+  }
+
+  const maxAttempts = Math.max(1, readPositiveIntegerEnv("WARDIAN_NATIVE_SESSION_START_ATTEMPTS", 2));
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await startNativeSessionAttempt(harness);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetryableNativeSessionStartError(error)) {
+        throw nativeInfrastructureError(error);
+      }
+      await sleep(750 * attempt);
+    }
+  }
+
+  throw nativeInfrastructureError(lastError ?? new Error("Failed to start native Tauri session."));
 }
 
 export function formatAppShellTimeoutMessage({

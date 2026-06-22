@@ -106,9 +106,14 @@ Native builder round-trip fixture.
   assert.deepEqual(writeResult.diagnostics, []);
 
   const reparsed = await invokeTauri(session.driver, "workflow_parse", { path: outputPath });
+  const expectedNodes = [...parsed.blueprint.nodes].sort((a, b) => a.id.localeCompare(b.id));
+  const expectedEdges = [...parsed.blueprint.edges].sort((a, b) => (
+    `${a.from}\u0000${a.from_port ?? ""}\u0000${a.to}\u0000${a.to_port ?? ""}`
+      .localeCompare(`${b.from}\u0000${b.from_port ?? ""}\u0000${b.to}\u0000${b.to_port ?? ""}`)
+  ));
   assert.equal(reparsed.blueprint.id, parsed.blueprint.id);
   assert.equal(reparsed.blueprint.name, parsed.blueprint.name);
-  assert.deepEqual(reparsed.blueprint.nodes, parsed.blueprint.nodes);
-  assert.deepEqual(reparsed.blueprint.edges, parsed.blueprint.edges);
+  assert.deepEqual(reparsed.blueprint.nodes, expectedNodes);
+  assert.deepEqual(reparsed.blueprint.edges, expectedEdges);
   assert.deepEqual(reparsed.diagnostics, []);
 });

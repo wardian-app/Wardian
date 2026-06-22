@@ -1,4 +1,83 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import * as fs from 'node:fs';
+
+async function installResponsiveLayoutIpcMock(page: Page) {
+  await page.addInitScript(() => {
+    type Agent = {
+      session_id: string;
+      session_name: string;
+      agent_class: string;
+      folder: string;
+      provider: string;
+      is_off: boolean;
+    };
+
+    const agents: Agent[] = [
+      {
+        session_id: 'responsive-agent-1',
+        session_name: 'Responsive Alpha',
+        agent_class: 'Coder',
+        folder: '<absolute-workspace-path>',
+        provider: 'mock',
+        is_off: false,
+      },
+      {
+        session_id: 'responsive-agent-2',
+        session_name: 'Responsive Beta',
+        agent_class: 'Reviewer',
+        folder: '<absolute-workspace-path>',
+        provider: 'mock',
+        is_off: false,
+      },
+    ];
+    let callbackId = 1;
+    const callbacks = new Map<number, unknown>();
+    const tauriWindow = window as Window & {
+      __TAURI_INTERNALS__?: Record<string, unknown>;
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+    };
+
+    tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: () => undefined,
+    };
+
+    tauriWindow.__TAURI_INTERNALS__ = {
+      metadata: {
+        currentWindow: { label: 'main' },
+        currentWebview: { label: 'main' },
+      },
+      transformCallback: (callback: unknown) => {
+        const id = callbackId++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback: (id: number) => {
+        callbacks.delete(id);
+      },
+      convertFileSrc: (filePath: string) => filePath,
+      invoke: async (command: string) => {
+        if (command === 'list_agents') return agents;
+        if (command === 'list_agent_classes') return [];
+        if (command === 'list_provider_readiness') return [];
+        if (command === 'load_watchlists') return [];
+        if (command === 'load_watchlist_prefs') return null;
+        if (command === 'load_agent_interactions') return {};
+        if (command === 'load_queue_items') return [];
+        if (command === 'load_queue_preferences') return {};
+        if (command === 'load_onboarding_hints') return { dismissed_hint_ids: ['spawn-agent-first-run:v1'] };
+        if (command === 'list_workflows') return [];
+        if (command === 'list_scheduled_runs') return [];
+        if (command === 'load_workflow_library') return { folders: [], rootWorkflowIds: [] };
+        if (command === 'get_library_tree') return { type: 'Folder', path: '', name: 'Root', children: [] };
+        if (command === 'list_deployed_skills') return [];
+        if (command === 'sync_provider_theme_settings') return null;
+        if (command === 'plugin:event|listen') return callbackId++;
+        if (command === 'plugin:event|unlisten') return null;
+        return null;
+      },
+    };
+  });
+}
 
 test.describe('responsive layout', () => {
   test('left sidebar width persists across reload', async ({ page }) => {
@@ -25,13 +104,13 @@ test.describe('responsive layout', () => {
   });
 
   test('grid drag past 2/3 enters stacked mode; stack-exit drag restores multi-column', async ({ page }) => {
+    await installResponsiveLayoutIpcMock(page);
     await page.goto('/', { waitUntil: "domcontentloaded" });
-    // Pre-condition: at least 2 mock agents present in fixtures.
     const agentCards = page.locator('[data-testid="agent-card"]');
-    test.skip(await agentCards.count() < 2, 'requires at least two visible agent cards');
+    await expect(agentCards).toHaveCount(2);
 
     const handle = page.locator('[data-resize-handle="h"]').first();
-    if (!(await handle.isVisible())) test.skip();
+    await expect(handle).toBeVisible();
 
     const grid = page.locator('[data-testid="agent-grid"]');
     const gridBox = await grid.boundingBox();
@@ -46,6 +125,8 @@ test.describe('responsive layout', () => {
 
     const exitHandle = page.locator('[data-resize-handle="stack-exit"]').first();
     await expect(exitHandle).toBeVisible();
+    fs.mkdirSync('e2e/screenshots/responsive-layout', { recursive: true });
+    await grid.screenshot({ path: 'e2e/screenshots/responsive-layout/stacked-mode.png' });
 
     // Drag the stack-exit handle inward to the middle of the grid → exit stacked.
     const exitBox = await exitHandle.boundingBox();

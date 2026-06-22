@@ -205,7 +205,6 @@ test("native harness resolves debug app from cargo metadata target directory", a
   const metadata = spawnSync("cargo", ["metadata", "--format-version=1", "--no-deps"], {
     cwd: harness.repoRoot,
     encoding: "utf8",
-    shell: process.platform === "win32",
   });
   assert.equal(metadata.status, 0, metadata.stderr);
   const targetDirectory = JSON.parse(metadata.stdout).target_directory;

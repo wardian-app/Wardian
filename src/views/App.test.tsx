@@ -12,6 +12,7 @@ import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
+import { ConfirmProvider } from "../components/ConfirmDialog";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -156,6 +157,11 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
           currentAgents = currentAgents.map(a => 
             a.session_id === args.sessionId ? { ...a, is_off: false } : a
           );
+        }
+        return null;
+      case "kill_agent":
+        if (args?.sessionId) {
+          currentAgents = currentAgents.filter(a => a.session_id !== args.sessionId);
         }
         return null;
       case "clone_agent":
@@ -1852,5 +1858,38 @@ describe("Agent Off State Operations", () => {
     await waitFor(() => {
       expect(screen.getAllByText("Alpha").length).toBe(2);
     });
+  });
+
+  it("requires confirmation before deleting an agent", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Alpha").length).toBeGreaterThan(0);
+    });
+
+    const alphaWatchlistText = screen.getByText("Alpha", { selector: "p" });
+    const alphaWatchlistRow = alphaWatchlistText.closest("div.watchlist-row");
+    expect(alphaWatchlistRow).not.toBeNull();
+
+    fireEvent.contextMenu(alphaWatchlistRow!);
+    fireEvent.click(screen.getByText("Delete"));
+    expect(screen.getByText("Delete this agent?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", { sessionId: "agent-1" });
+
+    fireEvent.contextMenu(alphaWatchlistRow!);
+    fireEvent.click(screen.getByText("Delete"));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("kill_agent", { sessionId: "agent-1" });
+    });
+    expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
   });
 });
