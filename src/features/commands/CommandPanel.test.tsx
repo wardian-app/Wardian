@@ -5,6 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
 import { useLibraryStore } from "../../store/useLibraryStore";
 import type { LibraryFolder } from "../../types";
+import { flattenPromptForInjection } from "../../utils/terminalInput";
 import { CommandPanel } from "./CommandPanel";
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
@@ -102,6 +103,30 @@ describe("CommandPanel", () => {
     expect(screen.queryByText("Draft")).not.toBeInTheDocument();
   });
 
+  it("shows an empty quick prompt state when no prompts are starred", () => {
+    useLibraryStore.setState({
+      promptTree: {
+        type: "Folder",
+        path: "",
+        name: "Prompts",
+        children: [
+          {
+            type: "Prompt",
+            path: "draft.md",
+            name: "Draft",
+            content: "Hidden prompt",
+            metadata: { id: "prompt-2", tags: [], is_starred: false },
+          },
+        ],
+      },
+    });
+
+    renderCommandPanel();
+
+    expect(screen.getByText("No quick prompts in Library.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Draft/i })).not.toBeInTheDocument();
+  });
+
   it("uses compact sidebar typography for title and section labels", () => {
     renderCommandPanel();
 
@@ -127,6 +152,39 @@ describe("CommandPanel", () => {
       prompt: "Ship it with notes",
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("list_agents");
+  });
+
+  it("injects the full flattened content of a long quick prompt", async () => {
+    const user = userEvent.setup();
+    const longContent = Array.from({ length: 30 }, (_, index) => `Line ${index + 1}: review this section.`).join(
+      "\n\n",
+    );
+    useLibraryStore.setState({
+      promptTree: {
+        type: "Folder",
+        path: "",
+        name: "Prompts",
+        children: [
+          {
+            type: "Prompt",
+            path: "long.md",
+            name: "Long Prompt",
+            content: longContent,
+            metadata: { id: "prompt-long", tags: [], is_starred: true },
+          },
+        ],
+      },
+    });
+
+    renderCommandPanel({ selectedAgentIds: new Set(["agent-1"]) });
+    await user.click(screen.getByRole("button", { name: /Long Prompt/i }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("submit_prompt_to_agent", {
+        sessionId: "agent-1",
+        prompt: flattenPromptForInjection(longContent),
+      });
+    });
   });
 
   it("confirms before broadcasting a quick prompt when no agents are selected", async () => {

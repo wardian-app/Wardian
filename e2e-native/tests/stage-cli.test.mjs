@@ -9,7 +9,7 @@ test("stage-cli resolves source from cargo metadata target directory", () => {
   const targetDirectory = "D:/shared/cargo-target";
 
   assert.equal(
-    resolveCliSourcePath({ root, targetDirectory, target: "", exe: "wardian-cli.exe" }),
+    resolveCliSourcePath({ root, targetDirectory, target: "", profile: "release", exe: "wardian-cli.exe" }),
     path.join(targetDirectory, "release", "wardian-cli.exe"),
   );
 });
@@ -19,7 +19,13 @@ test("stage-cli resolves explicit target triples under cargo metadata target dir
   const targetDirectory = "D:/shared/cargo-target";
 
   assert.equal(
-    resolveCliSourcePath({ root, targetDirectory, target: "x86_64-pc-windows-msvc", exe: "wardian-cli.exe" }),
+    resolveCliSourcePath({
+      root,
+      targetDirectory,
+      target: "x86_64-pc-windows-msvc",
+      profile: "release",
+      exe: "wardian-cli.exe",
+    }),
     path.join(targetDirectory, "x86_64-pc-windows-msvc", "release", "wardian-cli.exe"),
   );
 });

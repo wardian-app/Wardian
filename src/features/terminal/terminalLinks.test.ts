@@ -23,6 +23,26 @@ describe("findTerminalLinks", () => {
     expect(link.target).toBe("/home/me/repo/README.md");
   });
 
+  it("keeps Windows absolute paths absolute and strips line suffixes", () => {
+    const [link] = findTerminalLinks("open C:\\repo\\src\\App.tsx:12:3", "D:\\other");
+
+    expect(link).toMatchObject({
+      kind: "file",
+      text: "C:\\repo\\src\\App.tsx:12:3",
+      target: "C:\\repo\\src\\App.tsx",
+    });
+  });
+
+  it("keeps POSIX absolute paths absolute and strips line suffixes", () => {
+    const [link] = findTerminalLinks("open /home/me/repo/src/App.tsx:12:3", "/tmp/other");
+
+    expect(link).toMatchObject({
+      kind: "file",
+      text: "/home/me/repo/src/App.tsx:12:3",
+      target: "/home/me/repo/src/App.tsx",
+    });
+  });
+
   it("trims trailing sentence punctuation from detected links", () => {
     const links = findTerminalLinks("Open https://wardian.org/docs, then src/App.tsx.");
 
