@@ -249,7 +249,7 @@ describe("SpawnAgentPanel", () => {
     );
 
     expect(await screen.findByRole("option", { name: "Codex - not installed" })).toBeDisabled();
-    expect(screen.getByRole("option", { name: "Gemini - not installed" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "Gemini (Unmaintained) - not installed" })).toBeDisabled();
     expect(screen.queryByText(/Only provider CLIs found on this machine are selectable/i)).not.toBeInTheDocument();
   });
 
