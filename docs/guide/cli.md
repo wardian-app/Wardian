@@ -202,7 +202,7 @@ Mutating commands use Wardian's local control endpoint and require the desktop a
 
 Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
 
-`ask <target>` sends one prompt to one live Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. Wardian appends reply instructions to the delivered prompt and waits for the target to answer with `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when the task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete the ask.
+`ask <target>` sends one prompt to one live Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. Wardian appends reply instructions to the delivered prompt and waits for the target to execute `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when the task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete the ask.
 
 The JSON response includes `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. `reply.status` can be `done`, `blocked`, or `failed`; timeout remains a separate `watch_timeout` error. If the target runtime is booting, busy, action-required, or missing a safe input channel, Wardian keeps the interaction queued and reports the delivery state instead of relying on a fixed sleep before terminal injection.
 

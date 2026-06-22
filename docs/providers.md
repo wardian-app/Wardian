@@ -1,16 +1,16 @@
 # Provider Runtimes
 
-Wardian provides one orchestration layer over five supported CLI providers: Gemini CLI, Antigravity, Claude Code, Codex, and OpenCode. Each provider keeps its native command-line behavior, while Wardian adapts session identity, working roots, skill discovery, status tracking, and workflow execution into a consistent app model.
+Wardian provides one orchestration layer over five supported CLI providers: Antigravity, Claude Code, Codex, OpenCode, and Gemini CLI. Each provider keeps its native command-line behavior, while Wardian adapts session identity, working roots, skill discovery, status tracking, and workflow execution into a consistent app model.
 
 ## Overview
 
 | Provider | Support | Working Root | Instruction Source | Skill and Context Model | Session Identity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Supported | Real target workspace | `GEMINI.md` | Wardian include roots passed through `--include-directories`; Gemini patch enables multi-root skill discovery | Discovered from provider output |
 | **[Antigravity](https://www.antigravity.google/docs/cli-overview)** | Supported | Real target workspace | `AGENTS.md` | Wardian include roots passed through repeated `--add-dir` flags | Discovered from Antigravity conversation state |
 | **[Claude Code](https://github.com/anthropics/claude-code)** | Supported | Real target workspace | `CLAUDE.md` | `--add-dir` instruction roots plus `.claude/skills` links to Wardian-managed skills | Wardian assigns fresh session IDs and resumes explicitly |
 | **[Codex](https://github.com/openai/codex)** | Supported | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME` habitat with scoped skill projection | Discovered during bootstrap, then adopted into the final habitat |
 | **[OpenCode](https://github.com/anomalyco/opencode)** | Supported | Real target workspace | `AGENTS.md` plus injected runtime config | `OPENCODE_CONFIG` adds Wardian instructions; `OPENCODE_CONFIG_DIR` exposes projected skills | Discovered from JSON events and resumed with `--session` |
+| **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Unmaintained | Real target workspace | `GEMINI.md` | Wardian include roots passed through `--include-directories`; Gemini patch enables multi-root skill discovery | Discovered from provider output |
 
 ## Shared Runtime Model
 
@@ -18,26 +18,6 @@ Wardian provides one orchestration layer over five supported CLI providers: Gemi
 - Regular visible agents use the global session policy unless the agent has an explicit override.
 - Workflow Agent nodes choose one run mode: `ephemeral`, `inherit_fresh`, or `inherit_resume`.
 - Wardian keeps user repositories clean by adapting provider-native discovery instead of copying agent-specific instruction and skill files into the project root.
-
-## Gemini CLI (`@google/gemini-cli`)
-
-Gemini runs directly in the real target workspace.
-
-### Instruction and Skill Discovery
-
-Gemini reads `GEMINI.md`. Wardian passes common, class, and agent include roots through `--include-directories`. The Gemini skill patch lets the CLI discover skills from those additional roots rather than only from the global or project-local Gemini skill folders.
-
-### Session and Status Handling
-
-Wardian learns Gemini session identity from provider output and parses Gemini stream events into lifecycle states such as initialization, user input, generation, and turn completion. Workflow execution uses these structured turn-completion signals instead of waiting for fragile terminal text.
-
-### Debug First
-
-If Gemini misses Wardian-managed skills, check the Gemini patch state and include roots before changing workspace or workflow logic.
-
-### Migration Note
-
-Keep Gemini CLI support while users transition provider choices. Consumer/free Gemini CLI access is scheduled to cut off on June 18, 2026. Antigravity support is a separate provider path and does not reuse the Gemini adapter.
 
 ## Antigravity (`agy`)
 
@@ -108,6 +88,24 @@ Wardian discovers OpenCode session IDs from JSON events emitted by `opencode run
 ### Debug First
 
 If OpenCode misses instructions or skills, inspect the generated `OPENCODE_CONFIG` file and `OPENCODE_CONFIG_DIR` skill projection. On Windows, also verify whether Wardian resolved a native executable or correctly wrapped a command shim through the host shell.
+
+## Gemini CLI (`@google/gemini-cli`) — Unmaintained
+
+> **Unmaintained.** Gemini CLI support is no longer actively maintained. Consumer/free Gemini CLI access cut off on June 18, 2026. For Google-model access, use **Antigravity** (`agy`) instead — it is the preferred replacement, uses the same `AGENTS.md`-based instruction model, and receives active support.
+
+Gemini runs directly in the real target workspace.
+
+### Instruction and Skill Discovery
+
+Gemini reads `GEMINI.md`. Wardian passes common, class, and agent include roots through `--include-directories`. The Gemini skill patch lets the CLI discover skills from those additional roots rather than only from the global or project-local Gemini skill folders.
+
+### Session and Status Handling
+
+Wardian learns Gemini session identity from provider output and parses Gemini stream events into lifecycle states such as initialization, user input, generation, and turn completion. Workflow execution uses these structured turn-completion signals instead of waiting for fragile terminal text.
+
+### Debug First
+
+If Gemini misses Wardian-managed skills, check the Gemini patch state and include roots before changing workspace or workflow logic.
 
 ## Related References
 

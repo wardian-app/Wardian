@@ -47,7 +47,13 @@ The live control protocol exposes CLI wrappers for the same worktree operations:
 
 `send_input_to_agent` and `send_binary_input_to_agent` are raw PTY input paths for terminal interaction. They must not be used as the source of truth for structured agent-to-agent communication.
 
-`submit_prompt_to_agent` is the provider-aware prompt path used when Wardian submits text into a live runtime. It should respect provider input readiness and delivery transaction results. Fixed sleeps before injection are not a correctness mechanism; delivery should wait for readiness evidence or queue the interaction.
+`submit_prompt_to_agent` is the structured prompt submission command for live
+agents. It returns a `DeliveryDetail` and routes through the same backend
+live-surface delivery service used by CLI sends, command panel sends, remote
+prompt sends, workflow live routing, and mailbox drain. It must not be replaced
+with raw `send_input_to_agent` calls for prompt injection. Fixed sleeps before
+injection are not a correctness mechanism; delivery should wait for readiness
+evidence or queue the interaction.
 
 `read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Queue evidence, and provider status transitions must not depend on replaying this text.
 

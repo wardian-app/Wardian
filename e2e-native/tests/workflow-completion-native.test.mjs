@@ -19,13 +19,14 @@ function writeSingleTurnMockScript(harness, { sessionId, markerPath }) {
     mockScript,
     `
 const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const sessionId = process.env.WARDIAN_MOCK_SESSION_ID || "mock-session";
 const markerPath = process.env.WARDIAN_MOCK_MARKER;
+const cli = process.env.WARDIAN_CLI || "wardian-cli";
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 emit({ type: "init", session_id: sessionId, timestamp: new Date().toISOString() });
-emit({ type: "action_required", message: "waiting for workflow prompt" });
 
 let buffer = "";
 let completed = false;
@@ -35,13 +36,25 @@ process.stdin.on("data", async (chunk) => {
   buffer += chunk;
   if (buffer.includes("\\r") || buffer.includes("\\n")) {
     completed = true;
+    const requestId = buffer.match(/wardian reply\\s+([^\\s]+)/)?.[1] || null;
     emit({ type: "model", content: "partial model response, not a turn completion" });
     await sleep(1200);
     emit({ type: "result", status: "success" });
+    const reply = requestId
+      ? spawnSync(cli, ["reply", requestId, "--status", "done", "--stdin"], {
+          input: "workflow output complete",
+          encoding: "utf8",
+          env: { ...process.env, WARDIAN_SESSION_ID: sessionId },
+        })
+      : { status: 1, stdout: "", stderr: "request id not found" };
     if (markerPath) {
       fs.writeFileSync(markerPath, JSON.stringify({
         completed: true,
         input: buffer,
+        requestId,
+        replyStatus: reply.status,
+        replyStdout: reply.stdout,
+        replyStderr: reply.stderr,
         at: new Date().toISOString(),
       }));
     }
@@ -55,38 +68,34 @@ process.stdin.resume();
   return mockScript;
 }
 
-function seedWorkflow(harness, { workflowId, sessionId }) {
-  const workflowsDir = path.join(harness.isolatedHome, "workflows");
+function seedWorkflow(harness, { workflowId }) {
+  const workflowsDir = path.join(harness.isolatedHome, "library", "workflows");
   fs.mkdirSync(workflowsDir, { recursive: true });
+  const workflowPath = path.join(workflowsDir, `${workflowId}.md`);
   fs.writeFileSync(
-    path.join(workflowsDir, `${workflowId}.json`),
-    JSON.stringify(
-      {
-        id: workflowId,
-        name: "Agent Completion Repro",
-        settings: { max_iterations: 10, on_limit_reached: "stop" },
-        nodes: [
-          {
-            id: "agent-node-1",
-            type: "agent",
-            name: "Live mock agent node",
-            config: {
-              agent_id: sessionId,
-              mode: "inherit_resume",
-              prompt: "Complete this workflow node.",
-              output_format: "text",
-              timeout_ms: 1500,
-            },
-            dependencies: null,
-          },
-        ],
-        role_mappings: {},
-      },
-      null,
-      2,
-    ),
+    workflowPath,
+    `---
+schema: 2
+id: ${workflowId}
+name: Agent Completion Repro
+nodes:
+  - id: trigger
+    type: manual_trigger
+  - id: agent-node-1
+    type: task
+    fields:
+      agent: role:worker
+      prompt: Complete this workflow node.
+edges:
+  - from: trigger
+    to: agent-node-1
+---
+
+# Agent Completion Repro
+`,
     "utf8",
   );
+  return workflowPath;
 }
 
 async function spawnMockAgent(driver, { sessionId, sessionName, folder }) {
@@ -110,45 +119,68 @@ async function spawnMockAgent(driver, { sessionId, sessionName, folder }) {
   return result.agent;
 }
 
-async function invokeWorkflowRun(driver, workflowId) {
-  const result = await driver.executeAsyncScript((workflowId, done) => {
-    window.__TAURI_INTERNALS__.invoke("run_workflow", { id: workflowId, payload: null }).then(
-      () => done({ ok: true }),
+async function invokeWorkflowRun(driver, { workflowPath, sessionId, workspace }) {
+  const result = await driver.executeAsyncScript((payload, done) => {
+    window.__TAURI_INTERNALS__.invoke("workflow_run", payload).then(
+      (value) => done({ ok: true, value }),
       (error) => done({ ok: false, error: String(error) }),
     );
-  }, workflowId);
+  }, {
+    path: workflowPath,
+    provider: "mock",
+    workspace,
+    input: {},
+    assignments: {
+      worker: {
+        target_type: "agent",
+        agent_id: sessionId,
+        conversation: "current",
+        busy_policy: "wait",
+      },
+    },
+  });
 
-  assert.equal(result.ok, true, `run_workflow failed: ${result.error}`);
+  assert.equal(result.ok, true, `workflow_run failed: ${result.error}`);
+  assert.equal(result.value?.ok, true, `workflow_run did not start: ${JSON.stringify(result.value)}`);
+  return result.value;
 }
 
-async function readLatestWorkflowTrace(harness, workflowId, timeoutMs = 10000) {
+async function readLatestWorkflowState(harness, workflowId, timeoutMs = 10000) {
   const logDir = path.join(harness.isolatedHome, "logs", "workflows", workflowId);
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
     if (fs.existsSync(logDir)) {
-      const jsonFiles = fs
+      const runDirs = fs
         .readdirSync(logDir)
-        .filter((name) => name.endsWith(".json"))
         .map((name) => path.join(logDir, name))
+        .filter((candidate) => fs.statSync(candidate).isDirectory())
         .sort();
 
-      const newest = jsonFiles.at(-1);
-      if (newest) {
+      const newest = runDirs.at(-1);
+      const statePath = newest ? path.join(newest, "state.json") : null;
+      const eventsPath = newest ? path.join(newest, "events.jsonl") : null;
+      if (statePath && eventsPath && fs.existsSync(statePath) && fs.existsSync(eventsPath)) {
         try {
-          const events = JSON.parse(fs.readFileSync(newest, "utf8"));
-          if (Array.isArray(events) && events.length > 0) {
-            return { file: newest, events };
+          const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+          const events = fs
+            .readFileSync(eventsPath, "utf8")
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((line) => JSON.parse(line));
+          if (state.status === "completed" && events.length > 0) {
+            return { dir: newest, state, events };
           }
         } catch {
-          // The workflow may still be writing the trace file.
+          // The workflow may still be writing the trace files.
         }
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  assert.fail(`Timed out waiting for workflow trace in ${logDir}`);
+  assert.fail(`Timed out waiting for completed workflow state in ${logDir}`);
 }
 
 async function readAgentMetric(driver, sessionId) {
@@ -161,6 +193,20 @@ async function readAgentMetric(driver, sessionId) {
 
   assert.equal(result.ok, true, `list_agent_metrics failed: ${result.error}`);
   return result.metrics.find((entry) => entry.session_id === sessionId);
+}
+
+async function setAgentStatus(driver, sessionId, status) {
+  const result = await driver.executeAsyncScript((sessionId, status, done) => {
+    window.__TAURI_INTERNALS__.invoke("debug_set_agent_status", {
+      sessionId,
+      status,
+    }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, sessionId, status);
+
+  assert.equal(result.ok, true, `debug_set_agent_status failed: ${result.error}`);
 }
 
 test("workflow detects live agent turn completion instead of timing out", { timeout: 180000 }, async (t) => {
@@ -217,7 +263,7 @@ test("workflow detects live agent turn completion instead of timing out", { time
   process.env.WARDIAN_MOCK_SESSION_ID = sessionId;
   process.env.WARDIAN_MOCK_MARKER = markerPath;
 
-  seedWorkflow(harness, { workflowId, sessionId });
+  const workflowPath = seedWorkflow(harness, { workflowId });
 
   try {
     session = await startNativeSession(harness);
@@ -232,11 +278,16 @@ test("workflow detects live agent turn completion instead of timing out", { time
     sessionName,
     folder: path.join(harness.repoRoot, "e2e-native"),
   });
+  await setAgentStatus(session.driver, sessionId, "idle");
 
   await new Promise((resolve) => setTimeout(resolve, 750));
-  await invokeWorkflowRun(session.driver, workflowId);
+  await invokeWorkflowRun(session.driver, {
+    workflowPath,
+    sessionId,
+    workspace: path.join(harness.repoRoot, "e2e-native"),
+  });
 
-  const trace = await readLatestWorkflowTrace(harness, workflowId);
+  const trace = await readLatestWorkflowState(harness, workflowId);
   const marker = fs.existsSync(markerPath)
     ? JSON.parse(fs.readFileSync(markerPath, "utf8"))
     : null;
@@ -244,9 +295,14 @@ test("workflow detects live agent turn completion instead of timing out", { time
 
   assert.equal(marker?.completed, true, "mock provider did not complete its turn");
   assert.equal(metric?.current_status, "Idle");
-  assert.match(trace.events[0]?.output?.text ?? "", /"result","status":"success"|type":"result"/);
-  assert.deepEqual(
-    trace.events.map((event) => ({ node_id: event.node_id, status: event.status, error: event.error })),
-    [{ node_id: "agent-node-1", status: "completed", error: null }],
+  assert.equal(trace.state.status, "completed");
+  assert.equal(trace.state.nodes?.["agent-node-1"], "completed");
+  assert.ok(
+    trace.events.some((event) => event.kind === "node_completed" && event.node === "agent-node-1"),
+    `expected node_completed event, got ${JSON.stringify(trace.events)}`,
+  );
+  assert.equal(
+    trace.state.registry?.nodes?.["agent-node-1"]?.output?.text,
+    "workflow output complete",
   );
 });

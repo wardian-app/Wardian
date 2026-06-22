@@ -94,19 +94,33 @@ async fn fire_request(app: &AppHandle, req: &FireRequest) {
     let schedule_id = req.schedule_id.clone();
     let run_root = resolved.run_root.clone();
     tokio::spawn(async move {
-        let result = runs::drive_new_run_with_catalog_and_assignments(
-            Some(app_for_run),
-            resolved.blueprint,
-            resolved.run_id,
-            resolved.run_root,
-            resolved.workspace,
-            resolved.provider,
+        let result = match runs::prepare_new_scheduled_run_with_assignments(
+            &resolved.blueprint,
+            &resolved.run_id,
+            &resolved.run_root,
+            &resolved.workspace,
+            &resolved.provider,
+            &resolved.bindings,
+            &resolved.assignments,
+            &schedule_id,
             resolved.input,
-            resolved.bindings,
-            resolved.assignments,
-            agent_catalog,
-        )
-        .await;
+        ) {
+            Ok(run_state) => {
+                runs::drive_started_run_with_catalog_and_assignments(
+                    Some(app_for_run),
+                    resolved.blueprint,
+                    run_state,
+                    resolved.run_root,
+                    resolved.workspace,
+                    resolved.provider,
+                    resolved.bindings,
+                    resolved.assignments,
+                    agent_catalog,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
 
         match result {
             Ok(()) => mark_finished_from_checkpoint(&schedule_id, &run_root),

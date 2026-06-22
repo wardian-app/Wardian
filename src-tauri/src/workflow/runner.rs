@@ -43,8 +43,8 @@ pub trait AgentRunner: Send + Sync {
 
 /// Boundary for active-agent execution. Unlike headless runs, this uses the
 /// existing live PTY and completes only through the structured `wardian reply`
-/// contract. Idle terminal status is not completion; it is only a signal that
-/// transcript marker compatibility can be checked.
+/// contract. Idle terminal status and printed reply commands are not
+/// completion evidence.
 pub trait LiveAgentRunner: Send + Sync {
     fn run_live(&self, spec: LiveAgentRunSpec) -> LiveAgentRunFuture<'_>;
 }
@@ -81,6 +81,40 @@ impl AgentRunner for HeadlessAgentRunner {
 }
 
 #[derive(Clone)]
+pub struct TauriHeadlessAgentRunner {
+    app: tauri::AppHandle,
+}
+
+impl TauriHeadlessAgentRunner {
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl AgentRunner for TauriHeadlessAgentRunner {
+    fn run(&self, spec: AgentRunSpec) -> AgentRunFuture<'_> {
+        Box::pin(async move {
+            let state = self.app.state::<crate::state::AppState>();
+            crate::delivery::run_headless_process_prompt(
+                &state,
+                crate::delivery::HeadlessProcessPromptRequest {
+                    node: spec.node,
+                    provider: spec.provider,
+                    cwd: spec.cwd,
+                    prompt: spec.prompt,
+                    session_id: spec.session_id,
+                    resume_session: spec.resume_session,
+                    config_override: spec.config_override,
+                    interaction_id: None,
+                },
+            )
+            .await
+            .map(|result| result.response)
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct TauriLiveAgentRunner {
     app: tauri::AppHandle,
 }
@@ -102,33 +136,13 @@ async fn run_live_agent_prompt(
     spec: LiveAgentRunSpec,
 ) -> Result<String, String> {
     let state = app.state::<crate::state::AppState>();
-    let delivery_lock = state.delivery_lock_for(&spec.session_id).await;
-    let _delivery_guard = delivery_lock.lock().await;
 
-    let (tx, watch_state, current_status, provider_name, should_mark_processing) = {
+    let watch_state = {
         let agents = state.agents.lock().await;
         let agent = agents
             .get(&spec.session_id)
             .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
-        let config = agent
-            .config
-            .lock()
-            .map_err(|_| format!("Agent {} config lock poisoned", spec.session_id))?
-            .clone();
-        let tx = state
-            .input_senders
-            .try_read()
-            .map_err(|_| "Input channel temporarily locked".to_string())?
-            .get(&spec.session_id)
-            .cloned()
-            .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
-        (
-            tx,
-            agent.watch_state.clone(),
-            agent.current_status.clone(),
-            config.provider,
-            crate::manager::mark_agent_prompt_started(agent),
-        )
+        agent.watch_state.clone()
     };
 
     let initial_cursor = watch_state
@@ -174,27 +188,18 @@ async fn run_live_agent_prompt(
         return Err(error);
     }
 
-    if should_mark_processing {
-        crate::manager::set_agent_status(app, &spec.session_id, &current_status, "Processing...");
-    }
-    let provider_input = state
-        .interactions
-        .start_provider_input_generation(&spec.session_id, ProviderInputReadiness::Busy, None)
-        .await;
-
     let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
-    if let Err(error) = crate::commands::terminal::submit_prompt_to_agent_with_codex_echo_guard(
+    if let Err(error) = crate::delivery::submit_live_surface_prompt(
+        Some(app),
         &state,
-        &spec.session_id,
-        &provider_name,
-        &tx,
-        &prompt,
+        workflow_live_surface_prompt_request(&spec.session_id, prompt, &task.id),
     )
     .await
+    .map(|_| ())
     {
         let message = format!(
-            "failed to submit workflow node {} to live agent {}: {error}",
-            spec.node, spec.session_id
+            "failed to submit workflow node {} to live agent {}: {}",
+            spec.node, spec.session_id, error
         );
         fail_live_workflow_task(
             &state,
@@ -202,11 +207,16 @@ async fn run_live_agent_prompt(
             &task.id,
             &spec.session_id,
             &message,
-            true,
+            false,
         )
         .await;
         return Err(message);
     }
+    let provider_input_generation = state
+        .interactions
+        .current_provider_input_generation(&spec.session_id)
+        .await
+        .unwrap_or(0);
 
     let reply = match wait_for_live_agent_reply(
         &state,
@@ -251,7 +261,7 @@ async fn run_live_agent_prompt(
     } else if let Err(error) = wait_for_live_agent_provider_ready(
         &state,
         &spec.session_id,
-        provider_input.generation,
+        provider_input_generation,
         Duration::from_secs(30),
     )
     .await
@@ -265,8 +275,28 @@ async fn run_live_agent_prompt(
 
 fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> String {
     format!(
-        "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, respond with:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Put the final workflow output on stdin."
+        "{prompt}\n\nWardian workflow request id: {request_id}\nWhen this workflow node is fully complete, execute this command from your shell/tool with the final workflow output on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
     )
+}
+
+fn workflow_live_surface_prompt_request(
+    session_id: &str,
+    prompt: String,
+    interaction_id: &str,
+) -> crate::delivery::LiveSurfacePromptRequest {
+    crate::delivery::LiveSurfacePromptRequest {
+        session_id: session_id.to_string(),
+        prompt,
+        interaction_id: Some(interaction_id.to_string()),
+        input_mode: wardian_core::control::MessageInputMode::Message,
+        queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
+        approval_action: None,
+        origin: None,
+        runtime_state: "workflow_live_agent",
+        mark_prompt_started: true,
+        payload_sent_detail: None,
+        delivery_message_id: None,
+    }
 }
 
 async fn fail_live_workflow_task(
@@ -368,9 +398,9 @@ async fn wait_for_live_agent_provider_ready(
 async fn wait_for_live_agent_reply(
     app_state: &crate::state::AppState,
     watch_state: std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
-    since: String,
+    mut since: String,
     request_id: &str,
-    target_session_id: &str,
+    _target_session_id: &str,
     timeout: Duration,
 ) -> Result<wardian_core::control::StructuredReply, String> {
     let started = std::time::Instant::now();
@@ -382,23 +412,17 @@ async fn wait_for_live_agent_reply(
             let guard = watch_state
                 .lock()
                 .map_err(|_| "watch state lock poisoned".to_string())?;
-            guard
-                .snapshot_since(Some(&since), Some(128 * 1024))
-                .map_err(|error| format!("watch state error: {}", error.code()))?
+            match guard.snapshot_since(Some(&since), Some(128 * 1024)) {
+                Ok(snapshot) => snapshot,
+                Err(error) if error.code() == "cursor_expired" => guard
+                    .snapshot_since(None, Some(128 * 1024))
+                    .map_err(|error| format!("watch state error: {}", error.code()))?,
+                Err(error) => return Err(format!("watch state error: {}", error.code())),
+            }
         };
+        since = snapshot.cursor.clone();
         if let Some(error) = live_agent_terminal_failure(&snapshot) {
             return Err(error);
-        }
-        if latest_terminal_status(&snapshot).as_deref() == Some("idle") {
-            if let Some((status, body)) = structured_reply_marker(&snapshot, request_id) {
-                return app_state
-                    .interactions
-                    .complete_task_with_reply(request_id, Some(target_session_id), status, &body)
-                    .await
-                    .map_err(|error| {
-                        format!("failed to record live agent workflow reply {request_id}: {error}")
-                    });
-            }
         }
         let elapsed = started.elapsed();
         if elapsed >= timeout {
@@ -408,52 +432,6 @@ async fn wait_for_live_agent_reply(
         }
         tokio::time::sleep((timeout - elapsed).min(Duration::from_millis(25))).await;
     }
-}
-
-fn structured_reply_marker(
-    snapshot: &crate::state::agent_watch::WatchSnapshot,
-    request_id: &str,
-) -> Option<(ReplyStatus, String)> {
-    snapshot
-        .transcript
-        .messages
-        .iter()
-        .rev()
-        .filter(|message| matches!(message.role.as_str(), "assistant" | "model"))
-        .find_map(|message| parse_structured_reply_marker(&message.text, request_id))
-}
-
-fn parse_structured_reply_marker(text: &str, request_id: &str) -> Option<(ReplyStatus, String)> {
-    let marker = format!("wardian reply {request_id}");
-    let lines = text.lines().collect::<Vec<_>>();
-    let marker_line_index = lines.iter().position(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with(&marker)
-            && trimmed
-                .get(marker.len()..)
-                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' '))
-    })?;
-    let command = lines[marker_line_index].trim();
-    if !command.contains("--stdin") {
-        return None;
-    }
-    let status = if command.contains("--status blocked") {
-        ReplyStatus::Blocked
-    } else if command.contains("--status failed") {
-        ReplyStatus::Failed
-    } else if command.contains("--status done") {
-        ReplyStatus::Done
-    } else {
-        return None;
-    };
-    let leading_body = lines[..marker_line_index].join("\n").trim().to_string();
-    let trailing_body = lines[marker_line_index + 1..].join("\n");
-    let body = if leading_body.is_empty() {
-        trailing_body.trim().to_string()
-    } else {
-        leading_body
-    };
-    (!body.is_empty()).then_some((status, body))
 }
 
 #[cfg(test)]
@@ -706,7 +684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_agent_reply_wait_accepts_explicit_transcript_marker_after_idle() {
+    async fn live_agent_reply_wait_ignores_printed_reply_command_after_idle() {
         let app_state = crate::state::AppState::new();
         let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
             "agent-1".to_string(),
@@ -743,24 +721,89 @@ mod tests {
             guard.push_event("status", serde_json::json!({ "status": "idle" }));
         }
 
-        let reply = wait_for_live_agent_reply(
+        let error = wait_for_live_agent_reply(
+            &app_state,
+            watch_state,
+            since,
+            &task_id,
+            "agent-1",
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("printed reply command should not complete workflow task");
+
+        assert!(error.contains("timed out waiting for live agent workflow reply"));
+        assert!(app_state
+            .interactions
+            .structured_reply(&task_id)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn live_agent_reply_wait_survives_watch_cursor_rollover() {
+        let app_state = crate::state::AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            2,
+            4096,
+        )));
+        let since = watch_state
+            .lock()
+            .expect("watch state lock")
+            .latest_cursor();
+        let task = app_state
+            .interactions
+            .create_task_with_id(
+                "wf_test_cursor_rollover".to_string(),
+                None,
+                "agent-1".to_string(),
+                InteractionBodyRef::Inline {
+                    body: "write the file".to_string(),
+                },
+            )
+            .await;
+        let task_id = task.id.clone();
+        {
+            let mut guard = watch_state.lock().expect("watch state lock");
+            guard.push_event("status", serde_json::json!({ "status": "processing" }));
+            guard.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "working".to_string(),
+                provider: "mock".to_string(),
+                turn_id: None,
+                source: None,
+            });
+            guard.push_output(b"still working");
+        }
+
+        let wait = wait_for_live_agent_reply(
             &app_state,
             watch_state,
             since,
             &task_id,
             "agent-1",
             Duration::from_secs(1),
-        )
-        .await
-        .expect("marker should complete workflow task");
+        );
+        let complete = async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            app_state
+                .interactions
+                .complete_task_with_reply(
+                    &task_id,
+                    Some("agent-1"),
+                    ReplyStatus::Done,
+                    "{\"ok\":true}",
+                )
+                .await
+                .expect("complete workflow task")
+        };
 
+        let (reply, _) = tokio::join!(wait, complete);
+
+        let reply = reply.expect("cursor rollover should not fail structured reply waits");
         assert_eq!(reply.status, ReplyStatus::Done);
-        assert_eq!(reply.body, "Final workflow output");
-        assert!(app_state
-            .interactions
-            .structured_reply(&task_id)
-            .await
-            .is_some());
+        assert_eq!(reply.body, "{\"ok\":true}");
     }
 
     #[tokio::test]
@@ -873,36 +916,27 @@ mod tests {
     }
 
     #[test]
-    fn structured_reply_marker_requires_body_and_status() {
-        assert!(parse_structured_reply_marker(
-            "wardian reply wf_test --status done --stdin",
-            "wf_test"
-        )
-        .is_none());
-        assert!(
-            parse_structured_reply_marker("body\nwardian reply wf_test --stdin", "wf_test")
-                .is_none()
+    fn workflow_prompt_tells_agent_to_execute_reply_command() {
+        let prompt = prompt_with_structured_reply_instruction("write the file", "wf_test");
+
+        assert!(prompt.contains("execute this command"));
+        assert!(prompt.contains("wardian reply wf_test --status done --stdin"));
+        assert!(prompt.contains("Do not print the command"));
+    }
+
+    #[test]
+    fn workflow_live_surface_request_marks_prompt_started_after_delivery() {
+        let request = workflow_live_surface_prompt_request(
+            "agent-1",
+            "prompt".to_string(),
+            "wf_test_processing",
         );
-    }
 
-    #[test]
-    fn structured_reply_marker_accepts_body_after_command() {
-        let (status, body) = parse_structured_reply_marker(
-            "wardian reply wf_test --status done --stdin\nSummary written.",
-            "wf_test",
-        )
-        .expect("marker-first reply should parse");
-
-        assert_eq!(status, ReplyStatus::Done);
-        assert_eq!(body, "Summary written.");
-    }
-
-    #[test]
-    fn structured_reply_marker_ignores_embedded_command_text() {
-        assert!(parse_structured_reply_marker(
-            "Please run wardian reply wf_test --status done --stdin after the work.\nSummary.",
-            "wf_test",
-        )
-        .is_none());
+        assert!(request.mark_prompt_started);
+        assert_eq!(request.runtime_state, "workflow_live_agent");
+        assert_eq!(
+            request.queue_policy,
+            wardian_core::control::QueuePolicy::LiveOnly
+        );
     }
 }

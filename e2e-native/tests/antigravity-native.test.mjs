@@ -27,7 +27,6 @@ function buildCli(harness) {
     {
       cwd: harness.repoRoot,
       encoding: "utf8",
-      shell: process.platform === "win32",
     },
   );
 

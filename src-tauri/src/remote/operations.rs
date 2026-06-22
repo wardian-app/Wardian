@@ -167,13 +167,17 @@ pub async fn run_remote_agent_action(
     match request.action.as_str() {
         "send_prompt" => {
             let state = app.state::<AppState>();
-            crate::commands::terminal::submit_prompt_to_agent(
-                request.target,
-                request.prompt.unwrap_or_default(),
-                state,
-                app.clone(),
+            crate::delivery::submit_live_surface_prompt(
+                Some(app),
+                &state,
+                crate::delivery::LiveSurfacePromptRequest::message(
+                    request.target,
+                    request.prompt.unwrap_or_default(),
+                ),
             )
             .await
+            .map_err(|error| error.to_string())
+            .map(|_| ())
         }
         "pause" => {
             let state = app.state::<AppState>();

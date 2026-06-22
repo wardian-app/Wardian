@@ -335,6 +335,33 @@ describe("GitPanel", () => {
     expect(await screen.findByText("remote rejected")).toBeInTheDocument();
   });
 
+  it("runs pull from the selected source control root", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 1,
+          files: [],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_pull") return "Already up to date.";
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.click(await screen.findByTitle("Pull"));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_pull", { cwd: "C:/repo" });
+    });
+  });
+
   it("keeps file status visible when commit history cannot be loaded", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo";

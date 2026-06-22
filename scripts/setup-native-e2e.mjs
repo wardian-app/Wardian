@@ -102,7 +102,6 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd || repoRoot,
     stdio: "inherit",
-    shell: process.platform === "win32",
     env: process.env,
   });
 

@@ -1230,7 +1230,7 @@ mod tests {
         assert!(condition_requires_queued_delivery_submission("output:DONE"));
         assert!(condition_requires_queued_delivery_submission("status:idle"));
         assert!(!condition_requires_queued_delivery_submission(
-            "delivery:submit_sent_unverified"
+            "delivery:submit_sent_unconfirmed"
         ));
         assert!(!condition_requires_queued_delivery_submission(
             "delivery:queued"

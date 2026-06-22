@@ -163,7 +163,10 @@ mod tests {
 
         assert_eq!(rx.recv().await.expect("payload"), b"hello".to_vec());
         assert_eq!(rx.recv().await.expect("submit key"), b"\r".to_vec());
-        assert_eq!(outcome.delivery_state, "submit_sent_unverified");
+        assert_eq!(
+            outcome.delivery_state,
+            crate::utils::delivery_transaction::DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED
+        );
         assert_eq!(outcome.delivery_phase, "submit_key_sent");
         assert_eq!(outcome.observed_state.as_deref(), Some("bytes_sent"));
     }

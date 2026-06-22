@@ -15,9 +15,9 @@ describe('provider option helpers', () => {
     expect(buildUngatedProviderOptions()).toEqual([
       { value: 'claude', label: 'Claude', available: true, reason: null },
       { value: 'codex', label: 'Codex', available: true, reason: null },
-      { value: 'gemini', label: 'Gemini', available: true, reason: null },
       { value: 'antigravity', label: 'Antigravity', available: true, reason: null },
       { value: 'opencode', label: 'OpenCode', available: true, reason: null },
+      { value: 'gemini', label: 'Gemini (Unmaintained)', available: true, reason: null },
     ]);
   });
 

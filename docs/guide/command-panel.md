@@ -54,7 +54,10 @@ Broadcast sends freeform text from the textarea to:
 
 Behavior:
 
-- the text is submitted as terminal input through the same backend path used by direct terminal interaction
+- prompt injection uses Wardian's structured prompt delivery path, not raw
+  terminal keystrokes
+- delivery evidence is recorded in the same shape as CLI `wardian send`
+  delivery evidence
 - one submission fan-outs to all chosen agent sessions
 
 ## Selection Rules
@@ -71,7 +74,8 @@ Behavior:
 
 ## Important Limits
 
-- Broadcasts are delivered as terminal input. They do not guarantee that a provider accepts or completes the instruction.
+- Broadcasts record delivery evidence, but unverified terminal submission does
+  not guarantee that a provider accepts or completes the instruction.
 - No selection means "all active agents" only after confirmation.
 - Quick Prompts only lists prompts starred in the Library.
 - Use [Wardian CLI](./cli.md) for scriptable waits, marker watching, or structured peer asks.

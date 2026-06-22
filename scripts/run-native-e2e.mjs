@@ -12,10 +12,7 @@ if (testTargets.length > 0) {
 
 const child = spawn(process.execPath, args, {
   stdio: "inherit",
-  env: {
-    ...process.env,
-    WARDIAN_NATIVE_SKIP_BUILD: "1",
-  },
+  env: process.env,
 });
 
 child.on("exit", (code, signal) => {
