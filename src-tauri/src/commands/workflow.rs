@@ -109,10 +109,15 @@ fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
     };
     let blueprint_path =
         resolve_blueprint_path(&state.blueprint_id).map(|path| path.to_string_lossy().to_string());
+    let schedule_id = runs::read_run_invocation(dir)
+        .ok()
+        .flatten()
+        .and_then(|invocation| invocation.schedule_id);
 
     Some(serde_json::json!({
         "run_id": state.run_id,
         "blueprint_id": state.blueprint_id,
+        "schedule_id": schedule_id,
         "status": state.status,
         "node_count": state.nodes.len(),
         "failure": state.failure,
@@ -805,6 +810,36 @@ edges:
             summary["blueprint_path"].as_str(),
             Some(blueprint_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn run_summary_carries_schedule_id_from_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(dir.path());
+        seed_workflow_blueprint(dir.path());
+        let run_root = dir
+            .path()
+            .join("logs")
+            .join("workflows")
+            .join("wf")
+            .join("run-1");
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::Running;
+        write_checkpoint(&run_root, &state).unwrap();
+        std::fs::write(
+            run_root.join("invocation.json"),
+            r#"{
+  "schema": 1,
+  "provider": "mock",
+  "workspace": "<absolute-workspace-path>",
+  "schedule_id": "schedule-trader"
+}"#,
+        )
+        .unwrap();
+
+        let summary = summarize_run_dir(&run_root).unwrap();
+
+        assert_eq!(summary["schedule_id"], "schedule-trader");
     }
 
     #[test]

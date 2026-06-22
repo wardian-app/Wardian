@@ -328,8 +328,9 @@ For each task/decision node:
 4. Execute the route.
 5. For the live/open route, create a task interaction and require the target
    agent to answer with `wardian reply <request-id> --status ... --stdin`.
-   Terminal `idle` is not completion by itself; it only enables transcript
-   marker compatibility checks. `blocked` and `failed` replies fail the node.
+   Terminal `idle` is not completion by itself, and printed reply commands are
+   not accepted as compatibility markers. `blocked` and `failed` replies fail
+   the node.
 6. Parse output using existing workflow task/decision output semantics.
 7. Release leases and update schedule/run status.
 

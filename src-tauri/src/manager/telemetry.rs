@@ -19,6 +19,7 @@ use super::opencode::{
     opencode_session_diff_path, opencode_should_fallback_to_idle,
 };
 use crate::providers::antigravity::AntigravityProvider;
+use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -211,6 +212,18 @@ fn gemini_fallback_scan_due(session_id: &str) -> bool {
     }
 }
 
+fn should_run_provider_log_telemetry(
+    _provider: &str,
+    current_status: &str,
+    process_alive: Option<bool>,
+) -> bool {
+    if process_alive == Some(false) {
+        return false;
+    }
+    !(wardian_core::identity::normalize_status(current_status) == "off"
+        && process_alive != Some(true))
+}
+
 fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
     let divisor = logical_cpu_count.max(1) as f32;
     (raw_cpu_usage / divisor).clamp(0.0, 100.0)
@@ -360,6 +373,7 @@ struct AgentSnapshot {
     provider: String,
     folder: String,
     resume_session: Option<String>,
+    provider_generation: u64,
     process_id: Option<u32>,
     query_count: Arc<Mutex<usize>>,
     init_timestamp: Arc<Mutex<Option<String>>>,
@@ -369,6 +383,18 @@ struct AgentSnapshot {
     last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     log_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
+}
+
+#[derive(Default)]
+struct TelemetryPassResult {
+    metrics: Vec<AgentTelemetry>,
+    provider_statuses: Vec<TelemetryProviderStatus>,
+}
+
+struct TelemetryProviderStatus {
+    session_id: String,
+    generation: u64,
+    status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -860,7 +886,7 @@ fn collect_app_process_pids(
 }
 
 pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
-    let snapshots: Vec<AgentSnapshot> = {
+    let mut snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
             .iter()
@@ -871,6 +897,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     resume_session: config.resume_session.clone(),
+                    provider_generation: 0,
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
                     init_timestamp: agent.init_timestamp.clone(),
@@ -884,9 +911,16 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             })
             .collect()
     };
+    for snapshot in &mut snapshots {
+        snapshot.provider_generation = state
+            .interactions
+            .current_provider_input_generation(&snapshot.session_id)
+            .await
+            .unwrap_or(0);
+    }
 
     let sys_metrics = state.system_metrics.clone();
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let session_ids = snapshots
             .iter()
             .map(|snap| snap.session_id.clone())
@@ -895,6 +929,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         let lease_now = chrono::Utc::now().to_rfc3339();
         let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
+        let mut provider_statuses = Vec::new();
         let system_snapshot = refresh_system_process_snapshot(&sys_metrics, &session_ids);
         let mut slow_agents = Vec::new();
 
@@ -971,346 +1006,360 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .filter(|value| value.starts_with("ses_"))
                 .unwrap_or(&snap.session_id);
             let gemini_session_id = snap.resume_session.as_deref().unwrap_or(&snap.session_id);
+            let status_before_log_work = snap.current_status.lock().unwrap().clone();
+            let run_provider_log_work = should_run_provider_log_telemetry(
+                &snap.provider,
+                &status_before_log_work,
+                process_alive,
+            );
 
-            if let Some(_agent_work_guard) = try_begin_agent_telemetry_work(&snap.session_id) {
-                let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
+            if run_provider_log_work {
+                if let Some(_agent_work_guard) = try_begin_agent_telemetry_work(&snap.session_id) {
+                    let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
-                if snap.provider == "gemini" {
-                    // Re-verifying the session id requires reading the whole
-                    // log, so only do it when the file changed (or vanished)
-                    // since the last parse; unchanged content cannot go stale.
-                    let last_parsed_mtime = snap
-                        .log_last_modified
-                        .lock()
-                        .ok()
-                        .and_then(|last| *last);
-                    let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
-                        let current_mtime =
-                            std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-                        match (current_mtime, last_parsed_mtime) {
-                            (Some(current), Some(last)) if current == last => false,
-                            _ => std::fs::read_to_string(path).ok().is_none_or(|content| {
-                                !gemini_log_matches_session(&content, gemini_session_id)
-                            }),
-                        }
-                    });
-                    if stale_gemini_log {
-                        *log_path_lock = None;
-                        if let Ok(mut last_modified) = snap.log_last_modified.lock() {
-                            *last_modified = None;
-                        }
-                    }
-                }
-
-                // Provider-aware log discovery
-                if snap.provider == "opencode" {
-                    let mut discovered_log = None;
-                    let log_dirs = opencode_log_dirs();
-                    for dir in &log_dirs {
-                        if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
-                            discovered_log = Some(path);
-                            break;
-                        }
-                    }
-                    if discovered_log.is_none()
-                        && snap
-                            .resume_session
-                            .as_deref()
-                            .is_none_or(|value| !value.starts_with("ses_"))
-                    {
-                        let spawn_time =
-                            snap.init_timestamp.lock().ok().and_then(|timestamp| {
-                                timestamp_to_system_time(timestamp.as_deref())
-                            });
-                        if let Some(spawn_time) = spawn_time {
-                            for dir in &log_dirs {
-                                if let Some(path) = opencode_log_path_after(dir, spawn_time) {
-                                    discovered_log = Some(path);
-                                    break;
-                                }
+                    if snap.provider == "gemini" {
+                        // Re-verifying the session id requires reading the whole
+                        // log, so only do it when the file changed (or vanished)
+                        // since the last parse; unchanged content cannot go stale.
+                        let last_parsed_mtime =
+                            snap.log_last_modified.lock().ok().and_then(|last| *last);
+                        let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
+                            let current_mtime = std::fs::metadata(path)
+                                .and_then(|meta| meta.modified())
+                                .ok();
+                            match (current_mtime, last_parsed_mtime) {
+                                (Some(current), Some(last)) if current == last => false,
+                                _ => std::fs::read_to_string(path).ok().is_none_or(|content| {
+                                    !gemini_log_matches_session(&content, gemini_session_id)
+                                }),
                             }
-                        }
-                    }
-                    *log_path_lock = discovered_log
-                        .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
-                } else if snap.provider == "antigravity" {
-                    let conversation_id = snap
-                        .resume_session
-                        .as_ref()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                        .or_else(|| {
-                            AntigravityProvider::antigravity_home().and_then(|home| {
-                                AntigravityProvider::conversation_for_workspace(
-                                    &home,
-                                    std::path::Path::new(&snap.folder),
-                                )
-                                .or_else(|| AntigravityProvider::latest_conversation_id(&home))
-                            })
                         });
-                    if let (Some(home), Some(conversation_id)) =
-                        (AntigravityProvider::antigravity_home(), conversation_id)
-                    {
-                        let candidate =
-                            AntigravityProvider::transcript_path(&home, &conversation_id);
-                        if candidate.exists() {
-                            *log_path_lock = Some(candidate);
+                        if stale_gemini_log {
+                            *log_path_lock = None;
+                            if let Ok(mut last_modified) = snap.log_last_modified.lock() {
+                                *last_modified = None;
+                            }
                         }
                     }
-                } else if snap.provider == "claude" && snap.resume_session.is_some() {
-                    // For Claude, if we have a resume_session (Conversation ID), always re-verify
-                    // the path so it updates immediately after a Clear rotation.
-                    if let Some(home) = dirs::home_dir() {
-                        let project_dir = claude_project_dir_name(&snap.folder);
-                        let session_id_to_find = snap.resume_session.as_deref().unwrap();
-                        let candidate = home
-                            .join(".claude")
-                            .join("projects")
-                            .join(&project_dir)
-                            .join(format!("{}.jsonl", session_id_to_find));
-                        if candidate.exists() {
-                            *log_path_lock = Some(candidate);
+
+                    // Provider-aware log discovery
+                    if snap.provider == "opencode" {
+                        let mut discovered_log = None;
+                        let log_dirs = opencode_log_dirs();
+                        for dir in &log_dirs {
+                            if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
+                                discovered_log = Some(path);
+                                break;
+                            }
                         }
-                    }
-                } else if log_path_lock.is_none() {
-                    match snap.provider.as_str() {
-                        "codex" => {
-                            let agent_home = get_wardian_home()
-                                .map(|home| home.join("agents").join(&snap.session_id))
-                                .filter(|path| path.exists())
-                                .map(|path| path.to_string_lossy().to_string());
-                            let codex_session_id =
-                                codex_log_lookup_session_id(snap.resume_session.as_deref())
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        latest_codex_session_index_entry(&snap.session_id)
-                                            .ok()
-                                            .flatten()
-                                            .map(|(session_id, _updated_at)| session_id)
-                                    });
-                            if let Some(codex_session_id) = codex_session_id {
-                                if let Some(path) = codex_session_file_path(
-                                    &codex_session_id,
-                                    agent_home.as_deref(),
-                                ) {
-                                    *log_path_lock = Some(path);
+                        if discovered_log.is_none()
+                            && snap
+                                .resume_session
+                                .as_deref()
+                                .is_none_or(|value| !value.starts_with("ses_"))
+                        {
+                            let spawn_time =
+                                snap.init_timestamp.lock().ok().and_then(|timestamp| {
+                                    timestamp_to_system_time(timestamp.as_deref())
+                                });
+                            if let Some(spawn_time) = spawn_time {
+                                for dir in &log_dirs {
+                                    if let Some(path) = opencode_log_path_after(dir, spawn_time) {
+                                        discovered_log = Some(path);
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        "claude" => {
-                            // Fallback for initial spawn where resume_session might not be set yet
-                            if let Some(home) = dirs::home_dir() {
-                                let project_dir = claude_project_dir_name(&snap.folder);
-                                let candidate = home
-                                    .join(".claude")
-                                    .join("projects")
-                                    .join(&project_dir)
-                                    .join(format!("{}.jsonl", snap.session_id));
-                                if candidate.exists() {
-                                    *log_path_lock = Some(candidate);
-                                }
+                        *log_path_lock = discovered_log
+                            .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
+                    } else if snap.provider == "antigravity" {
+                        let conversation_id = snap
+                            .resume_session
+                            .as_ref()
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty())
+                            .or_else(|| {
+                                AntigravityProvider::antigravity_home().and_then(|home| {
+                                    AntigravityProvider::conversation_for_workspace(
+                                        &home,
+                                        std::path::Path::new(&snap.folder),
+                                    )
+                                    .or_else(|| AntigravityProvider::latest_conversation_id(&home))
+                                })
+                            });
+                        if let (Some(home), Some(conversation_id)) =
+                            (AntigravityProvider::antigravity_home(), conversation_id)
+                        {
+                            let candidate =
+                                AntigravityProvider::transcript_path(&home, &conversation_id);
+                            if candidate.exists() {
+                                *log_path_lock = Some(candidate);
                             }
                         }
-                        _ => {
-                            // Gemini: scan ~/.gemini/tmp for chat log files.
-                            // Bounded to recent candidates with prefix reads,
-                            // and retried only after the backoff TTL when
-                            // nothing matched.
-                            if let Some(home) = dirs::home_dir()
-                                .filter(|_| gemini_fallback_scan_due(&snap.session_id))
-                            {
-                                let tmp_dir = home.join(".gemini").join("tmp");
-                                if let Some(path) =
-                                    discover_gemini_log_in_tmp(&tmp_dir, gemini_session_id)
+                    } else if snap.provider == "claude" && snap.resume_session.is_some() {
+                        // For Claude, if we have a resume_session (Conversation ID), always re-verify
+                        // the path so it updates immediately after a Clear rotation.
+                        if let Some(home) = dirs::home_dir() {
+                            let project_dir = claude_project_dir_name(&snap.folder);
+                            let session_id_to_find = snap.resume_session.as_deref().unwrap();
+                            let candidate = home
+                                .join(".claude")
+                                .join("projects")
+                                .join(&project_dir)
+                                .join(format!("{}.jsonl", session_id_to_find));
+                            if candidate.exists() {
+                                *log_path_lock = Some(candidate);
+                            }
+                        }
+                    } else if log_path_lock.is_none() {
+                        match snap.provider.as_str() {
+                            "codex" => {
+                                let agent_home = get_wardian_home()
+                                    .map(|home| home.join("agents").join(&snap.session_id))
+                                    .filter(|path| path.exists())
+                                    .map(|path| path.to_string_lossy().to_string());
+                                let codex_session_id =
+                                    codex_log_lookup_session_id(snap.resume_session.as_deref())
+                                        .map(str::to_string)
+                                        .or_else(|| {
+                                            latest_codex_session_index_entry(&snap.session_id)
+                                                .ok()
+                                                .flatten()
+                                                .map(|(session_id, _updated_at)| session_id)
+                                        });
+                                if let Some(codex_session_id) = codex_session_id {
+                                    if let Some(path) = codex_session_file_path(
+                                        &codex_session_id,
+                                        agent_home.as_deref(),
+                                    ) {
+                                        *log_path_lock = Some(path);
+                                    }
+                                }
+                            }
+                            "claude" => {
+                                // Fallback for initial spawn where resume_session might not be set yet
+                                if let Some(home) = dirs::home_dir() {
+                                    let project_dir = claude_project_dir_name(&snap.folder);
+                                    let candidate = home
+                                        .join(".claude")
+                                        .join("projects")
+                                        .join(&project_dir)
+                                        .join(format!("{}.jsonl", snap.session_id));
+                                    if candidate.exists() {
+                                        *log_path_lock = Some(candidate);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Gemini: scan ~/.gemini/tmp for chat log files.
+                                // Bounded to recent candidates with prefix reads,
+                                // and retried only after the backoff TTL when
+                                // nothing matched.
+                                if let Some(home) = dirs::home_dir()
+                                    .filter(|_| gemini_fallback_scan_due(&snap.session_id))
                                 {
-                                    *log_path_lock = Some(path);
+                                    let tmp_dir = home.join(".gemini").join("tmp");
+                                    if let Some(path) =
+                                        discover_gemini_log_in_tmp(&tmp_dir, gemini_session_id)
+                                    {
+                                        *log_path_lock = Some(path);
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Provider-aware log parsing for status/query enrichment
-                if let Some(ref path) = *log_path_lock {
-                    let mut should_parse = true;
-                    let mut new_mtime = None;
-                    let mut is_initial_log_replay = snap
-                        .log_last_modified
-                        .lock()
-                        .map(|last| last.is_none())
-                        .unwrap_or(false);
-                    if let Ok(metadata) = std::fs::metadata(path) {
-                        if let Ok(modified) = metadata.modified() {
-                            let last_mod = *snap.log_last_modified.lock().unwrap();
-                            if last_mod == Some(modified) {
-                                should_parse = false;
-                            } else {
-                                is_initial_log_replay = last_mod.is_none();
-                                new_mtime = Some(modified);
+                    // Provider-aware log parsing for status/query enrichment
+                    if let Some(ref path) = *log_path_lock {
+                        let mut should_parse = true;
+                        let mut new_mtime = None;
+                        let mut is_initial_log_replay = snap
+                            .log_last_modified
+                            .lock()
+                            .map(|last| last.is_none())
+                            .unwrap_or(false);
+                        if let Ok(metadata) = std::fs::metadata(path) {
+                            if let Ok(modified) = metadata.modified() {
+                                let last_mod = *snap.log_last_modified.lock().unwrap();
+                                if last_mod == Some(modified) {
+                                    should_parse = false;
+                                } else {
+                                    is_initial_log_replay = last_mod.is_none();
+                                    new_mtime = Some(modified);
+                                }
                             }
                         }
-                    }
 
-                    if should_parse {
-                        if let Ok(content) = read_log_bounded(path) {
-                            if let Some(mtime) = new_mtime {
-                                *snap.log_last_modified.lock().unwrap() = Some(mtime);
-                            }
-                            match snap.provider.as_str() {
-                                "codex" => {
-                                    let lines: Vec<serde_json::Value> = content
-                                        .lines()
-                                        .filter_map(|l| serde_json::from_str(l).ok())
-                                        .collect();
+                        if should_parse {
+                            if let Ok(content) = read_log_bounded(path) {
+                                if let Some(mtime) = new_mtime {
+                                    *snap.log_last_modified.lock().unwrap() = Some(mtime);
+                                }
+                                match snap.provider.as_str() {
+                                    "codex" => {
+                                        let lines: Vec<serde_json::Value> = content
+                                            .lines()
+                                            .filter_map(|l| serde_json::from_str(l).ok())
+                                            .collect();
 
-                                    q_count = lines
-                                        .iter()
-                                        .filter(|l| {
+                                        q_count = lines
+                                            .iter()
+                                            .filter(|l| {
+                                                l.get("type").and_then(|v| v.as_str())
+                                                    == Some("event_msg")
+                                                    && l.get("payload")
+                                                        .and_then(|v| v.get("type"))
+                                                        .and_then(|v| v.as_str())
+                                                        == Some("user_message")
+                                            })
+                                            .count();
+
+                                        if let Some(meta) = lines.iter().find(|l| {
                                             l.get("type").and_then(|v| v.as_str())
-                                                == Some("event_msg")
-                                                && l.get("payload")
-                                                    .and_then(|v| v.get("type"))
-                                                    .and_then(|v| v.as_str())
-                                                    == Some("user_message")
-                                        })
-                                        .count();
+                                                == Some("session_meta")
+                                        }) {
+                                            if let Some(ts) = meta
+                                                .get("payload")
+                                                .and_then(|v| v.get("timestamp"))
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                i_ts = Some(ts.to_string());
+                                            }
+                                        }
 
-                                    if let Some(meta) = lines.iter().find(|l| {
-                                        l.get("type").and_then(|v| v.as_str())
-                                            == Some("session_meta")
-                                    }) {
-                                        if let Some(ts) = meta
-                                            .get("payload")
-                                            .and_then(|v| v.get("timestamp"))
-                                            .and_then(|v| v.as_str())
-                                        {
-                                            i_ts = Some(ts.to_string());
+                                        if let Some(status) = codex_status_from_log(&lines) {
+                                            set_snapshot_status_from_log(
+                                                snap,
+                                                &status,
+                                                is_initial_log_replay,
+                                            );
                                         }
                                     }
+                                    "claude" => {
+                                        // Claude logs are JSONL — one JSON object per line
+                                        let lines: Vec<serde_json::Value> = content
+                                            .lines()
+                                            .filter_map(|l| serde_json::from_str(l).ok())
+                                            .collect();
 
-                                    if let Some(status) = codex_status_from_log(&lines) {
+                                        q_count = lines
+                                            .iter()
+                                            .filter(|l| {
+                                                l.get("type").and_then(|v| v.as_str())
+                                                    == Some("user")
+                                                    && claude_is_real_user_query(l)
+                                            })
+                                            .count();
+
+                                        if let Some(first) = lines.first() {
+                                            if let Some(ts) =
+                                                first.get("timestamp").and_then(|v| v.as_str())
+                                            {
+                                                i_ts = Some(ts.to_string());
+                                            } else if let Some(ts_num) =
+                                                first.get("timestamp").and_then(|v| v.as_i64())
+                                            {
+                                                // Fallback if timestamp is an epoch number
+                                                if let Some(dt) =
+                                                    chrono::DateTime::from_timestamp_millis(ts_num)
+                                                {
+                                                    i_ts = Some(dt.to_rfc3339_opts(
+                                                        chrono::SecondsFormat::Millis,
+                                                        true,
+                                                    ));
+                                                }
+                                            }
+                                        }
+
+                                        apply_claude_log_status(
+                                            snap,
+                                            &lines,
+                                            is_initial_log_replay,
+                                        );
+                                    }
+                                    "opencode" => {
+                                        let mut status =
+                                            snap.current_status.lock().unwrap().clone();
+                                        let effective_session_id =
+                                            opencode_extract_created_session_id_for_agent(
+                                                path,
+                                                &snap.session_id,
+                                            )
+                                            .unwrap_or_else(|| opencode_session_id.to_string());
+                                        apply_opencode_log_metrics(
+                                            &content,
+                                            &effective_session_id,
+                                            &mut q_count,
+                                            &mut i_ts,
+                                            &mut status,
+                                        );
+                                        if wardian_core::identity::normalize_status(&status)
+                                            == "idle"
+                                        {
+                                            record_latest_opencode_assistant_text(
+                                                snap,
+                                                &effective_session_id,
+                                            );
+                                        }
                                         set_snapshot_status_from_log(
                                             snap,
                                             &status,
                                             is_initial_log_replay,
                                         );
                                     }
-                                }
-                                "claude" => {
-                                    // Claude logs are JSONL — one JSON object per line
-                                    let lines: Vec<serde_json::Value> = content
-                                        .lines()
-                                        .filter_map(|l| serde_json::from_str(l).ok())
-                                        .collect();
-
-                                    q_count = lines
-                                        .iter()
-                                        .filter(|l| {
-                                            l.get("type").and_then(|v| v.as_str()) == Some("user")
-                                                && claude_is_real_user_query(l)
-                                        })
-                                        .count();
-
-                                    if let Some(first) = lines.first() {
-                                        if let Some(ts) =
-                                            first.get("timestamp").and_then(|v| v.as_str())
-                                        {
-                                            i_ts = Some(ts.to_string());
-                                        } else if let Some(ts_num) =
-                                            first.get("timestamp").and_then(|v| v.as_i64())
-                                        {
-                                            // Fallback if timestamp is an epoch number
-                                            if let Some(dt) =
-                                                chrono::DateTime::from_timestamp_millis(ts_num)
-                                            {
-                                                i_ts = Some(dt.to_rfc3339_opts(
-                                                    chrono::SecondsFormat::Millis,
-                                                    true,
-                                                ));
-                                            }
-                                        }
-                                    }
-
-                                    apply_claude_log_status(snap, &lines, is_initial_log_replay);
-                                }
-                                "opencode" => {
-                                    let mut status = snap.current_status.lock().unwrap().clone();
-                                    let effective_session_id =
-                                        opencode_extract_created_session_id_for_agent(
-                                            path,
-                                            &snap.session_id,
-                                        )
-                                        .unwrap_or_else(|| opencode_session_id.to_string());
-                                    apply_opencode_log_metrics(
-                                        &content,
-                                        &effective_session_id,
-                                        &mut q_count,
-                                        &mut i_ts,
-                                        &mut status,
-                                    );
-                                    if wardian_core::identity::normalize_status(&status) == "idle" {
-                                        record_latest_opencode_assistant_text(
-                                            snap,
-                                            &effective_session_id,
-                                        );
-                                    }
-                                    set_snapshot_status_from_log(
-                                        snap,
-                                        &status,
-                                        is_initial_log_replay,
-                                    );
-                                }
-                                "antigravity" => {
-                                    let (queries, start_time, status) =
-                                        parse_antigravity_log_metrics(&content);
-                                    q_count = queries;
-                                    if let Some(status) = status {
-                                        set_snapshot_status_from_log(
-                                            snap,
-                                            status,
-                                            is_initial_log_replay,
-                                        );
-                                    }
-                                    if start_time.is_some() {
-                                        i_ts = start_time;
-                                    }
-                                    record_latest_antigravity_assistant_text(snap, &content);
-                                }
-                                _ => {
-                                    if let Some(metrics) = parse_gemini_log_metrics(&content) {
-                                        q_count = metrics.query_count;
-                                        if let Some(status) = metrics.status {
+                                    "antigravity" => {
+                                        let (queries, start_time, status) =
+                                            parse_antigravity_log_metrics(&content);
+                                        q_count = queries;
+                                        if let Some(status) = status {
                                             set_snapshot_status_from_log(
                                                 snap,
                                                 status,
                                                 is_initial_log_replay,
                                             );
                                         }
-                                        if let Some(start_time) = metrics.init_timestamp {
-                                            i_ts = Some(start_time);
+                                        if start_time.is_some() {
+                                            i_ts = start_time;
                                         }
+                                        record_latest_antigravity_assistant_text(snap, &content);
                                     }
-                                    if snap.provider == "gemini" {
-                                        record_latest_gemini_assistant_text(snap, &content);
+                                    _ => {
+                                        if let Some(metrics) = parse_gemini_log_metrics(&content) {
+                                            q_count = metrics.query_count;
+                                            if let Some(status) = metrics.status {
+                                                set_snapshot_status_from_log(
+                                                    snap,
+                                                    status,
+                                                    is_initial_log_replay,
+                                                );
+                                            }
+                                            if let Some(start_time) = metrics.init_timestamp {
+                                                i_ts = Some(start_time);
+                                            }
+                                        }
+                                        if snap.provider == "gemini" {
+                                            record_latest_gemini_assistant_text(snap, &content);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                if q_count > 0 {
-                    *snap.query_count.lock().unwrap() = q_count;
+                    if q_count > 0 {
+                        *snap.query_count.lock().unwrap() = q_count;
+                    }
+                    if let Some(ts) = i_ts {
+                        *snap.init_timestamp.lock().unwrap() = Some(ts);
+                    }
+                    log_path_display = log_path_lock.as_ref().map(|p| display_log_path(p));
+                } else {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Skipped overlapping telemetry log work for {}",
+                        snap.session_id
+                    ));
                 }
-                if let Some(ts) = i_ts {
-                    *snap.init_timestamp.lock().unwrap() = Some(ts);
-                }
-                log_path_display = log_path_lock.as_ref().map(|p| display_log_path(p));
-            } else {
-                crate::utils::logging::log_debug(&format!(
-                    "[Wardian] Skipped overlapping telemetry log work for {}",
-                    snap.session_id
-                ));
             }
 
             if (snap.provider == "opencode"
@@ -1347,6 +1396,11 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             } else {
                 snap.current_status.lock().unwrap().clone()
             };
+            provider_statuses.push(TelemetryProviderStatus {
+                session_id: snap.session_id.clone(),
+                generation: snap.provider_generation,
+                status: snap.current_status.lock().unwrap().clone(),
+            });
 
             results.push(AgentTelemetry {
                 session_id: snap.session_id.clone(),
@@ -1379,10 +1433,53 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
         if let Some(message) = timings.slow_log_message(TELEMETRY_SLOW_PASS_THRESHOLD) {
             crate::utils::logging::log_debug(&message);
         }
-        results
+        TelemetryPassResult {
+            metrics: results,
+            provider_statuses,
+        }
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+    apply_provider_status_observations(state, &result.provider_statuses).await;
+    result.metrics
+}
+
+async fn apply_provider_status_observations(
+    state: &AppState,
+    observations: &[TelemetryProviderStatus],
+) {
+    for observation in observations {
+        let readiness = provider_readiness_from_status(&observation.status);
+        let ready_evidence = (readiness == ProviderInputReadiness::Ready)
+            .then_some(ProviderReadyEvidence::ProviderEvent);
+        state
+            .interactions
+            .record_provider_input_state(
+                &observation.session_id,
+                observation.generation,
+                readiness,
+                ready_evidence,
+            )
+            .await;
+        if readiness == ProviderInputReadiness::Ready {
+            crate::control::drain_mailbox_for_idle_agent_from_status_observation(
+                None,
+                state,
+                &observation.session_id,
+            )
+            .await;
+        }
+    }
+}
+
+fn provider_readiness_from_status(status: &str) -> ProviderInputReadiness {
+    match wardian_core::identity::normalize_status(status).as_str() {
+        "idle" => ProviderInputReadiness::Ready,
+        "processing" => ProviderInputReadiness::Busy,
+        "action_required" => ProviderInputReadiness::ActionRequired,
+        "off" | "error" => ProviderInputReadiness::Unavailable,
+        _ => ProviderInputReadiness::Unknown,
+    }
 }
 
 pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
@@ -1486,6 +1583,7 @@ mod tests {
             provider: "opencode".to_string(),
             folder: "D:/work".to_string(),
             resume_session: None,
+            provider_generation: 0,
             process_id: Some(1234),
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(None)),
@@ -1831,7 +1929,10 @@ mod tests {
         content.push_str("gemini-session-1\"]}");
         std::fs::write(&path, content).expect("write big chat");
 
-        assert!(!super::gemini_log_prefix_contains(&path, "gemini-session-1"));
+        assert!(!super::gemini_log_prefix_contains(
+            &path,
+            "gemini-session-1"
+        ));
         assert!(!super::gemini_log_prefix_contains(&path, ""));
     }
 

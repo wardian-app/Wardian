@@ -13,6 +13,8 @@ const FRONTEND_PATTERNS = [
 ];
 
 const NON_VISUAL_FRONTEND_PATTERNS = [
+  /^src\/types\/.+\.(ts|tsx)$/,
+  /^src\/utils\/terminalInput\.ts$/,
   /^src\/.+\.test\.(ts|tsx)$/,
 ];
 

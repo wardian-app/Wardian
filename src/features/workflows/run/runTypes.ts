@@ -35,6 +35,7 @@ export interface RunState {
 export interface RunSummary {
   run_id: string;
   blueprint_id: string;
+  schedule_id?: string | null;
   status: RunStatusKind;
   node_count: number;
   failure?: string | null;

@@ -5,6 +5,7 @@ const MAX_TERMINAL_RECORDS_PER_TARGET: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailboxMessageDraft {
+    pub interaction_id: String,
     pub target_session_id: String,
     pub body: String,
     pub input_mode: MessageInputMode,
@@ -18,6 +19,7 @@ pub struct MailboxMessageDraft {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailboxMessageRecord {
     pub id: String,
+    pub interaction_id: String,
     pub target_session_id: String,
     pub body: String,
     pub input_mode: MessageInputMode,
@@ -68,6 +70,7 @@ impl MailboxState {
         let id = self.next_message_id();
         let record = MailboxMessageRecord {
             id,
+            interaction_id: draft.interaction_id,
             target_session_id: draft.target_session_id,
             body: draft.body,
             input_mode: draft.input_mode,
@@ -195,6 +198,7 @@ mod tests {
 
     fn message_for(target_session_id: &str, body: &str) -> MailboxMessageDraft {
         MailboxMessageDraft {
+            interaction_id: format!("int_{target_session_id}_{body}"),
             target_session_id: target_session_id.to_string(),
             body: body.to_string(),
             input_mode: MessageInputMode::Message,
@@ -216,6 +220,15 @@ mod tests {
         assert_eq!(record.phase, MailboxDeliveryPhase::Queued);
         assert!(record.id.starts_with("msg_"));
         assert_eq!(mailbox.all().len(), 1);
+    }
+
+    #[test]
+    fn queued_message_preserves_interaction_id() {
+        let mut mailbox = MailboxState::default();
+
+        let record = mailbox.enqueue(message_for("agent-1", "hello"));
+
+        assert_eq!(record.interaction_id, "int_agent-1_hello");
     }
 
     #[test]
@@ -264,6 +277,7 @@ mod tests {
         };
 
         let record = mailbox.enqueue(MailboxMessageDraft {
+            interaction_id: "int_approval".to_string(),
             target_session_id: "agent-1".to_string(),
             body: "approve".to_string(),
             input_mode: MessageInputMode::ApprovalAction,

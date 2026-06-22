@@ -120,17 +120,18 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   );
   const activities = useMemo(() => buildActivities(runs, schedules), [runs, schedules]);
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
-  const olderHistoryRuns = useMemo(() => olderHistoryRunsFor(runs, latestRuns), [runs, latestRuns]);
-  const visibleOlderHistoryLimit = Math.min(visibleOlderHistoryCount, olderHistoryRuns.length);
-  const visibleOlderHistoryRuns = useMemo(
-    () => olderHistoryRuns.slice(0, visibleOlderHistoryLimit),
-    [olderHistoryRuns, visibleOlderHistoryLimit],
+  const historyRuns = useMemo(() => chronologicalHistoryRuns(runs), [runs]);
+  const visibleHistoryLimit = Math.min(HISTORY_PAGE_SIZE + visibleOlderHistoryCount, historyRuns.length);
+  const visibleHistoryRuns = useMemo(
+    () => historyRuns.slice(0, visibleHistoryLimit),
+    [historyRuns, visibleHistoryLimit],
   );
   const visibleSections = useMemo(() => sectionsForFilter(filter), [filter]);
   const agentLabels = useMemo(() => agentLabelMap(agents), [agents]);
   const historyFilterActive = filter === 'history';
-  const hasVisibleActivity = visibleSections.some((section) => groupedActivities[section].length > 0)
-    || (historyFilterActive && olderHistoryRuns.length > 0);
+  const hasVisibleActivity = historyFilterActive
+    ? historyRuns.length > 0
+    : visibleSections.some((section) => groupedActivities[section].length > 0);
 
   const failedRuns = latestRuns.filter((run) => run.status === 'failed');
   const failedRunBlueprintIds = new Set(failedRuns.map((run) => run.blueprint_id));
@@ -184,24 +185,26 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
 
         <div className="min-h-0 overflow-y-auto p-3">
           {visibleSections.map((section) => {
-            const items = groupedActivities[section];
-            const hasOlderHistory = historyFilterActive && section === 'history' && olderHistoryRuns.length > 0;
-            if (items.length === 0 && !hasOlderHistory) return null;
+            const isHistorySection = historyFilterActive && section === 'history';
+            const items = isHistorySection ? [] : groupedActivities[section];
+            const historyItems = isHistorySection ? visibleHistoryRuns : [];
+            if (items.length === 0 && historyItems.length === 0) return null;
             return (
               <ActivitySection
                 key={section}
                 title={SECTION_LABELS[section]}
                 activities={items}
-                olderRuns={hasOlderHistory ? visibleOlderHistoryRuns : []}
-                remainingOlderRuns={hasOlderHistory ? Math.max(0, olderHistoryRuns.length - visibleOlderHistoryRuns.length) : 0}
+                olderRuns={historyItems}
+                remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
                 agentLabels={agentLabels}
                 onOpenRun={onOpenRun}
                 onPause={pause}
                 onResume={resume}
                 onRunNow={runNow}
                 onEditSchedule={onEditSchedule}
-                onShowMoreOlderRuns={() => setVisibleOlderHistoryCount((count) => Math.min(olderHistoryRuns.length, count + HISTORY_PAGE_SIZE))}
+                onShowMoreOlderRuns={() => setVisibleOlderHistoryCount((count) => Math.min(historyRuns.length, count + HISTORY_PAGE_SIZE))}
                 onResetOlderRuns={() => setVisibleOlderHistoryCount(0)}
+                canResetOlderRuns={isHistorySection && visibleOlderHistoryCount > 0}
               />
             );
           })}
@@ -229,6 +232,7 @@ function ActivitySection({
   onEditSchedule,
   onShowMoreOlderRuns,
   onResetOlderRuns,
+  canResetOlderRuns,
 }: {
   title: string;
   activities: WorkflowActivity[];
@@ -242,6 +246,7 @@ function ActivitySection({
   onEditSchedule: (schedule: WorkflowSchedule) => void;
   onShowMoreOlderRuns: () => void;
   onResetOlderRuns: () => void;
+  canResetOlderRuns: boolean;
 }) {
   const visibleCount = activities.length + olderRuns.length;
   const showMoreCount = Math.min(HISTORY_PAGE_SIZE, remainingOlderRuns);
@@ -278,7 +283,7 @@ function ActivitySection({
             onEditSchedule={onEditSchedule}
           />
         ))}
-        {remainingOlderRuns > 0 || olderRuns.length > 0 ? (
+        {remainingOlderRuns > 0 || canResetOlderRuns ? (
           <div className="flex flex-wrap items-center justify-center gap-2 border-t border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2">
             {remainingOlderRuns > 0 ? (
               <button
@@ -290,7 +295,7 @@ function ActivitySection({
                 Show {showMoreCount} older
               </button>
             ) : null}
-            {olderRuns.length > 0 ? (
+            {canResetOlderRuns ? (
               <button
                 type="button"
                 onClick={onResetOlderRuns}
@@ -445,6 +450,7 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     .filter((run) => run.status === 'running' || run.status === 'awaiting_approval')
     .sort(compareRunRecency);
   const activeBlueprintIds = new Set(activeRuns.map((run) => run.blueprint_id));
+  const activeScheduleIds = new Set(activeRuns.map((run) => run.schedule_id).filter(isPresent));
   const scheduleBlueprintIds = new Set(schedules.map((schedule) => schedule.blueprint_id));
   const scheduleCounts = schedules.reduce<Record<string, number>>((counts, schedule) => {
     counts[schedule.blueprint_id] = (counts[schedule.blueprint_id] ?? 0) + 1;
@@ -455,7 +461,10 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     const workflowSchedules = schedules
       .filter((schedule) => schedule.blueprint_id === run.blueprint_id)
       .sort(compareScheduleRecency);
-    const unambiguousSchedule = workflowSchedules.length === 1 ? workflowSchedules[0] : null;
+    const matchingSchedule = run.schedule_id
+      ? workflowSchedules.find((schedule) => schedule.id === run.schedule_id) ?? null
+      : null;
+    const unambiguousSchedule = matchingSchedule ?? (workflowSchedules.length === 1 ? workflowSchedules[0] : null);
     activities.push(activityFromParts({
       activityId: `run:${run.run_id}`,
       blueprintId: run.blueprint_id,
@@ -468,8 +477,9 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
   }
 
   for (const schedule of schedules) {
+    if (activeScheduleIds.has(schedule.id)) continue;
     if (activeBlueprintIds.has(schedule.blueprint_id) && scheduleCounts[schedule.blueprint_id] === 1) continue;
-    const workflowRuns = runs.filter((run) => run.blueprint_id === schedule.blueprint_id);
+    const workflowRuns = runs.filter((run) => runBelongsToSchedule(run, schedule, scheduleCounts[schedule.blueprint_id] ?? 0));
     const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
     activities.push(activityFromParts({
       activityId: `schedule:${schedule.id}`,
@@ -499,6 +509,16 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
   }
 
   return activities.sort(compareActivities);
+}
+
+function runBelongsToSchedule(run: RunSummary, schedule: WorkflowSchedule, scheduleCount: number) {
+  if (run.blueprint_id !== schedule.blueprint_id) return false;
+  if (run.schedule_id) return run.schedule_id === schedule.id;
+  return scheduleCount === 1;
+}
+
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }
 
 function activityFromParts(parts: {
@@ -648,11 +668,9 @@ function latestRunPerBlueprint(runs: RunSummary[]) {
   return [...latest.values()];
 }
 
-function olderHistoryRunsFor(runs: RunSummary[], latestRuns: RunSummary[]) {
-  const latestRunIds = new Set(latestRuns.map((run) => run.run_id));
+function chronologicalHistoryRuns(runs: RunSummary[]) {
   return runs
     .filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval')
-    .filter((run) => !latestRunIds.has(run.run_id))
     .sort(compareRunRecency);
 }
 
