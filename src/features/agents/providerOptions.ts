@@ -1,7 +1,7 @@
 import type { DefaultProviderSetting } from "../../types/settings";
 import type { ProviderReadiness, UserFacingProviderName } from "../../types";
 
-export const PROVIDER_ORDER: UserFacingProviderName[] = ["claude", "codex", "gemini", "antigravity", "opencode"];
+export const PROVIDER_ORDER: UserFacingProviderName[] = ["claude", "codex", "antigravity", "opencode", "gemini"];
 
 export interface ProviderOption {
   value: UserFacingProviderName;
@@ -17,7 +17,7 @@ export function providerDisplayName(provider: UserFacingProviderName): string {
     case "codex":
       return "Codex";
     case "gemini":
-      return "Gemini";
+      return "Gemini (Unmaintained)";
     case "antigravity":
       return "Antigravity";
     case "opencode":
