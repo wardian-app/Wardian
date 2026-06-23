@@ -1,9 +1,10 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { buildAgentGraph, type GraphRelationshipReason } from "../features/graph/graphProjection";
 import { buildGardenAgentUnits, buildGardenWorkflowUnits } from "../features/garden/gardenProjection";
 import { GardenCanvas } from "../features/garden/GardenCanvas";
+import { unitKey } from "../features/garden/garden.types";
 import { useGardenWorkflows } from "../features/garden/useGardenWorkflows";
 import { useGardenStore } from "../store/useGardenStore";
 
@@ -40,6 +41,11 @@ export const GardenView: React.FC<GardenViewProps> = ({
   const setPosition = useGardenStore((s) => s.setPosition);
   const workflowInputs = useGardenWorkflows();
 
+  // Canvas highlight is keyed by unitKey so agent and workflow ids can't collide,
+  // and it stays local so selecting a workflow never leaks into the app's
+  // agent-only selection set. Agent clicks still propagate up (for Grid routing).
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
   const projection = useMemo(
     () =>
       buildAgentGraph({
@@ -58,15 +64,23 @@ export const GardenView: React.FC<GardenViewProps> = ({
   const agentUnits = useMemo(() => buildGardenAgentUnits(projection, positions), [projection, positions]);
   const workflowUnits = useMemo(() => buildGardenWorkflowUnits(workflowInputs, positions), [workflowInputs, positions]);
 
-  const selectedId = selectedAgentIds.size === 1 ? [...selectedAgentIds][0] : null;
+  // Fall back to an externally-selected single agent (e.g. chosen in Grid) when
+  // there is no local Garden selection yet.
+  const externalAgentKey =
+    selectedAgentIds.size === 1 ? unitKey({ kind: "agent", id: [...selectedAgentIds][0] }) : null;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <GardenCanvas
         agentUnits={agentUnits}
         workflowUnits={workflowUnits}
-        selectedId={selectedId}
-        onSelect={(id) => onSelectionChange(new Set([id]))}
+        selectedKey={selectedKey ?? externalAgentKey}
+        onSelect={(ref) => {
+          setSelectedKey(unitKey(ref));
+          if (ref.kind === "agent") {
+            onSelectionChange(new Set([ref.id]));
+          }
+        }}
         onOpenAgent={onOpenAgentInGrid}
         onMoveUnit={(key, x, y) => setPosition(key, { x, y })}
       />

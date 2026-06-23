@@ -3,14 +3,14 @@ import { Layer, Stage } from "react-konva";
 import type Konva from "konva";
 import { AgentUnit } from "./AgentUnit";
 import { WorkflowUnit } from "./WorkflowUnit";
-import type { GardenAgentUnit, GardenWorkflowUnit } from "./garden.types";
+import type { GardenAgentUnit, GardenEntityRef, GardenWorkflowUnit } from "./garden.types";
 import { unitKey } from "./garden.types";
 
 interface GardenCanvasProps {
   agentUnits: GardenAgentUnit[];
   workflowUnits: GardenWorkflowUnit[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  selectedKey: string | null;
+  onSelect: (ref: GardenEntityRef) => void;
   onOpenAgent: (id: string) => void;
   onMoveUnit: (key: string, x: number, y: number) => void;
 }
@@ -22,7 +22,7 @@ const ZOOM_STEP = 1.05;
 export const GardenCanvas: React.FC<GardenCanvasProps> = ({
   agentUnits,
   workflowUnits,
-  selectedId,
+  selectedKey,
   onSelect,
   onOpenAgent,
   onMoveUnit,
@@ -64,8 +64,8 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
             <WorkflowUnit
               key={unitKey(unit.ref)}
               unit={unit}
-              selected={selectedId === unit.ref.id}
-              onSelect={onSelect}
+              selected={selectedKey === unitKey(unit.ref)}
+              onSelect={() => onSelect(unit.ref)}
               onDragMove={(x, y) => onMoveUnit(unitKey(unit.ref), x, y)}
             />
           ))}
@@ -73,8 +73,8 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
             <AgentUnit
               key={unitKey(unit.ref)}
               unit={unit}
-              selected={selectedId === unit.ref.id}
-              onSelect={onSelect}
+              selected={selectedKey === unitKey(unit.ref)}
+              onSelect={() => onSelect(unit.ref)}
               onOpen={onOpenAgent}
               onDragMove={(x, y) => onMoveUnit(unitKey(unit.ref), x, y)}
             />

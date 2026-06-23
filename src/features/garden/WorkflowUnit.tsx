@@ -19,7 +19,7 @@ const MAX_PIPS = 6;
 export const WorkflowUnit: React.FC<WorkflowUnitProps> = ({ unit, selected, onSelect, onDragMove }) => {
   const fill = resolveCssVar(workflowStatusColor(unit.runStatus));
   const pulse = useGardenPulse(isActiveWorkflowStatus(unit.runStatus));
-  const pips = Math.min(unit.nodeCount, MAX_PIPS);
+  const pips = Math.min(Math.max(unit.nodeCount, 0), MAX_PIPS);
 
   return (
     <Group

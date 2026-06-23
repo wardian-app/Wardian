@@ -16,7 +16,7 @@ describe("GardenCanvas", () => {
       <GardenCanvas
         agentUnits={[{ ref: { kind: "agent", id: "a1" }, label: "Alpha", status: "Idle", color: "#fff", recent: false, position: { x: 0, y: 0 } }]}
         workflowUnits={[{ ref: { kind: "workflow", id: "w1" }, label: "Build", runStatus: "none", nodeCount: 1, position: { x: 0, y: 0 } }]}
-        selectedId={null}
+        selectedKey={null}
         onSelect={vi.fn()}
         onOpenAgent={vi.fn()}
         onMoveUnit={vi.fn()}
