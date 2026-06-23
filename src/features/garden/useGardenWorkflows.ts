@@ -40,7 +40,8 @@ export function useGardenWorkflows(): GardenWorkflowInput[] {
   const [workflows, setWorkflows] = useState<GardenWorkflowInput[]>([]);
 
   const load = useCallback(async () => {
-    const refs = await invoke<BlueprintRef[]>("workflow_list_blueprints").catch(() => []);
+    // `invoke` can resolve to null (not just reject), so coalesce to [] before mapping.
+    const refs = (await invoke<BlueprintRef[]>("workflow_list_blueprints").catch(() => [])) ?? [];
     const parsedRaw = await Promise.all(
       refs.map(async (ref) => {
         const result = await invoke<{ blueprint: Blueprint }>("workflow_parse", { path: ref.path }).catch(() => null);
@@ -53,7 +54,7 @@ export function useGardenWorkflows(): GardenWorkflowInput[] {
       }),
     );
     const blueprints = parsedRaw.filter((bp): bp is ParsedBlueprint => bp !== null);
-    const runs = await invoke<RunSummary[]>("workflow_list_runs").catch(() => []);
+    const runs = (await invoke<RunSummary[]>("workflow_list_runs").catch(() => [])) ?? [];
     setWorkflows(mergeWorkflowRunStatus(blueprints, runs));
   }, []);
 

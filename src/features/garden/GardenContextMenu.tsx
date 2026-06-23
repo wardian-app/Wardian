@@ -28,10 +28,16 @@ export const GardenContextMenu: React.FC<GardenContextMenuProps> = ({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-    window.addEventListener("keydown", onKey);
+    // Defer attaching the dismiss listeners until after the opening right-click
+    // has finished propagating, so the same contextmenu/mouse event that opened
+    // the menu does not immediately close it.
+    const timer = window.setTimeout(() => {
+      window.addEventListener("click", close);
+      window.addEventListener("contextmenu", close);
+      window.addEventListener("keydown", onKey);
+    }, 0);
     return () => {
+      window.clearTimeout(timer);
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
       window.removeEventListener("keydown", onKey);

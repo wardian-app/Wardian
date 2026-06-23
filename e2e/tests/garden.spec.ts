@@ -183,14 +183,10 @@ test.describe("Garden View", () => {
     const box = await canvas.boundingBox();
     if (!box) throw new Error("no canvas bounding box");
 
-    // Open the context menu by dispatching a real contextmenu event on the
-    // canvas (bubbles to the container listener). A synthetic dispatch is more
-    // reliable than Playwright's mouse right-click over a <canvas> element.
-    await canvas.dispatchEvent("contextmenu", {
-      bubbles: true,
-      clientX: Math.round(box.x + box.width - 80),
-      clientY: Math.round(box.y + 60),
-    });
+    // Real right-click on an empty area opens the background (reset-only) menu.
+    await page.mouse.move(box.x + box.width - 80, box.y + 60);
+    await page.mouse.down({ button: "right" });
+    await page.mouse.up({ button: "right" });
     await expect(page.locator('[data-testid="garden-context-menu"]')).toBeVisible();
 
     await page.locator('[data-testid="garden-reset-layout"]').click();
