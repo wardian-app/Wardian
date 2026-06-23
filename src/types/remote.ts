@@ -124,10 +124,13 @@ export type RemoteTerminalStreamMessage =
   | RemoteTerminalOwnershipMessage
   | RemoteTerminalErrorMessage;
 
+export type RemoteAgentInputMode = "message" | "command";
+
 export interface RemoteAgentActionRequest {
   action: string;
   target: string;
   prompt?: string;
+  input_mode?: RemoteAgentInputMode;
 }
 
 export interface RemoteWorkflowSummary {

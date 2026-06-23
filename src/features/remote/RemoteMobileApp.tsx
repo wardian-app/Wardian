@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemotePairingView } from "./RemotePairingView";
+import { RemoteQueueView } from "./RemoteQueueView";
 import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 
@@ -65,7 +66,13 @@ export const RemoteMobileApp: React.FC = () => {
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-wardian-bg text-primary" data-testid="remote-mobile-app">
-      {activeRemoteTab === "watchlist" ? <RemoteWatchlistView /> : <RemotePlaceholderPanel tab={activeRemoteTab} />}
+      {activeRemoteTab === "watchlist" ? (
+        <RemoteWatchlistView />
+      ) : activeRemoteTab === "queue" ? (
+        <RemoteQueueView />
+      ) : (
+        <RemotePlaceholderPanel tab={activeRemoteTab} />
+      )}
       <RemoteBottomNav />
     </main>
   );

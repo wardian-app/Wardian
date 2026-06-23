@@ -4,12 +4,23 @@ import { useState } from "react";
 
 type CopyState = "idle" | "copied" | "error";
 
+async function writeClipboardText(value: string) {
+  try {
+    await writeText(value);
+    return;
+  } catch (nativeError) {
+    const browserWriteText = typeof navigator === "undefined" ? undefined : navigator.clipboard?.writeText;
+    if (!browserWriteText) throw nativeError;
+    await browserWriteText.call(navigator.clipboard, value);
+  }
+}
+
 export function CopyIconButton({ label, value }: { label: string; value: string }) {
   const [state, setState] = useState<CopyState>("idle");
   const copy = async () => {
     if (!value) return;
     try {
-      await writeText(value);
+      await writeClipboardText(value);
       setState("copied");
       window.setTimeout(() => setState("idle"), 1400);
     } catch {

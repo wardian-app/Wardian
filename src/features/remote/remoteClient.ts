@@ -4,6 +4,7 @@ import type {
   AgentChatEvent,
   PairingSubmitResponse,
   RemoteAgentActionRequest,
+  RemoteAgentInputMode,
   RemoteAgentSummary,
   RemoteTerminalSnapshot,
   RemoteTerminalStreamMessage,
@@ -123,8 +124,11 @@ export const remoteClient = {
     );
     return result.snapshot;
   },
-  async sendPrompt(target: string, prompt: string) {
-    const request: RemoteAgentActionRequest = { action: "send_prompt", target, prompt };
+  async sendPrompt(target: string, prompt: string, inputMode: RemoteAgentInputMode = "message") {
+    const request: RemoteAgentActionRequest =
+      inputMode === "command"
+        ? { action: "send_prompt", target, prompt, input_mode: "command" }
+        : { action: "send_prompt", target, prompt };
     await remoteJson<{ ok: true }>("/remote/api/agents/action", {
       method: "POST",
       body: JSON.stringify(request),

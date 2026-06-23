@@ -154,4 +154,20 @@ describe("ChatMarkdown", () => {
     screen.getByRole("button", { name: "Copy code block" }).click();
     expect(writeTextMock).toHaveBeenCalledWith("const ready = true;");
   });
+
+  it("falls back to the browser clipboard when native copy is unavailable", async () => {
+    const writeTextMock = vi.mocked(writeText);
+    const browserWriteTextMock = vi.fn().mockResolvedValue(undefined);
+    writeTextMock.mockRejectedValueOnce(new Error("native clipboard unavailable"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: browserWriteTextMock },
+    });
+
+    render(<ChatMarkdown source={"```sh\nnpm run test\n```"} />);
+
+    screen.getByRole("button", { name: "Copy code block" }).click();
+
+    await waitFor(() => expect(browserWriteTextMock).toHaveBeenCalledWith("npm run test"));
+  });
 });

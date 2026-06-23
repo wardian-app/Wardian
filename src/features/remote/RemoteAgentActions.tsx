@@ -1,5 +1,5 @@
 import React from "react";
-import { Pause, Play, RotateCcw, Trash2 } from "lucide-react";
+import { Copy, Pause, Play, RotateCcw, Trash2 } from "lucide-react";
 import type { RemoteAgentSummary } from "../../types";
 import { isRemoteAgentOff } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
@@ -10,14 +10,18 @@ const actionButtonClass =
 export const RemoteAgentActions: React.FC<{ agent: RemoteAgentSummary; compact?: boolean }> = ({ agent, compact = false }) => {
   const runAgentAction = useRemoteStore((state) => state.runAgentAction);
   const isOff = isRemoteAgentOff(agent.status);
-  const confirmAndRun = (action: "clear" | "kill", label: string) => {
+  const confirmAndRun = (action: "clone" | "clear" | "kill", label: string) => {
     if (window.confirm(`${label} ${agent.session_name}?`)) {
       void runAgentAction(action, agent.session_id);
     }
   };
 
   return (
-    <div className={`mt-3 grid gap-2 ${compact ? "grid-cols-3" : "grid-cols-3"}`}>
+    <div className={`mt-3 grid gap-2 ${compact ? "grid-cols-4" : "grid-cols-4"}`}>
+      <button type="button" onClick={() => confirmAndRun("clone", "Clone")} className={actionButtonClass}>
+        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+        Clone
+      </button>
       {isOff ? (
         <button type="button" onClick={() => void runAgentAction("resume", agent.session_id)} className={actionButtonClass}>
           <Play className="h-3.5 w-3.5" aria-hidden="true" />

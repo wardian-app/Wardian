@@ -1,10 +1,35 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, RefreshCw, Send } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  FileText,
+  GitCompare,
+  ListChecks,
+  RefreshCw,
+  Search,
+  Send,
+  ShieldAlert,
+  Slash,
+  Terminal as TerminalIcon,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { AgentChatEvent, AgentChatRole, RemoteAgentSummary } from "../../types";
 import { toActivityBlock, type ActivityBlockModel } from "../grid/activityBlocks";
+import { parseApprovalChoices } from "../grid/approvalChoices";
+import { ChatMarkdown } from "../grid/markdown/ChatMarkdown";
+import {
+  changedPathsFromEvents,
+  derivePresentedChatRows,
+  formatPresentedEntryForCopy,
+  formatPresentedWorkGroupForCopy,
+  type PresentedChatRow,
+  type PresentedWorkEntry,
+} from "../grid/workLogPresentation";
 import { RemoteAgentActions } from "./RemoteAgentActions";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
@@ -13,6 +38,8 @@ import { remoteClient } from "./remoteClient";
 import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
+  planTerminalCapabilityResponses,
+  stripTerminalColorReportInputs,
   type AntigravityRenderState,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
@@ -43,11 +70,17 @@ const iconButtonClass =
 const modeButtonClass =
   "min-h-9 flex-1 rounded-md px-3 text-xs font-semibold transition-colors";
 
-const WORK_GROUP_MIN_EVENTS = 4;
+const CHAT_INITIAL_ROW_LIMIT = 80;
+const CHAT_ROW_PAGE_SIZE = 60;
 
-type RemoteChatRow =
-  | { kind: "event"; event: AgentChatEvent }
-  | { kind: "work_group"; id: string; events: AgentChatEvent[] };
+type RemoteChatRow = PresentedChatRow;
+type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
+type ToolPresentation = {
+  kind: ToolDisplayKind;
+  title: string;
+  details: string[];
+  icon: LucideIcon;
+};
 
 function wardianColorToken(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
@@ -232,6 +265,53 @@ function setTerminalStdinEnabled(terminal: Terminal, enabled: boolean) {
   }
 }
 
+function chatInputDisabledReason(status: string | null | undefined, isSubmitting: boolean): string | null {
+  if (isSubmitting) return "Sending...";
+  const normalized = (status ?? "").toLowerCase();
+  if (!normalized) return null;
+  if (normalized.includes("action")) return null;
+  if (normalized.includes("off")) return "Agent is off";
+  if (normalized.includes("headless")) return "Agent is headless";
+  if (normalized.includes("paused")) return "Agent is paused";
+  if (normalized.includes("error")) return "Agent is in an error state";
+  return null;
+}
+
+type CopyState = "idle" | "copied" | "error";
+
+function RemoteCopyButton({ label, value }: { label: string; value: string }) {
+  const [state, setState] = useState<CopyState>("idle");
+  const copy = async () => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setState("copied");
+      window.setTimeout(() => setState("idle"), 1400);
+    } catch {
+      setState("error");
+      window.setTimeout(() => setState("idle"), 2200);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      aria-label={state === "copied" ? `${label} copied` : state === "error" ? `${label} failed` : label}
+      title={state === "copied" ? "Copied" : state === "error" ? "Copy failed" : label}
+      className={`inline-flex h-6 w-6 items-center justify-center rounded border text-muted-neutral transition-colors ${
+        state === "copied"
+          ? "border-[color-mix(in_srgb,var(--color-wardian-success),transparent_40%)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_86%)] text-[var(--color-wardian-success)]"
+          : state === "error"
+            ? "border-[color-mix(in_srgb,var(--color-wardian-error),transparent_40%)] bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_88%)] text-[var(--color-wardian-error)]"
+            : "border-wardian-border bg-wardian-bg hover:text-primary"
+      }`}
+      onClick={copy}
+    >
+      {state === "copied" ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+    </button>
+  );
+}
+
 export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({ agent }) => {
   const activeAgentViewMode = useRemoteStore((state) => state.activeAgentViewMode);
   const terminalLoading = useRemoteStore((state) => state.terminalLoading);
@@ -246,6 +326,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const refreshActiveAgentChat = useRemoteStore((state) => state.refreshActiveAgentChat);
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
   const [prompt, setPrompt] = useState("");
+  const [commandMode, setCommandMode] = useState(false);
   const contentEndRef = useRef<HTMLDivElement | null>(null);
 
   const visibleEvents = useMemo(
@@ -264,9 +345,10 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = prompt.trim();
-    if (!trimmed) return;
-    await sendPromptToActiveAgent(trimmed);
+    if (!trimmed || chatInputDisabledReason(agent.status, sending)) return;
+    await sendPromptToActiveAgent(trimmed, commandMode ? "command" : "message");
     setPrompt("");
+    setCommandMode(false);
   };
 
   const refresh = () => {
@@ -276,6 +358,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
       void refreshActiveAgentTerminal();
     }
   };
+  const disabledReason = chatInputDisabledReason(agent.status, sending);
+  const canSubmit = prompt.trim().length > 0 && !disabledReason;
 
   return (
     <main className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary" data-testid="remote-agent-detail">
@@ -333,7 +417,15 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
       </header>
 
       {activeAgentViewMode === "chat" ? (
-        <ChatPane agent={agent} visibleEvents={visibleEvents} loading={chatLoading} error={chatError} endRef={contentEndRef} />
+        <ChatPane
+          agent={agent}
+          visibleEvents={visibleEvents}
+          loading={chatLoading}
+          error={chatError}
+          endRef={contentEndRef}
+          isSubmitting={sending}
+          onApprovalSubmit={(response) => void sendPromptToActiveAgent(response)}
+        />
       ) : (
         <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
       )}
@@ -345,13 +437,29 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
               aria-label={`Prompt ${agent.session_name}`}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
+              disabled={Boolean(disabledReason)}
               rows={2}
-              className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)]"
-              placeholder="Prompt agent"
+              className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-70"
+              placeholder={disabledReason ?? "Prompt agent"}
             />
             <button
+              type="button"
+              aria-label="Command mode"
+              aria-pressed={commandMode}
+              title="Command mode"
+              disabled={Boolean(disabledReason)}
+              onClick={() => setCommandMode((value) => !value)}
+              className={`inline-flex h-14 w-11 shrink-0 items-center justify-center rounded-md border text-muted-neutral transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                commandMode
+                  ? "border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]"
+                  : "border-wardian-border bg-wardian-card hover:border-[var(--color-wardian-accent)] hover:text-primary"
+              }`}
+            >
+              <Slash className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
               type="submit"
-              disabled={sending || !prompt.trim()}
+              disabled={!canSubmit}
               className="inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span className="sr-only">Send prompt</span>
@@ -383,6 +491,7 @@ function TerminalPane({
   const outputStateRef = useRef<AntigravityRenderState>({});
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
+  const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -430,7 +539,9 @@ function TerminalPane({
     };
 
     terminal.onData?.((data) => {
-      sendTerminalSocketMessage(socketRef.current, { type: "input", data });
+      const input = agent.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+      if (input.length === 0) return;
+      sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
     });
     terminal.onBinary?.((data) => {
       sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(data) });
@@ -453,29 +564,45 @@ function TerminalPane({
     let seededInitialSnapshot = false;
     let attachmentId: string | null = null;
     let ownerAttachmentId: string | null = null;
+    let focusReported = false;
     const liveDecoder = new TextDecoder();
     const updateTerminalOwnership = (nextOwnerAttachmentId: string | null) => {
       ownerAttachmentId = nextOwnerAttachmentId;
       setTerminalStdinEnabled(terminal, attachmentId !== null && attachmentId === ownerAttachmentId);
     };
+    const planRemoteTerminalOutput = (output: string) => {
+      const context = {
+        ...remoteTerminalCapabilityContext(terminal, host),
+        focusReported,
+      };
+      const plan = planTerminalCapabilityResponses(agent.provider ?? undefined, output, context);
+      focusReported = plan.focusReported;
+      for (const input of plan.outgoingInputs) {
+        sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
+      }
+      return { context, output: plan.normalizedOutput };
+    };
     const writeTerminalSnapshot = (stateBase64: string) => {
+      const plan = planRemoteTerminalOutput(base64ToTerminalString(stateBase64));
       terminal.write?.(
         normalizeRemoteTerminalOutput(
-          base64ToTerminalString(stateBase64),
+          plan.output,
           agent.provider ?? undefined,
           outputStateRef.current,
-          remoteTerminalCapabilityContext(terminal, host),
+          plan.context,
         ),
       );
     };
     const writeTerminalUpdate = (stateBase64: string) => {
       const output = liveDecoder.decode(base64ToTerminalBytes(stateBase64), { stream: true });
       if (output) {
+        const plan = planRemoteTerminalOutput(output);
+        appendRemoteTerminalQueueOutput(agent.session_id, plan.output, agent.provider);
         terminal.write?.(
           normalizeRemoteTerminalLiveOutput(
-            output,
+            plan.output,
             agent.provider ?? undefined,
-            remoteTerminalCapabilityContext(terminal, host),
+            plan.context,
             outputStateRef.current,
           ),
         );
@@ -597,14 +724,28 @@ function ChatPane({
   loading,
   error,
   endRef,
+  isSubmitting,
+  onApprovalSubmit,
 }: {
   agent: RemoteAgentSummary;
   visibleEvents: AgentChatEvent[];
   loading: boolean;
   error: string;
   endRef: React.RefObject<HTMLDivElement | null>;
+  isSubmitting: boolean;
+  onApprovalSubmit: (response: string) => void;
 }) {
-  const rows = useMemo(() => deriveRemoteChatRows(sortRemoteTranscriptEvents(visibleEvents).filter(shouldShowRemoteChatEvent)), [visibleEvents]);
+  const rows = useMemo(
+    () => derivePresentedChatRows(sortRemoteTranscriptEvents(visibleEvents).filter(shouldShowRemoteChatEvent)),
+    [visibleEvents],
+  );
+  const [visibleRowLimit, setVisibleRowLimit] = useState(CHAT_INITIAL_ROW_LIMIT);
+  const hiddenOlderRowCount = Math.max(0, rows.length - visibleRowLimit);
+  const visibleRows = useMemo(() => rows.slice(hiddenOlderRowCount), [hiddenOlderRowCount, rows]);
+
+  useEffect(() => {
+    setVisibleRowLimit(CHAT_INITIAL_ROW_LIMIT);
+  }, [agent.session_id]);
 
   return (
     <section className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
@@ -620,13 +761,22 @@ function ChatPane({
           No chat transcript yet.
         </div>
       )}
-      {rows.map((row) =>
+      {hiddenOlderRowCount > 0 ? (
+        <button
+          type="button"
+          className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
+          onClick={() => setVisibleRowLimit((limit) => Math.min(rows.length, limit + CHAT_ROW_PAGE_SIZE))}
+        >
+          Load {Math.min(CHAT_ROW_PAGE_SIZE, hiddenOlderRowCount)} earlier transcript rows
+        </button>
+      ) : null}
+      {visibleRows.map((row) =>
         row.kind === "work_group" ? (
           <WorkGroupRow key={row.id} row={row} />
         ) : row.event.kind === "message" ? (
           <MessageBubble key={row.event.id} event={row.event} />
         ) : (
-          <ActivityRow key={row.event.id} event={row.event} />
+          <ActivityRow key={row.event.id} event={row.event} entry={row.entry} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />
         ),
       )}
       <div ref={endRef} aria-hidden="true" />
@@ -637,32 +787,85 @@ function ChatPane({
 function MessageBubble({ event }: { event: AgentChatEvent }) {
   const role = event.role ?? "assistant";
   const label = roleLabel[role];
+  const text = event.text?.trimEnd() ?? "";
 
   return (
-    <article aria-label={`${role} message`} className={`max-w-[86%] rounded-md border px-3 py-2 text-sm leading-relaxed ${messageClass[role]}`}>
+    <article aria-label={`${role} message`} className={`relative max-w-[86%] rounded-md border px-3 py-2 pr-9 text-sm leading-relaxed ${messageClass[role]}`}>
       <div className="mb-1 text-[11px] font-semibold uppercase text-muted-neutral">{label}</div>
-      <div className="whitespace-pre-wrap break-words">{event.text}</div>
+      {text ? (
+        <>
+          <div className="absolute right-1.5 top-1.5">
+            <RemoteCopyButton label="Copy message" value={text} />
+          </div>
+          <ChatMarkdown source={text} />
+        </>
+      ) : (
+        <div className="text-muted-neutral">No message content</div>
+      )}
     </article>
   );
 }
 
-function ActivityRow({ event }: { event: AgentChatEvent }) {
-  const block = toActivityBlock(event);
-  const output = outputWithoutCommandPrefix(block.content, event.command);
-  const details = [
-    event.source,
-    formatStatus(event.status),
-    event.path ? compactPath(event.path) : null,
-    typeof event.exit_code === "number" ? `exit ${event.exit_code}` : null,
-    block.language,
-  ].filter((detail): detail is string => Boolean(detail?.trim()));
+function ActivityRow({
+  event,
+  entry,
+  isSubmitting,
+  onApprovalSubmit,
+}: {
+  event: AgentChatEvent;
+  entry?: PresentedWorkEntry;
+  isSubmitting: boolean;
+  onApprovalSubmit: (response: string) => void;
+}) {
+  const block = entry?.block ?? toActivityBlock(event);
+  const content = entry?.content ?? block.content;
+  const [expanded, setExpanded] = useState(!block.defaultCollapsed);
+  const output = outputWithoutCommandPrefix(content, event.command);
+  const copyValue = entry ? formatPresentedEntryForCopy(entry) : output || content;
+  const visibleOutput = block.defaultCollapsed && !expanded ? previewActivityContent(output) : output;
+  const isApproval = block.kind === "approval" || block.tone === "warning";
+  const approvalChoices = isApproval ? parseApprovalChoices(event.text ?? content) : [];
+  const presentation = toolPresentation(event, block, entry);
+  const details = entry?.details ?? presentation.details;
+  const Icon = presentation.icon;
+  const changedPaths = entry?.changed_paths ?? changedPathsFromEvents([event]);
 
   return (
-    <article className="rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-xs">
+    <article
+      className={`rounded-md border bg-wardian-card px-3 py-2 text-xs ${
+        isApproval ? "border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_35%)]" : "border-wardian-border"
+      }`}
+      data-testid={
+        isApproval
+          ? "remote-activity-row-approval"
+          : event.kind === "terminal_output"
+            ? "remote-activity-row-terminal-fallback"
+            : undefined
+      }
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate font-semibold text-primary">{block.title}</div>
-          {details.length > 0 && <div className="mt-1 truncate text-muted-neutral">{details.join(" - ")}</div>}
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border ${toolIconClass(presentation.kind)}`}>
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate font-semibold text-primary">{presentation.title}</div>
+              {details.length > 0 && <div className="mt-1 truncate text-muted-neutral">{details.join(" - ")}</div>}
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {copyValue ? <RemoteCopyButton label="Copy activity output" value={copyValue} /> : null}
+          {block.defaultCollapsed ? (
+            <button
+              type="button"
+              className="rounded border border-wardian-border px-2 py-1 text-[11px] font-semibold leading-4 text-muted-neutral hover:text-primary"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "Collapse" : "Show output"}
+            </button>
+          ) : null}
         </div>
       </div>
       {event.command?.trim() ? (
@@ -673,92 +876,76 @@ function ActivityRow({ event }: { event: AgentChatEvent }) {
           </span>
         </div>
       ) : null}
-      {output && <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-neutral">{output}</pre>}
+      {changedPaths.length > 0 ? <ChangedFiles paths={changedPaths} /> : null}
+      {isApproval ? (
+        <div className="mt-2 rounded border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_45%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_92%)] px-2 py-1 text-[11px] leading-4 text-muted-neutral">
+          {approvalChoices.length > 0 ? "Action required. Choose a response or type below." : "Action required. Respond below or switch to terminal mode."}
+        </div>
+      ) : null}
+      {approvalChoices.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5" aria-label="Approval choices">
+          {approvalChoices.map((choice) => (
+            <button
+              type="button"
+              key={`${choice.value}-${choice.label}`}
+              aria-label={`Send approval response ${choice.value}: ${choice.label}`}
+              className="inline-flex max-w-full items-center gap-1.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_35%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] px-2 py-1 text-left text-[11px] font-semibold leading-4 text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isSubmitting}
+              onClick={() => onApprovalSubmit(choice.value)}
+            >
+              <span className="shrink-0 font-mono text-[var(--color-wardian-warning)]">{choice.value}</span>
+              <span className="min-w-0 truncate">{choice.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <ToolBody content={event.command ? outputWithoutCommandPrefix(visibleOutput, event.command) : visibleOutput} output={output} presentation={presentation} />
     </article>
   );
 }
 
 function WorkGroupRow({ row }: { row: Extract<RemoteChatRow, { kind: "work_group" }> }) {
-  const entries = row.events.map((event) => ({ event, block: toActivityBlock(event) }));
-  const visibleEntries = entries.slice(-6);
-  const hiddenCount = entries.length - visibleEntries.length;
+  const visibleEntries = row.entries.slice(-6);
+  const hiddenCount = row.entries.length - visibleEntries.length;
+  const copyValue = formatPresentedWorkGroupForCopy(row);
 
   return (
     <article className="rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-xs">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate font-semibold text-primary">{workGroupTitle(row.events)}</div>
+          <div className="truncate font-semibold text-primary">{workGroupTitle(row.entries)}</div>
           <div className="mt-1 text-muted-neutral">
-            {entries.length} {entries.length === 1 ? "event" : "events"}
+            {row.entries.length} {row.entries.length === 1 ? "event" : "events"}
             {hiddenCount > 0 ? ` - showing latest ${visibleEntries.length}` : ""}
           </div>
         </div>
+        {copyValue ? <RemoteCopyButton label="Copy work log" value={copyValue} /> : null}
       </div>
+      {row.changedPaths.length > 0 ? <ChangedFiles paths={row.changedPaths} /> : null}
       <div className="mt-2 space-y-1">
-        {visibleEntries.map(({ event, block }) => (
-          <WorkEntry block={block} event={event} key={block.id} />
+        {visibleEntries.map((entry) => (
+          <WorkEntry entry={entry} key={entry.id} />
         ))}
       </div>
     </article>
   );
 }
 
-function WorkEntry({ event, block }: { event: AgentChatEvent; block: ActivityBlockModel }) {
-  const summary = workEntrySummary(event, block);
+function WorkEntry({ entry }: { entry: PresentedWorkEntry }) {
   return (
     <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 py-1 text-xs leading-4">
-      <span className={`mt-1 h-1.5 w-1.5 rounded-full ${remoteActivityDotClass(block.tone)}`} aria-hidden="true" />
+      <span className={`mt-1 h-1.5 w-1.5 rounded-full ${remoteActivityDotClass(entry.block.tone)}`} aria-hidden="true" />
       <div className="min-w-0">
-        <div className="truncate font-medium text-primary">{block.title}</div>
-        {summary ? (
-          <div className="truncate font-mono text-[11px] text-muted-neutral" title={summary}>
-            {summary}
+        <div className="truncate font-medium text-primary">{entry.title}</div>
+        {entry.summary ? (
+          <div className="truncate font-mono text-[11px] text-muted-neutral" title={entry.summary}>
+            {entry.summary}
           </div>
         ) : null}
+        {entry.details.length > 0 ? <div className="truncate text-[11px] text-muted-neutral">{entry.details.join(" - ")}</div> : null}
       </div>
     </div>
   );
-}
-
-function deriveRemoteChatRows(events: AgentChatEvent[]): RemoteChatRow[] {
-  const rows: RemoteChatRow[] = [];
-  let pendingWorkEvents: AgentChatEvent[] = [];
-
-  const flushPendingWork = () => {
-    if (pendingWorkEvents.length === 0) return;
-
-    if (pendingWorkEvents.length < WORK_GROUP_MIN_EVENTS) {
-      pendingWorkEvents.forEach((event) => rows.push({ kind: "event", event }));
-    } else {
-      const first = pendingWorkEvents[0];
-      const last = pendingWorkEvents[pendingWorkEvents.length - 1];
-      rows.push({
-        kind: "work_group",
-        id: `work-group-${first.id}-${last.id}`,
-        events: pendingWorkEvents,
-      });
-    }
-
-    pendingWorkEvents = [];
-  };
-
-  events.forEach((event) => {
-    if (isGroupableRemoteWorkEvent(event)) {
-      pendingWorkEvents.push(event);
-      return;
-    }
-
-    flushPendingWork();
-    rows.push({ kind: "event", event });
-  });
-
-  flushPendingWork();
-  return rows;
-}
-
-function isGroupableRemoteWorkEvent(event: AgentChatEvent): boolean {
-  if (event.status === "action_required") return false;
-  return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "error";
 }
 
 function sortRemoteTranscriptEvents(events: AgentChatEvent[]): AgentChatEvent[] {
@@ -811,37 +998,202 @@ function stringMetadata(metadata: Record<string, unknown>, key: string): string 
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function workGroupTitle(events: AgentChatEvent[]): string {
-  if (events.some((event) => event.kind === "error" || event.status === "failed")) return "Work log with error";
-  if (events.some((event) => event.status === "action_required")) return "Work log needs attention";
+function workGroupTitle(entries: PresentedWorkEntry[]): string {
+  if (entries.some((entry) => entry.primary_event.kind === "error" || entry.primary_event.status === "failed")) return "Work log with error";
+  if (entries.some((entry) => entry.primary_event.status === "action_required")) return "Work log needs attention";
   return "Work log";
-}
-
-function firstContentLine(content: string): string {
-  const line = content
-    .split(/\r\n|\r|\n/)
-    .map((part) => part.trim())
-    .find(Boolean);
-  if (!line) return "";
-  return line.length > 140 ? `${line.slice(0, 137)}...` : line;
-}
-
-function workEntrySummary(event: AgentChatEvent, block: ActivityBlockModel): string {
-  const command = event.command?.trim();
-  if (command) return command.length > 140 ? `${command.slice(0, 137)}...` : command;
-
-  const content = firstContentLine(block.content);
-  const status = formatStatus(event.status);
-  if (content && content !== status) return content;
-
-  if (typeof event.exit_code === "number") return `Exit code: ${event.exit_code}`;
-  return "";
 }
 
 function outputWithoutCommandPrefix(content: string, command: string | null): string {
   if (!command?.trim()) return content;
   const escaped = command.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return content.replace(new RegExp(`^\\$\\s+${escaped}\\s*(?:\\r?\\n){1,2}`), "").trimEnd();
+}
+
+function ChangedFiles({ paths }: { paths: string[] }) {
+  const shown = paths.slice(0, 6);
+  const remaining = paths.length - shown.length;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <span className="text-[11px] font-semibold leading-4 text-muted-neutral">Changed files</span>
+      <RemoteCopyButton label="Copy changed file paths" value={paths.join("\n")} />
+      {shown.map((path) => (
+        <span
+          className="max-w-[180px] truncate rounded border border-wardian-border bg-wardian-bg px-1.5 py-0.5 font-mono text-[11px] leading-4 text-primary"
+          key={path}
+          title={path}
+        >
+          {compactPath(path)}
+        </span>
+      ))}
+      {remaining > 0 ? <span className="text-[11px] leading-4 text-muted-neutral">+{remaining} more</span> : null}
+    </div>
+  );
+}
+
+function ToolBody({
+  content,
+  output,
+  presentation,
+}: {
+  content: string;
+  output: string;
+  presentation: ToolPresentation;
+}) {
+  const safeContent = content.trimEnd() || "No activity content";
+
+  if (presentation.kind === "todo") {
+    const items = parseTodoItems(output || safeContent);
+    if (items.length > 0) {
+      return (
+        <ul className="mt-2 space-y-1 rounded border border-wardian-border bg-wardian-bg p-2" data-testid="remote-tool-todo-list">
+          {items.map((item, index) => (
+            <li className="flex items-start gap-2 text-[12px] leading-5 text-primary" key={`${index}-${item.label.slice(0, 24)}`}>
+              <span
+                aria-hidden="true"
+                className={`mt-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                  item.done
+                    ? "border-[var(--color-wardian-success)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_82%)]"
+                    : "border-wardian-border bg-wardian-card"
+                }`}
+              >
+                {item.done ? <Check className="h-2.5 w-2.5 text-[var(--color-wardian-success)]" aria-hidden="true" /> : null}
+              </span>
+              <span className="break-words">{item.label}</span>
+            </li>
+          ))}
+        </ul>
+      );
+    }
+  }
+
+  if (presentation.kind === "diff") {
+    const stats = diffStats((output || safeContent).trimEnd());
+    return (
+      <div className="mt-2 rounded border border-wardian-border bg-wardian-bg" data-testid="remote-tool-diff-panel">
+        <div className="flex flex-wrap items-center gap-2 border-b border-wardian-border px-2 py-1 text-[11px] leading-4 text-muted-neutral">
+          <span>{stats.files.length > 0 ? `${stats.files.length} ${stats.files.length === 1 ? "file" : "files"}` : "Patch"}</span>
+          <span className="text-[var(--color-wardian-success)]">+{stats.added}</span>
+          <span className="text-[var(--color-wardian-error)]">-{stats.removed}</span>
+          {stats.files.slice(0, 3).map((file) => (
+            <span className="max-w-[160px] truncate font-mono text-primary" key={file} title={file}>
+              {compactPath(file)}
+            </span>
+          ))}
+        </div>
+        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[11px] text-muted-neutral">
+          {safeContent}
+        </pre>
+      </div>
+    );
+  }
+
+  return <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-neutral">{safeContent}</pre>;
+}
+
+function toolPresentation(event: AgentChatEvent, block: ActivityBlockModel, entry?: PresentedWorkEntry): ToolPresentation {
+  const rawType = stringMetadata(event.metadata, "raw_type");
+  const toolName = toolNameFromEvent(event);
+  const haystack = [event.kind, event.title, event.source, event.command, rawType, toolName, event.path, block.language]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const details = entry?.details ?? [
+    toolLabelFromEvent(event, rawType, toolName),
+    formatStatus(event.status),
+    event.path ? compactPath(event.path) : null,
+    typeof event.exit_code === "number" ? `exit ${event.exit_code}` : null,
+    block.language,
+  ].filter((detail): detail is string => Boolean(detail?.trim()));
+
+  if (event.kind === "approval" || event.status === "action_required") {
+    return { kind: "permission", title: readableToolTitle(event, "Permission required"), details, icon: ShieldAlert };
+  }
+  if (haystack.includes("todo")) return { kind: "todo", title: readableToolTitle(event, "Todo update"), details, icon: ListChecks };
+  if (block.language === "diff" || /\b(apply_patch|patch|diff|edit|write)\b/.test(haystack)) {
+    return { kind: "diff", title: readableToolTitle(event, "File change"), details, icon: GitCompare };
+  }
+  if (event.command?.trim() || /\b(bash|shell|exec|command|powershell|pwsh|cmd)\b/.test(haystack)) {
+    return { kind: "shell", title: readableToolTitle(event, "Shell command"), details, icon: TerminalIcon };
+  }
+  if (/\b(search|grep|glob|rg|find|webfetch|websearch)\b/.test(haystack)) {
+    return { kind: "search", title: readableToolTitle(event, "Search"), details, icon: Search };
+  }
+  if (event.path || /\b(read|file|filesystem)\b/.test(haystack)) {
+    return { kind: "file", title: readableToolTitle(event, "File operation"), details, icon: FileText };
+  }
+  return { kind: "generic", title: readableToolTitle(event, block.title || "Tool activity"), details, icon: Wrench };
+}
+
+function toolIconClass(kind: ToolDisplayKind): string {
+  if (kind === "permission") return "border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_42%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] text-[var(--color-wardian-warning)]";
+  if (kind === "diff") return "border-[color-mix(in_srgb,var(--color-wardian-success),transparent_45%)] bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_88%)] text-[var(--color-wardian-success)]";
+  if (kind === "shell") return "border-[color-mix(in_srgb,var(--color-wardian-processing),transparent_42%)] bg-[color-mix(in_srgb,var(--color-wardian-processing),transparent_88%)] text-[var(--color-wardian-processing)]";
+  return "border-wardian-border bg-wardian-bg text-muted-neutral";
+}
+
+function readableToolTitle(event: AgentChatEvent, fallback: string): string {
+  const title = event.title?.trim();
+  const toolName = toolNameFromEvent(event);
+  const command = event.command?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (toolName) return toolName.replace(/_/g, " ");
+  if (command) return commandName(command);
+  return fallback;
+}
+
+function commandName(command: string): string {
+  const first = command.trim().split(/\s+/)[0];
+  if (!first) return "Shell command";
+  return first.replace(/\.(exe|cmd|ps1)$/i, "");
+}
+
+function toolLabelFromEvent(event: AgentChatEvent, rawType: string | null, toolName: string | null): string | null {
+  const title = event.title?.trim();
+  if (title && !/^(custom_tool_call|function_call|tool_call|tool_use)$/i.test(title)) return title.replace(/_/g, " ");
+  if (toolName) return toolName.replace(/_/g, " ");
+  if (rawType) return rawType.replace(/_/g, " ");
+  if (event.kind === "tool_call") return "tool call";
+  if (event.kind === "tool_result") return "tool result";
+  return null;
+}
+
+function parseTodoItems(content: string): Array<{ done: boolean; label: string }> {
+  return content
+    .replace(/\r\n|\r/g, "\n")
+    .split("\n")
+    .map((line) => {
+      const checkbox = /^\s*(?:[-*]\s*)?\[([ xX])\]\s+(.+)$/.exec(line);
+      if (checkbox) return { done: checkbox[1].toLowerCase() === "x", label: checkbox[2].trim() };
+      const prefixed = /^\s*(?:done|completed|pending|todo|in_progress|in progress)\s*[:-]\s*(.+)$/i.exec(line);
+      if (prefixed) return { done: /^(done|completed)/i.test(line.trim()), label: prefixed[1].trim() };
+      return null;
+    })
+    .filter((item): item is { done: boolean; label: string } => Boolean(item?.label));
+}
+
+function diffStats(content: string): { added: number; removed: number; files: string[] } {
+  const files = new Set<string>();
+  let added = 0;
+  let removed = 0;
+
+  content.split(/\r\n|\r|\n/).forEach((line) => {
+    if (/^\+[^+]/.test(line)) added += 1;
+    if (/^-[^-]/.test(line)) removed += 1;
+    const diffFile = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (diffFile) files.add(diffFile[2]);
+    const patchFile = /^(\*\*\* (?:Add|Update|Delete) File:\s+)(.+)$/.exec(line);
+    if (patchFile) files.add(patchFile[2].trim());
+  });
+
+  return { added, removed, files: [...files] };
+}
+
+function previewActivityContent(content: string): string {
+  const lines = content.split(/\r\n|\r|\n/);
+  const linePreview = lines.slice(0, 6).join("\n");
+  const charPreview = linePreview.slice(0, 900);
+  return `${charPreview}\n\nOutput collapsed; show output to inspect all lines.`;
 }
 
 function compactPath(path: string): string {

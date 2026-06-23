@@ -4,6 +4,7 @@ use crate::remote::models::{
 use crate::state::AppState;
 use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
+use wardian_core::control::MessageInputMode;
 use wardian_core::models::chat::AgentChatEvent;
 
 pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
@@ -145,17 +146,26 @@ pub async fn remote_agent_terminal_raw_output(
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
-    match request.action.as_str() {
-        "send_prompt"
-            if request
-                .prompt
-                .as_ref()
-                .is_none_or(|prompt| prompt.trim().is_empty()) =>
+    if request.action == "send_prompt" {
+        if request
+            .prompt
+            .as_ref()
+            .is_none_or(|prompt| prompt.trim().is_empty())
         {
             Err("prompt_required".to_string())
+        } else if matches!(
+            request.input_mode.unwrap_or_default(),
+            MessageInputMode::Message | MessageInputMode::Command
+        ) {
+            Ok(())
+        } else {
+            Err("unsupported_remote_input_mode".to_string())
         }
-        "send_prompt" | "pause" | "resume" | "clear" | "kill" => Ok(()),
-        _ => Err("unsupported_remote_agent_action".to_string()),
+    } else {
+        match request.action.as_str() {
+            "clone" | "pause" | "resume" | "clear" | "kill" => Ok(()),
+            _ => Err("unsupported_remote_agent_action".to_string()),
+        }
     }
 }
 
@@ -170,10 +180,19 @@ pub async fn run_remote_agent_action(
             crate::delivery::submit_live_surface_prompt(
                 Some(app),
                 &state,
-                crate::delivery::LiveSurfacePromptRequest::message(
-                    request.target,
-                    request.prompt.unwrap_or_default(),
-                ),
+                crate::delivery::LiveSurfacePromptRequest {
+                    session_id: request.target,
+                    prompt: request.prompt.unwrap_or_default(),
+                    interaction_id: None,
+                    input_mode: request.input_mode.unwrap_or_default(),
+                    queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
+                    approval_action: None,
+                    origin: None,
+                    runtime_state: "live_pty_available",
+                    mark_prompt_started: true,
+                    payload_sent_detail: None,
+                    delivery_message_id: None,
+                },
             )
             .await
             .map_err(|error| error.to_string())
@@ -182,6 +201,22 @@ pub async fn run_remote_agent_action(
         "pause" => {
             let state = app.state::<AppState>();
             crate::commands::agent::pause_agent(request.target, state, app.clone()).await
+        }
+        "clone" => {
+            let state = app.state::<AppState>();
+            let req = crate::commands::agent::CloneAgentRequest {
+                source_session_id: request.target,
+                mode: crate::commands::agent::CloneAgentMode::Fresh,
+                session_name: None,
+                provider: None,
+                folder: None,
+                agent_class: None,
+                start: Some(true),
+                profile_selection: None,
+            };
+            crate::commands::agent::clone_agent(req, state, app.clone())
+                .await
+                .map(|_| ())
         }
         "resume" => {
             let state = app.state::<AppState>();
@@ -486,11 +521,51 @@ mod tests {
             action: "open_shell".to_string(),
             target: "agent-1".to_string(),
             prompt: None,
+            input_mode: None,
         };
 
         assert_eq!(
             validate_remote_agent_action(&request).unwrap_err(),
             "unsupported_remote_agent_action"
         );
+    }
+
+    #[test]
+    fn remote_send_prompt_accepts_command_mode() {
+        let request = crate::remote::models::RemoteAgentActionRequest {
+            action: "send_prompt".to_string(),
+            target: "agent-1".to_string(),
+            prompt: Some("/status".to_string()),
+            input_mode: Some(wardian_core::control::MessageInputMode::Command),
+        };
+
+        validate_remote_agent_action(&request).expect("command mode should be accepted");
+    }
+
+    #[test]
+    fn remote_send_prompt_rejects_approval_action_mode() {
+        let request = crate::remote::models::RemoteAgentActionRequest {
+            action: "send_prompt".to_string(),
+            target: "agent-1".to_string(),
+            prompt: Some("1".to_string()),
+            input_mode: Some(wardian_core::control::MessageInputMode::ApprovalAction),
+        };
+
+        assert_eq!(
+            validate_remote_agent_action(&request).unwrap_err(),
+            "unsupported_remote_input_mode"
+        );
+    }
+
+    #[test]
+    fn remote_agent_action_accepts_clone() {
+        let request = crate::remote::models::RemoteAgentActionRequest {
+            action: "clone".to_string(),
+            target: "agent-1".to_string(),
+            prompt: None,
+            input_mode: None,
+        };
+
+        validate_remote_agent_action(&request).expect("clone should be accepted");
     }
 }

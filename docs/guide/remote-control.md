@@ -245,11 +245,34 @@ The watchlist itself does not expose inline actions. Tap an agent row to open
 the detail view before sending prompts, pausing, resuming, clearing, or killing
 an agent.
 
+Use the send icon in the watchlist header to open the broadcast prompt. Mobile
+broadcasts require confirmation before Wardian sends the prompt to every
+visible target. The prompt stays collapsed until you open it, so the first
+screen remains focused on triage.
+
 When you tap an agent, Wardian opens a read-only terminal transcript by
 default. This transcript is a sanitized snapshot from the desktop-owned agent
 watch state; it does not drain the desktop PTY renderer. Use the Terminal and
 Chat buttons in the agent detail view to switch between the terminal transcript
 and the normalized chat transcript.
+
+The agent detail composer sends ordinary chat messages by default. Turn on
+command mode when you need to submit a provider slash command or another input
+that must reach the provider command channel without chat attribution. Command
+mode resets after a successful send.
+
+The mobile action strip includes lifecycle controls and Clone for the selected
+agent. Clone creates a fresh desktop-owned agent through the remote gateway and
+refreshes the phone roster after the desktop accepts the action.
+
+The mobile Queue tab shows completion cards derived from live remote terminal
+output and status transitions that the phone has observed in the current
+browser session. These cards help review recent mobile work, but they are not
+the durable desktop Queue. Restarting the PWA, using another phone, or opening
+the desktop Queue may show different history until a future remote queue
+endpoint hydrates the mobile surface from desktop-owned queue storage.
+
+![Mobile PWA Queue showing a recent agent completion summary](../assets/screenshots/remote-control/mobile-pwa-queue-summary.png)
 
 The service worker caches only the remote app shell and static assets. It does
 not queue agent, workflow, PTY, or revocation actions while offline. If the
