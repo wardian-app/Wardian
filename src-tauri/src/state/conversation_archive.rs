@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
     sync::Mutex,
 };
@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, materialize_text_payload, read_jsonl_records,
-    read_latest_index_entries, write_json_atomic, AgentConversationLoggingSetting,
-    ConversationBoundaryReason, ConversationFormatVersions, ConversationIndexEntry,
-    ConversationLoggingSetting, ConversationManifest, ConversationNarrativeRecord,
-    ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, ConversationStatus,
+    read_latest_index_entries, write_json_atomic, write_jsonl_atomic,
+    AgentConversationLoggingSetting, ConversationBoundaryReason, ConversationFormatVersions,
+    ConversationIndexEntry, ConversationLoggingSetting, ConversationManifest,
+    ConversationNarrativeRecord, ConversationProviderNativeRef, ConversationRecordKind,
+    ConversationSourceRecord, ConversationSpeakerType, ConversationStatus,
+    ConversationTurnFailureSignal, ConversationTurnRecord, ConversationTurnStatus,
     CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{
@@ -220,7 +222,7 @@ impl ConversationArchiveState {
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
         let capture_state = read_capture_state(&context.agent_id)?;
-        let existing_records: Vec<ConversationNarrativeRecord> =
+        let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut seen_event_ids = existing_records
             .iter()
@@ -237,12 +239,46 @@ impl ConversationArchiveState {
         let mut appended = Vec::new();
         let mut event_records = Vec::new();
         let mut source_records = Vec::new();
+        let mut merged_existing_count = 0_usize;
 
         for event in events {
             if capture_state.should_skip_event(event, provider_source_key.as_deref()) {
                 continue;
             }
             if !seen_event_ids.insert(event.id.clone()) {
+                continue;
+            }
+            if let Some(record_index) =
+                matching_delivered_input_record_index(&existing_records, event)
+            {
+                let record_seq = existing_records[record_index].seq;
+                let source_record = source_record_from_chat_event(event, record_seq);
+                if let Some(source_record) = source_record {
+                    if !existing_records[record_index]
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| source_ref == &source_record.source_id)
+                    {
+                        existing_records[record_index]
+                            .source_refs
+                            .push(source_record.source_id.clone());
+                    }
+                    append_jsonl_record(&sources_path, &source_record)?;
+                }
+                existing_records[record_index]
+                    .event_refs
+                    .push(event.id.clone());
+                if existing_records[record_index].turn_id.is_none() {
+                    existing_records[record_index].turn_id = event.turn_id.clone();
+                }
+                if existing_records[record_index].speaker_type
+                    == Some(ConversationSpeakerType::Unknown)
+                {
+                    existing_records[record_index].speaker_type =
+                        Some(ConversationSpeakerType::User);
+                }
+                append_jsonl_record(&events_path, event)?;
+                merged_existing_count = merged_existing_count.saturating_add(1);
                 continue;
             }
             let Some(mut record) = narrative_from_chat_event(event, next_seq) else {
@@ -260,10 +296,14 @@ impl ConversationArchiveState {
             appended.push(record);
         }
 
-        if appended.is_empty() {
+        if appended.is_empty() && merged_existing_count == 0 {
             handle.next_seq = next_seq;
             active.insert(context.agent_id.clone(), handle);
             return Ok(0);
+        }
+
+        if merged_existing_count > 0 {
+            write_jsonl_atomic(&conversation_path, &existing_records)?;
         }
 
         for (index, record) in appended.iter().enumerate() {
@@ -284,13 +324,21 @@ impl ConversationArchiveState {
             .last()
             .or_else(|| existing_records.last())
             .expect("conversation has at least one record");
-        let record_count = (existing_records.len() + appended.len()) as u64;
-        let manifest = open_manifest(
+        let all_records = existing_records
+            .iter()
+            .chain(appended.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
+        let summary = archive_summary(&all_records, &[], &all_sources);
+        let record_count = all_records.len() as u64;
+        let mut manifest = open_manifest(
             &effective_context,
             &handle.conversation_id,
             first_record.at.clone(),
             last_record.at.clone(),
         );
+        apply_archive_summary_to_manifest(&mut manifest, &summary);
         write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
         append_index_upsert(
             &index_path(&context.agent_id)?,
@@ -300,13 +348,13 @@ impl ConversationArchiveState {
                 excerpt_from_record(first_record),
                 excerpt_from_record(last_record),
                 record_count,
-                artifact_count_for_records(existing_records.iter().chain(appended.iter())),
+                artifact_count_for_records(all_records.iter()),
             ),
         )?;
 
         handle.next_seq = next_seq;
         active.insert(context.agent_id.clone(), handle);
-        Ok(appended.len())
+        Ok(appended.len().saturating_add(merged_existing_count))
     }
 
     pub fn append_delivered_input(
@@ -396,13 +444,21 @@ impl ConversationArchiveState {
         append_jsonl_record(&conversation_path, &record)?;
 
         let first_record = existing_records.first().unwrap_or(&record);
-        let record_count = (existing_records.len() + 1) as u64;
-        let manifest = open_manifest(
+        let all_records = existing_records
+            .iter()
+            .chain(std::iter::once(&record))
+            .cloned()
+            .collect::<Vec<_>>();
+        let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
+        let summary = archive_summary(&all_records, &[], &all_sources);
+        let record_count = all_records.len() as u64;
+        let mut manifest = open_manifest(
             &effective_context,
             &handle.conversation_id,
             first_record.at.clone(),
             record.at.clone(),
         );
+        apply_archive_summary_to_manifest(&mut manifest, &summary);
         write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
         append_index_upsert(
             &index_path(&context.agent_id)?,
@@ -412,7 +468,7 @@ impl ConversationArchiveState {
                 excerpt_from_record(first_record),
                 excerpt_from_record(&record),
                 record_count,
-                artifact_count_for_records(existing_records.iter().chain(std::iter::once(&record))),
+                artifact_count_for_records(all_records.iter()),
             ),
         )?;
 
@@ -539,6 +595,7 @@ pub fn narrative_from_chat_event(
     Some(ConversationNarrativeRecord {
         schema: CONVERSATION_SCHEMA,
         seq,
+        turn_id: event.turn_id.clone(),
         at: event
             .created_at
             .clone()
@@ -547,7 +604,7 @@ pub fn narrative_from_chat_event(
         role,
         speaker_type: event.role.as_ref().map(speaker_type_from_role),
         text: event.text.clone(),
-        tool: event.title.clone().or_else(|| event.command.clone()),
+        tool: tool_name_from_chat_event(event),
         status: event.status.as_ref().map(status_to_string),
         summary: event.title.clone(),
         excerpt: None,
@@ -571,7 +628,7 @@ fn source_record_from_chat_event(
         source_id: format!("src_{seq}"),
         provider: event.provider.clone(),
         provider_session_id: metadata_string(&event.metadata, "opencode_session_id")
-            .or_else(|| event.turn_id.clone()),
+            .or_else(|| metadata_string(&event.metadata, "provider_session_id")),
         source_kind,
         source_path: event
             .path
@@ -588,6 +645,45 @@ fn source_record_from_chat_event(
         hash: metadata_string(&event.metadata, "hash"),
         artifact_ref: metadata_string(&event.metadata, "artifact_ref"),
     })
+}
+
+fn matching_delivered_input_record_index(
+    records: &[ConversationNarrativeRecord],
+    event: &AgentChatEvent,
+) -> Option<usize> {
+    if event.kind != AgentChatEventKind::Message
+        || event.role.as_ref() != Some(&AgentChatRole::User)
+    {
+        return None;
+    }
+    let event_text = event.text.as_deref()?.trim();
+    if event_text.is_empty() {
+        return None;
+    }
+
+    let mut matches = records.iter().enumerate().filter_map(|(index, record)| {
+        (record.kind == ConversationRecordKind::Message
+            && record.role.as_deref() == Some("user")
+            && record.turn_id.is_none()
+            && record
+                .event_refs
+                .iter()
+                .all(|event_ref| event_ref.starts_with("generated:"))
+            && record
+                .text
+                .as_deref()
+                .is_some_and(|text| text.trim() == event_text))
+        .then_some(index)
+    });
+    let index = matches.next()?;
+    matches.next().is_none().then_some(index)
+}
+
+fn tool_name_from_chat_event(event: &AgentChatEvent) -> Option<String> {
+    metadata_string(&event.metadata, "tool_name")
+        .or_else(|| event.title.clone())
+        .map(|tool| tool.trim().to_string())
+        .filter(|tool| !tool.is_empty())
 }
 
 fn generated_event_from_record(
@@ -634,7 +730,7 @@ fn generated_event_from_record(
 }
 
 fn generated_sources_from_record(
-    context: &ConversationArchiveContext,
+    _context: &ConversationArchiveContext,
     record: &mut ConversationNarrativeRecord,
 ) -> Vec<ConversationSourceRecord> {
     let mut sources = Vec::new();
@@ -665,8 +761,8 @@ fn generated_sources_from_record(
         sources.push(ConversationSourceRecord {
             schema: CONVERSATION_SCHEMA,
             source_id,
-            provider: context.provider.clone(),
-            provider_session_id: context.provider_source_key.clone(),
+            provider: "wardian".to_string(),
+            provider_session_id: None,
             source_kind: "wardian_lifecycle".to_string(),
             source_path: None,
             cursor: Some(record.seq.to_string()),
@@ -712,6 +808,7 @@ pub fn narrative_from_delivered_input(
     ConversationNarrativeRecord {
         schema: CONVERSATION_SCHEMA,
         seq,
+        turn_id: None,
         at: at.to_string(),
         kind: ConversationRecordKind::Message,
         role: Some("user".to_string()),
@@ -741,6 +838,7 @@ pub fn lifecycle_record(
     ConversationNarrativeRecord {
         schema: CONVERSATION_SCHEMA,
         seq,
+        turn_id: None,
         at: at.to_string(),
         kind: ConversationRecordKind::Lifecycle,
         role: Some("system".to_string()),
@@ -1010,7 +1108,6 @@ fn provider_session_ids_from_events(events: &[AgentChatEvent]) -> Vec<String> {
 fn provider_session_id_from_event(event: &AgentChatEvent) -> Option<String> {
     metadata_string(&event.metadata, "opencode_session_id")
         .or_else(|| metadata_string(&event.metadata, "provider_session_id"))
-        .or_else(|| event.turn_id.clone())
 }
 
 fn source_path_from_event(event: &AgentChatEvent) -> Option<String> {
@@ -1170,6 +1267,12 @@ fn close_conversation_dir(
 ) -> io::Result<()> {
     let conversation_path = conversation_dir.join("conversation.jsonl");
     let records: Vec<ConversationNarrativeRecord> = read_jsonl_records(&conversation_path)?;
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&conversation_dir.join("events.jsonl"))?;
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&conversation_dir.join("sources.jsonl"))?;
+    let turns = derive_turn_records(&records, &events, &sources);
+    write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
+    let summary = archive_summary(&records, &turns, &sources);
     let now = current_rfc3339_millis();
     let mut manifest =
         read_manifest(&conversation_dir.join("manifest.json"))?.unwrap_or_else(|| {
@@ -1184,6 +1287,7 @@ fn close_conversation_dir(
     manifest.closed_at = Some(now.clone());
     manifest.status = status_for_boundary_reason(reason);
     manifest.boundary_reason = reason;
+    apply_archive_summary_to_manifest(&mut manifest, &summary);
     write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
     append_index_upsert(
         &index_path(agent_id)?,
@@ -1224,6 +1328,7 @@ fn open_manifest(
         provider: context.provider.clone(),
         provider_session_ids: context.provider_session_ids.clone(),
         provider_source_key: context.provider_source_key.clone(),
+        provider_native_refs: Vec::new(),
         effective_logging: ConversationLoggingSetting::Enabled,
         created_at,
         updated_at,
@@ -1231,6 +1336,10 @@ fn open_manifest(
         status: ConversationStatus::Open,
         boundary_reason: ConversationBoundaryReason::Spawn,
         format_versions: ConversationFormatVersions::default(),
+        record_count: 0,
+        turn_count: 0,
+        has_turns: false,
+        lifecycle_only: false,
     }
 }
 
@@ -1258,11 +1367,334 @@ fn index_entry_from_manifest(
         first_prompt_excerpt,
         last_record_excerpt,
         record_count,
+        turn_count: manifest.turn_count,
+        has_turns: manifest.has_turns,
+        lifecycle_only: manifest.lifecycle_only,
         artifact_count,
         path: format!(
             "agents/{}/conversations/{}",
             manifest.agent_id, manifest.conversation_id
         ),
+    }
+}
+
+#[derive(Debug)]
+struct ConversationArchiveSummary {
+    record_count: u64,
+    turn_count: u64,
+    has_turns: bool,
+    lifecycle_only: bool,
+    provider_native_refs: Vec<ConversationProviderNativeRef>,
+}
+
+#[derive(Debug)]
+struct TurnAccumulator {
+    turn_id: Option<String>,
+    records: Vec<ConversationNarrativeRecord>,
+    events: Vec<AgentChatEvent>,
+    sources: Vec<ConversationSourceRecord>,
+}
+
+fn derive_turn_records(
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+    sources: &[ConversationSourceRecord],
+) -> Vec<ConversationTurnRecord> {
+    let events_by_id = events
+        .iter()
+        .map(|event| (event.id.as_str(), event))
+        .collect::<HashMap<_, _>>();
+    let sources_by_id = sources
+        .iter()
+        .map(|source| (source.source_id.as_str(), source))
+        .collect::<HashMap<_, _>>();
+    let mut turns: Vec<TurnAccumulator> = Vec::new();
+    let mut current_unkeyed: Option<usize> = None;
+
+    for record in records
+        .iter()
+        .filter(|record| record.kind != ConversationRecordKind::Lifecycle)
+    {
+        let turn_index = if let Some(turn_id) = record.turn_id.as_deref() {
+            current_unkeyed = None;
+            if turns
+                .last()
+                .is_some_and(|turn| turn.turn_id.as_deref() == Some(turn_id))
+            {
+                turns.len() - 1
+            } else {
+                turns.push(TurnAccumulator {
+                    turn_id: Some(turn_id.to_string()),
+                    records: Vec::new(),
+                    events: Vec::new(),
+                    sources: Vec::new(),
+                });
+                turns.len() - 1
+            }
+        } else if record.kind == ConversationRecordKind::Message
+            && record.role.as_deref() == Some("user")
+        {
+            turns.push(TurnAccumulator {
+                turn_id: None,
+                records: Vec::new(),
+                events: Vec::new(),
+                sources: Vec::new(),
+            });
+            let index = turns.len() - 1;
+            current_unkeyed = Some(index);
+            index
+        } else if let Some(index) = current_unkeyed {
+            index
+        } else {
+            turns.push(TurnAccumulator {
+                turn_id: None,
+                records: Vec::new(),
+                events: Vec::new(),
+                sources: Vec::new(),
+            });
+            let index = turns.len() - 1;
+            current_unkeyed = Some(index);
+            index
+        };
+
+        let turn = &mut turns[turn_index];
+        turn.events.extend(
+            record
+                .event_refs
+                .iter()
+                .filter_map(|event_id| events_by_id.get(event_id.as_str()).copied().cloned()),
+        );
+        turn.sources.extend(
+            record
+                .source_refs
+                .iter()
+                .filter_map(|source_id| sources_by_id.get(source_id.as_str()).copied().cloned()),
+        );
+        turn.records.push(record.clone());
+    }
+
+    turns
+        .into_iter()
+        .map(turn_record_from_accumulator)
+        .collect()
+}
+
+fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord {
+    let seq_start = turn
+        .records
+        .iter()
+        .map(|record| record.seq)
+        .min()
+        .unwrap_or(0);
+    let seq_end = turn
+        .records
+        .iter()
+        .map(|record| record.seq)
+        .max()
+        .unwrap_or(seq_start);
+    let user_message = turn.records.iter().find(|record| {
+        record.kind == ConversationRecordKind::Message && record.role.as_deref() == Some("user")
+    });
+    let assistant_message = turn.records.iter().rev().find(|record| {
+        record.kind == ConversationRecordKind::Message
+            && record.role.as_deref() == Some("assistant")
+    });
+    let mut tools_used = BTreeMap::new();
+    for record in turn
+        .records
+        .iter()
+        .filter(|record| record.kind == ConversationRecordKind::ToolCall)
+    {
+        *tools_used.entry(tool_name_for_record(record)).or_insert(0) += 1;
+    }
+    for record in turn
+        .records
+        .iter()
+        .filter(|record| record.kind == ConversationRecordKind::ToolResult)
+    {
+        let tool = tool_name_for_record(record);
+        tools_used.entry(tool).or_insert(1);
+    }
+
+    let mut failed_tool_count = 0;
+    let mut command_nonzero_count = 0;
+    let mut failure_signals = Vec::new();
+    let mut files_read = Vec::new();
+    let mut files_written = Vec::new();
+    let mut external_side_effects = Vec::new();
+    let events_by_record_seq = turn
+        .records
+        .iter()
+        .flat_map(|record| {
+            record.event_refs.iter().filter_map(|event_id| {
+                turn.events
+                    .iter()
+                    .find(|event| &event.id == event_id)
+                    .map(|event| (record.seq, event))
+            })
+        })
+        .collect::<Vec<_>>();
+    for (seq, event) in events_by_record_seq {
+        if matches!(
+            event.kind,
+            AgentChatEventKind::ToolCall | AgentChatEventKind::ToolResult
+        ) && event.status == Some(AgentChatStatus::Failed)
+        {
+            failed_tool_count += 1;
+            failure_signals.push(ConversationTurnFailureSignal {
+                signal: "tool_failed".to_string(),
+                seq,
+            });
+        }
+        if event.exit_code.is_some_and(|exit_code| exit_code != 0) {
+            command_nonzero_count += 1;
+            failure_signals.push(ConversationTurnFailureSignal {
+                signal: "command_nonzero_exit".to_string(),
+                seq,
+            });
+        }
+        extend_unique(
+            &mut files_read,
+            metadata_string_array(&event.metadata, "files_read"),
+        );
+        extend_unique(
+            &mut files_written,
+            metadata_string_array(&event.metadata, "files_written"),
+        );
+        extend_unique(
+            &mut external_side_effects,
+            metadata_string_array(&event.metadata, "external_side_effects"),
+        );
+    }
+
+    let (status, status_source) = if failed_tool_count > 0 {
+        (
+            ConversationTurnStatus::Failed,
+            Some("tool_failure".to_string()),
+        )
+    } else if command_nonzero_count > 0 {
+        (
+            ConversationTurnStatus::Failed,
+            Some("command_nonzero_exit".to_string()),
+        )
+    } else {
+        (ConversationTurnStatus::Unknown, None)
+    };
+    ConversationTurnRecord {
+        schema: CONVERSATION_SCHEMA,
+        turn_id: turn.turn_id,
+        seq_start,
+        seq_end,
+        user_message_seq: user_message.map(|record| record.seq),
+        assistant_message_seq: assistant_message.map(|record| record.seq),
+        user_message_text: user_message.and_then(|record| record.text.clone()),
+        user_message_excerpt: user_message.and_then(|record| record.excerpt.clone()),
+        assistant_message_text: assistant_message.and_then(|record| record.text.clone()),
+        assistant_message_excerpt: assistant_message.and_then(|record| record.excerpt.clone()),
+        status,
+        status_source,
+        tools_used,
+        failed_tool_count,
+        command_nonzero_count,
+        files_read,
+        files_written,
+        external_side_effects,
+        failure_signals,
+        provider_native_refs: provider_native_refs_from_sources(&turn.sources),
+    }
+}
+
+fn archive_summary(
+    records: &[ConversationNarrativeRecord],
+    turns: &[ConversationTurnRecord],
+    sources: &[ConversationSourceRecord],
+) -> ConversationArchiveSummary {
+    let lifecycle_only = !records.is_empty()
+        && records
+            .iter()
+            .all(|record| record.kind == ConversationRecordKind::Lifecycle);
+    ConversationArchiveSummary {
+        record_count: records.len() as u64,
+        turn_count: turns.len() as u64,
+        has_turns: !turns.is_empty(),
+        lifecycle_only,
+        provider_native_refs: provider_native_refs_from_sources(sources),
+    }
+}
+
+fn apply_archive_summary_to_manifest(
+    manifest: &mut ConversationManifest,
+    summary: &ConversationArchiveSummary,
+) {
+    manifest.record_count = summary.record_count;
+    manifest.turn_count = summary.turn_count;
+    manifest.has_turns = summary.has_turns;
+    manifest.lifecycle_only = summary.lifecycle_only;
+    manifest.provider_native_refs = summary.provider_native_refs.clone();
+}
+
+fn provider_native_refs_from_sources(
+    sources: &[ConversationSourceRecord],
+) -> Vec<ConversationProviderNativeRef> {
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for source in sources {
+        if source.provider == "wardian"
+            || (source.provider_session_id.is_none() && source.source_path.is_none())
+        {
+            continue;
+        }
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            source.provider,
+            source.provider_session_id.as_deref().unwrap_or_default(),
+            source.source_kind,
+            source.source_path.as_deref().unwrap_or_default()
+        );
+        if seen.insert(key) {
+            refs.push(ConversationProviderNativeRef {
+                provider: source.provider.clone(),
+                provider_session_id: source.provider_session_id.clone(),
+                source_kind: source.source_kind.clone(),
+                source_path: source.source_path.clone(),
+            });
+        }
+    }
+    refs
+}
+
+fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Vec<String> {
+    metadata
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn tool_name_for_record(record: &ConversationNarrativeRecord) -> String {
+    record
+        .tool
+        .as_deref()
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .unwrap_or("unknown_tool")
+        .to_string()
+}
+
+fn extend_unique(values: &mut Vec<String>, next_values: Vec<String>) {
+    let mut seen = values.iter().cloned().collect::<HashSet<_>>();
+    for value in next_values {
+        if seen.insert(value.clone()) {
+            values.push(value);
+        }
     }
 }
 
@@ -1346,17 +1778,19 @@ fn status_for_boundary_reason(reason: ConversationBoundaryReason) -> Conversatio
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_conversation_logging, lifecycle_record, narrative_from_chat_event,
-        narrative_from_delivered_input, new_conversation_id, ActiveConversationHandle,
-        ConversationArchiveContext, ConversationArchiveState,
+        derive_turn_records, effective_conversation_logging, lifecycle_record,
+        narrative_from_chat_event, narrative_from_delivered_input, new_conversation_id,
+        ActiveConversationHandle, ConversationArchiveContext, ConversationArchiveState,
     };
     use wardian_core::conversations::{
         read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
         ConversationLoggingSetting, ConversationManifest, ConversationNarrativeRecord,
         ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType,
-        ConversationStatus, CONVERSATION_SCHEMA,
+        ConversationStatus, ConversationTurnRecord, ConversationTurnStatus, CONVERSATION_SCHEMA,
     };
-    use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
+    use wardian_core::models::chat::{
+        AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+    };
     use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
 
     #[test]
@@ -1595,6 +2029,204 @@ mod tests {
         assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+    }
+
+    #[test]
+    fn turn_id_does_not_become_provider_session_or_rollover_key() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let mut first = chat_event(
+            "event-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("First turn."),
+        );
+        first.provider = "codex".to_string();
+        first.turn_id = Some("turn-1".to_string());
+        first.source = Some("response_item".to_string());
+        let mut second = chat_event(
+            "event-2",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("Second turn."),
+        );
+        second.provider = "codex".to_string();
+        second.turn_id = Some("turn-2".to_string());
+        second.source = Some("response_item".to_string());
+
+        archive
+            .append_chat_events("agent-1", &[first])
+            .expect("append first turn");
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation");
+        archive
+            .append_chat_events("agent-1", &[second])
+            .expect("append second turn");
+
+        assert_eq!(
+            archive
+                .active_conversation_id_for_test("agent-1")
+                .as_deref(),
+            Some(conversation_id.as_str())
+        );
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let sources: Vec<ConversationSourceRecord> =
+            read_jsonl_records(&conversation_path.join("sources.jsonl"))
+                .expect("read source records");
+        assert_eq!(sources.len(), 2);
+        assert!(sources
+            .iter()
+            .all(|source| source.provider_session_id.is_none()));
+    }
+
+    #[test]
+    fn command_string_is_not_used_as_turn_tool_name() {
+        let event = AgentChatEvent {
+            command: Some("cargo test --workspace".to_string()),
+            title: None,
+            metadata: serde_json::json!({}),
+            ..chat_event(
+                "event-tool",
+                AgentChatEventKind::ToolCall,
+                None,
+                Some("Running tests."),
+            )
+        };
+
+        let record = narrative_from_chat_event(&event, 1).expect("narrative record");
+
+        assert_eq!(record.tool, None);
+    }
+
+    #[test]
+    fn repeated_turn_id_after_another_keyed_turn_starts_new_span() {
+        let records = vec![
+            narrative_record_with_turn(1, "turn-1", "First A."),
+            narrative_record_with_turn(2, "turn-2", "Second."),
+            narrative_record_with_turn(3, "turn-1", "First B."),
+        ];
+
+        let turns = derive_turn_records(&records, &[], &[]);
+
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(turns[0].seq_start, 1);
+        assert_eq!(turns[0].seq_end, 1);
+        assert_eq!(turns[2].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(turns[2].seq_start, 3);
+        assert_eq!(turns[2].seq_end, 3);
+    }
+
+    #[test]
+    fn append_chat_events_writes_factual_turns_index() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let mut user = chat_event(
+            "event-user",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::User),
+            Some("Run the tests."),
+        );
+        user.turn_id = Some("turn-1".to_string());
+        user.source = Some("response_item".to_string());
+        user.metadata = serde_json::json!({
+            "log_path": "<absolute-workspace-path>/codex.jsonl",
+            "raw_type": "message"
+        });
+        let mut tool = chat_event(
+            "event-tool",
+            AgentChatEventKind::ToolCall,
+            None,
+            Some("Need test output."),
+        );
+        tool.turn_id = Some("turn-1".to_string());
+        tool.title = Some("shell_command".to_string());
+        tool.command = Some("cargo test".to_string());
+        tool.status = Some(AgentChatStatus::Running);
+        tool.source = Some("response_item".to_string());
+        let mut result = chat_event(
+            "event-result",
+            AgentChatEventKind::ToolResult,
+            Some(AgentChatRole::Tool),
+            Some("test failed"),
+        );
+        result.turn_id = Some("turn-1".to_string());
+        result.title = Some("shell_command".to_string());
+        result.status = Some(AgentChatStatus::Failed);
+        result.exit_code = Some(101);
+        result.source = Some("response_item".to_string());
+        let mut assistant = chat_event(
+            "event-assistant",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some("The test failed."),
+        );
+        assistant.turn_id = Some("turn-1".to_string());
+        assistant.source = Some("response_item".to_string());
+
+        archive
+            .append_chat_events_with_context(
+                archive_context("session-one"),
+                &[user, tool, result, assistant],
+            )
+            .expect("append events");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        archive
+            .rollover_agent("agent-1", ConversationBoundaryReason::Shutdown)
+            .expect("close conversation");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let turns: Vec<ConversationTurnRecord> =
+            read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+
+        assert_eq!(records[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(turns[0].seq_start, 1);
+        assert_eq!(turns[0].seq_end, 4);
+        assert_eq!(turns[0].user_message_seq, Some(1));
+        assert_eq!(turns[0].assistant_message_seq, Some(4));
+        assert_eq!(
+            turns[0].user_message_text.as_deref(),
+            Some("Run the tests.")
+        );
+        assert_eq!(
+            turns[0].assistant_message_text.as_deref(),
+            Some("The test failed.")
+        );
+        assert_eq!(turns[0].status, ConversationTurnStatus::Failed);
+        assert_eq!(turns[0].status_source.as_deref(), Some("tool_failure"));
+        assert_eq!(turns[0].tools_used.get("shell_command"), Some(&1));
+        assert_eq!(turns[0].failed_tool_count, 1);
+        assert_eq!(turns[0].command_nonzero_count, 1);
+        assert!(turns[0].files_read.is_empty());
+        assert!(turns[0].files_written.is_empty());
+        assert!(turns[0].external_side_effects.is_empty());
+        assert_eq!(turns[0].failure_signals[0].signal, "tool_failed");
+        assert_eq!(turns[0].failure_signals[0].seq, 3);
+        assert_eq!(manifest.record_count, 4);
+        assert_eq!(manifest.turn_count, 1);
+        assert!(manifest.has_turns);
+        assert!(!manifest.lifecycle_only);
+
+        let json = serde_json::to_value(&turns[0]).unwrap();
+        assert!(json.get("capture_quality").is_none());
+        assert!(json.get("notes_for_evolver").is_none());
+        assert!(json.get("user_correction").is_none());
+        let manifest_json = serde_json::to_value(&manifest).unwrap();
+        assert!(manifest_json.get("capture_quality").is_none());
     }
 
     #[test]
@@ -1967,6 +2599,113 @@ mod tests {
     }
 
     #[test]
+    fn provider_user_message_does_not_duplicate_delivered_input_prompt() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input_with_context(
+                archive_context("session-one"),
+                "Run the focused tests.",
+                None,
+            )
+            .expect("append delivered input");
+        let mut provider_event = chat_event(
+            "provider-user-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::User),
+            Some("Run the focused tests."),
+        );
+        provider_event.provider = "codex".to_string();
+        provider_event.turn_id = Some("turn-1".to_string());
+        provider_event.source = Some("response_item".to_string());
+        provider_event.metadata = serde_json::json!({
+            "provider_session_id": "session-one",
+            "raw_type": "message"
+        });
+
+        archive
+            .append_chat_events_with_context(archive_context("session-one"), &[provider_event])
+            .expect("append provider event");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let sources: Vec<ConversationSourceRecord> =
+            read_jsonl_records(&conversation_path.join("sources.jsonl"))
+                .expect("read source records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text.as_deref(), Some("Run the focused tests."));
+        assert_eq!(records[0].event_refs.len(), 2);
+        assert!(records[0]
+            .event_refs
+            .iter()
+            .any(|event_ref| event_ref.starts_with("generated:")));
+        assert!(records[0]
+            .event_refs
+            .iter()
+            .any(|event_ref| event_ref == "provider-user-1"));
+        assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].provider, "codex");
+    }
+
+    #[test]
+    fn repeated_same_text_delivered_inputs_are_not_ambiguously_merged() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_delivered_input_with_context(archive_context("session-one"), "Again.", None)
+            .expect("append first delivered input");
+        archive
+            .append_delivered_input_with_context(archive_context("session-one"), "Again.", None)
+            .expect("append second delivered input");
+        let mut provider_event = chat_event(
+            "provider-user-1",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::User),
+            Some("Again."),
+        );
+        provider_event.provider = "codex".to_string();
+        provider_event.turn_id = Some("turn-1".to_string());
+        provider_event.source = Some("response_item".to_string());
+        provider_event.metadata = serde_json::json!({
+            "provider_session_id": "session-one",
+            "raw_type": "message"
+        });
+
+        archive
+            .append_chat_events_with_context(archive_context("session-one"), &[provider_event])
+            .expect("append provider event");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+
+        assert_eq!(records.len(), 3);
+        assert!(records[0]
+            .event_refs
+            .iter()
+            .all(|event_ref| event_ref.starts_with("generated:")));
+        assert!(records[1]
+            .event_refs
+            .iter()
+            .all(|event_ref| event_ref.starts_with("generated:")));
+        assert_eq!(records[2].event_refs, vec!["provider-user-1".to_string()]);
+        assert_eq!(records[2].turn_id.as_deref(), Some("turn-1"));
+    }
+
+    #[test]
     fn append_empty_delivered_input_does_not_create_conversation_files() {
         let (_guard, _temp) = isolated_home();
         let archive = ConversationArchiveState::default();
@@ -2058,6 +2797,96 @@ mod tests {
             manifest.provider_source_key.as_deref(),
             Some("codex:session:session-one")
         );
+    }
+
+    #[test]
+    fn lifecycle_boundary_with_context_does_not_create_unknown_stub() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+        let context = ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "CoderOne".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["session-one".to_string()],
+            provider_source_key: Some("codex:session:session-one".to_string()),
+        };
+
+        archive
+            .append_lifecycle_boundary_with_context(context, ConversationBoundaryReason::Clear)
+            .expect("append contextual lifecycle");
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        archive
+            .rollover_agent("agent-1", ConversationBoundaryReason::Clear)
+            .expect("close conversation");
+
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+                .expect("read narrative records");
+        let turns: Vec<ConversationTurnRecord> =
+            read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+        assert_eq!(manifest.agent_name, "CoderOne");
+        assert_eq!(manifest.agent_class, "Coder");
+        assert_eq!(manifest.workspace, "<absolute-workspace-path>");
+        assert_eq!(manifest.provider, "codex");
+        assert_eq!(
+            manifest.provider_session_ids,
+            vec!["session-one".to_string()]
+        );
+        assert_eq!(
+            manifest.provider_source_key.as_deref(),
+            Some("codex:session:session-one")
+        );
+        assert_eq!(manifest.record_count, 1);
+        assert_eq!(manifest.turn_count, 0);
+        assert!(!manifest.has_turns);
+        assert!(manifest.lifecycle_only);
+        let manifest_json = serde_json::to_value(&manifest).unwrap();
+        assert!(manifest_json.get("capture_quality").is_none());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, ConversationRecordKind::Lifecycle);
+        assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_source_does_not_create_provider_native_ref() {
+        let (_guard, _temp) = isolated_home();
+        let archive = ConversationArchiveState::default();
+
+        archive
+            .append_lifecycle_boundary_with_context(
+                archive_context("session-one"),
+                ConversationBoundaryReason::Clear,
+            )
+            .expect("append lifecycle");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let conversation_path =
+            agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+        let manifest: ConversationManifest = serde_json::from_str(
+            &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+        )
+        .expect("read manifest");
+        let sources: Vec<ConversationSourceRecord> =
+            read_jsonl_records(&conversation_path.join("sources.jsonl"))
+                .expect("read source records");
+
+        assert!(sources
+            .iter()
+            .any(|source| source.source_kind == "wardian_lifecycle"));
+        assert!(manifest.provider_native_refs.is_empty());
     }
 
     #[test]
@@ -2447,6 +3276,30 @@ mod tests {
                 Some(AgentChatRole::Assistant),
                 Some(text),
             )
+        }
+    }
+
+    fn narrative_record_with_turn(
+        seq: u64,
+        turn_id: &str,
+        text: &str,
+    ) -> ConversationNarrativeRecord {
+        ConversationNarrativeRecord {
+            schema: CONVERSATION_SCHEMA,
+            seq,
+            turn_id: Some(turn_id.to_string()),
+            at: "2026-06-15T00:00:00.000Z".to_string(),
+            kind: ConversationRecordKind::Message,
+            role: Some("assistant".to_string()),
+            speaker_type: Some(ConversationSpeakerType::Assistant),
+            text: Some(text.to_string()),
+            tool: None,
+            status: None,
+            summary: None,
+            excerpt: None,
+            event_refs: Vec::new(),
+            source_refs: Vec::new(),
+            artifact_refs: Vec::new(),
         }
     }
 

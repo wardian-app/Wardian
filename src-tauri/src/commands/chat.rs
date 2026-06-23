@@ -1,22 +1,46 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::manager::{self, opencode::opencode_database_path};
 use crate::providers::chat_transcript::{normalize_chat_lines, visible_chat_text};
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
 };
-use crate::state::AppState;
+use crate::state::{AgentWatchState, AppState};
+use sha2::{Digest, Sha256};
 use tauri::State;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
-use wardian_core::conversations::ConversationLoggingSetting;
+use wardian_core::conversations::{AgentConversationLoggingSetting, ConversationLoggingSetting};
 use wardian_core::identity::normalize_status;
 use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+pub(crate) struct AgentArchiveCaptureSnapshot {
+    pub(crate) session_id: String,
+    pub(crate) provider: String,
+    pub(crate) resume_session: Option<String>,
+    pub(crate) fresh_provider_session_id: Option<String>,
+    pub(crate) cleared_provider_sessions: Vec<String>,
+    pub(crate) current_status: String,
+    pub(crate) last_status_at: Option<String>,
+    pub(crate) log_path: Option<PathBuf>,
+    pub(crate) agent_name: String,
+    pub(crate) agent_class: String,
+    pub(crate) workspace: String,
+    pub(crate) agent_conversation_logging: AgentConversationLoggingSetting,
+    pub(crate) watch_state: Arc<Mutex<AgentWatchState>>,
+}
+
+pub(crate) struct ArchiveCaptureResult {
+    pub(crate) events: Vec<AgentChatEvent>,
+    pub(crate) context: ConversationArchiveContext,
+}
 
 #[tauri::command]
 pub async fn load_agent_chat_transcript(
@@ -35,140 +59,154 @@ pub async fn load_agent_chat_transcript_for_state(
         return Err("session_id is required".to_string());
     }
 
-    let (
-        watch_state,
+    let result = archive_agent_chat_events_for_state(state, &session_id).await?;
+    Ok(result.events)
+}
+
+pub(crate) async fn agent_archive_capture_snapshot(
+    state: &AppState,
+    session_id: &str,
+) -> Result<AgentArchiveCaptureSnapshot, String> {
+    let session_id = session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("session_id is required".to_string());
+    }
+
+    let agents = state.agents.lock().await;
+    let agent = agents
+        .get(&session_id)
+        .ok_or_else(|| format!("agent not found: {session_id}"))?;
+    let config = agent
+        .config
+        .lock()
+        .map_err(|_| "agent config lock poisoned".to_string())?;
+    let provider = config.provider.clone();
+    let cleared_provider_sessions = if provider == "codex" {
+        config.codex_config().cleared_provider_sessions
+    } else {
+        Vec::new()
+    };
+    let current_status = agent
+        .current_status
+        .lock()
+        .map_err(|_| "agent status lock poisoned".to_string())?
+        .clone();
+    let last_status_at = agent
+        .last_status_at
+        .lock()
+        .map_err(|_| "agent status timestamp lock poisoned".to_string())?
+        .clone();
+    let log_path = agent
+        .log_path
+        .lock()
+        .map_err(|_| "agent log path lock poisoned".to_string())?
+        .clone();
+    let workspace = config
+        .git_worktree_folder
+        .clone()
+        .unwrap_or_else(|| config.folder.clone());
+
+    Ok(AgentArchiveCaptureSnapshot {
+        session_id,
         provider,
-        resume_session,
+        resume_session: config.resume_session.clone(),
+        fresh_provider_session_id: config.fresh_provider_session_id.clone(),
+        cleared_provider_sessions,
         current_status,
         last_status_at,
         log_path,
-        agent_name,
-        agent_class,
+        agent_name: config.session_name.clone(),
+        agent_class: config.agent_class.clone(),
         workspace,
-        fresh_provider_session_id,
-        cleared_provider_sessions,
-        agent_conversation_logging,
-    ) = {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(&session_id)
-            .ok_or_else(|| format!("agent not found: {session_id}"))?;
-        let config = agent
-            .config
-            .lock()
-            .map_err(|_| "agent config lock poisoned".to_string())?;
-        let provider = config.provider.clone();
-        let agent_name = config.session_name.clone();
-        let agent_class = config.agent_class.clone();
-        let workspace = config
-            .git_worktree_folder
-            .clone()
-            .unwrap_or_else(|| config.folder.clone());
-        let agent_conversation_logging = config.conversation_logging;
-        let resume_session = config.resume_session.clone();
-        let fresh_provider_session_id = config.fresh_provider_session_id.clone();
-        let cleared_provider_sessions = if provider == "codex" {
-            config.codex_config().cleared_provider_sessions
-        } else {
-            Vec::new()
-        };
-        let current_status = agent
-            .current_status
-            .lock()
-            .map_err(|_| "agent status lock poisoned".to_string())?
-            .clone();
-        let last_status_at = agent
-            .last_status_at
-            .lock()
-            .map_err(|_| "agent status timestamp lock poisoned".to_string())?
-            .clone();
-        let log_path = agent
-            .log_path
-            .lock()
-            .map_err(|_| "agent log path lock poisoned".to_string())?
-            .clone();
-        (
-            agent.watch_state.clone(),
-            provider,
-            resume_session,
-            current_status,
-            last_status_at,
-            log_path,
-            agent_name,
-            agent_class,
-            workspace,
-            fresh_provider_session_id,
-            cleared_provider_sessions,
-            agent_conversation_logging,
-        )
-    };
+        agent_conversation_logging: config.conversation_logging,
+        watch_state: agent.watch_state.clone(),
+    })
+}
 
-    let snapshot = watch_state
+pub(crate) fn collect_agent_chat_events_for_archive(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Result<ArchiveCaptureResult, String> {
+    let watch_snapshot = snapshot
+        .watch_state
         .lock()
         .map_err(|_| "watch state lock poisoned".to_string())?
         .snapshot_since(None, None)
         .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
-
     let mut provider_events = load_provider_log_chat_events(
-        &session_id,
-        &provider,
-        log_path.as_deref(),
-        &cleared_provider_sessions,
+        &snapshot.session_id,
+        &snapshot.provider,
+        snapshot.log_path.as_deref(),
+        &snapshot.cleared_provider_sessions,
     );
-    if provider == "opencode" {
+    if snapshot.provider == "opencode" {
         provider_events.extend(load_opencode_db_chat_events(
-            &session_id,
-            opencode_session_id(&session_id, resume_session.as_deref()).as_deref(),
+            &snapshot.session_id,
+            opencode_session_id(&snapshot.session_id, snapshot.resume_session.as_deref())
+                .as_deref(),
         ));
     }
     let provider_has_transcript = has_transcript_events(&provider_events);
     let watch_events = map_watch_snapshot_to_chat_events(WatchSnapshotChatInput {
-        session_id: &session_id,
-        provider: &provider,
-        current_status: Some(&current_status),
-        last_status_at: last_status_at.as_deref(),
-        events: &snapshot.events,
-        output: &snapshot.output,
-        transcript: &snapshot.transcript,
+        session_id: &snapshot.session_id,
+        provider: &snapshot.provider,
+        current_status: Some(&snapshot.current_status),
+        last_status_at: snapshot.last_status_at.as_deref(),
+        events: &watch_snapshot.events,
+        output: &watch_snapshot.output,
+        transcript: &watch_snapshot.transcript,
         include_transcript: !provider_has_transcript,
         include_terminal_output: !provider_has_transcript,
     });
 
     let events = merge_chat_events(watch_events, provider_events);
+    let context = conversation_archive_context(ConversationArchiveContextInput {
+        session_id: &snapshot.session_id,
+        provider: &snapshot.provider,
+        agent_name: &snapshot.agent_name,
+        agent_class: &snapshot.agent_class,
+        workspace: &snapshot.workspace,
+        resume_session: snapshot.resume_session.as_deref(),
+        fresh_provider_session_id: snapshot.fresh_provider_session_id.as_deref(),
+        log_path: snapshot.log_path.as_deref(),
+    });
+
+    Ok(ArchiveCaptureResult { events, context })
+}
+
+pub(crate) async fn archive_agent_chat_events_for_state(
+    state: &AppState,
+    session_id: &str,
+) -> Result<ArchiveCaptureResult, String> {
+    let snapshot = agent_archive_capture_snapshot(state, session_id).await?;
+    let result = collect_agent_chat_events_for_archive(&snapshot)?;
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
-    let archive_context = conversation_archive_context(ConversationArchiveContextInput {
-        session_id: &session_id,
-        provider: &provider,
-        agent_name: &agent_name,
-        agent_class: &agent_class,
-        workspace: &workspace,
-        resume_session: resume_session.as_deref(),
-        fresh_provider_session_id: fresh_provider_session_id.as_deref(),
-        log_path: log_path.as_deref(),
-    });
-    if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
-        == ConversationLoggingSetting::Enabled
+    if effective_conversation_logging(
+        global_conversation_logging,
+        snapshot.agent_conversation_logging,
+    ) == ConversationLoggingSetting::Enabled
     {
         if let Err(error) = state
             .conversation_archive
-            .append_chat_events_with_context(archive_context, &events)
+            .append_chat_events_with_context(result.context.clone(), &result.events)
         {
             manager::log_debug(&format!(
-                "[WARDIAN] conversation archive append failed for {session_id}: {error}"
+                "[WARDIAN] conversation archive append failed for {}: {error}",
+                snapshot.session_id
             ));
         }
     } else if let Err(error) = state
         .conversation_archive
-        .discard_agent_with_context(archive_context, &events)
+        .discard_agent_with_context(result.context.clone(), &result.events)
     {
         manager::log_debug(&format!(
-            "[WARDIAN] conversation archive disabled cutoff failed for {session_id}: {error}"
+            "[WARDIAN] conversation archive disabled cutoff failed for {}: {error}",
+            snapshot.session_id
         ));
     }
 
-    Ok(events)
+    Ok(result)
 }
 
 struct WatchSnapshotChatInput<'a> {
@@ -354,8 +392,50 @@ fn load_provider_log_chat_events(
                 "log_path",
                 path.to_string_lossy().to_string(),
             );
+            event.id = stable_provider_log_event_id(&event, path);
             event
         })
+        .collect()
+}
+
+fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
+    let mut hash = Sha256::new();
+    hash.update(event.session_id.as_bytes());
+    hash.update(b"\0");
+    hash.update(event.provider.as_bytes());
+    hash.update(b"\0");
+    hash.update(path.to_string_lossy().as_bytes());
+    hash.update(b"\0");
+    hash.update(format!("{:?}", event.kind).as_bytes());
+    hash.update(b"\0");
+    hash.update(format!("{:?}", event.role).as_bytes());
+    hash.update(b"\0");
+    for value in [
+        event.turn_id.as_deref(),
+        event.created_at.as_deref(),
+        event.source.as_deref(),
+        event.title.as_deref(),
+        event.command.as_deref(),
+        event.text.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        hash.update(value.as_bytes());
+        hash.update(b"\0");
+    }
+    format!(
+        "{}:provider_log:{}",
+        event.session_id,
+        hex_prefix(hash.finalize().as_slice(), 16)
+    )
+}
+
+fn hex_prefix(bytes: &[u8], len: usize) -> String {
+    bytes
+        .iter()
+        .take(len)
+        .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
@@ -391,14 +471,20 @@ fn read_provider_log_tail_with_limit(path: &Path, tail_bytes: u64) -> std::io::R
     }
 
     let start = file_len.saturating_sub(tail_bytes);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity(tail_bytes as usize);
+    let read_start = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(read_start))?;
+    let mut bytes = Vec::with_capacity((file_len - read_start) as usize);
     file.read_to_end(&mut bytes)?;
-    let content = String::from_utf8_lossy(&bytes);
-    Ok(content
-        .split_once('\n')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_default())
+    let content = if read_start < start && bytes.first() == Some(&b'\n') {
+        String::from_utf8_lossy(&bytes[1..]).to_string()
+    } else {
+        let content = String::from_utf8_lossy(&bytes);
+        content
+            .split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default()
+    };
+    Ok(content)
 }
 
 struct ConversationArchiveContextInput<'a> {
@@ -1164,6 +1250,51 @@ Do you want to proceed?
         assert!(!content.contains("stale"));
         assert!(content.contains("Recent provider log message"));
         assert!(content.starts_with('{'));
+    }
+
+    #[test]
+    fn reads_provider_log_tail_keeps_line_when_tail_starts_on_boundary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let stale_line = "stale provider line";
+        let latest_line = r#"{"type":"response_item","turn_id":"turn-2","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Boundary provider log message"}]}}"#;
+        std::fs::write(&log_path, format!("{stale_line}\n{latest_line}\n")).expect("write log");
+
+        let tail_bytes = latest_line.len() as u64 + 1;
+        let content =
+            read_provider_log_tail_with_limit(&log_path, tail_bytes).expect("tail content");
+
+        assert!(!content.contains(stale_line));
+        assert!(content.contains("Boundary provider log message"));
+        assert!(content.starts_with('{'));
+    }
+
+    #[test]
+    fn provider_log_event_ids_stay_stable_when_line_position_changes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let target_line = r#"{"type":"response_item","turn_id":"turn-2","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Stable provider log message"}]}}"#;
+        std::fs::write(&log_path, format!("{target_line}\n")).expect("write first log");
+        let first = load_provider_log_chat_events("agent-1", "codex", Some(&log_path), &[]);
+        let first_id = first
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Stable provider log message"))
+            .expect("target event")
+            .id
+            .clone();
+
+        let earlier_line = r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Earlier provider log message"}]}}"#;
+        std::fs::write(&log_path, format!("{earlier_line}\n{target_line}\n"))
+            .expect("write shifted log");
+        let second = load_provider_log_chat_events("agent-1", "codex", Some(&log_path), &[]);
+        let second_id = second
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Stable provider log message"))
+            .expect("target event")
+            .id
+            .clone();
+
+        assert_eq!(first_id, second_id);
     }
 
     #[test]

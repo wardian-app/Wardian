@@ -386,10 +386,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         sessionId: selectedAgentId,
         worktreeName: worktreeName.trim(),
       });
-      await invoke("clear_agent_session", {
-        sessionId: selectedAgentId,
-        reason: "worktree_switch",
-      });
       setIsNamingWorktree(false);
       setWorktreeName("");
       onAgentsUpdated();
@@ -411,10 +407,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       await invoke("disable_agent_worktree", {
         sessionId: selectedAgentId,
       });
-      await invoke("clear_agent_session", {
-        sessionId: selectedAgentId,
-        reason: "worktree_switch",
-      });
       onAgentsUpdated();
     } catch (err) {
       setError(formatError(err));
@@ -430,10 +422,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       await invoke("assign_agent_worktree", {
         sessionId: selectedAgentId,
         worktreeFolder: worktree.worktree_folder,
-      });
-      await invoke("clear_agent_session", {
-        sessionId: selectedAgentId,
-        reason: "worktree_switch",
       });
       onAgentsUpdated();
     } catch (err) {
@@ -473,10 +461,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       await invoke("assign_agent_worktree", {
         sessionId: selectedAgentId,
         worktreeFolder: selectedWorktreeFolder,
-      });
-      await invoke("clear_agent_session", {
-        sessionId: selectedAgentId,
-        reason: "worktree_switch",
       });
       onAgentsUpdated();
     } catch (err) {

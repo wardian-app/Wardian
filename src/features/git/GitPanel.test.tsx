@@ -447,12 +447,6 @@ describe("GitPanel", () => {
       });
     });
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", {
-        sessionId: "agent-1",
-        reason: "worktree_switch",
-      });
-    });
-    await waitFor(() => {
       expect(screen.getByText("Create Worktree")).toBeInTheDocument();
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
@@ -518,12 +512,6 @@ describe("GitPanel", () => {
       expect(mockInvoke).toHaveBeenCalledWith("assign_agent_worktree", {
         sessionId: "agent-1",
         worktreeFolder: "C:/repo-worktree",
-      });
-    });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", {
-        sessionId: "agent-1",
-        reason: "worktree_switch",
       });
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
@@ -712,12 +700,6 @@ describe("GitPanel", () => {
         worktreeFolder: "C:/repo-worktree",
       });
     });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", {
-        sessionId: "agent-1",
-        reason: "worktree_switch",
-      });
-    });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
@@ -760,12 +742,6 @@ describe("GitPanel", () => {
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("disable_agent_worktree", { sessionId: "agent-1" });
-    });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", {
-        sessionId: "agent-1",
-        reason: "worktree_switch",
-      });
     });
     await waitFor(() => {
       expect(screen.getByTitle("Remove worktree assignment")).toBeInTheDocument();

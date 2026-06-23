@@ -524,7 +524,6 @@ async fn handle_agent_worktree_enable(
     crate::commands::agent::enable_agent_worktree(uuid.clone(), name, state, app.clone())
         .await
         .map_err(ControlError::request_failed)?;
-    clear_agent_after_worktree_move(app, &uuid).await?;
 
     let worktrees = list_agent_worktree_summaries(app.state::<AppState>()).await?;
     let worktree = worktree_for_member(&worktrees, &uuid);
@@ -570,7 +569,6 @@ async fn handle_agent_worktree_join(
     )
     .await
     .map_err(ControlError::request_failed)?;
-    clear_agent_after_worktree_move(app, &uuid).await?;
 
     let worktrees = list_agent_worktree_summaries(app.state::<AppState>()).await?;
     let agent = live_agent_identity(app, &uuid).await?;
@@ -604,7 +602,6 @@ async fn handle_agent_worktree_disable(
     crate::commands::agent::disable_agent_worktree(uuid.clone(), state, app.clone())
         .await
         .map_err(ControlError::request_failed)?;
-    clear_agent_after_worktree_move(app, &uuid).await?;
 
     let agent = live_agent_identity(app, &uuid).await?;
     let response = AgentWorktreeMutationResponse {
@@ -620,20 +617,6 @@ async fn handle_agent_worktree_disable(
         cleared_session: true,
     };
     ok_json(&response)
-}
-
-async fn clear_agent_after_worktree_move(
-    app: &AppHandle,
-    session_id: &str,
-) -> Result<(), ControlError> {
-    crate::commands::agent::clear_agent_session(
-        session_id.to_string(),
-        Some("worktree_switch".to_string()),
-        app.state::<AppState>(),
-        app.clone(),
-    )
-    .await
-    .map_err(ControlError::request_failed)
 }
 
 #[derive(Debug)]
@@ -2798,7 +2781,10 @@ async fn record_conversation_delivery(
 }
 
 fn conversation_delivery_state_is_recordable(delivery_state: &str) -> bool {
-    matches!(delivery_state, "submitted" | "submit_sent_unverified")
+    matches!(
+        delivery_state,
+        "submitted" | "submit_sent_unverified" | "submit_sent_unconfirmed"
+    )
 }
 
 async fn persist_interaction_delivery_attempt(
@@ -3580,7 +3566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_delivery_archives_accepted_input_with_agent_origin() {
+    async fn message_delivery_archives_unconfirmed_live_input_with_agent_origin() {
         let _home = TestWardianHome::new();
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
             conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Disabled,
@@ -3600,7 +3586,7 @@ mod tests {
             name: "CoderOne".to_string(),
             provider: "mock".to_string(),
             runtime_state: "live_pty_available".to_string(),
-            delivery_state: "submitted".to_string(),
+            delivery_state: "submit_sent_unconfirmed".to_string(),
             input_mode: MessageInputMode::Message,
             queue_policy: QueuePolicy::QueueIfBusy,
             message_id: None,

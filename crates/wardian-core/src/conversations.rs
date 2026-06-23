@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -76,6 +76,8 @@ pub struct ConversationFormatVersions {
     pub conversation: u8,
     pub events: u8,
     pub sources: u8,
+    #[serde(default = "default_format_version")]
+    pub turns: u8,
 }
 
 impl Default for ConversationFormatVersions {
@@ -85,8 +87,31 @@ impl Default for ConversationFormatVersions {
             conversation: 1,
             events: 1,
             sources: 1,
+            turns: 1,
         }
     }
+}
+
+fn default_format_version() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationTurnStatus {
+    Succeeded,
+    Failed,
+    Blocked,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationProviderNativeRef {
+    pub provider: String,
+    pub provider_session_id: Option<String>,
+    pub source_kind: String,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +126,8 @@ pub struct ConversationManifest {
     pub provider_session_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_source_key: Option<String>,
+    #[serde(default)]
+    pub provider_native_refs: Vec<ConversationProviderNativeRef>,
     pub effective_logging: ConversationLoggingSetting,
     pub created_at: String,
     pub updated_at: String,
@@ -108,12 +135,22 @@ pub struct ConversationManifest {
     pub status: ConversationStatus,
     pub boundary_reason: ConversationBoundaryReason,
     pub format_versions: ConversationFormatVersions,
+    #[serde(default)]
+    pub record_count: u64,
+    #[serde(default)]
+    pub turn_count: u64,
+    #[serde(default)]
+    pub has_turns: bool,
+    #[serde(default)]
+    pub lifecycle_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationNarrativeRecord {
     pub schema: u8,
     pub seq: u64,
+    #[serde(default)]
+    pub turn_id: Option<String>,
     pub at: String,
     pub kind: ConversationRecordKind,
     pub role: Option<String>,
@@ -126,6 +163,36 @@ pub struct ConversationNarrativeRecord {
     pub event_refs: Vec<String>,
     pub source_refs: Vec<String>,
     pub artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnFailureSignal {
+    pub signal: String,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnRecord {
+    pub schema: u8,
+    pub turn_id: Option<String>,
+    pub seq_start: u64,
+    pub seq_end: u64,
+    pub user_message_seq: Option<u64>,
+    pub assistant_message_seq: Option<u64>,
+    pub user_message_text: Option<String>,
+    pub user_message_excerpt: Option<String>,
+    pub assistant_message_text: Option<String>,
+    pub assistant_message_excerpt: Option<String>,
+    pub status: ConversationTurnStatus,
+    pub status_source: Option<String>,
+    pub tools_used: BTreeMap<String, u64>,
+    pub failed_tool_count: u64,
+    pub command_nonzero_count: u64,
+    pub files_read: Vec<String>,
+    pub files_written: Vec<String>,
+    pub external_side_effects: Vec<String>,
+    pub failure_signals: Vec<ConversationTurnFailureSignal>,
+    pub provider_native_refs: Vec<ConversationProviderNativeRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +228,12 @@ pub struct ConversationIndexEntry {
     pub first_prompt_excerpt: Option<String>,
     pub last_record_excerpt: Option<String>,
     pub record_count: u64,
+    #[serde(default)]
+    pub turn_count: u64,
+    #[serde(default)]
+    pub has_turns: bool,
+    #[serde(default)]
+    pub lifecycle_only: bool,
     pub artifact_count: u64,
     pub path: String,
 }
@@ -308,6 +381,22 @@ fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = tmp_path_for(path);
+    {
+        let mut file = fs::File::create(&tmp_path)?;
+        for record in records {
+            serde_json::to_writer(&mut file, record).map_err(io::Error::other)?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+    }
+    replace_file(&tmp_path, path)
+}
+
 #[cfg(windows)]
 fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
@@ -366,7 +455,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn manifest_serializes_archive_enums_as_snake_case() {
+    fn manifest_serializes_archive_enums_as_snake_case_without_capture_quality() {
         let manifest = ConversationManifest {
             schema: CONVERSATION_SCHEMA,
             conversation_id: "conv_20260615_000000_agent_1".to_string(),
@@ -377,6 +466,7 @@ mod tests {
             provider: "codex".to_string(),
             provider_session_ids: vec!["session-1".to_string()],
             provider_source_key: Some("codex:session:session-1".to_string()),
+            provider_native_refs: Vec::new(),
             effective_logging: ConversationLoggingSetting::Enabled,
             created_at: "2026-06-15T00:00:00.000Z".to_string(),
             updated_at: "2026-06-15T00:01:00.000Z".to_string(),
@@ -384,6 +474,10 @@ mod tests {
             status: ConversationStatus::Interrupted,
             boundary_reason: ConversationBoundaryReason::ProviderSourceChanged,
             format_versions: ConversationFormatVersions::default(),
+            record_count: 2,
+            turn_count: 1,
+            has_turns: true,
+            lifecycle_only: false,
         };
 
         let json = serde_json::to_value(&manifest).unwrap();
@@ -392,6 +486,9 @@ mod tests {
         assert_eq!(json["status"], "interrupted");
         assert_eq!(json["boundary_reason"], "provider_source_changed");
         assert_eq!(json["effective_logging"], "enabled");
+        assert_eq!(json["record_count"], 2);
+        assert_eq!(json["turn_count"], 1);
+        assert!(json.get("capture_quality").is_none());
     }
 
     #[test]
@@ -399,6 +496,7 @@ mod tests {
         let record = ConversationNarrativeRecord {
             schema: CONVERSATION_SCHEMA,
             seq: 7,
+            turn_id: Some("turn-1".to_string()),
             at: "2026-06-15T00:00:07.000Z".to_string(),
             kind: ConversationRecordKind::ToolResult,
             role: Some("tool".to_string()),
@@ -416,9 +514,56 @@ mod tests {
         let json = serde_json::to_value(&record).unwrap();
 
         assert_eq!(json["kind"], "tool_result");
+        assert_eq!(json["turn_id"], "turn-1");
         assert_eq!(json["speaker_type"], "tool");
         assert_eq!(json["tool"], "shell_command");
         assert_eq!(json["artifact_refs"][0], "artifacts/tool-result-7.txt");
+    }
+
+    #[test]
+    fn turn_record_serializes_only_factual_aggregations_without_capture_quality() {
+        let mut tools_used = std::collections::BTreeMap::new();
+        tools_used.insert("shell_command".to_string(), 2);
+        let record = ConversationTurnRecord {
+            schema: CONVERSATION_SCHEMA,
+            turn_id: Some("turn-1".to_string()),
+            seq_start: 1,
+            seq_end: 4,
+            user_message_seq: Some(1),
+            assistant_message_seq: Some(4),
+            user_message_text: Some("Run the tests.".to_string()),
+            user_message_excerpt: None,
+            assistant_message_text: Some("Tests failed.".to_string()),
+            assistant_message_excerpt: None,
+            status: ConversationTurnStatus::Failed,
+            status_source: Some("tool_failure".to_string()),
+            tools_used,
+            failed_tool_count: 1,
+            command_nonzero_count: 1,
+            files_read: vec!["src/lib.rs".to_string()],
+            files_written: vec!["src/lib.rs".to_string()],
+            external_side_effects: Vec::new(),
+            failure_signals: vec![ConversationTurnFailureSignal {
+                signal: "command_nonzero_exit".to_string(),
+                seq: 3,
+            }],
+            provider_native_refs: vec![ConversationProviderNativeRef {
+                provider: "codex".to_string(),
+                provider_session_id: Some("session-1".to_string()),
+                source_kind: "provider_log".to_string(),
+                source_path: Some("<absolute-workspace-path>/codex.jsonl".to_string()),
+            }],
+        };
+
+        let json = serde_json::to_value(&record).unwrap();
+
+        assert_eq!(json["turn_id"], "turn-1");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["status_source"], "tool_failure");
+        assert_eq!(json["tools_used"]["shell_command"], 2);
+        assert!(json.get("capture_quality").is_none());
+        assert!(json.get("notes_for_evolver").is_none());
+        assert!(json.get("user_correction").is_none());
     }
 
     #[test]
@@ -563,7 +708,8 @@ mod tests {
         let first = "x".repeat(CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
         let second = "y".repeat(CONVERSATION_INLINE_TEXT_LIMIT_BYTES + 1);
 
-        let first_payload = materialize_text_payload(&artifacts_dir, "tool result", &first).unwrap();
+        let first_payload =
+            materialize_text_payload(&artifacts_dir, "tool result", &first).unwrap();
         let second_payload =
             materialize_text_payload(&artifacts_dir, "tool result", &second).unwrap();
 
@@ -621,6 +767,7 @@ mod tests {
         ConversationNarrativeRecord {
             schema: CONVERSATION_SCHEMA,
             seq,
+            turn_id: None,
             at: format!("2026-06-15T00:00:0{seq}.000Z"),
             kind: ConversationRecordKind::Message,
             role: Some("assistant".to_string()),
@@ -647,6 +794,7 @@ mod tests {
             provider: "codex".to_string(),
             provider_session_ids: vec!["session-1".to_string()],
             provider_source_key: Some("codex:session:session-1".to_string()),
+            provider_native_refs: Vec::new(),
             effective_logging: ConversationLoggingSetting::Enabled,
             created_at: "2026-06-15T00:00:00.000Z".to_string(),
             updated_at: "2026-06-15T00:01:00.000Z".to_string(),
@@ -654,6 +802,10 @@ mod tests {
             status,
             boundary_reason: ConversationBoundaryReason::Spawn,
             format_versions: ConversationFormatVersions::default(),
+            record_count: 0,
+            turn_count: 0,
+            has_turns: false,
+            lifecycle_only: false,
         }
     }
 
@@ -678,6 +830,9 @@ mod tests {
             first_prompt_excerpt: Some("first prompt".to_string()),
             last_record_excerpt: Some(last_record_excerpt.to_string()),
             record_count: 1,
+            turn_count: 0,
+            has_turns: false,
+            lifecycle_only: false,
             artifact_count: 0,
             path: format!("agent-1/conversations/{conversation_id}"),
         }

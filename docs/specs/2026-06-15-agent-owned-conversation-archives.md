@@ -38,6 +38,7 @@ under each agent's Wardian directory:
           manifest.json
           conversation.jsonl
           events.jsonl
+          turns.jsonl
           sources.jsonl
           artifacts/
 ```
@@ -67,11 +68,24 @@ logging behavior is identical.
 A pure terminal display clear or scrollback repaint does not create a new
 conversation unless it also resets provider continuity.
 
+Lifecycle records created by clear, worktree switch, or provider-source rollover
+must use live agent configuration when the agent exists. A lifecycle-only archive
+may have no turns, but it must still preserve `agent_name`, `agent_class`,
+`workspace`, `provider`, `provider_session_ids`, and `provider_source_key` when
+those values are available. `provider: "unknown"` is reserved for genuinely
+unidentified offline or manual archive writes.
+
 ## Capture Model
 
 Conversation logging runs in the backend lifecycle and transcript path, not in
 the React chat view. The chat view can read archived conversations later, but
 capture must not depend on UI polling.
+
+Archive capture is runtime-owned, not chat-view-owned. The chat view may trigger
+the same capture helper that terminal and lifecycle paths use, but opening chat
+mode is not required for a live agent to append provider/watch events into its
+agent-owned archive. Restored agents schedule a bounded archive sync after their
+runtime or log source is available.
 
 Wardian appends only completed semantic records:
 
@@ -102,11 +116,16 @@ Stores conversation-level metadata:
 - provider
 - provider session/source ids
 - provider source key used for continuity rollover and open-archive hydration
+- provider-native references discovered from structured source records
 - effective logging setting
 - created, updated, and closed timestamps
 - status: `open`, `closed`, or `interrupted`
 - boundary reason
 - file format versions
+- record count
+- turn count
+- whether turns are present
+- whether the archive is lifecycle-only
 
 `manifest.json` updates should be written atomically.
 
@@ -125,6 +144,7 @@ Common fields include:
 
 - `schema`
 - `seq`
+- `turn_id`
 - `at`
 - `kind`
 - `role`
@@ -142,11 +162,42 @@ Wardian does not need perfect human-vs-agent attribution in v1. Inter-agent
 messages often land through the same provider input path as user prompts, so
 attribution should be best effort.
 
+`seq` is the canonical ordering key inside a conversation archive. Timestamps
+are useful evidence, but they may reflect provider event time, capture time, or
+export time depending on the source adapter.
+
 ### `events.jsonl`
 
 Stores fuller canonical event records. It includes the records represented in
 `conversation.jsonl` plus more detailed structured data for status transitions,
 tool metadata, provider-specific normalized fields, and lifecycle events.
+
+### `turns.jsonl`
+
+Stores a compact derived index over `conversation.jsonl`, `events.jsonl`, and
+`sources.jsonl` for completed conversation archives. It exists to save agents
+joins and bounded scans; it is not a semantic analysis file. Wardian materializes
+it when a conversation is closed rather than rewriting it on every append.
+
+Turn rows are factual aggregations only. They may include:
+
+- `turn_id`, when provided by a provider or Wardian structured event
+- `seq_start` and `seq_end`
+- `user_message_seq` and `assistant_message_seq`
+- `user_message_text` or `user_message_excerpt`
+- `assistant_message_text` or `assistant_message_excerpt`
+- `status` and `status_source`, only when mechanically supported
+- `tools_used`, counted by normalized structured tool name
+- `failed_tool_count`
+- `command_nonzero_count`
+- `files_read` and `files_written`, only from structured metadata
+- `external_side_effects`, only from structured metadata
+- `failure_signals` with `seq` references
+- `provider_native_refs`
+
+The archive writer must not infer user intent, corrections, complaints,
+causality, recovery, task success, file access, or side effects from arbitrary
+prose or command strings. There is no `notes_for_evolver` field in v1.
 
 ### `sources.jsonl`
 
@@ -195,10 +246,19 @@ The index stores mechanical metadata only:
 - first prompt excerpt
 - last record excerpt
 - record count
+- turn count
+- whether turns are present
+- whether the archive is lifecycle-only
 - artifact count
 - path
 
 No LLM-generated titles or summaries are created in v1.
+
+Agents and external tools should not recursively discover conversations under
+`agents/*`. Use `wardian conversation list`, or perform bounded reads of each
+agent's `conversations/index.jsonl` and then open specific conversation paths.
+`index.jsonl` is append-only upsert history; direct file readers must collapse
+entries by `conversation_id` and keep the latest row.
 
 ## Settings
 
