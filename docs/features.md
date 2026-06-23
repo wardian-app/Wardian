@@ -116,7 +116,7 @@ Related docs:
 
 ## Provider-Aware Orchestration
 
-- Unified orchestration over Gemini, Antigravity, Claude, Codex, and OpenCode
+- Unified orchestration over Antigravity, Claude, Codex, and OpenCode (Gemini is unmaintained — use Antigravity for Google-model access)
 - Provider-specific lifecycle handling for resume/session identity and skill discovery
 
 Related docs:

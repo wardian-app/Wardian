@@ -22,76 +22,14 @@ impl OpenCodeProvider {
     }
 
     #[cfg(target_os = "windows")]
-    fn packaged_windows_binary_from_shim(base_dir: &std::path::Path) -> Option<String> {
-        [
-            base_dir
-                .join("node_modules")
-                .join("opencode-ai")
-                .join("node_modules")
-                .join("opencode-windows-x64")
-                .join("bin")
-                .join("opencode.exe"),
-            base_dir
-                .join("node_modules")
-                .join("opencode-ai")
-                .join("node_modules")
-                .join("opencode-windows-x64-baseline")
-                .join("bin")
-                .join("opencode.exe"),
-            base_dir
-                .join("node_modules")
-                .join("opencode-ai")
-                .join("node_modules")
-                .join("opencode-windows-arm64")
-                .join("bin")
-                .join("opencode.exe"),
-        ]
-        .into_iter()
-        .find(|candidate| candidate.exists())
-        .map(|candidate| candidate.to_string_lossy().to_string())
-    }
-
-    /// Standard npm global install roots on Windows, used as a PATH-independent
-    /// fallback. npm's default prefix is `%APPDATA%\npm`; `npm_config_prefix`
-    /// overrides it. Each returned dir is expected to contain `node_modules`.
-    #[cfg(target_os = "windows")]
-    fn windows_npm_global_dirs() -> Vec<std::path::PathBuf> {
-        let mut dirs = Vec::new();
-        if let Ok(prefix) = std::env::var("npm_config_prefix") {
-            let trimmed = prefix.trim();
-            if !trimmed.is_empty() {
-                dirs.push(std::path::PathBuf::from(trimmed));
-            }
-        }
-        if let Some(appdata) = dirs::config_dir() {
-            let npm = appdata.join("npm");
-            if !dirs.contains(&npm) {
-                dirs.push(npm);
-            }
-        }
-        dirs
-    }
-
-    #[cfg(target_os = "windows")]
     fn find_windows_opencode_in_paths<I>(paths: I, path_exts: &[String]) -> Option<String>
     where
         I: IntoIterator<Item = std::path::PathBuf>,
     {
-        let mut shim_fallback: Option<String> = None;
-
         for path in paths {
             let direct_exe = path.join("opencode.exe");
             if direct_exe.exists() {
-                return Some(direct_exe.to_string_lossy().to_string());
-            }
-
-            // npm can leave the platform binary under node_modules without a
-            // bin shim (interrupted install, or an update that didn't
-            // regenerate opencode.cmd/.ps1). Probe the packaged binary relative
-            // to every PATH entry so a missing shim doesn't hide a working
-            // install — a later native exe still wins via the checks above.
-            if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                return Some(executable);
+                return Some("opencode".to_string());
             }
 
             let bare = path.join("opencode");
@@ -99,44 +37,16 @@ impl OpenCodeProvider {
             for ext in path_exts {
                 let candidate = path.join(format!("opencode{ext}"));
                 if candidate.exists() {
-                    if candidate
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|value| value.eq_ignore_ascii_case("exe"))
-                    {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
-
-                    if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                        return Some(executable);
-                    }
-                    if shim_fallback.is_none() {
-                        shim_fallback = Some(candidate.to_string_lossy().to_string());
-                    }
-                    break;
+                    return Some("opencode".to_string());
                 }
             }
 
-            if bare.exists() {
-                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                    return Some(executable);
-                }
-                if shim_fallback.is_none() {
-                    shim_fallback = Some("opencode".to_string());
-                }
-            }
-
-            if powershell.exists() {
-                if let Some(executable) = Self::packaged_windows_binary_from_shim(&path) {
-                    return Some(executable);
-                }
-                if shim_fallback.is_none() {
-                    shim_fallback = Some("opencode".to_string());
-                }
+            if bare.exists() || powershell.exists() {
+                return Some("opencode".to_string());
             }
         }
 
-        shim_fallback
+        None
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -214,15 +124,6 @@ impl AgentProvider for OpenCodeProvider {
                 if let Some(executable) =
                     Self::find_windows_opencode_in_paths(std::env::split_paths(&paths), &path_exts)
                 {
-                    return (executable, vec![]);
-                }
-            }
-
-            // PATH may omit the npm global dir when the packaged app is launched
-            // outside a shell, so probe the standard npm global install
-            // locations directly before giving up.
-            for base in Self::windows_npm_global_dirs() {
-                if let Some(executable) = Self::packaged_windows_binary_from_shim(&base) {
                     return (executable, vec![]);
                 }
             }
@@ -464,7 +365,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_prefers_packaged_executable_from_shim_dir() {
+    fn windows_path_lookup_prefers_cmd_shim_over_packaged_executable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let cmd = temp.path().join("opencode.cmd");
         std::fs::write(&cmd, "@echo off\r\n").expect("cmd shim");
@@ -484,12 +385,12 @@ mod tests {
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some("opencode".to_string()));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_uses_packaged_executable_for_powershell_script() {
+    fn windows_path_lookup_prefers_powershell_shim_over_packaged_executable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let ps1 = temp.path().join("opencode.ps1");
         std::fs::write(&ps1, "Write-Output hi\r\n").expect("ps1 shim");
@@ -509,7 +410,7 @@ mod tests {
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some("opencode".to_string()));
     }
 
     #[cfg(target_os = "windows")]
@@ -526,12 +427,12 @@ mod tests {
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some(cmd.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some("opencode".to_string()));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_prefers_later_native_exe_over_earlier_cmd_shim() {
+    fn windows_path_lookup_uses_bare_command_for_path_matches() {
         let shim_dir = tempfile::tempdir().expect("shim dir");
         let exe_dir = tempfile::tempdir().expect("exe dir");
         let cmd = shim_dir.path().join("opencode.cmd");
@@ -544,15 +445,14 @@ mod tests {
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some("opencode".to_string()));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_path_lookup_resolves_packaged_binary_without_a_shim() {
-        // npm left the platform binary under node_modules but no opencode.cmd/
-        // .ps1 shim (interrupted install / update). The npm global dir is on
-        // PATH, so detection must resolve the packaged binary anyway.
+    fn windows_path_lookup_ignores_packaged_binary_without_a_shim() {
+        // The OpenCode package can contain a nested platform binary, but
+        // Wardian should launch the same PATH command a user terminal would.
         let temp = tempfile::tempdir().expect("temp dir");
         let exe = temp
             .path()
@@ -570,7 +470,7 @@ mod tests {
             &[".exe".into(), ".cmd".into(), ".bat".into()],
         );
 
-        assert_eq!(resolved, Some(exe.to_string_lossy().to_string()));
+        assert_eq!(resolved, None);
     }
 
     #[cfg(not(target_os = "windows"))]

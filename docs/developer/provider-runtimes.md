@@ -1,6 +1,6 @@
 # Provider Runtime Notes
 
-This document captures the practical runtime differences between Wardian's supported CLI providers: Gemini, Antigravity, Claude, Codex, and OpenCode. It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
+This document captures the practical runtime differences between Wardian's supported CLI providers: Antigravity, Claude, Codex, OpenCode, and Gemini (unmaintained). It is intended for maintainers working on spawn, resume, workflow execution, skill projection, and status/approval handling.
 
 ## Shared Wardian Invariants
 
@@ -24,37 +24,11 @@ This document captures the practical runtime differences between Wardian's suppo
 
 | Provider | Working root | Instruction file | Skill model | Session identity |
 | --- | --- | --- | --- | --- |
-| Gemini | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 | Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Discovered from conversation cache and transcript path |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
 | Codex | Real target workspace via `--cd`; habitat-backed `CODEX_HOME` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
 | OpenCode | Habitat command root with real workspace passed as `--dir` | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
-
-## Gemini
-
-### Working-root model
-
-Gemini headless runs use a projected habitat workspace so shared, class, and
-agent instructions and skills can be materialized outside Wardian's hidden state
-tree. The real target workspace remains the author-facing workspace, but the
-provider process runs from the habitat workspace path during headless execution.
-
-### Instruction and skill discovery
-
-- Gemini reads `GEMINI.md`.
-- Wardian passes include roots through `--include-directories`.
-- Skill discovery depends on Wardian's Gemini patching flow; see [Gemini CLI Patches](./gemini-cli-patches.md).
-- If Gemini stops seeing Wardian-managed skills, check the patched CLI bundle before changing spawn logic.
-
-### Session and telemetry behavior
-
-- Gemini session identity is learned from provider output rather than assigned before launch.
-- Wardian parses Gemini JSON events into `Init`, `UserQuery`, `Generating`, and `TurnCompleted` states.
-
-### Practical implications
-
-- Gemini regressions are usually about habitat projection, CLI patch drift,
-  include-directory handling, or event parsing.
+| Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
 ## Antigravity
 
@@ -234,17 +208,44 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `OPENCODE_CONFIG_CONTENT` first.
 - If interactive spawn works but telemetry is thin, that is expected today; OpenCode does not expose one stable per-session JSONL path the way Claude and Codex do.
-- On Windows, Wardian should prefer a native `opencode.exe` or packaged
-  OpenCode binary over `.cmd`/script shims during PATH resolution. If only an
-  extensionless or script shim exists, interactive and headless launch must wrap
-  it through `cmd /d /c ...` because direct process spawning does not get shell
-  dispatch semantics.
+- On Windows, Wardian should launch the `opencode` command resolved from PATH,
+  matching how a user terminal starts OpenCode. Interactive and headless launch
+  wrap that command through the configured shell because npm and PowerShell
+  shims need shell dispatch semantics.
+
+## Gemini (Unmaintained)
+
+> **Unmaintained.** Consumer/free Gemini CLI access ended June 18, 2026. Use Antigravity for Google-model access — it is the preferred replacement.
+
+### Working-root model
+
+Gemini headless runs use a projected habitat workspace so shared, class, and
+agent instructions and skills can be materialized outside Wardian's hidden state
+tree. The real target workspace remains the author-facing workspace, but the
+provider process runs from the habitat workspace path during headless execution.
+
+### Instruction and skill discovery
+
+- Gemini reads `GEMINI.md`.
+- Wardian passes include roots through `--include-directories`.
+- Skill discovery depends on Wardian's Gemini patching flow; see [Gemini CLI Patches](./gemini-cli-patches.md).
+- If Gemini stops seeing Wardian-managed skills, check the patched CLI bundle before changing spawn logic.
+
+### Session and telemetry behavior
+
+- Gemini session identity is learned from provider output rather than assigned before launch.
+- Wardian parses Gemini JSON events into `Init`, `UserQuery`, `Generating`, and `TurnCompleted` states.
+
+### Practical implications
+
+- Gemini regressions are usually about habitat projection, CLI patch drift,
+  include-directory handling, or event parsing.
 
 ## Choosing Where to Debug
 
 When provider behavior breaks, start with the provider-specific seam instead of the generic agent UI.
 
-- Gemini problems: inspect patching, include directories, and JSON event parsing.
 - Claude problems: inspect `CLAUDE.md` discovery, permission hooks, and explicit session flags.
 - Codex problems: inspect `CODEX_HOME`, `--cd`, bootstrap migration, and sandbox approval transitions.
 - OpenCode problems: inspect `OPENCODE_CONFIG_CONTENT`, real-workspace `cwd`, and JSON session parsing.
+- Gemini problems (unmaintained): inspect patching, include directories, and JSON event parsing.

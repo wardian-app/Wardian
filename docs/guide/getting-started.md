@@ -62,11 +62,11 @@ Wardian runs local provider CLIs inside managed terminals. Install and authentic
 
 | Provider | Install command | Basic check |
 | :--- | :--- | :--- |
-| Gemini CLI | `npm install -g @google/gemini-cli` | `gemini --version` |
 | Antigravity | See the [Antigravity CLI overview](https://www.antigravity.google/docs/cli-overview) | `agy --version` |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude --version` |
 | Codex | `npm install -g @openai/codex` | `codex --version` |
 | OpenCode | Provider package that exposes `opencode` | `opencode --version` |
+| Gemini CLI *(unmaintained)* | `npm install -g @google/gemini-cli` | `gemini --version` |
 
 Run the check from a normal terminal first. If the command is not found there, Wardian usually will not find it either.
 
@@ -75,11 +75,11 @@ Run the check from a normal terminal first. If the command is not found there, W
 Start the provider directly once and complete any sign-in prompt before launching it through Wardian.
 
 ```bash
-gemini
 agy
 claude
 codex
 opencode
+gemini
 ```
 
 Use only the provider you installed. Exit the provider after it reaches its normal ready state.
@@ -87,11 +87,11 @@ Use only the provider you installed. Exit the provider after it reaches its norm
 PowerShell uses the same provider commands:
 
 ```powershell
-gemini
 agy
 claude
 codex
 opencode
+gemini
 ```
 
 If a provider asks you to sign in again inside Wardian, finish that prompt in the agent terminal. For provider-specific runtime details, see [Provider Runtimes](../providers.md).

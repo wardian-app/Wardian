@@ -48,7 +48,7 @@ describe('WorkflowMonitor', () => {
   it('shows completed runs in history', () => {
     runState.runs = [{
       run_id: 'run-1',
-      blueprint_id: 'heartbeat',
+      blueprint_id: 'routine-check',
       status: 'completed',
       node_count: 2,
       path: '/runs/run-1',
@@ -56,12 +56,12 @@ describe('WorkflowMonitor', () => {
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(screen.queryByTestId('workflow-activity-row-heartbeat')).toBeNull();
+    expect(screen.queryByTestId('workflow-activity-row-routine-check')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('heartbeat');
-    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('Completed');
+    expect(screen.getByTestId('workflow-history-run-run-1')).toHaveTextContent('routine-check');
+    expect(screen.getByTestId('workflow-history-run-run-1')).toHaveTextContent('Completed');
   });
 
   it('sorts history by latest run timestamp and shows the timestamp', () => {
@@ -90,8 +90,8 @@ describe('WorkflowMonitor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    const newerRow = screen.getByTestId('workflow-activity-row-newer-workflow');
-    const olderRow = screen.getByTestId('workflow-activity-row-older-workflow');
+    const newerRow = screen.getByTestId('workflow-history-run-run-newer');
+    const olderRow = screen.getByTestId('workflow-history-run-run-older');
     expect(newerRow.compareDocumentPosition(olderRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(newerRow).toHaveTextContent('Time');
     expect(newerRow).toHaveTextContent(new Date(newerTimestamp).toLocaleString());
@@ -102,8 +102,8 @@ describe('WorkflowMonitor', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
-        blueprint_id: 'heartbeat',
-        name: 'Passive Heartbeat',
+        blueprint_id: 'routine-check',
+        name: 'Routine Check',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -135,7 +135,7 @@ describe('WorkflowMonitor', () => {
     runState.runs = [
       {
         run_id: 'run-active',
-        blueprint_id: 'heartbeat',
+        blueprint_id: 'routine-check',
         status: 'running',
         node_count: 2,
         path: '/runs/active',
@@ -166,15 +166,15 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /^history$/i })).toBeNull();
     expect(screen.queryByRole('heading', { name: /^schedules$/i })).toBeNull();
-    expect(screen.getAllByText('Passive Heartbeat')).toHaveLength(1);
+    expect(screen.getAllByText('Routine Check')).toHaveLength(1);
   });
 
   it('filters the activity surface by operational state', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
-        blueprint_id: 'heartbeat',
-        name: 'Passive Heartbeat',
+        blueprint_id: 'routine-check',
+        name: 'Routine Check',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -195,7 +195,7 @@ describe('WorkflowMonitor', () => {
     ];
     runState.runs = [{
       run_id: 'run-active',
-      blueprint_id: 'heartbeat',
+      blueprint_id: 'routine-check',
       status: 'running',
       node_count: 2,
       path: '/runs/active',
@@ -206,18 +206,18 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /needs attention/i }));
     expect(screen.getByText('Audit')).toBeInTheDocument();
     expect(screen.getByText('crashed')).toBeInTheDocument();
-    expect(screen.queryByText('Passive Heartbeat')).toBeNull();
+    expect(screen.queryByText('Routine Check')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /running/i }));
-    expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
+    expect(screen.getByText('Routine Check')).toBeInTheDocument();
     expect(screen.queryByText('Audit')).toBeNull();
   });
 
   it('shows history only when the history filter is selected', () => {
     scheduleState.schedules = [{
       id: 'schedule-1',
-      blueprint_id: 'heartbeat',
-      name: 'Passive Heartbeat',
+      blueprint_id: 'routine-check',
+      name: 'Routine Check',
       input: {},
       bindings: {},
       schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -227,7 +227,7 @@ describe('WorkflowMonitor', () => {
     runState.runs = [
       {
         run_id: 'run-current',
-        blueprint_id: 'heartbeat',
+        blueprint_id: 'routine-check',
         status: 'running',
         node_count: 2,
         path: '/runs/current',
@@ -256,12 +256,61 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByText('manual-review')).toBeInTheDocument();
   });
 
+  it('shows history as one chronological run stream without hiding newer failed runs behind old workflow summaries', () => {
+    runState.runs = [
+      {
+        run_id: 'run-old-alpha',
+        blueprint_id: 'alpha-workflow',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/alpha',
+        updated_at: '2026-05-30T08:28:10Z',
+      },
+      {
+        run_id: 'run-old-beta',
+        blueprint_id: 'beta-workflow',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/beta',
+        updated_at: '2026-05-30T08:28:09Z',
+      },
+      {
+        run_id: 'run-new-failed',
+        blueprint_id: 'gamma-workflow',
+        status: 'failed',
+        node_count: 2,
+        path: '/runs/gamma-failed',
+        updated_at: '2026-06-10T07:09:28Z',
+        failure: 'watch state error',
+      },
+      {
+        run_id: 'run-new-completed',
+        blueprint_id: 'gamma-workflow',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/gamma-completed',
+        updated_at: '2026-06-10T06:35:40Z',
+      },
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    const newestFailed = screen.getByTestId('workflow-history-run-run-new-failed');
+    const newerCompleted = screen.getByTestId('workflow-history-run-run-new-completed');
+    const oldAlpha = screen.getByTestId('workflow-history-run-run-old-alpha');
+    expect(newestFailed.compareDocumentPosition(newerCompleted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(newerCompleted.compareDocumentPosition(oldAlpha) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText('watch state error')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
+  });
+
   it('shows all scheduled workflows with neutral scheduled labeling', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
-        blueprint_id: 'heartbeat',
-        name: 'Passive Heartbeat',
+        blueprint_id: 'routine-check',
+        name: 'Routine Check',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -286,7 +335,7 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /due soon/i })).toBeNull();
-    expect(screen.getByText('Passive Heartbeat')).toBeInTheDocument();
+    expect(screen.getByText('Routine Check')).toBeInTheDocument();
     expect(screen.getByText('Nightly Review')).toBeInTheDocument();
   });
 
@@ -294,7 +343,7 @@ describe('WorkflowMonitor', () => {
     runState.runs = [
       {
         run_id: 'run-active-1',
-        blueprint_id: 'passive-heartbeat',
+        blueprint_id: 'shared-workflow',
         status: 'running',
         node_count: 2,
         path: '/runs/active-1',
@@ -302,7 +351,7 @@ describe('WorkflowMonitor', () => {
       },
       {
         run_id: 'run-active-2',
-        blueprint_id: 'passive-heartbeat',
+        blueprint_id: 'shared-workflow',
         status: 'running',
         node_count: 2,
         path: '/runs/active-2',
@@ -321,8 +370,8 @@ describe('WorkflowMonitor', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
-        blueprint_id: 'passive-heartbeat',
-        name: 'Trader Heartbeat',
+        blueprint_id: 'shared-workflow',
+        name: 'Primary Schedule',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -331,8 +380,8 @@ describe('WorkflowMonitor', () => {
       },
       {
         id: 'schedule-2',
-        blueprint_id: 'passive-heartbeat',
-        name: 'Assistant Heartbeat',
+        blueprint_id: 'shared-workflow',
+        name: 'Secondary Schedule',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },
@@ -344,16 +393,16 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /scheduled/i }));
 
-    expect(screen.getByText('Trader Heartbeat')).toBeInTheDocument();
-    expect(screen.getByText('Assistant Heartbeat')).toBeInTheDocument();
+    expect(screen.getByText('Primary Schedule')).toBeInTheDocument();
+    expect(screen.getByText('Secondary Schedule')).toBeInTheDocument();
   });
 
   it('does not hide scheduled instances when another instance of the same workflow is running', () => {
     scheduleState.schedules = [
       {
-        id: 'schedule-trader',
-        blueprint_id: 'passive-heartbeat',
-        name: 'Trader Heartbeat',
+        id: 'schedule-primary',
+        blueprint_id: 'shared-workflow',
+        name: 'Primary Schedule',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -361,9 +410,9 @@ describe('WorkflowMonitor', () => {
         next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
       },
       {
-        id: 'schedule-reviewer',
-        blueprint_id: 'passive-heartbeat',
-        name: 'Reviewer Heartbeat',
+        id: 'schedule-secondary',
+        blueprint_id: 'shared-workflow',
+        name: 'Secondary Schedule',
         input: {},
         bindings: {},
         schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },
@@ -372,24 +421,72 @@ describe('WorkflowMonitor', () => {
       },
     ];
     runState.runs = [{
-      run_id: 'run-trader',
-      blueprint_id: 'passive-heartbeat',
+      run_id: 'run-primary',
+      blueprint_id: 'shared-workflow',
       status: 'running',
       node_count: 2,
-      path: '/runs/trader',
+      path: '/runs/primary',
     }];
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(screen.getByText('Trader Heartbeat')).toBeInTheDocument();
-    expect(screen.getByText('Reviewer Heartbeat')).toBeInTheDocument();
+    expect(screen.getByText('Primary Schedule')).toBeInTheDocument();
+    expect(screen.getByText('Secondary Schedule')).toBeInTheDocument();
+  });
+
+  it('associates active scheduled runs with the matching schedule instance', () => {
+    scheduleState.schedules = [
+      {
+        id: 'schedule-primary',
+        blueprint_id: 'shared-workflow',
+        name: 'Primary Schedule',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+      },
+      {
+        id: 'schedule-secondary',
+        blueprint_id: 'shared-workflow',
+        name: 'Secondary Schedule',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 17, 0, 0),
+      },
+    ];
+    runState.runs = [{
+      run_id: 'run-primary',
+      blueprint_id: 'shared-workflow',
+      schedule_id: 'schedule-primary',
+      status: 'running',
+      node_count: 2,
+      path: '/runs/primary',
+    } as RunSummary];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    const rows = screen.getAllByTestId('workflow-activity-row-shared-workflow');
+    expect(rows).toHaveLength(2);
+    const primaryRow = rows.find((row) => row.textContent?.includes('Primary Schedule'));
+    const secondaryRow = rows.find((row) => row.textContent?.includes('Secondary Schedule'));
+    expect(primaryRow).toBeDefined();
+    expect(secondaryRow).toBeDefined();
+    expect(primaryRow).toHaveTextContent('Primary Schedule');
+    expect(primaryRow).toHaveTextContent('Running');
+    expect(primaryRow).toHaveTextContent('run-primary');
+    expect(secondaryRow).toHaveTextContent('Secondary Schedule');
+    expect(secondaryRow).toHaveTextContent('Scheduled');
+    expect(secondaryRow).toHaveTextContent('No runs yet');
   });
 
   it('renders activity actions inside responsive rows instead of a fixed actions table', () => {
     scheduleState.schedules = [{
       id: 'schedule-1',
-      blueprint_id: 'heartbeat',
-      name: 'Passive Heartbeat',
+      blueprint_id: 'routine-check',
+      name: 'Routine Check',
       input: {},
       bindings: {},
       schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
@@ -399,9 +496,9 @@ describe('WorkflowMonitor', () => {
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(screen.getByTestId('workflow-activity-row-heartbeat')).toHaveTextContent('Passive Heartbeat');
+    expect(screen.getByTestId('workflow-activity-row-routine-check')).toHaveTextContent('Routine Check');
     expect(screen.queryByRole('columnheader', { name: /actions/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /pause passive heartbeat/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /pause routine check/i })).toBeInTheDocument();
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -439,7 +536,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.queryByText('run-old-failed')).toBeNull();
   });
 
-  it('expands history to show older runs on demand', () => {
+  it('shows short history runs without requiring expansion', () => {
     runState.runs = [
       {
         run_id: 'run-new',
@@ -464,21 +561,15 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByRole('heading', { name: /^history$/i })).toBeInTheDocument();
     const latestRunId = screen.getByText('run-new');
-    const showOlderButton = screen.getByRole('button', { name: /show 1 older/i });
-    expect(latestRunId.compareDocumentPosition(showOlderButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.queryByText('run-old')).toBeNull();
-
-    fireEvent.click(showOlderButton);
-
-    expect(screen.getByText('run-new')).toBeInTheDocument();
     const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
+    expect(latestRunId.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(olderRunRow).toHaveTextContent('run-old');
     expect(olderRunRow).toHaveTextContent('Run');
     expect(olderRunRow).toHaveTextContent('Schedule');
     expect(olderRunRow).toHaveTextContent('Assignment');
     expect(olderRunRow).toHaveTextContent('Manual only');
     expect(olderRunRow).toHaveTextContent('Default');
-    expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
   });
 
   it('reveals older history ten runs at a time', () => {
@@ -504,21 +595,18 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.queryByText('run-old-01')).toBeNull();
-    expect(screen.getByRole('button', { name: /show 10 older/i })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /show 10 older/i }));
-
     expect(screen.getByText('run-old-01')).toBeInTheDocument();
+    expect(screen.getByText('run-old-09')).toBeInTheDocument();
+    expect(screen.queryByText('run-old-10')).toBeNull();
+    expect(screen.getByRole('button', { name: /show 3 older/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /show 3 older/i }));
+
     expect(screen.getByText('run-old-10')).toBeInTheDocument();
-    expect(screen.queryByText('run-old-11')).toBeNull();
-    expect(screen.getByRole('button', { name: /show 2 older/i })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /show 2 older/i }));
-
     expect(screen.getByText('run-old-11')).toBeInTheDocument();
     expect(screen.getByText('run-old-12')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
   });
 
   it('renders scheduled agent assignments as agent names', async () => {
@@ -534,8 +622,8 @@ describe('WorkflowMonitor', () => {
     ]);
     scheduleState.schedules = [{
       id: 'schedule-1',
-      blueprint_id: 'passive-heartbeat',
-      name: 'Passive Heartbeat',
+      blueprint_id: 'routine-check',
+      name: 'Routine Check',
       input: {},
       bindings: { reasoning_gate: 'fb7107aa-4fd1-411f-b6bb-9c5a306d5ae2' },
       schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },

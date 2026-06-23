@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod control;
+pub mod delivery;
 pub mod manager;
 pub mod providers;
 pub mod remote;

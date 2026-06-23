@@ -40,7 +40,7 @@
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:web": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
-    "test:e2e:native": "node --test --test-concurrency=1 e2e-native/tests",
+    "test:e2e:native": "node scripts/run-native-e2e.mjs",
     "test:e2e:native:fast": "node scripts/run-native-e2e-fast.mjs",
     "test:e2e:native:watch": "node scripts/run-native-e2e-watch.mjs",
     "setup:e2e:native": "node scripts/setup-native-e2e.mjs",
@@ -94,7 +94,7 @@
     "tailwindcss": "^4.3.1",
     "terser": "^5.46.1",
     "typescript": "~5.8.3",
-    "vite": "6.4.2",
+    "vite": "6.4.3",
     "vitepress": "^1.6.4",
     "vitest": "^4.1.8"
   },
@@ -103,7 +103,7 @@
     "minimatch@10.2.5": {
       "brace-expansion": "5.0.6"
     },
-    "vite": "6.4.2",
-    "ws": "8.20.1"
+    "vite": "6.4.3",
+    "ws": "8.21.0"
   }
 }
