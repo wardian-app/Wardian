@@ -69,6 +69,13 @@ vi.mock("../features/graph/GraphCanvas", () => ({
   GraphCanvas: () => <div data-testid="graph-canvas" />,
 }));
 
+// GardenCanvas pulls in react-konva, whose node build requires the native
+// `canvas` package that jsdom can't provide. Stub it like GraphCanvas above;
+// real canvas behavior is covered by Playwright E2E.
+vi.mock("../features/garden/GardenCanvas", () => ({
+  GardenCanvas: () => <div data-testid="garden-canvas" />,
+}));
+
 // Cast invoke to mock for test control
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
