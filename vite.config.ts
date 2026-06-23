@@ -21,6 +21,17 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Align the dev-server dependency optimizer with the `build.target` below.
+  // esbuild 0.28 no longer lowers destructuring for Vite's legacy default
+  // optimizeDeps target (chrome87/es2020/...), so prebundling deps that use
+  // destructuring (konva, d3, zustand, xyflow, ...) fails when the dev server
+  // starts. Wardian's Tauri webviews are modern enough for ES2022.
+  optimizeDeps: {
+    esbuildOptions: {
+      target: "es2022",
+    },
+  },
+
   // esbuild miscompiles xterm.js 6.0.0's `requestMode` (nested `const i`
   // shadowing the outer webpack require in the pre-minified UMD bundle),
   // producing a runtime `ReferenceError: i is not defined` when a provider

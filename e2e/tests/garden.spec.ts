@@ -34,6 +34,20 @@ async function installGardenTestIpcMock(page: Page) {
       unregisterListener: () => undefined,
     };
 
+    // Seed a known garden position for the test agent so the drag below starts
+    // on top of a real unit (canvas units have no DOM handle to target). Guarded
+    // so the reload in the persistence test does not clobber the dragged value.
+    // Shape matches zustand's `persist` envelope: { state, version }.
+    if (!localStorage.getItem("wardian-garden")) {
+      localStorage.setItem(
+        "wardian-garden",
+        JSON.stringify({
+          state: { positions: { "agent:garden-test-agent-01": { x: 200, y: 200 } }, pins: {} },
+          version: 0,
+        }),
+      );
+    }
+
     tauriWindow.__TAURI_INTERNALS__ = {
       metadata: {
         currentWindow: { label: "main" },
@@ -101,14 +115,14 @@ test.describe("Garden View", () => {
   });
 
   test("renders a canvas when Garden tab is clicked", async () => {
-    await page.getByRole("button", { name: "Garden" }).click();
+    await page.getByRole("button", { name: "Garden", exact: true }).click();
     const canvas = page.locator(".garden-canvas canvas");
     await expect(canvas).toBeVisible();
   });
 
   test("dragging a unit persists its position to localStorage", async () => {
     // Ensure we're on the Garden tab
-    await page.getByRole("button", { name: "Garden" }).click();
+    await page.getByRole("button", { name: "Garden", exact: true }).click();
 
     // Wait for the canvas to be visible
     const canvas = page.locator(".garden-canvas canvas");
@@ -118,12 +132,12 @@ test.describe("Garden View", () => {
     const box = await canvas.boundingBox();
     if (!box) throw new Error("no canvas bounding box");
 
-    // Perform a drag operation: start at a position, drag to a new position
-    // We drag from near the center-left to center-right
-    const startX = box.x + 120;
-    const startY = box.y + 90;
-    const endX = box.x + 320;
-    const endY = box.y + 240;
+    // Start the drag on the seeded unit (canvas coords 200,200; Stage starts at
+    // offset 0 / scale 1, so canvas point maps to box origin + that offset).
+    const startX = box.x + 200;
+    const startY = box.y + 200;
+    const endX = box.x + 360;
+    const endY = box.y + 320;
 
     await page.mouse.move(startX, startY);
     await page.mouse.down();
@@ -152,7 +166,7 @@ test.describe("Garden View", () => {
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
     // Navigate back to Garden tab
-    await page.getByRole("button", { name: "Garden" }).click();
+    await page.getByRole("button", { name: "Garden", exact: true }).click();
 
     // Read localStorage again
     const storedAfter = await page.evaluate(() => localStorage.getItem("wardian-garden"));
