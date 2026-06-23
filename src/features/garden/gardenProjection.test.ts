@@ -1,27 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { buildGardenAgentUnits, buildGardenWorkflowUnits } from "./gardenProjection";
+import {
+  AGENT_LAYOUT_CENTER,
+  WORKFLOW_LAYOUT_CENTER,
+  buildGardenAgentUnits,
+  buildGardenWorkflowUnits,
+} from "./gardenProjection";
 import type { AgentGraphProjection } from "../graph/graphProjection";
 
+function node(id: string, label: string) {
+  return {
+    id,
+    label,
+    status: "Idle",
+    color: "var(--color-wardian-success)",
+    x: 0,
+    y: 0,
+    size: 9,
+    agent: {} as never,
+    clusterId: null,
+    selected: false,
+    recent: true,
+  };
+}
+
 const projection = {
-  nodes: [
-    { id: "a1", label: "Alpha", status: "Idle", color: "var(--color-wardian-success)", x: 100, y: 50, size: 9, agent: {} as never, clusterId: null, selected: false, recent: true },
-  ],
+  nodes: [node("a1", "Alpha"), node("a2", "Beta")],
   edges: [],
   clusters: [],
   visibleAgents: [],
   scopeLabel: "All",
 } as unknown as AgentGraphProjection;
 
+function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 describe("buildGardenAgentUnits", () => {
-  it("uses the projection seed position when there is no override", () => {
-    const [unit] = buildGardenAgentUnits(projection, {});
-    expect(unit.ref).toEqual({ kind: "agent", id: "a1" });
-    expect(unit.position).toEqual({ x: 100, y: 50 });
-    expect(unit.color).toBe("var(--color-wardian-success)");
-    expect(unit.recent).toBe(true);
+  it("spirals agents around the layout center (index 0 sits on the center)", () => {
+    const [first, second] = buildGardenAgentUnits(projection, {});
+    expect(first.ref).toEqual({ kind: "agent", id: "a1" });
+    expect(first.position).toEqual(AGENT_LAYOUT_CENTER);
+    expect(first.color).toBe("var(--color-wardian-success)");
+    expect(first.recent).toBe(true);
+    // The second unit fans outward, so it never overlaps the first.
+    expect(distance(second.position, AGENT_LAYOUT_CENTER)).toBeCloseTo(60, 5);
+    expect(second.position).not.toEqual(first.position);
   });
 
-  it("prefers a persisted override over the seed", () => {
+  it("prefers a persisted override over the seeded spiral position", () => {
     const [unit] = buildGardenAgentUnits(projection, { "agent:a1": { x: 7, y: 8 } });
     expect(unit.position).toEqual({ x: 7, y: 8 });
   });
@@ -33,14 +59,15 @@ describe("buildGardenWorkflowUnits", () => {
     { id: "w2", label: "Ship", runStatus: "none" as const, nodeCount: 1 },
   ];
 
-  it("lays unplaced workflows out along a shelf band", () => {
+  it("spirals workflows around their own center, clustered apart from agents", () => {
     const units = buildGardenWorkflowUnits(workflows, {});
-    expect(units[0].position).toEqual({ x: 40, y: 40 });
-    expect(units[1].position).toEqual({ x: 200, y: 40 });
     expect(units[0].ref).toEqual({ kind: "workflow", id: "w1" });
+    expect(units[0].position).toEqual(WORKFLOW_LAYOUT_CENTER);
+    expect(distance(units[1].position, WORKFLOW_LAYOUT_CENTER)).toBeCloseTo(80, 5);
+    expect(units[1].position).not.toEqual(units[0].position);
   });
 
-  it("prefers a persisted override over the shelf slot", () => {
+  it("prefers a persisted override over the seeded spiral position", () => {
     const units = buildGardenWorkflowUnits(workflows, { "workflow:w2": { x: 5, y: 6 } });
     expect(units[1].position).toEqual({ x: 5, y: 6 });
   });
