@@ -23,11 +23,7 @@ The fixed header at the top of the application acts as the global navigation and
 
 The **Graph** mode maps agents as status-colored nodes with relationship edges for same team, shared workspace, and same worktree. Use the centered relationship lenses to focus the map, and open the inspector or context menu from any node to use the same agent actions available in the roster.
 
-The future **Garden** mode is Wardian's planned malleability surface: a spatial
-habitat for arranging agents, teams, workflows, skills, memories, files, and
-runtime evidence around the work itself. Garden should treat teams as
-project/workstream scopes that can cross workspace boundaries, while workspaces
-and folders remain the filesystem and execution boundaries.
+The **Garden** mode is a spatial canvas for organizing agents and workflows as draggable units (living orbs / pods) you arrange freely. Agent units display live status color; workflow units cluster in a shelf and show run state. Unit positions persist locally across restart. Only actively-processing units animate with a gentle pulse — the default is calm. Full agent session inspection still happens by opening the agent in Grid (Garden routes there), not inside Garden.
 
 ### 2. Left Sidebar (Control & Context)
 

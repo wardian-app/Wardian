@@ -35,7 +35,7 @@ import { SettingsModal } from "../features/settings/SettingsModal";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { GraphView } from "./GraphView";
-import { PlaceholderView } from "./PlaceholderView";
+import { GardenView } from "./GardenView";
 import { QueueView } from "./QueueView";
 import { WorkflowsView } from "./WorkflowsView";
 import { LibraryView } from "./LibraryView";
@@ -1098,9 +1098,22 @@ function AppBody() {
             )}
 
             {viewMode === "garden" && (
-              <div className="flex-1 flex flex-col min-h-0">
-                <PlaceholderView viewMode="garden" />
-              </div>
+              <GardenView
+                filteredAgents={filteredAgents}
+                telemetry={telemetry}
+                teams={teams}
+                activeList={activeList}
+                interactions={agentInteractions}
+                selectedAgentIds={selectedAgentIds}
+                offAgentIds={offAgentIds}
+                onSelectionChange={setSelectedAgentIds}
+                onOpenAgentInGrid={(id) => {
+                  setViewMode("grid");
+                  setSelectedAgentIds(new Set([id]));
+                  lastSelectedIdRef.current = id;
+                  window.setTimeout(() => scrollToAgent(id), 0);
+                }}
+              />
             )}
 
             {viewMode === "grid" && (
