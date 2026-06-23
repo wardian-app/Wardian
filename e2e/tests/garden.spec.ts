@@ -174,4 +174,30 @@ test.describe("Garden View", () => {
     // Verify the value is unchanged
     expect(storedAfter).toEqual(storedBefore);
   });
+
+  test("right-click offers Reset layout and clears persisted positions", async () => {
+    await page.getByRole("button", { name: "Garden", exact: true }).click();
+    const canvas = page.locator(".garden-canvas canvas");
+    await expect(canvas).toBeVisible();
+
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("no canvas bounding box");
+
+    // Open the context menu by dispatching a real contextmenu event on the
+    // canvas (bubbles to the container listener). A synthetic dispatch is more
+    // reliable than Playwright's mouse right-click over a <canvas> element.
+    await canvas.dispatchEvent("contextmenu", {
+      bubbles: true,
+      clientX: Math.round(box.x + box.width - 80),
+      clientY: Math.round(box.y + 60),
+    });
+    await expect(page.locator('[data-testid="garden-context-menu"]')).toBeVisible();
+
+    await page.locator('[data-testid="garden-reset-layout"]').click();
+    await page.waitForTimeout(200);
+
+    // Reset empties the persisted positions map.
+    const parsed = await page.evaluate(() => JSON.parse(localStorage.getItem("wardian-garden") ?? "{}"));
+    expect(parsed.state.positions).toEqual({});
+  });
 });

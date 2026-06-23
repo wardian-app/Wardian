@@ -5,6 +5,9 @@ import { isActiveAgentStatus } from "./gardenStatus";
 import { resolveCssVar } from "./resolveColor";
 import { useGardenPulse } from "./useGardenPulse";
 
+/** Konva node `name` used to identify agent units during canvas hit-testing. */
+export const AGENT_UNIT_NAME = "agent-unit";
+
 interface AgentUnitProps {
   unit: GardenAgentUnit;
   selected: boolean;
@@ -21,6 +24,10 @@ export const AgentUnit: React.FC<AgentUnitProps> = ({ unit, selected, onSelect, 
     <Group
       x={unit.position.x}
       y={unit.position.y}
+      // id + name let the canvas resolve which agent was right-clicked via
+      // Konva hit-testing (see GardenCanvas), without per-node DOM handlers.
+      id={unit.ref.id}
+      name={AGENT_UNIT_NAME}
       draggable
       onClick={() => onSelect(unit.ref.id)}
       onTap={() => onSelect(unit.ref.id)}

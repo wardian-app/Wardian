@@ -39,6 +39,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
 }) => {
   const positions = useGardenStore((s) => s.positions);
   const setPosition = useGardenStore((s) => s.setPosition);
+  const resetLayout = useGardenStore((s) => s.reset);
   const workflowInputs = useGardenWorkflows();
 
   // Canvas highlight is keyed by unitKey so agent and workflow ids can't collide,
@@ -83,6 +84,10 @@ export const GardenView: React.FC<GardenViewProps> = ({
         }}
         onOpenAgent={onOpenAgentInGrid}
         onMoveUnit={(key, x, y) => setPosition(key, { x, y })}
+        onResetLayout={() => {
+          resetLayout();
+          setSelectedKey(null);
+        }}
       />
     </div>
   );

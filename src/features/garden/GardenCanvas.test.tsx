@@ -5,7 +5,10 @@ vi.mock("react-konva", () => ({
   Stage: ({ children }: any) => <div data-konva="stage">{children}</div>,
   Layer: ({ children }: any) => <div data-konva="layer">{children}</div>,
 }));
-vi.mock("./AgentUnit", () => ({ AgentUnit: ({ unit }: any) => <div data-testid="agent-unit">{unit.label}</div> }));
+vi.mock("./AgentUnit", () => ({
+  AGENT_UNIT_NAME: "agent-unit",
+  AgentUnit: ({ unit }: any) => <div data-testid="agent-unit">{unit.label}</div>,
+}));
 vi.mock("./WorkflowUnit", () => ({ WorkflowUnit: ({ unit }: any) => <div data-testid="workflow-unit">{unit.label}</div> }));
 
 import { GardenCanvas } from "./GardenCanvas";
@@ -20,6 +23,7 @@ describe("GardenCanvas", () => {
         onSelect={vi.fn()}
         onOpenAgent={vi.fn()}
         onMoveUnit={vi.fn()}
+        onResetLayout={vi.fn()}
       />,
     );
     expect(screen.getByTestId("agent-unit")).toHaveTextContent("Alpha");
