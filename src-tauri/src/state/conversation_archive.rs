@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agent
 pub struct ConversationArchiveState {
     #[allow(dead_code)]
     active: Mutex<HashMap<String, ActiveConversationHandle>>,
+    agent_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +204,8 @@ impl ConversationArchiveState {
             return Ok(0);
         }
 
-        let mut active = lock_active(&self.active)?;
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
         let provider_source_key = context
             .provider_source_key
             .clone()
@@ -215,7 +217,7 @@ impl ConversationArchiveState {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
         let mut handle =
-            active_handle_for_context(&mut active, &context, provider_source_key.clone())?;
+            active_handle_for_context(&self.active, &context, provider_source_key.clone())?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
@@ -277,7 +279,8 @@ impl ConversationArchiveState {
                     existing_records[record_index].speaker_type =
                         Some(ConversationSpeakerType::User);
                 }
-                append_jsonl_record(&events_path, event)?;
+                let event_record = event_record_for_jsonl(event, &existing_records[record_index]);
+                append_jsonl_record(&events_path, &event_record)?;
                 merged_existing_count = merged_existing_count.saturating_add(1);
                 continue;
             }
@@ -291,14 +294,14 @@ impl ConversationArchiveState {
             } else {
                 source_records.push(None);
             }
-            event_records.push(event.clone());
+            event_records.push(event_record_for_jsonl(event, &record));
             next_seq = next_seq.saturating_add(1);
             appended.push(record);
         }
 
         if appended.is_empty() && merged_existing_count == 0 {
             handle.next_seq = next_seq;
-            active.insert(context.agent_id.clone(), handle);
+            lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
             return Ok(0);
         }
 
@@ -353,7 +356,7 @@ impl ConversationArchiveState {
         )?;
 
         handle.next_seq = next_seq;
-        active.insert(context.agent_id.clone(), handle);
+        lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
         Ok(appended.len().saturating_add(merged_existing_count))
     }
 
@@ -411,12 +414,13 @@ impl ConversationArchiveState {
         mut context: ConversationArchiveContext,
         make_record: impl FnOnce(u64) -> ConversationNarrativeRecord,
     ) -> io::Result<usize> {
-        let mut active = lock_active(&self.active)?;
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
         let provider_source_key = context.provider_source_key.clone();
         if context.provider_source_key.is_none() {
             context.provider_source_key = provider_source_key.clone();
         }
-        let mut handle = active_handle_for_context(&mut active, &context, provider_source_key)?;
+        let mut handle = active_handle_for_context(&self.active, &context, provider_source_key)?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
         let effective_context = effective_context_for_handle(&context, &handle, &conversation_dir)?;
         let conversation_path = conversation_dir.join("conversation.jsonl");
@@ -473,7 +477,7 @@ impl ConversationArchiveState {
         )?;
 
         handle.next_seq = next_seq.saturating_add(1);
-        active.insert(context.agent_id.clone(), handle);
+        lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
         Ok(1)
     }
 
@@ -482,8 +486,9 @@ impl ConversationArchiveState {
         agent_id: &str,
         reason: ConversationBoundaryReason,
     ) -> io::Result<Option<String>> {
-        let mut active = lock_active(&self.active)?;
-        let Some(handle) = active.remove(agent_id) else {
+        let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
+        let Some(handle) = lock_active(&self.active)?.remove(agent_id) else {
             return Ok(None);
         };
         let conversation_dir = conversation_dir(agent_id, &handle.conversation_id)?;
@@ -521,8 +526,11 @@ impl ConversationArchiveState {
         provider_source_key: Option<&str>,
         events: &[AgentChatEvent],
     ) -> io::Result<Option<String>> {
-        let mut active = lock_active(&self.active)?;
-        let removed = active.remove(agent_id).map(|handle| handle.conversation_id);
+        let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
+        let removed = lock_active(&self.active)?
+            .remove(agent_id)
+            .map(|handle| handle.conversation_id);
         let mut capture_state = read_capture_state(agent_id)?;
         let cutoff = current_rfc3339_millis();
 
@@ -977,6 +985,24 @@ fn lock_active(
         .map_err(|_| io::Error::other("conversation archive state lock poisoned"))
 }
 
+fn agent_lock_for(
+    locks: &Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    agent_id: &str,
+) -> io::Result<Arc<Mutex<()>>> {
+    let mut locks = locks
+        .lock()
+        .map_err(|_| io::Error::other("conversation archive lock map poisoned"))?;
+    Ok(locks
+        .entry(agent_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+fn lock_agent_archive(lock: &Arc<Mutex<()>>) -> io::Result<std::sync::MutexGuard<'_, ()>> {
+    lock.lock()
+        .map_err(|_| io::Error::other("conversation archive agent lock poisoned"))
+}
+
 fn conversation_dir(agent_id: &str, conversation_id: &str) -> io::Result<std::path::PathBuf> {
     agent_conversation_dir(agent_id, conversation_id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe conversation path"))
@@ -1120,22 +1146,30 @@ fn source_path_from_event(event: &AgentChatEvent) -> Option<String> {
 }
 
 fn active_handle_for_context(
-    active: &mut HashMap<String, ActiveConversationHandle>,
+    active: &Mutex<HashMap<String, ActiveConversationHandle>>,
     context: &ConversationArchiveContext,
     provider_source_key: Option<String>,
 ) -> io::Result<ActiveConversationHandle> {
-    if let Some(existing) = active.get(&context.agent_id).cloned() {
+    let existing = {
+        let active = lock_active(active)?;
+        active.get(&context.agent_id).cloned()
+    };
+
+    if let Some(existing) = existing {
         match (
             existing.provider_source_key.as_deref(),
             provider_source_key.as_deref(),
         ) {
             (Some(existing_key), Some(next_key)) if existing_key != next_key => {
+                {
+                    let mut active = lock_active(active)?;
+                    active.remove(&context.agent_id);
+                }
                 close_conversation_handle(
                     &context.agent_id,
                     &existing,
                     ConversationBoundaryReason::ProviderSourceChanged,
                 )?;
-                active.remove(&context.agent_id);
             }
             (None, Some(_)) => {
                 return Ok(ActiveConversationHandle {
@@ -1714,6 +1748,48 @@ fn materialize_record_text(
     record.excerpt = payload.excerpt;
     record.artifact_refs = payload.artifact_refs;
     Ok(())
+}
+
+fn event_record_for_jsonl(
+    event: &AgentChatEvent,
+    record: &ConversationNarrativeRecord,
+) -> AgentChatEvent {
+    if event.text.is_none() || record.text.is_some() || record.artifact_refs.is_empty() {
+        return event.clone();
+    }
+
+    let mut event = event.clone();
+    event.text = None;
+    let metadata = event
+        .metadata
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .chain([
+            (
+                "text_excerpt".to_string(),
+                record
+                    .excerpt
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "text_artifact_refs".to_string(),
+                serde_json::Value::Array(
+                    record
+                        .artifact_refs
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            ),
+        ])
+        .collect();
+    event.metadata = serde_json::Value::Object(metadata);
+    event
 }
 
 fn artifact_stem_for_record(record: &ConversationNarrativeRecord) -> String {
@@ -2499,6 +2575,9 @@ mod tests {
         let records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path.join("conversation.jsonl"))
                 .expect("read narrative records");
+        let events: Vec<AgentChatEvent> =
+            read_jsonl_records(&conversation_path.join("events.jsonl"))
+                .expect("read event records");
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].text, None);
@@ -2518,6 +2597,15 @@ mod tests {
             )
             .expect("read artifact"),
             large_text
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, None);
+        assert!(events[0].metadata["text_excerpt"]
+            .as_str()
+            .is_some_and(|excerpt| large_text.starts_with(excerpt)));
+        assert_eq!(
+            events[0].metadata["text_artifact_refs"][0],
+            "event-large-0001.txt"
         );
     }
 

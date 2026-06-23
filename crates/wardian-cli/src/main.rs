@@ -130,8 +130,11 @@ fn resolve_conversation_agent(
     agent: Option<String>,
     scope_all: bool,
 ) -> Result<Option<String>, CliError> {
-    if agent.is_some() || scope_all {
-        return Ok(agent);
+    if let Some(agent) = agent {
+        return Ok(Some(resolve_conversation_agent_target(&agent)));
+    }
+    if scope_all {
+        return Ok(None);
     }
 
     std::env::var("WARDIAN_SESSION_ID")
@@ -140,6 +143,19 @@ fn resolve_conversation_agent(
         .filter(|value| !value.is_empty())
         .map(Some)
         .ok_or_else(|| CliError::generic("--agent, --scope all, or WARDIAN_SESSION_ID is required"))
+}
+
+fn resolve_conversation_agent_target(target: &str) -> String {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    open_db()
+        .ok()
+        .and_then(|conn| identity::resolve_by_name_or_uuid(&conn, trimmed).ok())
+        .map(|agent| agent.uuid)
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,6 +1573,29 @@ mod tests {
         assert!(error.message.contains("--agent"));
         assert!(error.message.contains("--scope all"));
         assert!(error.message.contains("WARDIAN_SESSION_ID"));
+    }
+
+    #[test]
+    fn conversation_list_agent_accepts_persisted_agent_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestWardianHome::new(temp.path());
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db")).unwrap();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: "agent-uuid-1",
+            session_name: "AgentOne",
+            agent_class: "Coder",
+            provider: "codex",
+            workspace: Some("<absolute-workspace-path>"),
+            project: None,
+            is_off: false,
+            created_at: Some("2026-06-15T00:00:00.000Z"),
+        })
+        .unwrap();
+
+        let resolved = resolve_conversation_agent(Some("AgentOne".to_string()), false)
+            .expect("resolve agent name");
+
+        assert_eq!(resolved.as_deref(), Some("agent-uuid-1"));
     }
 
     #[test]

@@ -159,16 +159,7 @@ pub(crate) fn collect_agent_chat_events_for_archive(
     });
 
     let events = merge_chat_events(watch_events, provider_events);
-    let context = conversation_archive_context(ConversationArchiveContextInput {
-        session_id: &snapshot.session_id,
-        provider: &snapshot.provider,
-        agent_name: &snapshot.agent_name,
-        agent_class: &snapshot.agent_class,
-        workspace: &snapshot.workspace,
-        resume_session: snapshot.resume_session.as_deref(),
-        fresh_provider_session_id: snapshot.fresh_provider_session_id.as_deref(),
-        log_path: snapshot.log_path.as_deref(),
-    });
+    let context = conversation_archive_context_from_snapshot(snapshot);
 
     Ok(ArchiveCaptureResult { events, context })
 }
@@ -530,6 +521,21 @@ fn conversation_archive_context(
         provider_session_ids,
         provider_source_key,
     }
+}
+
+pub(crate) fn conversation_archive_context_from_snapshot(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> ConversationArchiveContext {
+    conversation_archive_context(ConversationArchiveContextInput {
+        session_id: &snapshot.session_id,
+        provider: &snapshot.provider,
+        agent_name: &snapshot.agent_name,
+        agent_class: &snapshot.agent_class,
+        workspace: &snapshot.workspace,
+        resume_session: snapshot.resume_session.as_deref(),
+        fresh_provider_session_id: snapshot.fresh_provider_session_id.as_deref(),
+        log_path: snapshot.log_path.as_deref(),
+    })
 }
 
 fn load_opencode_db_chat_events(
