@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import "../../styles/App.css";
 import { RefreshCw } from "lucide-react";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
@@ -14,7 +14,9 @@ export const RemoteMobileApp: React.FC = () => {
   const activeAgentId = useRemoteStore((state) => state.activeAgentId);
   const activeRemoteTab = useRemoteStore((state) => state.activeRemoteTab);
   const load = useRemoteStore((state) => state.load);
+  const refresh = useRemoteStore((state) => state.refresh);
   const disconnectStatusStream = useRemoteStore((state) => state.disconnectStatusStream);
+  const resumeRefreshInFlightRef = useRef(false);
 
   useEffect(() => {
     void load();
@@ -23,6 +25,27 @@ export const RemoteMobileApp: React.FC = () => {
   useEffect(() => {
     return () => disconnectStatusStream();
   }, [disconnectStatusStream]);
+
+  useEffect(() => {
+    const refreshOnResume = () => {
+      if (document.visibilityState === "hidden") return;
+      if (useRemoteStore.getState().status !== "ready") return;
+      if (resumeRefreshInFlightRef.current) return;
+      resumeRefreshInFlightRef.current = true;
+      void refresh().finally(() => {
+        resumeRefreshInFlightRef.current = false;
+      });
+    };
+
+    window.addEventListener("focus", refreshOnResume);
+    window.addEventListener("pageshow", refreshOnResume);
+    document.addEventListener("visibilitychange", refreshOnResume);
+    return () => {
+      window.removeEventListener("focus", refreshOnResume);
+      window.removeEventListener("pageshow", refreshOnResume);
+      document.removeEventListener("visibilitychange", refreshOnResume);
+    };
+  }, [refresh]);
 
   if (status === "loading") {
     return (

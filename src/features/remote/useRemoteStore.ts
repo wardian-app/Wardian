@@ -62,6 +62,7 @@ interface RemoteState {
   chatError: string;
   sending: boolean;
   load: () => Promise<void>;
+  refresh: () => Promise<void>;
   disconnectStatusStream: () => void;
   setActiveWatchlistId: (id: string) => void;
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
@@ -638,6 +639,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         set({ status: "pairing_expired" });
         return;
       }
+      set({ status: statusFromError(error) });
+    }
+  },
+  async refresh() {
+    try {
+      await ensureAuthenticatedSession(set);
+      await loadRemoteShellData(set, get);
+    } catch (error) {
+      closeStatusStream();
       set({ status: statusFromError(error) });
     }
   },
