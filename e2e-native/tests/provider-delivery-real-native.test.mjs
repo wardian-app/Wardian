@@ -132,6 +132,15 @@ function providerCustomArgs(provider) {
   return process.env[envName]?.trim() || null;
 }
 
+function expectedMarkerOccurrencesForProvider(provider) {
+  return provider === "gemini" ? 2 : 1;
+}
+
+function markerOccurrenceCount(text, marker) {
+  if (!marker) return 0;
+  return text.split(marker).length - 1;
+}
+
 function configOverrideForProvider(provider) {
   const config = { provider };
   const model = providerModel(provider);
@@ -179,6 +188,25 @@ async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
   );
   assert.equal(result.agent.provider, provider);
   return result.agent;
+}
+
+async function killRealProviderAgent(driver, sessionId) {
+  if (!sessionId) {
+    return;
+  }
+
+  const result = await driver.executeAsyncScript((sid, done) => {
+    window.__TAURI_INTERNALS__.invoke("kill_agent", { sessionId: sid }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, sessionId);
+
+  assert.equal(
+    result.ok,
+    true,
+    `real provider cleanup failed for ${sessionId}: ${result.error}`,
+  );
 }
 
 async function waitForDeliveryState(cliPath, harness, target, state, messageId, timeoutMs = 60000) {
@@ -242,7 +270,7 @@ async function runRealDeliveryCase({ cliPath, harness, provider, agentName, inpu
     cliPath,
     harness,
     agentName,
-    "submit_sent_unverified",
+    "submit_sent_unconfirmed",
     queuedDelivery.message_id,
   );
   assert.equal(drained.runtime_state, "mailbox_drain");
@@ -264,7 +292,13 @@ async function runRealDeliveryCase({ cliPath, harness, provider, agentName, inpu
     const watchJson = JSON.parse(watched.stdout);
     const transcript = watchJson.transcript?.latest_text ?? "";
     const output = watchJson.output?.text ?? "";
-    assert.match(`${transcript}\n${output}`, new RegExp(expected));
+    const combinedOutput = `${transcript}\n${output}`;
+    const occurrenceCount = markerOccurrenceCount(combinedOutput, expected);
+    const requiredOccurrences = expectedMarkerOccurrencesForProvider(provider);
+    assert.ok(
+      occurrenceCount >= requiredOccurrences,
+      `${provider} output contained ${occurrenceCount} occurrence(s) of ${expected}; expected at least ${requiredOccurrences}`,
+    );
   }
 }
 
@@ -274,6 +308,11 @@ test("real provider delivery case parser expands all only as the sole entry", ()
     INPUT_CASES.map((inputCase) => inputCase.name),
   );
   assert.deepEqual(parseDeliveryCases("all,mailbox-short"), ["all", "mailbox-short"]);
+});
+
+test("Gemini delivery output must include the marker beyond the prompt echo", () => {
+  assert.equal(expectedMarkerOccurrencesForProvider("gemini"), 2);
+  assert.equal(expectedMarkerOccurrencesForProvider("codex"), 1);
 });
 
 test("real provider delivery validation uses actual provider CLIs", { timeout: 900000 }, async (t) => {
@@ -338,8 +377,10 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
   const selectedCases = INPUT_CASES.filter((inputCase) => caseNames.includes(inputCase.name));
   for (const provider of providers) {
     const agentName = `E2E-RealDelivery-${provider}-${runId}`;
+    let agent = null;
+    let providerError = null;
     try {
-      await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
+      agent = await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
       for (const inputCase of selectedCases) {
         await runRealDeliveryCase({
           cliPath,
@@ -351,9 +392,21 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
         });
       }
     } catch (error) {
+      providerError = error;
+    } finally {
+      if (agent?.session_id) {
+        try {
+          await killRealProviderAgent(session.driver, agent.session_id);
+        } catch (cleanupError) {
+          providerError ??= cleanupError;
+        }
+      }
+    }
+
+    if (providerError) {
       const debugTail = await readDebugTail(harness);
       assert.fail(
-        `Real provider delivery failed for ${provider}: ${error.message}\n\n` +
+        `Real provider delivery failed for ${provider}: ${providerError.message}\n\n` +
           `Model: ${providerModel(provider) ?? "<provider default>"}\n` +
           `Custom args: ${providerCustomArgs(provider) ?? "<none>"}\n` +
           `--- Wardian debug tail ---\n${debugTail}`,

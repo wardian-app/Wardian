@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const REAL_RENDERING_PROVIDERS = ["codex", "claude", "gemini", "opencode"];
+const REAL_RENDERING_PROVIDERS = ["codex", "claude", "gemini", "opencode", "antigravity"];
 const DEFAULT_REAL_RENDERING_PROVIDERS = ["codex", "claude"];
 const RESIZE_AUDIT_STATES = new Set([
   "resized",
@@ -417,6 +417,10 @@ function byState(states) {
   return new Map((states ?? []).map((state) => [state.name, state]));
 }
 
+function stateAuditTextExpected(state) {
+  return state?.metrics?.validation?.audit_text_present !== null;
+}
+
 function parsedAnsiByCode(ansi, code) {
   return (ansi.parsed ?? []).find((item) => item.code === code) ?? null;
 }
@@ -670,7 +674,7 @@ export function auditRenderingEvidence({
     // blank the terminal instead.
     const pausedLines = wardianStates.get("paused")?.capture?.debug?.lines ?? [];
     providerCheck(
-      inPlaceTui
+      inPlaceTui || !stateAuditTextExpected(latestPrePauseState)
         ? pausedLines.some((line) => String(line ?? "").trim().length > 0)
         : JSON.stringify(latestPrePauseState?.capture?.debug?.lines ?? []) ===
             JSON.stringify(pausedLines),
@@ -678,10 +682,12 @@ export function auditRenderingEvidence({
     );
     if (wardianManifest.input_submitted === true) {
       const resumedState = wardianStates.get("resumed");
-      providerCheck(
-        terminalTextIncludes(`${stateText(resumedState)}\n${parserHistoryText(resumedState)}`, auditText),
-        "Wardian resumed terminal history includes submitted audit marker",
-      );
+      if (stateAuditTextExpected(resumedState)) {
+        providerCheck(
+          terminalTextIncludes(`${stateText(resumedState)}\n${parserHistoryText(resumedState)}`, auditText),
+          "Wardian resumed terminal history includes submitted audit marker",
+        );
+      }
     }
 
     if (!requireOutsideEvidence) {

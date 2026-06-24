@@ -1,27 +1,14 @@
-import { spawn } from "node:child_process";
 import { nativeE2eTestTargets } from "./native-e2e-targets.mjs";
+import { runNativeE2eTargets } from "./native-e2e-runner.mjs";
 
 const testTargets = process.argv.slice(2);
-const args = ["--test", "--test-concurrency=1"];
 
-if (testTargets.length > 0) {
-  args.push(...testTargets);
-} else {
-  args.push(...nativeE2eTestTargets());
-}
-
-const child = spawn(process.execPath, args, {
-  stdio: "inherit",
+const exitCode = await runNativeE2eTargets({
+  requestedTargets: testTargets,
+  defaultTargets: nativeE2eTestTargets(),
   env: {
     ...process.env,
     WARDIAN_NATIVE_SKIP_BUILD: "1",
   },
 });
-
-child.on("exit", (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
-});
+process.exit(exitCode);

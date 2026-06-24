@@ -764,7 +764,7 @@ pub(crate) fn apply_managed_cli_path_to_pty(cmd: &mut CommandBuilder) {
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
     {
-        cmd.env("PATH", path);
+        cmd.env(managed_cli_path_env_key(), path);
     }
 }
 
@@ -772,14 +772,31 @@ pub(crate) fn apply_managed_cli_path_to_process(cmd: &mut tokio::process::Comman
     if let Some(path) =
         crate::utils::cli_install::child_path_with_cli_bin(std::env::var("PATH").ok().as_deref())
     {
-        cmd.env("PATH", path);
+        cmd.env(managed_cli_path_env_key(), path);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn managed_cli_path_env_key() -> &'static str {
+    "Path"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn managed_cli_path_env_key() -> &'static str {
+    "PATH"
 }
 
 pub(crate) fn apply_interactive_provider_runtime_env(
     provider_name: &str,
     cmd: &mut CommandBuilder,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    if provider_name == "claude" {
+        if let Some(script) = ensure_claude_bash_env_script()? {
+            cmd.env("BASH_ENV", script);
+        }
+    }
+
     let _ = (provider_name, cmd);
 
     Ok(())
@@ -789,9 +806,64 @@ pub(crate) fn apply_process_provider_runtime_env(
     provider_name: &str,
     cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    if provider_name == "claude" {
+        if let Some(script) = ensure_claude_bash_env_script()? {
+            cmd.env("BASH_ENV", script);
+        }
+    }
+
     let _ = (provider_name, cmd);
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_claude_bash_env_script() -> Result<Option<String>, String> {
+    let Some(home) = crate::utils::fs::get_wardian_home() else {
+        return Ok(None);
+    };
+    let script_path = home
+        .join("runtime")
+        .join("windows")
+        .join("claude-bash-env.sh");
+    if let Some(parent) = script_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create Claude bash environment directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let bin_path = windows_path_to_msys_shell_path(&home.join("bin"));
+    let contents = format!(
+        "# wardian Claude tool shell PATH\nwardian_bin={}\ncase \":$PATH:\" in\n  *\":$wardian_bin:\"*) ;;\n  *) export PATH=\"$wardian_bin:$PATH\" ;;\nesac\n",
+        shell_single_quote(&bin_path)
+    );
+    std::fs::write(&script_path, contents).map_err(|err| {
+        format!(
+            "Failed to write Claude bash environment script {}: {err}",
+            script_path.display()
+        )
+    })?;
+    Ok(Some(windows_path_to_msys_shell_path(&script_path)))
+}
+
+#[cfg(windows)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(windows)]
+fn windows_path_to_msys_shell_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string().replace('\\', "/");
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("/{drive}{}", &text[2..])
+    } else {
+        text
+    }
 }
 
 pub(crate) fn display_log_path(path: &std::path::Path) -> String {
@@ -832,7 +904,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn managed_cli_path_is_applied_to_pty_commands() {
+    fn managed_cli_path_is_applied_to_pty_commands_with_windows_path_key() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_home = std::env::var_os("WARDIAN_HOME");
         let previous_path = std::env::var_os("PATH");
@@ -843,9 +915,14 @@ mod tests {
         let mut cmd = CommandBuilder::new("claude");
         apply_managed_cli_path_to_pty(&mut cmd);
 
+        let path_keys = cmd
+            .iter_extra_env_as_str()
+            .filter_map(|(key, _)| key.eq_ignore_ascii_case("PATH").then_some(key.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(path_keys, vec!["Path".to_string()]);
         let path = cmd
-            .get_env("PATH")
-            .expect("PATH env")
+            .get_env("Path")
+            .expect("Path env")
             .to_string_lossy()
             .to_string();
         assert!(path.starts_with(&home.path().join("bin").display().to_string()));
@@ -951,8 +1028,8 @@ mod tests {
         apply_terminal_identity_env(&mut cmd);
 
         let path = cmd
-            .get_env("PATH")
-            .expect("PATH env")
+            .get_env(managed_cli_path_env_key())
+            .expect("managed CLI path env")
             .to_string_lossy()
             .to_string();
         assert!(path.starts_with(&home.path().join("bin").display().to_string()));
@@ -1041,6 +1118,47 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn claude_provider_runtime_env_sets_bash_env_path_hook() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut interactive = CommandBuilder::new("claude");
+        apply_interactive_provider_runtime_env("claude", &mut interactive).unwrap();
+
+        let bash_env = interactive
+            .get_env("BASH_ENV")
+            .expect("BASH_ENV env")
+            .to_string_lossy()
+            .to_string();
+        assert!(bash_env.ends_with("/runtime/windows/claude-bash-env.sh"));
+        let script_path = home
+            .path()
+            .join("runtime")
+            .join("windows")
+            .join("claude-bash-env.sh");
+        let script = std::fs::read_to_string(&script_path).expect("bash env script");
+        assert!(script.contains("export PATH=\"$wardian_bin:$PATH\""));
+        assert!(script.contains(&windows_path_to_msys_shell_path(&home.path().join("bin"))));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_to_msys_shell_path_converts_drive_paths() {
+        assert_eq!(
+            windows_path_to_msys_shell_path(Path::new(r"D:\Development\Wardian\.wardian\bin")),
+            "/d/Development/Wardian/.wardian/bin"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn managed_cli_path_is_applied_to_headless_processes() {
         let _guard = crate::utils::wardian_test_env_lock();
         let previous_home = std::env::var_os("WARDIAN_HOME");
@@ -1056,10 +1174,10 @@ mod tests {
             .as_std()
             .get_envs()
             .find_map(|(key, value)| {
-                (key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+                (key == managed_cli_path_env_key())
                     .then(|| value.expect("PATH value").to_string_lossy().to_string())
             })
-            .expect("PATH env");
+            .expect("managed CLI path env");
         assert!(path.starts_with(&home.path().join("bin").display().to_string()));
         assert!(path.ends_with(r"C:\Windows\System32"));
 

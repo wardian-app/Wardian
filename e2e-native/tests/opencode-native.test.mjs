@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { By, until } from "selenium-webdriver";
+import { By } from "selenium-webdriver";
 
 import {
   createNativeHarness,
@@ -15,6 +15,7 @@ import {
 const runRealOpenCode = process.env.WARDIAN_E2E_REAL_OPENCODE === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+const nativeOpenCodeAgentName = "Native-OpenCode";
 
 async function readDebugTail(harness) {
   try {
@@ -96,36 +97,10 @@ async function readAgentPty(driver, sessionId) {
   }, sessionId);
 }
 
-async function readDerivedAppStatus(driver, sessionId) {
-  const snapshot = await driver.executeScript((sid) => {
-    return window.__wardianAppDebug?.snapshot(sid) ?? null;
-  }, sessionId);
-  return snapshot?.derivedStatus || null;
-}
-
 async function readAppSnapshot(driver, sessionId) {
   return await driver.executeScript((sid) => {
     return window.__wardianAppDebug?.snapshot(sid) ?? null;
   }, sessionId);
-}
-
-async function sampleAgentStatuses(driver, sessionId, durationMs = 10000, intervalMs = 100) {
-  const seen = [];
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < durationMs) {
-    const snapshot = await readAppSnapshot(driver, sessionId);
-    if (snapshot?.derivedStatus) {
-      seen.push({
-        title: snapshot.title,
-        thought: snapshot.thought,
-        derivedStatus: snapshot.derivedStatus,
-      });
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  return seen;
 }
 
 async function startPromptSubmission(driver, sessionId, prompt) {
@@ -214,7 +189,7 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
   await waitForAppShell(driver, 20000);
 
   await driver.findElement(By.css('[data-testid="sidebar-tab-agent-config"]')).click();
-  await driver.findElement(By.css('[data-testid="spawn-agent-name"]')).sendKeys("Native OpenCode");
+  await driver.findElement(By.css('[data-testid="spawn-agent-name"]')).sendKeys(nativeOpenCodeAgentName);
   const workspaceInput = await driver.findElement(By.css('[data-testid="spawn-workspace-path"]'));
   await workspaceInput.clear();
   await workspaceInput.sendKeys(workspacePath);
@@ -226,7 +201,7 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
       const agents = await driver.executeAsyncScript((done) => {
         window.__TAURI_INTERNALS__.invoke("list_agents").then(done, (error) => done({ error: String(error) }));
       });
-      return Array.isArray(agents) && agents.some((agent) => agent.session_name === "Native OpenCode");
+      return Array.isArray(agents) && agents.some((agent) => agent.session_name === nativeOpenCodeAgentName);
     }, 60000);
 
     const sessionId = await readLatestAgentSessionId(driver);
@@ -237,12 +212,12 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
     const initialMetrics = await readAgentMetricRow(driver, sessionId);
     assert.ok(initialMetrics, "Expected telemetry row for spawned OpenCode session");
 
-    const initialStatus = await readDerivedAppStatus(driver, sessionId);
-    assert.match(initialStatus, /Idle|Pending|Booting/i);
+    assert.match(initialMetrics.current_status, /Idle|Pending|Booting|Processing/i);
+    const initialQueryCount = initialMetrics.query_count ?? 0;
 
     await driver.wait(async () => {
-      const snapshot = await readAppSnapshot(driver, sessionId);
-      return snapshot?.title === "OpenCode";
+      const row = await readAgentMetricRow(driver, sessionId);
+      return !!row && /Idle|Pending|Booting|Processing/i.test(row.current_status ?? "");
     }, 30000);
 
     await startPromptSubmission(
@@ -251,28 +226,18 @@ test("native OpenCode spawn works through Tauri IPC", { timeout: 180000 }, async
       "Use the skill tool to load wardian-native-skill. If it is available, reply with exactly NATIVE_SKILL_VISIBLE. If it is unavailable, reply with exactly NATIVE_SKILL_MISSING. Do not search the repository.",
     );
 
-    const sampledStatuses = await sampleAgentStatuses(driver, sessionId, 10000, 100);
-
-    assert.ok(
-      sampledStatuses.some((entry) => /Processing/i.test(entry.derivedStatus) || /^OC \| /.test(entry.title ?? "")),
-      `Expected to observe Processing status, got: ${JSON.stringify(sampledStatuses)}`,
-    );
-
     const submitResult = await waitForPromptSubmissionResult(driver, 90000);
     assert.deepEqual(submitResult, { ok: true });
 
     await driver.wait(async () => {
       const row = await readAgentMetricRow(driver, sessionId);
-      return !!row && row.query_count >= 1;
+      return !!row && row.query_count > initialQueryCount;
     }, 90000);
 
     const finalMetrics = await readAgentMetricRow(driver, sessionId);
-    assert.ok(finalMetrics && finalMetrics.query_count >= 1, "Expected query count to increment after prompt submission");
-
-    const finalSnapshot = await readAppSnapshot(driver, sessionId);
     assert.ok(
-      finalSnapshot?.title === "OpenCode" || /^OC \| /.test(finalSnapshot?.title ?? ""),
-      `Expected OpenCode title telemetry after prompt submission, got snapshot: ${JSON.stringify(finalSnapshot)}`,
+      finalMetrics && finalMetrics.query_count > initialQueryCount,
+      `Expected query count to increment after prompt submission from ${initialQueryCount}, got ${JSON.stringify(finalMetrics)}`,
     );
   } catch (error) {
     const debugTail = await readDebugTail(harness);

@@ -399,6 +399,8 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   assert.equal(fieldResult.status, 0, fieldResult.stderr);
   assert.equal(fieldResult.stdout, `${LIVE_SESSION_ID}\n`);
 
+  await waitForCliField(cliPath, harness, LIVE_SESSION_NAME, "status", "idle");
+
   const showResult = runCli(cliPath, harness, [
     "agent",
     LIVE_SESSION_NAME,
