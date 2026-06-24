@@ -261,9 +261,9 @@ command mode when you need to submit a provider slash command or another input
 that must reach the provider command channel without chat attribution. Command
 mode resets after a successful send.
 
-The mobile action strip includes lifecycle controls and Clone for the selected
-agent. Clone creates a fresh desktop-owned agent through the remote gateway and
-refreshes the phone roster after the desktop accepts the action.
+The mobile action strip includes lifecycle controls for the selected agent.
+Clone remains a desktop-only operation so the phone does not create new agent
+sessions accidentally from a compact remote surface.
 
 The mobile Queue tab shows completion cards derived from live remote terminal
 output and status transitions that the phone has observed in the current

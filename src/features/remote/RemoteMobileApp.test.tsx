@@ -3466,7 +3466,7 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     await userEvent.click(runningRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Clone" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
 
@@ -3477,14 +3477,13 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     await userEvent.click(offlineRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Clone" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
-  it("runs a selected-agent clone and refreshes the mobile roster", async () => {
+  it("does not expose selected-agent clone in the mobile roster", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    let agentListCalls = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -3499,43 +3498,20 @@ describe("RemoteMobileApp", () => {
         );
       }
       if (url === "/remote/api/agents") {
-        agentListCalls += 1;
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              agents:
-                agentListCalls === 1
-                  ? [
-                      {
-                        session_id: "agent-1",
-                        session_name: "Coder",
-                        agent_class: "Coder",
-                        provider: "codex",
-                        workspace: "<absolute-workspace-path>",
-                        status: "Idle",
-                        latest_text: null,
-                      },
-                    ]
-                  : [
-                      {
-                        session_id: "agent-1",
-                        session_name: "Coder",
-                        agent_class: "Coder",
-                        provider: "codex",
-                        workspace: "<absolute-workspace-path>",
-                        status: "Idle",
-                        latest_text: null,
-                      },
-                      {
-                        session_id: "agent-2",
-                        session_name: "Coder-copy",
-                        agent_class: "Coder",
-                        provider: "codex",
-                        workspace: "<absolute-workspace-path>",
-                        status: "Processing...",
-                        latest_text: null,
-                      },
-                    ],
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
             }),
             { status: 200 },
           ),
@@ -3560,21 +3536,8 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
-    await userEvent.click(await screen.findByRole("button", { name: "Clone" }));
-
-    await waitFor(() => {
-      expect(window.confirm).toHaveBeenCalledWith("Clone Coder?");
-      const actionCall = fetchMock.mock.calls.find(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
-      expect(actionCall).toBeTruthy();
-      expect(JSON.parse(actionCall?.[1]?.body as string)).toEqual({
-        action: "clone",
-        target: "agent-1",
-      });
-    });
-
-    await userEvent.click(screen.getByRole("button", { name: /Back to remote agents/i }));
-    expect(await screen.findByRole("button", { name: /Open Coder-copy details/i })).toBeVisible();
-    expect(agentListCalls).toBe(2);
+    expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
   });
 
   it("runs detail lifecycle actions without reloading the roster", async () => {

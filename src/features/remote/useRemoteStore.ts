@@ -595,11 +595,6 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
   void ensureStatusStream(set, get).catch((error: unknown) => handleStatusStreamOpenFailure(set, error));
 };
 
-const refreshAgents = async (set: RemoteSet) => {
-  const agents = await remoteClient.listAgents();
-  set({ agents });
-};
-
 export const useRemoteStore = create<RemoteState>((set, get) => ({
   agents: [],
   workflows: [],
@@ -800,10 +795,6 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   async runAgentAction(action, target) {
     try {
       await remoteClient.runAgentAction(action, target);
-      if (action === "clone") {
-        await refreshAgents(set);
-        return;
-      }
       if (get().activeAgentId === target) {
         if (action === "clear") {
           set({

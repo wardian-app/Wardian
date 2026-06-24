@@ -163,7 +163,7 @@ pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Resul
         }
     } else {
         match request.action.as_str() {
-            "clone" | "pause" | "resume" | "clear" | "kill" => Ok(()),
+            "pause" | "resume" | "clear" | "kill" => Ok(()),
             _ => Err("unsupported_remote_agent_action".to_string()),
         }
     }
@@ -201,22 +201,6 @@ pub async fn run_remote_agent_action(
         "pause" => {
             let state = app.state::<AppState>();
             crate::commands::agent::pause_agent(request.target, state, app.clone()).await
-        }
-        "clone" => {
-            let state = app.state::<AppState>();
-            let req = crate::commands::agent::CloneAgentRequest {
-                source_session_id: request.target,
-                mode: crate::commands::agent::CloneAgentMode::Fresh,
-                session_name: None,
-                provider: None,
-                folder: None,
-                agent_class: None,
-                start: Some(true),
-                profile_selection: None,
-            };
-            crate::commands::agent::clone_agent(req, state, app.clone())
-                .await
-                .map(|_| ())
         }
         "resume" => {
             let state = app.state::<AppState>();
@@ -558,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_agent_action_accepts_clone() {
+    fn remote_agent_action_rejects_clone() {
         let request = crate::remote::models::RemoteAgentActionRequest {
             action: "clone".to_string(),
             target: "agent-1".to_string(),
@@ -566,6 +550,9 @@ mod tests {
             input_mode: None,
         };
 
-        validate_remote_agent_action(&request).expect("clone should be accepted");
+        assert_eq!(
+            validate_remote_agent_action(&request).unwrap_err(),
+            "unsupported_remote_agent_action"
+        );
     }
 }
