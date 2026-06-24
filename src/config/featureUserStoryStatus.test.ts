@@ -147,7 +147,7 @@ describe("feature user story tracker", () => {
     const rows = trackerRows();
     const ids = rows.map((row) => row.id);
 
-    expect(rows).toHaveLength(100);
+    expect(rows).toHaveLength(101);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toEqual([...ids].sort());
     rows.forEach((row) => {

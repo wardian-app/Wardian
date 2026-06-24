@@ -3683,6 +3683,27 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         PathEnvGuard(original)
     }
 
+    fn fake_provider_log_block(log: &str, provider: &str) -> String {
+        let marker = format!("provider={provider}");
+        let mut lines = log.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line != marker {
+                continue;
+            }
+
+            let mut block = vec![line.to_string()];
+            while let Some(next) = lines.peek() {
+                if next.starts_with("provider=") {
+                    break;
+                }
+                block.push(lines.next().unwrap_or_default().to_string());
+            }
+            return block.join("\n");
+        }
+
+        panic!("{provider} fake executable should run: {log}");
+    }
+
     #[cfg(windows)]
     fn run_copyable_command_for_test(
         temp: &std::path::Path,
@@ -4095,11 +4116,6 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         for config in &cases {
             let command = build_agent_cli_command_with_shells(config, &settings, &shells)
                 .unwrap_or_else(|err| panic!("{} command should build: {err}", config.provider));
-            assert!(
-                command.contains(&format!("WARDIAN_SESSION_ID={}", config.session_id)),
-                "{} command should set its own Wardian identity: {command}",
-                config.provider
-            );
             generated_commands.push(format!("{}: {}", config.provider, command));
             let output = run_copyable_command_for_test(
                 temp.path(),
@@ -4123,25 +4139,26 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 
         let log = std::fs::read_to_string(&log_path).expect("external command smoke log");
         for config in cases {
+            let provider_log = fake_provider_log_block(&log, &config.provider);
             assert!(
-                log.contains(&format!("provider={}", config.provider)),
-                "{} fake executable should run: {log}",
-                config.provider
-            );
-            assert!(
-                log.contains(&format!("session={}", config.session_id)),
+                provider_log.contains(&format!("session={}", config.session_id)),
                 "{} command should pass Wardian identity.\nlog:\n{}\ncommands:\n{}",
                 config.provider,
                 log,
                 generated_commands.join("\n")
             );
         }
+        let codex_log = fake_provider_log_block(&log, "codex");
         assert!(
-            log.contains("codex_home=") && !log.contains("codex_home=\r\n"),
+            codex_log
+                .lines()
+                .find_map(|line| line.strip_prefix("codex_home="))
+                .is_some_and(|value| !value.trim().is_empty()),
             "Codex command should set CODEX_HOME before invoking provider: {log}"
         );
+        let claude_log = fake_provider_log_block(&log, "claude");
         assert!(
-            log.contains("claude_additional=1"),
+            claude_log.contains("claude_additional=1"),
             "Claude command should set additional-directory env before invoking provider: {log}"
         );
     }
