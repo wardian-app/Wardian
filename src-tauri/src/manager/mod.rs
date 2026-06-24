@@ -21,10 +21,10 @@ pub use headless::{
     obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options,
     HeadlessRunOptions,
 };
+pub(crate) use opencode::opencode_last_assistant_text;
 pub use opencode::{
     opencode_extract_created_session_id, opencode_extract_created_session_id_for_agent,
 };
-pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
@@ -253,6 +253,27 @@ pub(crate) fn set_agent_status(
                             }),
                         );
                     }
+                }
+                drop(agents);
+
+                let normalized_status = wardian_core::identity::normalize_status(&status);
+                if matches!(normalized_status.as_str(), "idle" | "action_required") {
+                    let archive_app = status_app.clone();
+                    let archive_session_id = status_session_id.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = archive_app.state::<AppState>();
+                        if let Err(error) =
+                            crate::commands::chat::archive_agent_chat_events_for_state(
+                                state.inner(),
+                                &archive_session_id,
+                            )
+                            .await
+                        {
+                            log_debug(&format!(
+                                "[WARDIAN] conversation archive status sync failed for {archive_session_id}: {error}"
+                            ));
+                        }
+                    });
                 }
 
                 let _ = status_app.emit(

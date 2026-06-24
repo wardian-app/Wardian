@@ -1,8 +1,10 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
+use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
+use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
     DeployedSkillRef, ProviderConfig,
@@ -24,6 +26,26 @@ pub struct SpawnAgentRequest {
 pub enum CloneAgentMode {
     Fresh,
     Profile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentClearReason {
+    UserClear,
+    WorktreeSwitch,
+}
+
+fn agent_clear_reason_from_input(reason: Option<&str>) -> AgentClearReason {
+    match reason.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("worktree_switch") => AgentClearReason::WorktreeSwitch,
+        _ => AgentClearReason::UserClear,
+    }
+}
+
+fn conversation_boundary_for_clear_reason(reason: Option<&str>) -> ConversationBoundaryReason {
+    match agent_clear_reason_from_input(reason) {
+        AgentClearReason::UserClear => ConversationBoundaryReason::Clear,
+        AgentClearReason::WorktreeSwitch => ConversationBoundaryReason::WorktreeSwitch,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2506,14 +2528,128 @@ pub async fn resume_agent(
 #[tauri::command]
 pub async fn clear_agent_session(
     session_id: String,
+    reason: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
+) -> Result<(), String> {
+    clear_agent_session_with_reason(session_id, reason, state, app).await
+}
+
+async fn archive_agent_lifecycle_boundary_from_snapshot(
+    state: &AppState,
+    session_id: &str,
+    boundary_reason: ConversationBoundaryReason,
+    snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> Result<(), String> {
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    let effective_logging = effective_conversation_logging(
+        global_conversation_logging,
+        snapshot.agent_conversation_logging,
+    );
+    let capture = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)?;
+
+    if effective_logging == ConversationLoggingSetting::Enabled {
+        if let Err(error) = state
+            .conversation_archive
+            .append_chat_events_with_context(capture.context.clone(), &capture.events)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive pre-clear append failed for {session_id}: {error}"
+            ));
+        }
+        if let Err(error) = state
+            .conversation_archive
+            .append_lifecycle_boundary_with_context(capture.context, boundary_reason)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive lifecycle append failed for {session_id}: {error}"
+            ));
+        }
+        if let Err(error) = state
+            .conversation_archive
+            .rollover_agent(session_id, boundary_reason)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive rollover failed for {session_id}: {error}"
+            ));
+        }
+    } else if let Err(error) = state
+        .conversation_archive
+        .discard_agent_with_context(capture.context, &capture.events)
+    {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive discard failed for {session_id}: {error}"
+        ));
+    }
+
+    Ok(())
+}
+
+async fn archive_agent_lifecycle_boundary(
+    state: &AppState,
+    session_id: &str,
+    boundary_reason: ConversationBoundaryReason,
+) -> Result<(), String> {
+    let snapshot =
+        match crate::commands::chat::agent_archive_capture_snapshot(state, session_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.contains("agent not found") => return Ok(()),
+            Err(error) => return Err(error),
+        };
+    archive_agent_lifecycle_boundary_from_snapshot(state, session_id, boundary_reason, snapshot)
+        .await
+}
+
+pub async fn clear_agent_session_with_reason(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    clear_agent_session_inner(session_id, reason, state, app, None).await
+}
+
+async fn clear_agent_session_with_archive_snapshot(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> Result<(), String> {
+    clear_agent_session_inner(session_id, reason, state, app, Some(archive_snapshot)).await
+}
+
+async fn clear_agent_session_inner(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
 ) -> Result<(), String> {
     manager::log_debug(&format!(
         "[WARDIAN] clear_agent_session called for session: {}",
         session_id
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    let archive_result = if let Some(snapshot) = archive_snapshot {
+        archive_agent_lifecycle_boundary_from_snapshot(
+            &state,
+            &session_id,
+            boundary_reason,
+            snapshot,
+        )
+        .await
+    } else {
+        archive_agent_lifecycle_boundary(&state, &session_id, boundary_reason).await
+    };
+    if let Err(error) = archive_result {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive lifecycle boundary failed for {session_id}: {error}"
+        ));
+    }
     let mut prepared = {
         let mut agents = state.agents.lock().await;
         let Some(agent) = agents.get_mut(&session_id) else {
@@ -3015,6 +3151,10 @@ pub async fn enable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
 
     let worktree_name = worktree_name
         .as_deref()
@@ -3065,18 +3205,35 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            enable_worktree_config(&mut config, &worktree_path);
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                enable_worktree_config(&mut config, &worktree_path);
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
+    }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
+}
+
+async fn clear_agent_after_worktree_mutation(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
+) -> Result<(), String> {
+    let reason = Some("worktree_switch".to_string());
+    if let Some(snapshot) = archive_snapshot {
+        clear_agent_session_with_archive_snapshot(session_id, reason, state, app, snapshot).await
     } else {
-        Err(format!("Agent {} not found", session_id))
+        clear_agent_session_with_reason(session_id, reason, state, app).await
     }
 }
 
@@ -3112,6 +3269,10 @@ pub async fn assign_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
     let worktree_path = std::path::Path::new(worktree_folder.trim());
     if !worktree_path.is_dir() {
         return Err("Worktree folder does not exist".to_string());
@@ -3130,31 +3291,34 @@ pub async fn assign_agent_worktree(
     let managed_worktree =
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            let source_folder = config
-                .git_worktree_source
-                .as_deref()
-                .map(str::trim)
-                .filter(|folder| !folder.is_empty())
-                .unwrap_or(config.folder.trim())
-                .to_string();
-            validate_assignable_worktree_for_agent(
-                &source_folder,
-                &managed_worktree,
-                worktree_path,
-            )?;
-            assign_worktree_config(&mut config, &worktree_folder)?;
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                let source_folder = config
+                    .git_worktree_source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|folder| !folder.is_empty())
+                    .unwrap_or(config.folder.trim())
+                    .to_string();
+                validate_assignable_worktree_for_agent(
+                    &source_folder,
+                    &managed_worktree,
+                    worktree_path,
+                )?;
+                assign_worktree_config(&mut config, &worktree_folder)?;
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
     }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
 }
 
 #[tauri::command]
@@ -3206,20 +3370,27 @@ pub async fn disable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
 
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            disable_worktree_config(&mut config)?;
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                disable_worktree_config(&mut config)?;
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
     }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
 }
 
 #[tauri::command]
@@ -3239,7 +3410,8 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, assign_worktree_config,
+        agent_status_update_payload, archive_agent_lifecycle_boundary,
+        archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
         build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
         build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
@@ -3250,9 +3422,10 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered,
-        configured_new_agent_order_placement, detach_agent_for_kill, disable_worktree_config,
-        discover_git_worktrees_for_configs, discover_git_worktrees_for_sources_with,
-        enable_worktree_config, ensure_existing_worktree_is_git_registered,
+        configured_new_agent_order_placement, conversation_boundary_for_clear_reason,
+        detach_agent_for_kill, disable_worktree_config, discover_git_worktrees_for_configs,
+        discover_git_worktrees_for_sources_with, enable_worktree_config,
+        ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
@@ -5982,6 +6155,216 @@ mod tests {
             "019db30f-12fc-7ef0-8faa-8d88703dc124",
             &excluded
         ));
+    }
+
+    #[test]
+    fn conversation_rollover_reason_for_worktree_switch_is_worktree_switch() {
+        assert_eq!(
+            conversation_boundary_for_clear_reason(Some("worktree_switch")),
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn clear_lifecycle_archive_uses_live_agent_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<absolute-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+            config.conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Default;
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        archive_agent_lifecycle_boundary(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::Clear,
+        )
+        .await
+        .expect("archive lifecycle boundary");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_name, "CoderOne");
+        assert_eq!(entries[0].agent_class, "Coder");
+        assert_eq!(entries[0].workspace, "<absolute-workspace-path>");
+        assert_eq!(entries[0].provider, "codex");
+        assert_eq!(
+            entries[0].provider_session_ids,
+            vec!["codex-session-1".to_string()]
+        );
+        assert_ne!(entries[0].provider, "unknown");
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn worktree_lifecycle_archive_uses_pre_move_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<old-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("pre-move snapshot");
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").expect("agent");
+            let mut config = agent.config.lock().unwrap();
+            config.git_worktree_folder = Some("<new-worktree-path>".to_string());
+            config.folder = "<new-worktree-path>".to_string();
+        }
+
+        archive_agent_lifecycle_boundary_from_snapshot(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch,
+            snapshot,
+        )
+        .await
+        .expect("archive lifecycle boundary");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace, "<old-workspace-path>");
+        assert_eq!(entries[0].provider, "codex");
+        assert_eq!(entries[0].agent_name, "CoderOne");
+        assert_eq!(
+            entries[0].provider_session_ids,
+            vec!["codex-session-1".to_string()]
+        );
+        assert_eq!(
+            entries[0].boundary_reason,
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn clear_ingests_watch_transcript_before_turn_index_is_written() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<absolute-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+        }
+        {
+            let mut watch = agent.watch_state.lock().unwrap();
+            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "user".to_string(),
+                text: "Run tests.".to_string(),
+                provider: "codex".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                source: Some("watch_transcript".to_string()),
+            });
+            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Tests failed.".to_string(),
+                provider: "codex".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                source: Some("watch_transcript".to_string()),
+            });
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        archive_agent_lifecycle_boundary(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::Clear,
+        )
+        .await
+        .expect("archive clear");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].record_count >= 3);
+        assert!(entries[0].has_turns);
+        assert!(entries[0].turn_count >= 1);
+
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &entries[0].conversation_id)
+                .expect("conversation dir");
+        assert!(conversation_dir.join("events.jsonl").exists());
+        assert!(conversation_dir.join("sources.jsonl").exists());
+        assert!(conversation_dir.join("turns.jsonl").exists());
+
+        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]

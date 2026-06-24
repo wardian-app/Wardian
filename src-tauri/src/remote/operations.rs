@@ -189,7 +189,8 @@ pub async fn run_remote_agent_action(
         }
         "clear" => {
             let state = app.state::<AppState>();
-            crate::commands::agent::clear_agent_session(request.target, state, app.clone()).await
+            crate::commands::agent::clear_agent_session(request.target, None, state, app.clone())
+                .await
         }
         "kill" => {
             let state = app.state::<AppState>();

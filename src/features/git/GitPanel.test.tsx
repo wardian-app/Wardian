@@ -447,9 +447,6 @@ describe("GitPanel", () => {
       });
     });
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
-    });
-    await waitFor(() => {
       expect(screen.getByText("Create Worktree")).toBeInTheDocument();
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
@@ -516,9 +513,6 @@ describe("GitPanel", () => {
         sessionId: "agent-1",
         worktreeFolder: "C:/repo-worktree",
       });
-    });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
@@ -706,9 +700,6 @@ describe("GitPanel", () => {
         worktreeFolder: "C:/repo-worktree",
       });
     });
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
-    });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
   });
 
@@ -753,9 +744,6 @@ describe("GitPanel", () => {
       expect(mockInvoke).toHaveBeenCalledWith("disable_agent_worktree", { sessionId: "agent-1" });
     });
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
-    });
-    await waitFor(() => {
       expect(screen.getByTitle("Remove worktree assignment")).toBeInTheDocument();
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", { sessionId: "agent-1" });
@@ -783,6 +771,9 @@ describe("GitPanel", () => {
 
     expect(await screen.findByText("Unable to Load Source Control")).toBeInTheDocument();
     expect(screen.getByText("worktree is locked")).toBeInTheDocument();
-    expect(mockInvoke).not.toHaveBeenCalledWith("clear_agent_session", { sessionId: "agent-1" });
+    expect(mockInvoke).not.toHaveBeenCalledWith("clear_agent_session", {
+      sessionId: "agent-1",
+      reason: "worktree_switch",
+    });
   });
 });

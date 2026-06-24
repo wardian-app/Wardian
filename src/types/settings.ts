@@ -8,6 +8,7 @@ export interface ShellOption {
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 export type DefaultProviderSetting = 'auto' | 'claude' | 'codex' | 'gemini' | 'antigravity' | 'opencode';
+export type ConversationLoggingSetting = 'enabled' | 'disabled';
 export type AppThemeSetting = 'dark' | 'light' | 'system';
 export type WatchlistNewAgentPosition = 'top' | 'bottom';
 export type ExternalEditorSetting = 'system' | 'vscode' | 'custom';
@@ -32,6 +33,7 @@ export interface ShellSettings {
   agent_session_persistence: 'fresh' | 'resume';
   codex_runtime_policy?: CodexRuntimePolicy;
   default_provider?: DefaultProviderSetting;
+  conversation_logging?: ConversationLoggingSetting;
 }
 
 export interface ShellSettingsOverrides {
@@ -41,6 +43,7 @@ export interface ShellSettingsOverrides {
   agent_session_persistence?: 'fresh' | 'resume';
   codex_runtime_policy?: CodexRuntimePolicyOverrides;
   default_provider?: DefaultProviderSetting;
+  conversation_logging?: ConversationLoggingSetting;
 }
 
 export interface AppSettings {

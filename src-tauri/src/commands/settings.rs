@@ -2,6 +2,7 @@ use crate::utils::OnboardingHintsState;
 use crate::utils::{AppSettingsDocument, ShellOption, ShellSettings, ShellSettingsDocument};
 use serde::Serialize;
 use tauri::State;
+use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::models::AgentSessionPersistence;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -698,10 +699,69 @@ pub fn save_app_settings(settings: AppSettingsDocument) -> Result<AppSettingsDoc
 }
 
 #[tauri::command]
-pub fn save_shell_settings(
+pub async fn save_shell_settings(
+    settings: ShellSettingsDocument,
+    state: State<'_, crate::state::AppState>,
+) -> Result<ShellSettingsDocument, String> {
+    save_shell_settings_for_state(&state, settings).await
+}
+
+pub(crate) async fn save_shell_settings_for_state(
+    state: &crate::state::AppState,
     settings: ShellSettingsDocument,
 ) -> Result<ShellSettingsDocument, String> {
-    crate::utils::save_shell_settings_document(&settings)
+    let previous_logging = crate::utils::load_shell_settings_document()
+        .map(|document| document.settings.conversation_logging)
+        .unwrap_or_else(|_| ShellSettings::default().conversation_logging);
+    let saved = crate::utils::save_shell_settings_document(&settings)?;
+
+    if previous_logging != ConversationLoggingSetting::Disabled
+        && saved.settings.conversation_logging == ConversationLoggingSetting::Disabled
+    {
+        mark_global_conversation_logging_disabled(state).await;
+    }
+
+    Ok(saved)
+}
+
+async fn mark_global_conversation_logging_disabled(state: &crate::state::AppState) {
+    let session_ids = {
+        let agents = state.agents.lock().await;
+        agents.keys().cloned().collect::<Vec<_>>()
+    };
+
+    for session_id in session_ids {
+        let snapshot = match crate::commands::chat::agent_archive_capture_snapshot(
+            state,
+            &session_id,
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::manager::log_debug(&format!(
+                    "[WARDIAN] conversation archive disabled cutoff snapshot failed for {session_id}: {error}"
+                ));
+                continue;
+            }
+        };
+        if crate::state::conversation_archive::effective_conversation_logging(
+            ConversationLoggingSetting::Disabled,
+            snapshot.agent_conversation_logging,
+        ) != ConversationLoggingSetting::Disabled
+        {
+            continue;
+        }
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        if let Err(error) = state
+            .conversation_archive
+            .discard_agent_with_context(context, &[])
+        {
+            crate::manager::log_debug(&format!(
+                "[WARDIAN] conversation archive disabled cutoff failed for {session_id}: {error}"
+            ));
+        }
+    }
 }
 
 #[tauri::command]
@@ -732,7 +792,20 @@ pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, 
 
 #[cfg(test)]
 mod settings_path_tests {
-    use super::{ensure_settings_folder_path_from_home, settings_folder_path_from_home};
+    use super::{
+        ensure_settings_folder_path_from_home, save_shell_settings_for_state,
+        settings_folder_path_from_home,
+    };
+    use crate::state::{ActiveAgent, AgentWatchState, AppState};
+    use crate::utils::{ShellSettings, ShellSettingsDocument, ShellSettingsOverrides};
+    use std::sync::{Arc, Mutex};
+    use wardian_core::conversations::{
+        AgentConversationLoggingSetting, ConversationLoggingSetting,
+    };
+    use wardian_core::models::chat::{
+        AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
+    };
+    use wardian_core::models::AgentConfig;
 
     #[test]
     fn settings_folder_path_points_under_wardian_home() {
@@ -752,5 +825,127 @@ mod settings_path_tests {
         );
 
         assert!(path.is_dir());
+    }
+
+    #[test]
+    fn save_shell_settings_disabled_cuts_off_default_agent_provider_source() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp_dir.path());
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        runtime.block_on(async {
+            let state = AppState::new();
+            state.agents.lock().await.insert(
+                "agent-1".to_string(),
+                test_agent(
+                    "agent-1",
+                    AgentConversationLoggingSetting::Default,
+                    Some("provider-session-1"),
+                ),
+            );
+
+            let settings = ShellSettings {
+                conversation_logging: ConversationLoggingSetting::Disabled,
+                ..Default::default()
+            };
+            let saved = save_shell_settings_for_state(
+                &state,
+                ShellSettingsDocument {
+                    schema_version: 2,
+                    settings,
+                    overrides: ShellSettingsOverrides {
+                        conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("save disabled settings");
+            assert_eq!(
+                saved.settings.conversation_logging,
+                ConversationLoggingSetting::Disabled
+            );
+
+            let appended = state
+                .conversation_archive
+                .append_chat_events_with_context(
+                    crate::state::conversation_archive::ConversationArchiveContext {
+                        agent_id: "agent-1".to_string(),
+                        agent_name: "Agent One".to_string(),
+                        agent_class: "Coder".to_string(),
+                        workspace: "<absolute-workspace-path>".to_string(),
+                        provider: "codex".to_string(),
+                        provider_session_ids: vec!["provider-session-1".to_string()],
+                        provider_source_key: Some("codex:session:provider-session-1".to_string()),
+                    },
+                    &[provider_event("event-disabled-window")],
+                )
+                .expect("append after disabled cutoff");
+
+            assert_eq!(appended, 0);
+        });
+    }
+
+    fn test_agent(
+        session_id: &str,
+        conversation_logging: AgentConversationLoggingSetting,
+        resume_session: Option<&str>,
+    ) -> ActiveAgent {
+        ActiveAgent {
+            config: Arc::new(Mutex::new(AgentConfig {
+                session_id: session_id.to_string(),
+                session_name: "Agent One".to_string(),
+                agent_class: "Coder".to_string(),
+                provider: "codex".to_string(),
+                folder: "<absolute-workspace-path>".to_string(),
+                resume_session: resume_session.map(ToString::to_string),
+                conversation_logging,
+                ..Default::default()
+            })),
+            child_process: None,
+            background_processes: Vec::new(),
+            pty_master: None,
+            stdin_tx: None,
+            output_buffer: Arc::new(Mutex::new(String::new())),
+            process_id: None,
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new("Idle".to_string())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                session_id.to_string(),
+                32,
+                4096,
+            ))),
+            terminal_title: Arc::new(Mutex::new(String::new())),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        }
+    }
+
+    fn provider_event(id: &str) -> AgentChatEvent {
+        AgentChatEvent {
+            id: id.to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::Assistant),
+            text: Some("This happened while logging was disabled.".to_string()),
+            title: None,
+            status: Some(AgentChatStatus::Idle),
+            turn_id: Some("turn-disabled".to_string()),
+            source: Some("response_item".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: Some("2026-06-15T00:00:00.000Z".to_string()),
+            sequence: Some(1),
+            metadata: serde_json::json!({}),
+        }
     }
 }

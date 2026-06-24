@@ -114,6 +114,22 @@ pub fn agents_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("agents"))
 }
 
+/// `<wardian-home>/agents/<agent-id>/conversations`.
+pub fn agent_conversations_dir(agent_id: &str) -> Option<PathBuf> {
+    if !is_safe_path_component(agent_id) {
+        return None;
+    }
+    agents_dir().map(|dir| dir.join(agent_id).join("conversations"))
+}
+
+/// `<wardian-home>/agents/<agent-id>/conversations/<conversation-id>`.
+pub fn agent_conversation_dir(agent_id: &str, conversation_id: &str) -> Option<PathBuf> {
+    if !is_safe_path_component(conversation_id) {
+        return None;
+    }
+    agent_conversations_dir(agent_id).map(|dir| dir.join(conversation_id))
+}
+
 /// `<wardian-home>/logs/workflows` — root of all workflow run logs.
 pub fn workflow_runs_dir() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("logs").join("workflows"))
@@ -213,6 +229,44 @@ mod tests {
         assert!(workflow_run_dir("wf/name", "run-1").is_none());
         assert!(workflow_run_dir("wf", "run\\one").is_none());
         assert!(workflow_run_dir("wf.name_1", "run-1").is_some());
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn agent_conversation_paths_use_agent_owned_layout() {
+        let _guard = crate::tests::env_lock();
+        std::env::set_var("WARDIAN_HOME", "/tmp/wardian-conversations");
+
+        assert_eq!(
+            agent_conversations_dir("agent-1").unwrap(),
+            PathBuf::from("/tmp/wardian-conversations")
+                .join("agents")
+                .join("agent-1")
+                .join("conversations")
+        );
+        assert_eq!(
+            agent_conversation_dir("agent-1", "conv_20260615_000000_agent_1").unwrap(),
+            PathBuf::from("/tmp/wardian-conversations")
+                .join("agents")
+                .join("agent-1")
+                .join("conversations")
+                .join("conv_20260615_000000_agent_1")
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn agent_conversation_paths_reject_unsafe_components() {
+        let _guard = crate::tests::env_lock();
+        std::env::set_var("WARDIAN_HOME", "/tmp/wardian-conversations");
+
+        assert!(agent_conversations_dir("../agent").is_none());
+        assert!(agent_conversation_dir("agent-1", "../conv").is_none());
+        assert!(agent_conversation_dir("agent-1", "conv/name").is_none());
+        assert!(agent_conversation_dir("agent-1", "conv\\name").is_none());
+        assert!(agent_conversation_dir("agent-1", "conv.name_1").is_some());
 
         std::env::remove_var("WARDIAN_HOME");
     }

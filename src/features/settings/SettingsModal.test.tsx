@@ -58,6 +58,7 @@ describe("SettingsModal", () => {
       custom_executable: "",
       custom_args: "",
       agent_session_persistence: "resume",
+      conversation_logging: "enabled",
       default_provider: "auto",
       codex_runtime_policy: {
         sandbox_mode: "workspace-write",
@@ -219,6 +220,31 @@ describe("SettingsModal", () => {
           schema_version: 2,
           overrides: expect.objectContaining({
             default_provider: "codex",
+          }),
+        }),
+      });
+    });
+  });
+
+  it("exposes searchable conversation logging and saves the runtime override", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.change(screen.getByPlaceholderText("Search settings"), {
+      target: { value: "conversation logging" },
+    });
+
+    const select = screen.getByLabelText("Conversation logging");
+    expect(select).toHaveValue("enabled");
+
+    fireEvent.change(select, { target: { value: "disabled" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent Runtime" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            conversation_logging: "disabled",
           }),
         }),
       });
