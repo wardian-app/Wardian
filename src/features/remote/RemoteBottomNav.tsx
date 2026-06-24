@@ -1,9 +1,9 @@
 import React from "react";
-import { Bot, Library, ListChecks, Network } from "lucide-react";
+import { Bot, Library, ListChecks, Sprout } from "lucide-react";
 import { useRemoteStore } from "./useRemoteStore";
 
 type RemoteNavTab = {
-  id: "watchlist" | "workflows" | "queue" | "graph" | "library";
+  id: "watchlist" | "workflows" | "queue" | "garden" | "library";
   label: string;
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
 };
@@ -23,7 +23,7 @@ const tabs: readonly RemoteNavTab[] = [
   { id: "watchlist", label: "Watchlist", icon: Bot },
   { id: "workflows", label: "Workflows", icon: WorkflowNavIcon },
   { id: "queue", label: "Queue", icon: ListChecks },
-  { id: "graph", label: "Graph", icon: Network },
+  { id: "garden", label: "Garden", icon: Sprout },
   { id: "library", label: "Library", icon: Library },
 ] as const;
 

@@ -14,7 +14,7 @@ In scope:
 - Load desktop watchlists, teams, and watchlist preferences in the PWA.
 - Render a compact mobile watchlist with team ordering.
 - Remember the active mobile watchlist locally.
-- Add a bottom navigation bar with Watchlist as the real tab and placeholder tabs for Workflows, Queue, Graph, and Library.
+- Add a bottom navigation bar with Watchlist as the real tab and placeholder tabs for Workflows, Queue, Garden, and Library.
 - Remove the always-visible broadcast command bar from the watchlist first screen.
 
 Out of scope:
@@ -23,7 +23,7 @@ Out of scope:
 - Mutating team membership from mobile.
 - Sending prompts or lifecycle actions from the watchlist.
 - Syncing mobile collapse toggles back to desktop preferences.
-- Implementing real Workflows, Queue, Graph, or Library mobile tabs.
+- Implementing real Workflows, Queue, Garden, or Library mobile tabs.
 
 ## Remote Data
 
@@ -102,7 +102,7 @@ Bottom navigation:
 
 - Fixed bottom bar.
 - Real tab: Watchlist.
-- Placeholder tabs: Workflows, Queue, Graph, Library.
+- Placeholder tabs: Workflows, Queue, Garden, Library.
 - Placeholder tabs show a compact unavailable panel and do not add feature behavior.
 
 ## State

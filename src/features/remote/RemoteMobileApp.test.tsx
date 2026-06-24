@@ -282,6 +282,42 @@ describe("RemoteMobileApp", () => {
     expect(useRemoteStore.getState().activeAgentId).toBe("agent-1");
   });
 
+  it("returns from agent detail to the watchlist when swiping from the left edge", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: "agent-1",
+      activeAgentViewMode: "chat",
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    const detail = screen.getByTestId("remote-agent-detail");
+    fireEvent.touchStart(detail, { touches: [{ clientX: 12, clientY: 240 }] });
+    fireEvent.touchMove(detail, { touches: [{ clientX: 104, clientY: 246 }] });
+    fireEvent.touchEnd(detail, { changedTouches: [{ clientX: 104, clientY: 246 }], touches: [] });
+
+    expect(useRemoteStore.getState().activeAgentId).toBeNull();
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+  });
+
   it("updates the active remote tab from the compact mobile bottom nav", async () => {
     useRemoteStore.setState({
       activeRemoteTab: "watchlist",
@@ -291,8 +327,9 @@ describe("RemoteMobileApp", () => {
     render(<RemoteBottomNav />);
 
     expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
-    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
-    expect(useRemoteStore.getState().activeRemoteTab).toBe("graph");
+    expect(screen.queryByRole("button", { name: "Graph" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Garden" }));
+    expect(useRemoteStore.getState().activeRemoteTab).toBe("garden");
   });
 
   it("shows bottom navigation placeholders without exposing watchlist actions", async () => {
@@ -328,8 +365,8 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Prompt")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
-    expect(screen.getByText("Graph is not available in the mobile PWA yet.")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Garden" }));
+    expect(screen.getByText("Garden is not available in the mobile PWA yet.")).toBeVisible();
   });
 
   it("broadcasts a prompt from an explicit mobile watchlist action", async () => {

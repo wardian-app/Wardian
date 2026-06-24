@@ -37,7 +37,7 @@ type RemoteStatus =
   | "gateway_identity_changed"
   | "device_revoked";
 
-type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "graph" | "library";
+type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
 
 interface RemoteState {
   agents: RemoteAgentSummary[];

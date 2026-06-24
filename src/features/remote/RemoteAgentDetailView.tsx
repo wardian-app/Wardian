@@ -72,6 +72,9 @@ const modeButtonClass =
 
 const CHAT_INITIAL_ROW_LIMIT = 80;
 const CHAT_ROW_PAGE_SIZE = 60;
+const EDGE_BACK_START_MAX_X = 32;
+const EDGE_BACK_MIN_DELTA_X = 72;
+const EDGE_BACK_MAX_DELTA_Y = 48;
 
 type RemoteChatRow = PresentedChatRow;
 type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
@@ -80,6 +83,12 @@ type ToolPresentation = {
   title: string;
   details: string[];
   icon: LucideIcon;
+};
+
+type EdgeBackSwipeStart = {
+  x: number;
+  y: number;
+  closed: boolean;
 };
 
 function wardianColorToken(name: string, fallback: string) {
@@ -328,6 +337,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const [prompt, setPrompt] = useState("");
   const [commandMode, setCommandMode] = useState(false);
   const contentEndRef = useRef<HTMLDivElement | null>(null);
+  const edgeBackSwipeStartRef = useRef<EdgeBackSwipeStart | null>(null);
 
   const visibleEvents = useMemo(
     () =>
@@ -358,11 +368,55 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
       void refreshActiveAgentTerminal();
     }
   };
+  const maybeCloseFromEdgeSwipe = (touch: React.Touch, event: React.TouchEvent<HTMLElement>) => {
+    const start = edgeBackSwipeStartRef.current;
+    if (!start || start.closed) return;
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (
+      deltaX >= EDGE_BACK_MIN_DELTA_X
+      && Math.abs(deltaY) <= EDGE_BACK_MAX_DELTA_Y
+      && deltaX > Math.abs(deltaY) * 1.5
+    ) {
+      start.closed = true;
+      event.preventDefault();
+      closeAgent();
+    }
+  };
+  const onEdgeBackTouchStart = (event: React.TouchEvent<HTMLElement>) => {
+    if (event.touches.length !== 1) {
+      edgeBackSwipeStartRef.current = null;
+      return;
+    }
+    const touch = event.touches[0];
+    edgeBackSwipeStartRef.current = touch.clientX <= EDGE_BACK_START_MAX_X
+      ? { x: touch.clientX, y: touch.clientY, closed: false }
+      : null;
+  };
+  const onEdgeBackTouchMove = (event: React.TouchEvent<HTMLElement>) => {
+    const touch = event.touches[0];
+    if (event.touches.length !== 1 || !touch) return;
+    maybeCloseFromEdgeSwipe(touch, event);
+  };
+  const onEdgeBackTouchEnd = (event: React.TouchEvent<HTMLElement>) => {
+    const touch = event.changedTouches[0];
+    if (touch) maybeCloseFromEdgeSwipe(touch, event);
+    edgeBackSwipeStartRef.current = null;
+  };
   const disabledReason = chatInputDisabledReason(agent.status, sending);
   const canSubmit = prompt.trim().length > 0 && !disabledReason;
 
   return (
-    <main className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary" data-testid="remote-agent-detail">
+    <main
+      className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary"
+      data-testid="remote-agent-detail"
+      onTouchStartCapture={onEdgeBackTouchStart}
+      onTouchMoveCapture={onEdgeBackTouchMove}
+      onTouchEndCapture={onEdgeBackTouchEnd}
+      onTouchCancelCapture={() => {
+        edgeBackSwipeStartRef.current = null;
+      }}
+    >
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
         <div className="flex items-center gap-2">
           <button type="button" aria-label="Back to remote agents" onClick={closeAgent} className={iconButtonClass}>
