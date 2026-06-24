@@ -18,6 +18,8 @@ export const RemoteCommandBar: React.FC = () => {
     const trimmed = prompt.trim();
     if (!trimmed || sending || agentCount === 0) return;
     setError("");
+    const agentLabel = agentCount === 1 ? "agent" : "agents";
+    if (!window.confirm(`Broadcast to ${agentCount} ${agentLabel}?`)) return;
     try {
       await broadcastPrompt(trimmed);
       setPrompt("");
@@ -27,13 +29,13 @@ export const RemoteCommandBar: React.FC = () => {
   };
 
   return (
-    <form onSubmit={submitBroadcast} className="sticky bottom-0 border-t border-wardian-border bg-wardian-bg p-3">
+    <form onSubmit={submitBroadcast} className="rounded-md border border-wardian-border bg-wardian-card p-3">
       <label className="sr-only" htmlFor="remote-prompt">
-        Prompt
+        Broadcast prompt
       </label>
       <textarea
         id="remote-prompt"
-        aria-label="Prompt"
+        aria-label="Broadcast prompt"
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
         maxLength={REMOTE_PROMPT_MAX_LENGTH}

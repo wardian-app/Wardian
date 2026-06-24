@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import type { AgentChatEvent, RemoteAgentSummary, RemoteTerminalSnapshot, RemoteWorkflowSummary } from "../../types";
+import type {
+  AgentChatEvent,
+  QueueItem,
+  RemoteAgentInputMode,
+  RemoteAgentSummary,
+  RemoteTerminalSnapshot,
+  RemoteWorkflowSummary,
+} from "../../types";
 import {
   DEFAULT_WATCHLIST_PREFS,
   type AgentTeam,
@@ -8,6 +15,7 @@ import {
 } from "../../layout/watchlist/types";
 import { normalizeWatchlistState } from "../../layout/watchlist/watchlistUtils";
 import { normalizedRemoteAgentStatus } from "./remoteAgentStatus";
+import { extractTerminalQueueContent } from "../../utils/statusUtils";
 import {
   clearStoredRemoteIdentity,
   createRemoteDeviceKeyPair,
@@ -29,11 +37,14 @@ type RemoteStatus =
   | "gateway_identity_changed"
   | "device_revoked";
 
-type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "graph" | "library";
+type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
 
 interface RemoteState {
   agents: RemoteAgentSummary[];
   workflows: RemoteWorkflowSummary[];
+  remoteQueueItems: QueueItem[];
+  remoteQueueBuffers: Record<string, string>;
+  remoteAgentStatuses: Record<string, string>;
   watchlists: Watchlist[];
   teams: AgentTeam[];
   watchlistPrefs: WatchlistPrefs;
@@ -51,6 +62,7 @@ interface RemoteState {
   chatError: string;
   sending: boolean;
   load: () => Promise<void>;
+  refresh: () => Promise<void>;
   disconnectStatusStream: () => void;
   setActiveWatchlistId: (id: string) => void;
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
@@ -60,7 +72,8 @@ interface RemoteState {
   setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
-  sendPromptToActiveAgent: (prompt: string) => Promise<void>;
+  appendRemoteTerminalQueueOutput: (sessionId: string, data: string, provider?: string) => void;
+  sendPromptToActiveAgent: (prompt: string, inputMode?: RemoteAgentInputMode) => Promise<void>;
   broadcastPrompt: (prompt: string) => Promise<void>;
   runAgentAction: (action: string, target: string) => Promise<void>;
   runWorkflow: (workflowId: string) => Promise<void>;
@@ -78,6 +91,8 @@ const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
+const REMOTE_QUEUE_SUMMARY_MAX_CHARS = 500;
+const REMOTE_QUEUE_MAX_ITEMS = 100;
 
 const storedActiveWatchlistId = () => {
   try {
@@ -105,6 +120,79 @@ const chatEventFingerprint = (event: AgentChatEvent) =>
 const chatEventsEqual = (left: AgentChatEvent[], right: AgentChatEvent[]) => {
   if (left.length !== right.length) return false;
   return left.every((event, index) => chatEventFingerprint(event) === chatEventFingerprint(right[index]));
+};
+
+const normalizePromptText = (value: string) => value.replace(/\s+/g, " ").trim();
+
+const matchingUserMessageCount = (events: AgentChatEvent[], text: string) => {
+  const normalized = normalizePromptText(text);
+  if (!normalized) return 0;
+  return events.filter((event) => event.kind === "message" && event.role === "user" && normalizePromptText(event.text ?? "") === normalized)
+    .length;
+};
+
+const maxSequence = (events: AgentChatEvent[]) =>
+  events.reduce((max, event) => (typeof event.sequence === "number" ? Math.max(max, event.sequence) : max), 0);
+
+const optimisticChatEvents = (events: AgentChatEvent[]) =>
+  events.filter((event) => event.kind === "message" && event.role === "user" && event.metadata?.optimistic === true);
+
+const pendingConfirmAfterMatchingUserCount = (event: AgentChatEvent) => {
+  const value = event.metadata?.confirm_after_matching_user_count;
+  return typeof value === "number" ? value : null;
+};
+
+const unconfirmedOptimisticChatEvents = (transcript: AgentChatEvent[], currentEvents: AgentChatEvent[]) =>
+  optimisticChatEvents(currentEvents).filter((event) => {
+    const pendingText = normalizePromptText(event.text ?? "");
+    if (!pendingText) return false;
+    const confirmAfterCount = pendingConfirmAfterMatchingUserCount(event);
+    if (confirmAfterCount === null) return matchingUserMessageCount(transcript, pendingText) === 0;
+    return matchingUserMessageCount(transcript, pendingText) <= confirmAfterCount;
+  });
+
+const mergeOptimisticChatEvents = (transcript: AgentChatEvent[], currentEvents: AgentChatEvent[]) => {
+  const pending = unconfirmedOptimisticChatEvents(transcript, currentEvents);
+  if (pending.length === 0) return transcript;
+  const baseSequence = maxSequence(transcript);
+  return [
+    ...transcript,
+    ...pending.map((event, index) => ({
+      ...event,
+      sequence: baseSequence + index + 1,
+    })),
+  ];
+};
+
+const createOptimisticUserMessage = (
+  sessionId: string,
+  provider: string,
+  prompt: string,
+  currentEvents: AgentChatEvent[],
+): AgentChatEvent => {
+  const createdAt = new Date().toISOString();
+  return {
+    id: `pending-user-${sessionId}-${createdAt}`,
+    session_id: sessionId,
+    provider,
+    kind: "message",
+    role: "user",
+    text: prompt,
+    title: null,
+    status: "succeeded",
+    turn_id: null,
+    source: "chat_input",
+    command: null,
+    exit_code: null,
+    path: null,
+    language: null,
+    created_at: createdAt,
+    sequence: maxSequence(currentEvents) + 1,
+    metadata: {
+      optimistic: true,
+      confirm_after_matching_user_count: matchingUserMessageCount(currentEvents, prompt),
+    },
+  };
 };
 
 class RemotePairingExpiredError extends Error {}
@@ -204,6 +292,62 @@ const activeAgentStatusShouldRefreshChat = (status: string) => {
   return normalized === "processing" || normalized === "running" || normalized === "action_required" || normalized === "action_needed";
 };
 
+const statusCanFlushRemoteCompletion = (previousStatus: string | undefined, nextStatus: string) => {
+  const previous = previousStatus ? normalizedRemoteAgentStatus(previousStatus) : "";
+  const next = normalizedRemoteAgentStatus(nextStatus);
+  return (previous === "processing" || previous === "running") && next === "idle";
+};
+
+const boundRemoteQueueSummary = (text: string): string => {
+  if (text.length <= REMOTE_QUEUE_SUMMARY_MAX_CHARS) return text;
+  const marker = "\n...\n";
+  const available = REMOTE_QUEUE_SUMMARY_MAX_CHARS - marker.length;
+  const headLength = Math.ceil(available * 0.72);
+  const tailLength = available - headLength;
+  return `${text.slice(0, headLength)}${marker}${text.slice(-tailLength)}`;
+};
+
+const newRemoteQueueItemId = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `remote-queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
+const remoteAgentStatusMap = (agents: RemoteAgentSummary[]) =>
+  Object.fromEntries(agents.map((agent) => [agent.session_id, agent.status]));
+
+const remoteQueuePatchForAgents = (state: RemoteState, agents: RemoteAgentSummary[]): Partial<RemoteState> => {
+  let items = state.remoteQueueItems;
+  let buffers = state.remoteQueueBuffers;
+  let changed = false;
+
+  for (const agent of agents) {
+    if (!statusCanFlushRemoteCompletion(state.remoteAgentStatuses[agent.session_id], agent.status)) continue;
+    const summary = (buffers[agent.session_id] ?? "").trim();
+    if (!summary) continue;
+
+    const item: QueueItem = {
+      id: newRemoteQueueItemId(),
+      type: "agent_completed",
+      timestamp: Date.now(),
+      read: false,
+      agent_session_id: agent.session_id,
+      agent_name: agent.session_name,
+      summary: boundRemoteQueueSummary(summary),
+      evidence_source: "live_runtime",
+    };
+    items = [item, ...items].slice(0, REMOTE_QUEUE_MAX_ITEMS);
+    buffers = { ...buffers, [agent.session_id]: "" };
+    changed = true;
+  }
+
+  return {
+    remoteAgentStatuses: remoteAgentStatusMap(agents),
+    ...(changed ? { remoteQueueItems: items, remoteQueueBuffers: buffers } : {}),
+  };
+};
+
 const scheduleStatusStreamReconnect = (set: RemoteSet, get: RemoteGet) => {
   if (statusStreamReconnectTimer !== null || statusStreamSocket || get().status === "session_expired") return;
   const delay = Math.min(
@@ -230,9 +374,10 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
     onAgents: (agents) => {
       const activeAgentId = get().activeAgentId;
       const activeAgent = activeAgentId ? agents.find((agent) => agent.session_id === activeAgentId) : null;
-      set({
+      set((state) => ({
         agents,
         status: "ready",
+        ...remoteQueuePatchForAgents(state, agents),
         ...(activeAgent
           ? {}
           : {
@@ -244,7 +389,7 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
               chatLoading: false,
               chatError: "",
             }),
-      });
+      }));
       if (activeAgent) {
         const nextRefreshKey = activeAgentRefreshKey(activeAgent);
         const refreshKeyChanged = nextRefreshKey !== lastActiveAgentRefreshKey;
@@ -428,6 +573,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
     return {
       agents,
       workflows,
+      remoteAgentStatuses: remoteAgentStatusMap(agents),
       watchlists: watchlistState.watchlists,
       teams: watchlistState.teams,
       watchlistPrefs,
@@ -453,6 +599,9 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
 export const useRemoteStore = create<RemoteState>((set, get) => ({
   agents: [],
   workflows: [],
+  remoteQueueItems: [],
+  remoteQueueBuffers: {},
+  remoteAgentStatuses: {},
   watchlists: [],
   teams: [],
   watchlistPrefs: DEFAULT_WATCHLIST_PREFS,
@@ -490,6 +639,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         set({ status: "pairing_expired" });
         return;
       }
+      set({ status: statusFromError(error) });
+    }
+  },
+  async refresh() {
+    try {
+      await ensureAuthenticatedSession(set);
+      await loadRemoteShellData(set, get);
+    } catch (error) {
+      closeStatusStream();
       set({ status: statusFromError(error) });
     }
   },
@@ -567,8 +725,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       const chatEvents = await remoteClient.loadAgentChat(activeAgentId);
       set((state) => {
         if (state.activeAgentId !== activeAgentId) return { chatLoading: false };
-        if (chatEventsEqual(state.chatEvents, chatEvents)) return { chatLoading: false, chatError: "" };
-        return { chatEvents, chatLoading: false, chatError: "" };
+        const mergedChatEvents = mergeOptimisticChatEvents(chatEvents, state.chatEvents);
+        if (chatEventsEqual(state.chatEvents, mergedChatEvents)) return { chatLoading: false, chatError: "" };
+        return { chatEvents: mergedChatEvents, chatLoading: false, chatError: "" };
       });
     } catch (error) {
       set({
@@ -578,15 +737,40 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       });
     }
   },
-  async sendPromptToActiveAgent(prompt) {
+  appendRemoteTerminalQueueOutput(sessionId, data, provider) {
+    if (provider && provider !== "opencode") return;
+    const text = extractTerminalQueueContent(data);
+    if (!text) return;
+    set((state) => ({
+      remoteQueueBuffers: {
+        ...state.remoteQueueBuffers,
+        [sessionId]: boundRemoteQueueSummary(
+          `${state.remoteQueueBuffers[sessionId] ? `${state.remoteQueueBuffers[sessionId]}\n` : ""}${text}`,
+        ),
+      },
+    }));
+  },
+  async sendPromptToActiveAgent(prompt, inputMode = "message") {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     const activeAgentId = get().activeAgentId;
     if (!activeAgentId) return;
     set({ sending: true });
     try {
-      await remoteClient.sendPrompt(activeAgentId, trimmed);
+      await remoteClient.sendPrompt(activeAgentId, trimmed, inputMode);
       if (get().activeAgentViewMode === "chat") {
+        if (inputMode === "message") {
+          set((state) => {
+            if (state.activeAgentId !== activeAgentId) return {};
+            const activeAgent = state.agents.find((agent) => agent.session_id === activeAgentId);
+            return {
+              chatEvents: [
+                ...state.chatEvents,
+                createOptimisticUserMessage(activeAgentId, activeAgent?.provider ?? "unknown", trimmed, state.chatEvents),
+              ],
+            };
+          });
+        }
         await get().refreshActiveAgentChat();
       } else {
         await get().refreshActiveAgentTerminal();
@@ -622,6 +806,16 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     try {
       await remoteClient.runAgentAction(action, target);
       if (get().activeAgentId === target) {
+        if (action === "clear") {
+          set({
+            terminalSnapshot: null,
+            terminalLoading: false,
+            terminalError: "",
+            chatEvents: [],
+            chatLoading: false,
+            chatError: "",
+          });
+        }
         if (get().activeAgentViewMode === "chat") {
           await get().refreshActiveAgentChat({ background: true });
         } else {

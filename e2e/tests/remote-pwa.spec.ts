@@ -1,11 +1,30 @@
-import { expect, test } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
+import { expect, test, type Locator, type WebSocketRoute } from "@playwright/test";
+
+function remoteActionBody(body: unknown): {
+  action?: string;
+  target?: string;
+  prompt?: string;
+  input_mode?: string;
+} {
+  return typeof body === "object" && body !== null ? body : {};
+}
 
 test("remote mobile shell renders team-ordered watchlist and opens agent detail", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
 
+  const screenshotDir = process.env.WARDIAN_MOBILE_PWA_PARITY_SCREENSHOT_DIR;
+  if (screenshotDir) fs.mkdirSync(screenshotDir, { recursive: true });
+  const captureFeatureScreenshot = async (name: string, locator: Locator) => {
+    if (!screenshotDir) return;
+    await locator.screenshot({ path: path.join(screenshotDir, name), animations: "disabled" });
+  };
+
   const actionRequests: Array<{ headers: Record<string, string>; body: unknown }> = [];
+  let statusStream: WebSocketRoute | null = null;
 
   await page.route("**/remote/api/session", async (route) => {
     await route.fulfill({
@@ -35,10 +54,10 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
             session_id: "agent-1",
             session_name: "Remote Coder",
             agent_class: "Coder",
-            provider: "codex",
+            provider: "opencode",
             workspace: "<absolute-workspace-path>",
-            status: "Idle",
-            latest_text: "Ready",
+            status: "Processing",
+            latest_text: "Working",
           },
         ],
       }),
@@ -70,6 +89,7 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     });
   });
   await page.routeWebSocket("**/remote/api/status-stream", async (ws) => {
+    statusStream = ws;
     ws.onMessage(() => {});
   });
   await page.routeWebSocket("**/remote/api/agents/agent-1/terminal-stream", async (ws) => {
@@ -90,6 +110,14 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
           cols: 80,
           rows: 24,
           state_base64: Buffer.from("terminal ready from e2e", "utf8").toString("base64"),
+        }),
+      );
+      ws.send(
+        JSON.stringify({
+          type: "update",
+          attachment_id: "attach-e2e",
+          owner_attachment_id: "attach-e2e",
+          state_base64: Buffer.from("Finished remote e2e update.", "utf8").toString("base64"),
         }),
       );
     });
@@ -114,16 +142,65 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   ]);
   await expect(page.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
 
+  await page.getByRole("button", { name: "Open broadcast prompt" }).click();
+  await expect(page.getByRole("textbox", { name: "Broadcast prompt" })).toBeVisible();
+  await captureFeatureScreenshot("broadcast-prompt.png", page.locator('[data-testid="remote-watchlist-view"]'));
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toBe("Broadcast to 2 agents?");
+    await dialog.accept();
+  });
+  await page.getByRole("textbox", { name: "Broadcast prompt" }).fill("broadcast status");
+  await page.getByRole("button", { name: "Broadcast", exact: true }).click();
+  await expect
+    .poll(() => actionRequests.filter(({ body }) => remoteActionBody(body).prompt === "broadcast status").length)
+    .toBe(2);
+  expect(
+    actionRequests
+      .map(({ body }) => remoteActionBody(body))
+      .filter((body) => body.prompt === "broadcast status")
+      .map((body) => body.target)
+      .sort(),
+  ).toEqual(["agent-1", "agent-2"]);
+
   await page.getByRole("button", { name: "Open Remote Coder details" }).click();
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("terminal ready from e2e")).toBeVisible();
+  await expect.poll(() => statusStream !== null).toBe(true);
+  statusStream?.send(
+    JSON.stringify({
+      type: "agent_status",
+      agents: [
+        {
+          session_id: "agent-2",
+          session_name: "Remote Reviewer",
+          agent_class: "Reviewer",
+          provider: "claude",
+          workspace: "<absolute-workspace-path>",
+          status: "Processing",
+          latest_text: null,
+        },
+        {
+          session_id: "agent-1",
+          session_name: "Remote Coder",
+          agent_class: "Coder",
+          provider: "opencode",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: "Ready",
+        },
+      ],
+    }),
+  );
   await page.getByRole("button", { name: "Chat", exact: true }).click();
   await page.getByLabel("Prompt Remote Coder").fill("status please");
   await page.getByRole("button", { name: "Send prompt" }).click();
 
-  await expect.poll(() => actionRequests.length).toBe(1);
-  expect(actionRequests[0]).toMatchObject({
+  await expect
+    .poll(() => actionRequests.filter(({ body }) => remoteActionBody(body).prompt === "status please").length)
+    .toBe(1);
+  const chatPromptRequest = actionRequests.find(({ body }) => remoteActionBody(body).prompt === "status please");
+  expect(chatPromptRequest).toMatchObject({
     headers: {
       "x-wardian-csrf": "csrf-e2e",
     },
@@ -133,4 +210,10 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
       prompt: "status please",
     },
   });
+
+  await page.getByRole("button", { name: "Back to remote agents" }).click();
+  await page.getByRole("button", { name: "Queue" }).click();
+  await expect(page.getByText("Agent task completed")).toBeVisible();
+  await expect(page.getByText("Finished remote e2e update.")).toBeVisible();
+  await captureFeatureScreenshot("queue-summary.png", page.locator("main"));
 });

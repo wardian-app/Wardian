@@ -1,8 +1,9 @@
 import React from "react";
-import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Send } from "lucide-react";
 import { getDisplayItemsForList } from "../../layout/watchlist/watchlistUtils";
 import type { RemoteAgentSummary } from "../../types";
 import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
+import { RemoteCommandBar } from "./RemoteCommandBar";
 import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { remoteAgentToWatchlistAgent } from "./remoteWatchlistAdapter";
 import { useRemoteStore } from "./useRemoteStore";
@@ -13,6 +14,7 @@ const formatProviderName = (provider: string | null | undefined) => {
 };
 
 export const RemoteWatchlistView: React.FC = () => {
+  const [showBroadcast, setShowBroadcast] = React.useState(false);
   const agents = useRemoteStore((state) => state.agents);
   const watchlists = useRemoteStore((state) => state.watchlists);
   const teams = useRemoteStore((state) => state.teams);
@@ -41,14 +43,25 @@ export const RemoteWatchlistView: React.FC = () => {
             <h1 className="truncate text-base font-semibold text-primary">Wardian</h1>
             <p className="truncate text-xs text-muted-neutral">{currentName}</p>
           </div>
-          <button
-            type="button"
-            aria-label="Refresh remote watchlist"
-            onClick={() => void load()}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary"
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              aria-label={showBroadcast ? "Close broadcast prompt" : "Open broadcast prompt"}
+              aria-expanded={showBroadcast}
+              onClick={() => setShowBroadcast((current) => !current)}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary"
+            >
+              <Send className="h-4 w-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              aria-label="Refresh remote watchlist"
+              onClick={() => void load()}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary"
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1 no-scrollbar" data-testid="remote-watchlist-tabs">
           <button
@@ -69,6 +82,11 @@ export const RemoteWatchlistView: React.FC = () => {
             </button>
           ))}
         </div>
+        {showBroadcast && (
+          <div className="mt-3">
+            <RemoteCommandBar />
+          </div>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-3" data-testid="remote-scroll-region">

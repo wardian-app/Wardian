@@ -1,9 +1,10 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import "../../styles/App.css";
 import { RefreshCw } from "lucide-react";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemotePairingView } from "./RemotePairingView";
+import { RemoteQueueView } from "./RemoteQueueView";
 import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
 
@@ -13,7 +14,9 @@ export const RemoteMobileApp: React.FC = () => {
   const activeAgentId = useRemoteStore((state) => state.activeAgentId);
   const activeRemoteTab = useRemoteStore((state) => state.activeRemoteTab);
   const load = useRemoteStore((state) => state.load);
+  const refresh = useRemoteStore((state) => state.refresh);
   const disconnectStatusStream = useRemoteStore((state) => state.disconnectStatusStream);
+  const resumeRefreshInFlightRef = useRef(false);
 
   useEffect(() => {
     void load();
@@ -22,6 +25,27 @@ export const RemoteMobileApp: React.FC = () => {
   useEffect(() => {
     return () => disconnectStatusStream();
   }, [disconnectStatusStream]);
+
+  useEffect(() => {
+    const refreshOnResume = () => {
+      if (document.visibilityState === "hidden") return;
+      if (useRemoteStore.getState().status !== "ready") return;
+      if (resumeRefreshInFlightRef.current) return;
+      resumeRefreshInFlightRef.current = true;
+      void refresh().finally(() => {
+        resumeRefreshInFlightRef.current = false;
+      });
+    };
+
+    window.addEventListener("focus", refreshOnResume);
+    window.addEventListener("pageshow", refreshOnResume);
+    document.addEventListener("visibilitychange", refreshOnResume);
+    return () => {
+      window.removeEventListener("focus", refreshOnResume);
+      window.removeEventListener("pageshow", refreshOnResume);
+      document.removeEventListener("visibilitychange", refreshOnResume);
+    };
+  }, [refresh]);
 
   if (status === "loading") {
     return (
@@ -65,15 +89,21 @@ export const RemoteMobileApp: React.FC = () => {
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-wardian-bg text-primary" data-testid="remote-mobile-app">
-      {activeRemoteTab === "watchlist" ? <RemoteWatchlistView /> : <RemotePlaceholderPanel tab={activeRemoteTab} />}
+      {activeRemoteTab === "watchlist" ? (
+        <RemoteWatchlistView />
+      ) : activeRemoteTab === "queue" ? (
+        <RemoteQueueView />
+      ) : (
+        <RemotePlaceholderPanel tab={activeRemoteTab} />
+      )}
       <RemoteBottomNav />
     </main>
   );
 };
 
-function RemotePlaceholderPanel({ tab }: { tab: "workflows" | "queue" | "graph" | "library" }) {
+function RemotePlaceholderPanel({ tab }: { tab: "workflows" | "queue" | "garden" | "library" }) {
   const label =
-    tab === "workflows" ? "Workflows" : tab === "queue" ? "Queue" : tab === "graph" ? "Graph" : "Library";
+    tab === "workflows" ? "Workflows" : tab === "queue" ? "Queue" : tab === "garden" ? "Garden" : "Library";
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">

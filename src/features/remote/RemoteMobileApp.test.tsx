@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentChatEvent } from "../../types";
 import {
   clearStoredRemoteIdentity,
   createRemoteDeviceKeyPair,
@@ -28,6 +29,7 @@ vi.mock("./remoteIdentity", () => ({
 const fetchMock = vi.fn();
 globalThis.fetch = fetchMock;
 let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+let clipboardWriteTextMock: ReturnType<typeof vi.fn>;
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -66,11 +68,77 @@ function bytesToBase64(bytes: number[]) {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function mockRemoteAgentDetailFetch(
+  provider: string,
+  options: {
+    chatEvents?: AgentChatEvent[];
+    status?: string;
+  } = {},
+) {
+  const { chatEvents = [], status = "Idle" } = options;
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (url === "/remote/api/session") {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            csrf_nonce: "csrf-1",
+            expires_at: "2026-05-21T08:05:00.000Z",
+            absolute_expires_at: "2026-05-21T20:00:00.000Z",
+          }),
+          { status: 200 },
+        ),
+      );
+    }
+    if (url === "/remote/api/agents") {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            agents: [
+              {
+                session_id: "agent-1",
+                session_name: "Coder",
+                agent_class: "Coder",
+                provider,
+                workspace: "<absolute-workspace-path>",
+                status,
+                latest_text: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    }
+    if (url === "/remote/api/workflows") {
+      return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+    }
+    if (url === "/remote/api/agents/agent-1/chat") {
+      return Promise.resolve(new Response(JSON.stringify({ events: chatEvents }), { status: 200 }));
+    }
+    if (url === "/remote/api/agents/action" && init?.method === "POST") {
+      return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }
+    if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+      return Promise.resolve(
+        new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+          status: 200,
+        }),
+      );
+    }
+    return Promise.resolve(new Response("{}", { status: 404 }));
+  });
+}
+
 const initialRemoteStoreState = useRemoteStore.getState();
 
 describe("RemoteMobileApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clipboardWriteTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteTextMock },
+    });
     vi.mocked(Terminal).mockImplementation(function MockTerminal(options) {
       return {
         open: vi.fn(),
@@ -117,6 +185,9 @@ describe("RemoteMobileApp", () => {
     useRemoteStore.setState({
       agents: [],
       workflows: [],
+      remoteQueueItems: [],
+      remoteQueueBuffers: {},
+      remoteAgentStatuses: {},
       watchlists: [],
       teams: [],
       watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
@@ -211,6 +282,42 @@ describe("RemoteMobileApp", () => {
     expect(useRemoteStore.getState().activeAgentId).toBe("agent-1");
   });
 
+  it("returns from agent detail to the watchlist when swiping from the left edge", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: "agent-1",
+      activeAgentViewMode: "chat",
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    const detail = screen.getByTestId("remote-agent-detail");
+    fireEvent.touchStart(detail, { touches: [{ clientX: 12, clientY: 240 }] });
+    fireEvent.touchMove(detail, { touches: [{ clientX: 104, clientY: 246 }] });
+    fireEvent.touchEnd(detail, { changedTouches: [{ clientX: 104, clientY: 246 }], touches: [] });
+
+    expect(useRemoteStore.getState().activeAgentId).toBeNull();
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+  });
+
   it("updates the active remote tab from the compact mobile bottom nav", async () => {
     useRemoteStore.setState({
       activeRemoteTab: "watchlist",
@@ -220,8 +327,9 @@ describe("RemoteMobileApp", () => {
     render(<RemoteBottomNav />);
 
     expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
-    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
-    expect(useRemoteStore.getState().activeRemoteTab).toBe("graph");
+    expect(screen.queryByRole("button", { name: "Graph" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Garden" }));
+    expect(useRemoteStore.getState().activeRemoteTab).toBe("garden");
   });
 
   it("shows bottom navigation placeholders without exposing watchlist actions", async () => {
@@ -257,8 +365,33 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Prompt")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Graph" }));
-    expect(screen.getByText("Graph is not available in the mobile PWA yet.")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Garden" }));
+    expect(screen.getByText("Garden is not available in the mobile PWA yet.")).toBeVisible();
+  });
+
+  it("broadcasts a prompt from an explicit mobile watchlist action", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockRemoteAgentDetailFetch("codex");
+
+    render(<RemoteMobileApp />);
+
+    expect(await screen.findByRole("button", { name: /Open Coder details/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Open broadcast prompt" }));
+    await userEvent.type(screen.getByLabelText("Broadcast prompt"), "status please");
+    await userEvent.click(screen.getByRole("button", { name: "Broadcast" }));
+
+    await waitFor(() => {
+      expect(window.confirm).toHaveBeenCalledWith("Broadcast to 1 agent?");
+      const actionCalls = fetchMock.mock.calls.filter(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
+      expect(actionCalls).toHaveLength(1);
+      expect(JSON.parse(actionCalls[0][1]?.body as string)).toEqual({
+        action: "send_prompt",
+        target: "agent-1",
+        prompt: "status please",
+      });
+    });
   });
 
   it("pairs from a QR URL, waits for desktop approval, then authenticates the phone", async () => {
@@ -590,6 +723,65 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 
+  it("refreshes stale agent status when the mobile PWA regains focus", async () => {
+    let agentListCalls = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        agentListCalls += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: agentListCalls === 1 ? "Processing..." : "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    expect(await screen.findByText("Processing...")).toBeVisible();
+
+    window.dispatchEvent(new Event("focus"));
+
+    await waitFor(() => expect(screen.getByText("Idle")).toBeVisible());
+    expect(agentListCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("opens a selected agent detail view with terminal attach selected by default, keeps chat one tap away, and sends prompts", async () => {
     let chatCalls = 0;
     let terminalCalls = 0;
@@ -844,6 +1036,401 @@ describe("RemoteMobileApp", () => {
     });
   });
 
+  it("sends typed slash commands through command input mode without a composer toggle", async () => {
+    mockRemoteAgentDetailFetch("codex");
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    expect(screen.queryByRole("button", { name: "Command mode" })).not.toBeInTheDocument();
+    await userEvent.type(await screen.findByLabelText("Prompt Coder"), "/status");
+    await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+
+    await waitFor(() => {
+      const actionCall = fetchMock.mock.calls.find(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
+      expect(actionCall).toBeTruthy();
+      expect(JSON.parse(actionCall?.[1]?.body as string)).toEqual({
+        action: "send_prompt",
+        target: "agent-1",
+        prompt: "/status",
+        input_mode: "command",
+      });
+    });
+  });
+
+  it("renders remote chat messages with desktop markdown and copy behavior", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "assistant-markdown",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "message",
+          role: "assistant",
+          text: "Use **bold** and `npm test`.",
+          title: null,
+          status: null,
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const article = await screen.findByLabelText("assistant message");
+    expect(within(article).getByText("bold").tagName).toBe("STRONG");
+    expect(within(article).getByText("npm test").tagName).toBe("CODE");
+
+    await userEvent.click(within(article).getByRole("button", { name: "Copy message" }));
+    await waitFor(() => expect(clipboardWriteTextMock).toHaveBeenCalledWith("Use **bold** and `npm test`."));
+  });
+
+  it("submits remote approval choices through the PWA prompt action", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      status: "Action Required",
+      chatEvents: [
+        {
+          id: "approval-required",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "approval",
+          role: null,
+          text: "Do you want to proceed?\n\n1. Yes, and always allow\n2. No",
+          title: "Approval required",
+          status: "action_required",
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    expect(await screen.findByTestId("remote-activity-row-approval")).toHaveTextContent(
+      "Action required. Choose a response or type below.",
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Send approval response 1: Yes, and always allow" }));
+
+    await waitFor(() => {
+      const actionCall = fetchMock.mock.calls.find(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
+      expect(actionCall).toBeTruthy();
+      expect(JSON.parse(actionCall?.[1]?.body as string)).toEqual({
+        action: "send_prompt",
+        target: "agent-1",
+        prompt: "1",
+      });
+    });
+  });
+
+  it("disables the remote chat composer when the selected agent cannot accept chat input", async () => {
+    mockRemoteAgentDetailFetch("codex", { status: "Headless" });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const input = await screen.findByLabelText("Prompt Coder");
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("placeholder", "Agent is headless");
+    expect(screen.getByRole("button", { name: "Send prompt" })).toBeDisabled();
+  });
+
+  it("shows an optimistic remote user message while the post-send chat refresh is pending", async () => {
+    let chatCalls = 0;
+    let resolveRefresh: ((response: Response) => void) | null = null;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/agents/agent-1/chat") {
+        chatCalls += 1;
+        if (chatCalls === 1) {
+          return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+        }
+        return new Promise<Response>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      }
+      if (url === "/remote/api/agents/action" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await userEvent.type(await screen.findByLabelText("Prompt Coder"), "show status");
+    await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+
+    expect(await screen.findByLabelText("user message")).toHaveTextContent("show status");
+
+    act(() => {
+      resolveRefresh?.(
+        new Response(
+          JSON.stringify({
+            events: [
+              {
+                id: "confirmed-user",
+                session_id: "agent-1",
+                provider: "codex",
+                kind: "message",
+                role: "user",
+                text: "show status",
+                title: null,
+                status: "succeeded",
+                turn_id: "turn-1",
+                source: "provider_log",
+                command: null,
+                exit_code: null,
+                path: null,
+                language: null,
+                created_at: "2026-05-21T08:00:00.000Z",
+                sequence: 1,
+                metadata: {},
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    });
+
+    await waitFor(() => expect(screen.getAllByLabelText("user message")).toHaveLength(1));
+  });
+
+  it("clears the active remote chat immediately after a clear action succeeds", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let chatCalls = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/agents/agent-1/chat") {
+        chatCalls += 1;
+        if (chatCalls === 1) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                events: [
+                  {
+                    id: "message-before-clear",
+                    session_id: "agent-1",
+                    provider: "codex",
+                    kind: "message",
+                    role: "assistant",
+                    text: "Clear me from the PWA chat.",
+                    title: null,
+                    status: null,
+                    turn_id: "turn-1",
+                    source: "provider_log",
+                    command: null,
+                    exit_code: null,
+                    path: null,
+                    language: null,
+                    created_at: "2026-05-21T08:00:00.000Z",
+                    sequence: 1,
+                    metadata: {},
+                  },
+                ],
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return new Promise<Response>(() => {});
+      }
+      if (url === "/remote/api/agents/action" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    expect(await screen.findByText("Clear me from the PWA chat.")).toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => {
+      const actionCall = fetchMock.mock.calls.find(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
+      expect(actionCall).toBeTruthy();
+      expect(JSON.parse(actionCall?.[1]?.body as string)).toEqual({
+        action: "clear",
+        target: "agent-1",
+      });
+    });
+
+    expect(screen.queryByText("Clear me from the PWA chat.")).not.toBeInTheDocument();
+    expect(screen.getByText("No chat transcript yet.")).toBeVisible();
+  });
+
+  it("lazy loads older remote chat rows from the latest transcript window", async () => {
+    const chatEvents: AgentChatEvent[] = Array.from({ length: 85 }, (_, index) => ({
+      id: `message-${index + 1}`,
+      session_id: "agent-1",
+      provider: "codex",
+      kind: "message",
+      role: "assistant",
+      text: `Message ${index + 1}`,
+      title: null,
+      status: null,
+      turn_id: "turn-1",
+      source: "provider_log",
+      command: null,
+      exit_code: null,
+      path: null,
+      language: null,
+      created_at: `2026-05-21T08:${String(index).padStart(2, "0")}:00.000Z`,
+      sequence: index + 1,
+      metadata: {},
+    }));
+    mockRemoteAgentDetailFetch("codex", { chatEvents });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    expect(await screen.findByText("Message 85")).toBeVisible();
+    expect(screen.queryByText("Message 1")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Load 5 earlier transcript rows" }));
+    expect(await screen.findByText("Message 1")).toBeVisible();
+  });
+
+  it("keeps long remote terminal fallback rows compact until expanded", async () => {
+    const terminalOutput = Array.from({ length: 45 }, (_, index) => `terminal line ${index + 1}`).join("\n");
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "terminal-fallback",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "terminal_output",
+          role: null,
+          text: terminalOutput,
+          title: "Terminal output",
+          status: null,
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: "terminal",
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const row = await screen.findByTestId("remote-activity-row-terminal-fallback");
+    expect(row).toHaveTextContent("terminal line 1");
+    expect(row).not.toHaveTextContent("terminal line 45");
+
+    await userEvent.click(within(row).getByRole("button", { name: "Copy activity output" }));
+    await waitFor(() => expect(clipboardWriteTextMock).toHaveBeenCalledWith(terminalOutput));
+
+    await userEvent.click(within(row).getByRole("button", { name: "Show output" }));
+    expect(row).toHaveTextContent("terminal line 45");
+  });
+
   it("renders remote chat work logs with concrete tool call details", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -991,6 +1578,164 @@ describe("RemoteMobileApp", () => {
     expect(article).toHaveTextContent("cargo test -p Wardian commands::terminal::tests");
     expect(article).toHaveTextContent("npm run test -- src/features/grid/AgentChatView.test.tsx");
     expect(article).not.toHaveTextContent("running");
+
+    await userEvent.click(within(article).getByRole("button", { name: "Copy work log" }));
+    await waitFor(() => {
+      expect(clipboardWriteTextMock).toHaveBeenCalledWith(expect.stringContaining("Get-ChildItem src/features/grid"));
+      expect(clipboardWriteTextMock).toHaveBeenCalledWith(expect.stringContaining("commands::terminal::tests passed"));
+      expect(clipboardWriteTextMock).toHaveBeenCalledWith(expect.stringContaining("npm run test -- src/features/grid/AgentChatView.test.tsx"));
+    });
+  });
+
+  it("renders remote diff and todo tool activity with desktop-style structure", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "diff-output",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_result",
+          role: "tool",
+          text: "diff --git a/src/App.tsx b/src/App.tsx\n+added\n-removed",
+          title: "Tool result",
+          status: "succeeded",
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: 0,
+          path: null,
+          language: "diff",
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+        {
+          id: "todo-tool",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_call",
+          role: null,
+          text: "- [x] Inspect transcript\n- [ ] Add mobile parity",
+          title: "todowrite",
+          status: "succeeded",
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: "markdown",
+          created_at: "2026-05-21T08:00:01.000Z",
+          sequence: 2,
+          metadata: { tool_name: "todowrite" },
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    expect(await screen.findByTestId("remote-tool-diff-panel")).toHaveTextContent("1 file");
+    expect(screen.getByTestId("remote-tool-diff-panel")).toHaveTextContent("+1");
+    expect(screen.getByTestId("remote-tool-diff-panel")).toHaveTextContent("-1");
+    expect(screen.getByTestId("remote-tool-todo-list")).toHaveTextContent("Inspect transcript");
+    expect(screen.getByTestId("remote-tool-todo-list")).toHaveTextContent("Add mobile parity");
+  });
+
+  it("surfaces changed files inside remote grouped work logs", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "shell-call-1",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_call",
+          role: null,
+          text: null,
+          title: "shell_command",
+          status: "running",
+          turn_id: null,
+          source: "provider_log",
+          command: "git status --short",
+          exit_code: null,
+          path: null,
+          language: "shell",
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: { tool_name: "shell_command" },
+        },
+        {
+          id: "diff-result",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_result",
+          role: "tool",
+          text: "diff --git a/src/remote.ts b/src/remote.ts\n+added",
+          title: "Tool result",
+          status: "succeeded",
+          turn_id: null,
+          source: "provider_log",
+          command: null,
+          exit_code: 0,
+          path: null,
+          language: "diff",
+          created_at: "2026-05-21T08:00:01.000Z",
+          sequence: 2,
+          metadata: { changed_files: ["src/remote.ts"] },
+        },
+        {
+          id: "shell-call-2",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_call",
+          role: null,
+          text: null,
+          title: "shell_command",
+          status: "running",
+          turn_id: null,
+          source: "provider_log",
+          command: "npm test",
+          exit_code: null,
+          path: null,
+          language: "shell",
+          created_at: "2026-05-21T08:00:02.000Z",
+          sequence: 3,
+          metadata: { tool_name: "shell_command" },
+        },
+        {
+          id: "shell-call-3",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "tool_call",
+          role: null,
+          text: null,
+          title: "shell_command",
+          status: "running",
+          turn_id: null,
+          source: "provider_log",
+          command: "npm run build",
+          exit_code: null,
+          path: null,
+          language: "shell",
+          created_at: "2026-05-21T08:00:03.000Z",
+          sequence: 4,
+          metadata: { tool_name: "shell_command" },
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const group = (await screen.findByText("Work log")).closest("article") as HTMLElement;
+    expect(group).toHaveTextContent("Changed files");
+    expect(group).toHaveTextContent("src/remote.ts");
+
+    await userEvent.click(within(group).getByRole("button", { name: "Copy changed file paths" }));
+    await waitFor(() => expect(clipboardWriteTextMock).toHaveBeenCalledWith("src/remote.ts"));
   });
 
   it("refreshes remote chat on repeated active status frames", async () => {
@@ -1796,6 +2541,118 @@ describe("RemoteMobileApp", () => {
     expect(written).not.toContain("\u001b[1 q");
   });
 
+  it("strips Codex terminal color-report replies before forwarding remote terminal input", async () => {
+    mockRemoteAgentDetailFetch("codex");
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalSocket = MockWebSocket.instances[1];
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.onData?.mock) as {
+      onData: ReturnType<typeof vi.fn>;
+    };
+    const onData = terminalInstance.onData.mock.calls[0]?.[0] as ((data: string) => void) | undefined;
+    const colorReply = "\u001b]11;rgb:fc/fa/f5\u001b\\";
+
+    act(() => {
+      terminalSocket?.emit("open");
+      terminalSocket?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+    });
+    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+
+    const sentBeforeColorReply = terminalSocket?.sent.length ?? 0;
+    act(() => {
+      onData?.(colorReply);
+      onData?.(`${colorReply}ls -la\r`);
+    });
+
+    const sentAfterColorReply = terminalSocket?.sent.slice(sentBeforeColorReply).map((payload) => JSON.parse(payload));
+    expect(sentAfterColorReply).toEqual([{ type: "input", data: "ls -la\r" }]);
+  });
+
+  it("normalizes OpenCode synchronized-output noise from remote terminal live updates", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.write?.mock) as {
+      write: ReturnType<typeof vi.fn>;
+    };
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          state_base64: btoa("\u001b[?2026hhello\u001b[?1016$ptest\u001b[?2026l"),
+        }),
+      });
+    });
+
+    expect(terminalInstance.write).toHaveBeenLastCalledWith("hellotest");
+  });
+
+  it("answers OpenCode terminal capability probes on the remote terminal stream", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalSocket = MockWebSocket.instances[1];
+
+    act(() => {
+      terminalSocket?.emit("open");
+      terminalSocket?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("\u001b[6n\u001b[14t"),
+        }),
+      });
+    });
+    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+
+    const inputFrames = terminalSocket?.sent.map((payload) => JSON.parse(payload)).filter((frame) => frame.type === "input");
+    expect(inputFrames).toEqual([
+      { type: "input", data: "\u001b[1;1R" },
+      { type: "input", data: "\u001b[4;1;1t" },
+    ]);
+  });
+
   it("does not send terminal input or detach while the attach socket is not open", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -2120,6 +2977,94 @@ describe("RemoteMobileApp", () => {
 
     expect(terminalInstance.write).toHaveBeenCalledTimes(2);
     expect(terminalInstance.write).toHaveBeenLastCalledWith("\u20ac");
+  });
+
+  it("adds streamed remote terminal output to the mobile queue when the agent returns idle", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "opencode",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Processing...",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify({
+          type: "update",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          state_base64: btoa("Finished the requested update."),
+        }),
+      });
+      MockWebSocket.instances[0]?.emit("message", {
+        data: JSON.stringify({
+          type: "agent_status",
+          agents: [
+            {
+              session_id: "agent-1",
+              session_name: "Coder",
+              agent_class: "Coder",
+              provider: "opencode",
+              workspace: "<absolute-workspace-path>",
+              status: "Idle",
+              latest_text: "Ready",
+            },
+          ],
+        }),
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Back to remote agents" }));
+    await userEvent.click(screen.getByRole("button", { name: "Queue" }));
+
+    expect(screen.getByText("Agent task completed")).toBeVisible();
+    expect(screen.getByText("Coder")).toBeVisible();
+    expect(screen.getByText("Finished the requested update.")).toBeVisible();
   });
 
   it("does not poll terminal snapshots when the status stream updates the attached terminal", async () => {
@@ -2614,8 +3559,10 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     await userEvent.click(runningRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
 
@@ -2626,8 +3573,67 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     await userEvent.click(offlineRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+  });
+
+  it("does not expose selected-agent clone in the mobile roster", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/remote/api/session") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              csrf_nonce: "csrf-1",
+              expires_at: "2026-05-21T08:05:00.000Z",
+              absolute_expires_at: "2026-05-21T20:00:00.000Z",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/agents") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [
+                {
+                  session_id: "agent-1",
+                  session_name: "Coder",
+                  agent_class: "Coder",
+                  provider: "codex",
+                  workspace: "<absolute-workspace-path>",
+                  status: "Idle",
+                  latest_text: null,
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/remote/api/workflows") {
+        return Promise.resolve(new Response(JSON.stringify({ workflows: [] }), { status: 200 }));
+      }
+      if (url === "/remote/api/ws-ticket" && init?.method === "POST") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ticket: "ws-ticket-1", expires_at: "2026-05-21T08:01:00.000Z" }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url === "/remote/api/agents/action" && init?.method === "POST") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
   });
 
   it("runs detail lifecycle actions without reloading the roster", async () => {
