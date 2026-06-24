@@ -1,4 +1,5 @@
 use crate::state::active_agent::ActiveAgent;
+use crate::state::conversation_archive::ConversationArchiveState;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
 use crate::state::terminal_attach::TerminalAttachState;
@@ -52,6 +53,7 @@ pub struct AppState {
     // Live-only structured ask/reply requests keyed by backend-owned request id.
     pub ask_requests: Mutex<HashMap<String, AskRequestRecord>>,
     pub interactions: InteractionState,
+    pub conversation_archive: ConversationArchiveState,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
     // Last frontend-reported PTY size per session. Used to open a freshly-spawned
@@ -157,6 +159,7 @@ impl Default for AppState {
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
             interactions: InteractionState::default(),
+            conversation_archive: ConversationArchiveState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             pty_sizes: RwLock::new(HashMap::new()),
             terminal_theme: RwLock::new("dark".to_string()),

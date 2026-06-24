@@ -51,6 +51,7 @@ describe('default provider settings', () => {
       custom_executable: '',
       custom_args: '',
       agent_session_persistence: 'resume',
+      conversation_logging: 'enabled',
       default_provider: 'auto',
       shell_settings_loaded: false,
     });
@@ -62,6 +63,7 @@ describe('default provider settings', () => {
       custom_executable: null,
       custom_args: null,
       agent_session_persistence: 'resume',
+      conversation_logging: 'enabled',
       default_provider: 'codex',
     });
 
@@ -76,6 +78,7 @@ describe('default provider settings', () => {
       custom_executable: null,
       custom_args: null,
       agent_session_persistence: 'resume',
+      conversation_logging: 'enabled',
       default_provider: 'gemini',
     });
 
@@ -99,6 +102,7 @@ describe('default provider settings', () => {
       custom_executable: null,
       custom_args: null,
       agent_session_persistence: 'resume',
+      conversation_logging: 'enabled',
       default_provider: 'antigravity',
     });
 
@@ -114,6 +118,67 @@ describe('default provider settings', () => {
       }),
     });
     expect(useSettingsStore.getState().default_provider).toBe('antigravity');
+  });
+});
+
+describe('conversation logging settings', () => {
+  beforeEach(() => {
+    mockedInvoke.mockReset();
+    useSettingsStore.setState({
+      shell_id: 'auto',
+      custom_executable: '',
+      custom_args: '',
+      agent_session_persistence: 'resume',
+      conversation_logging: 'enabled',
+      default_provider: 'auto',
+      shell_settings_loaded: false,
+      shell_settings_overrides: {},
+    });
+  });
+
+  it('loads disabled conversation logging from shell settings', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      shell_id: 'auto',
+      custom_executable: null,
+      custom_args: null,
+      agent_session_persistence: 'resume',
+      conversation_logging: 'disabled',
+      default_provider: 'auto',
+    });
+
+    await useSettingsStore.getState().loadShellSettings();
+
+    expect(useSettingsStore.getState().conversation_logging).toBe('disabled');
+  });
+
+  it('saves disabled conversation logging as a sparse shell override', async () => {
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      settings: {
+        shell_id: 'auto',
+        custom_executable: null,
+        custom_args: null,
+        agent_session_persistence: 'resume',
+        conversation_logging: 'disabled',
+        default_provider: 'auto',
+      },
+      overrides: {
+        conversation_logging: 'disabled',
+      },
+    });
+
+    useSettingsStore.getState().setConversationLogging('disabled');
+    await useSettingsStore.getState().saveShellSettings();
+
+    expect(mockedInvoke).toHaveBeenCalledWith('save_shell_settings', {
+      settings: expect.objectContaining({
+        schema_version: 2,
+        overrides: expect.objectContaining({
+          conversation_logging: 'disabled',
+        }),
+      }),
+    });
+    expect(useSettingsStore.getState().conversation_logging).toBe('disabled');
   });
 });
 

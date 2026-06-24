@@ -17,8 +17,15 @@ describe('provider option helpers', () => {
       { value: 'codex', label: 'Codex', available: true, reason: null },
       { value: 'antigravity', label: 'Antigravity', available: true, reason: null },
       { value: 'opencode', label: 'OpenCode', available: true, reason: null },
-      { value: 'gemini', label: 'Gemini (Unmaintained)', available: true, reason: null },
+      { value: 'gemini', label: 'Gemini', available: true, reason: null },
     ]);
+  });
+
+  it('does not expose maintenance status in user-facing provider labels', () => {
+    expect(buildUngatedProviderOptions().find((option) => option.value === 'gemini')?.label).toBe('Gemini');
+    expect(buildProviderOptions([readiness('gemini', false)]).find((option) => option.value === 'gemini')?.label).toBe(
+      'Gemini - not installed',
+    );
   });
 
   it('uses canonical labels for known providers when readiness labels are stale', () => {

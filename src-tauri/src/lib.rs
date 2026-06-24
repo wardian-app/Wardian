@@ -17,11 +17,26 @@ pub use wardian_core::models;
 extern "C" {}
 
 use crate::state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::AgentConfig;
 
 const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const TELEMETRY_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn schedule_restored_agent_archive_sync(app_handle: AppHandle, session_id: String) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let state = app_handle.state::<AppState>();
+        if let Err(error) =
+            crate::commands::chat::archive_agent_chat_events_for_state(state.inner(), &session_id)
+                .await
+        {
+            crate::manager::log_debug(&format!(
+                "[WARDIAN] conversation archive restored-agent sync failed for {session_id}: {error}"
+            ));
+        }
+    });
+}
 
 fn restored_agent_without_process(
     config: AgentConfig,
@@ -420,6 +435,10 @@ pub fn run() {
                                     drop(agents_map);
                                     drop(order_map);
                                     let _ = app_handle.emit("agents-updated", ());
+                                    schedule_restored_agent_archive_sync(
+                                        app_handle.clone(),
+                                        config.session_id.clone(),
+                                    );
                                 });
                             }
                             while restore_tasks.join_next().await.is_some() {}
@@ -456,6 +475,8 @@ pub fn run() {
             commands::agent::delete_agent_worktree,
             commands::agent::disable_agent_worktree,
             commands::chat::load_agent_chat_transcript,
+            commands::conversation::list_conversations,
+            commands::conversation::show_conversation,
             commands::debug::debug_remove_agent_input_sender,
             commands::debug::debug_push_agent_watch_output,
             commands::debug::debug_set_agent_status,

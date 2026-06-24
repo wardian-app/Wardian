@@ -10,12 +10,36 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Agent(AgentArgs),
+    Conversation(ConversationArgs),
     Workflow(WorkflowArgs),
     Team(TeamArgs),
     Watchlist(WatchlistArgs),
     Send(SendArgs),
     Ask(AskArgs),
     Reply(ReplyArgs),
+}
+
+// ---------------------------------------------------------------------------
+// wardian conversation
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct ConversationArgs {
+    #[command(subcommand)]
+    pub command: ConversationCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConversationCommand {
+    List {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value = "current")]
+        scope: String,
+    },
+    Show {
+        conversation_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +456,75 @@ mod tests {
         assert!(matches!(
             args.command,
             WorkflowCommand::NodeTypes { json: true }
+        ));
+    }
+
+    #[test]
+    fn parses_conversation_list_current_agent() {
+        let cli = Cli::try_parse_from(["wardian", "conversation", "list"]).unwrap();
+        let Command::Conversation(args) = cli.command else {
+            panic!("expected Conversation")
+        };
+        assert!(matches!(
+            args.command,
+            ConversationCommand::List {
+                agent: None,
+                ref scope,
+            } if scope == "current"
+        ));
+    }
+
+    #[test]
+    fn parses_conversation_list_agent_filter() {
+        let cli =
+            Cli::try_parse_from(["wardian", "conversation", "list", "--agent", "agent-1"]).unwrap();
+        let Command::Conversation(args) = cli.command else {
+            panic!("expected Conversation")
+        };
+        assert!(matches!(
+            args.command,
+            ConversationCommand::List {
+                ref agent,
+                ref scope,
+            } if agent.as_deref() == Some("agent-1") && scope == "current"
+        ));
+    }
+
+    #[test]
+    fn parses_conversation_list_scope_all_agent() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "conversation",
+            "list",
+            "--scope",
+            "all",
+            "--agent",
+            "agent-1",
+        ])
+        .unwrap();
+        let Command::Conversation(args) = cli.command else {
+            panic!("expected Conversation")
+        };
+        assert!(matches!(
+            args.command,
+            ConversationCommand::List {
+                ref agent,
+                ref scope,
+            } if agent.as_deref() == Some("agent-1") && scope == "all"
+        ));
+    }
+
+    #[test]
+    fn parses_conversation_show() {
+        let cli = Cli::try_parse_from(["wardian", "conversation", "show", "conv-1"]).unwrap();
+        let Command::Conversation(args) = cli.command else {
+            panic!("expected Conversation")
+        };
+        assert!(matches!(
+            args.command,
+            ConversationCommand::Show {
+                ref conversation_id,
+            } if conversation_id == "conv-1"
         ));
     }
 

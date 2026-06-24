@@ -194,6 +194,10 @@ test("parseRenderingProviders defaults to Codex and Claude", () => {
   );
 });
 
+test("parseRenderingProviders accepts Antigravity when explicitly requested", () => {
+  assert.deepEqual(parseRenderingProviders("antigravity"), ["antigravity"]);
+});
+
 test("auditRenderingEvidence rejects OpenCode evidence without a real provider session link", () => {
   const { root, wardianRunId, outsideRunId, provider } = createRenderingEvidenceFixture({
     provider: "opencode",
@@ -1007,6 +1011,64 @@ test("auditRenderingEvidence accepts paused parser evidence when the paused card
   assert.equal(audit.ok, true, audit.failures.join("\n"));
 });
 
+test("auditRenderingEvidence does not require resumed markers after marker-optional clear", () => {
+  const { root, wardianRunId, provider } = createRenderingEvidenceFixture();
+  const manifestPath = path.join(
+    root,
+    "e2e",
+    "screenshots",
+    "real-provider-rendering",
+    wardianRunId,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.input_submitted = true;
+  manifest.input_text = "Reply exactly WARDIAN_MARKER.";
+  manifest.expected_response_text = "WARDIAN_MARKER";
+
+  for (const state of manifest.providers[0].states) {
+    state.capture.debug.lines = ["WARDIAN_MARKER"];
+    state.capture.debug.allLines = ["WARDIAN_MARKER"];
+    state.metrics = {
+      validation: { audit_text_present: true },
+      stability: { stable: true },
+      timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+    };
+  }
+
+  const cleared = minimalWardianState(root, wardianRunId, provider, "cleared-immediate", ["ready prompt"]);
+  cleared.metrics = {
+    validation: { audit_text_present: null },
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  const paused = minimalWardianState(root, wardianRunId, provider, "paused", ["paused prompt"]);
+  paused.metrics = {
+    validation: { audit_text_present: null },
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  const resumed = minimalWardianState(root, wardianRunId, provider, "resumed", ["resumed prompt"]);
+  resumed.metrics = {
+    validation: { audit_text_present: null },
+    stability: { stable: true },
+    timestamps: { artifact_written_at: "2026-05-13T12:00:00.000Z" },
+  };
+  manifest.providers[0].states = manifest.providers[0].states.filter((state) => state.name !== "paused");
+  manifest.providers[0].states.push(cleared, paused, resumed);
+  writeJson(manifestPath, manifest);
+
+  const audit = auditRenderingEvidence({
+    repoRoot: root,
+    wardianRunId,
+    providers: [provider],
+    requireWardianLabMetrics: true,
+    requireOutsideEvidence: false,
+  });
+
+  assert.equal(audit.ok, true, audit.failures.join("\n"));
+});
+
 test("parseRenderingProviders normalizes, deduplicates, and rejects unknown providers", () => {
   assert.deepEqual(parseRenderingProviders("Codex, gemini, CODEX"), ["codex", "gemini"]);
   assert.throws(
@@ -1297,6 +1359,19 @@ test("outside Gemini capture resolves the command shim Wardian launches", () => 
   assert.match(script, /& '\$escapedGeminiExecutable'/);
 });
 
+test("outside Antigravity capture mirrors Wardian interactive launch", () => {
+  const script = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "capture-outside-provider-rendering.ps1"),
+    "utf8",
+  );
+
+  assert.match(script, /ValidateSet\("codex", "claude", "gemini", "opencode", "antigravity"\)/);
+  assert.match(script, /Get-Command "agy\.exe"/);
+  assert.match(script, /Get-Command "agy\.cmd"/);
+  assert.match(script, /& '\$escapedAntigravityExecutable' --prompt-interactive ''/);
+  assert.match(script, /antigravity_executable/);
+});
+
 test("real-provider Wardian capture records DOM terminal geometry", () => {
   const testSource = fs.readFileSync(
     path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
@@ -1382,8 +1457,10 @@ test("real-provider Wardian capture exposes provider model env knobs", () => {
 
   assert.match(testSource, /WARDIAN_E2E_RENDERING_CODEX_MODEL/);
   assert.match(testSource, /WARDIAN_E2E_RENDERING_CLAUDE_MODEL/);
+  assert.match(testSource, /WARDIAN_E2E_RENDERING_GEMINI_MODEL/);
   assert.match(testSource, /WARDIAN_E2E_RENDERING_OPENCODE_MODEL/);
   assert.match(testSource, /DEFAULT_CLAUDE_RENDERING_MODEL = "haiku"/);
+  assert.match(testSource, /DEFAULT_GEMINI_RENDERING_MODEL = "gemini-2\.5-flash"/);
   assert.match(testSource, /DEFAULT_OPENCODE_RENDERING_MODEL = "opencode\/deepseek-v4-flash-free"/);
   assert.match(testSource, /modelForProvider\(provider\)/);
   assert.match(testSource, /config\.model = model/);
@@ -1481,7 +1558,7 @@ test("real-provider Wardian capture submits typed provider input before history 
   assert.match(testSource, /ArrowDown Enter/);
   assert.match(testSource, /startup_modal/);
   assert.match(testSource, /session_persistence: "resume"/);
-  assert.match(testSource, /expectAuditText: auditInputText\.trim\(\)\.length > 0/);
+  assert.match(testSource, /expectAuditText: submitAfterClear && auditInputText\.trim\(\)\.length > 0/);
 });
 
 test("real-provider Wardian capture defaults to a scrollback-producing provider prompt", () => {
@@ -1500,6 +1577,61 @@ test("real-provider Wardian capture defaults to a scrollback-producing provider 
   assert.match(testSource, /\[Pasted text/);
   assert.match(testSource, /longInputEchoFallbackTexts/);
   assert.match(testSource, /meaningfulLines\.slice\(-3\)/);
+});
+
+test("real-provider Wardian Antigravity-only capture defaults to a short marker prompt", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /DEFAULT_ANTIGRAVITY_RENDERING_PROMPT/);
+  assert.match(testSource, /WARDIAN_ANTIGRAVITY_RENDER_OK/);
+  assert.match(testSource, /onlyAntigravityRendering/);
+});
+
+test("real-provider Wardian Antigravity capture uses provider-aware prompt submission", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /provider === "antigravity"/);
+  assert.match(testSource, /"submit_prompt_to_agent"/);
+  assert.match(testSource, /delivery_detail/);
+});
+
+test("real-provider Wardian Antigravity response wait does not accept prompt echo alone", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /function expectedResponseTextOccurrences/);
+  assert.match(testSource, /provider === "antigravity"/);
+  assert.match(testSource, /return 2/);
+});
+
+test("real-provider Wardian Antigravity capture does not resubmit after clear", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /const submitAfterClear = provider !== "antigravity"/);
+  assert.match(testSource, /expectAuditText: submitAfterClear && auditInputText\.trim\(\)\.length > 0/);
+});
+
+test("real-provider Wardian capture fails fast on provider auth errors", () => {
+  const testSource = fs.readFileSync(
+    path.join(process.cwd(), "e2e-native", "tests", "real-provider-rendering-native.test.mjs"),
+    "utf8",
+  );
+
+  assert.match(testSource, /function assertNoProviderAuthFailure/);
+  assert.match(testSource, /API_KEY_INVALID/);
+  assert.match(testSource, /Please pass a valid API key/);
+  assert.match(testSource, /assertNoProviderAuthFailure\(last, sessionId, provider\)/);
 });
 
 test("outside provider capture submits typed input with Enter before history snapshots", () => {

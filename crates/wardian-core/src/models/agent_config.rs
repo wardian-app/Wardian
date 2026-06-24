@@ -1,6 +1,8 @@
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::conversations::AgentConversationLoggingSetting;
+
 use super::AgentSessionPersistenceOverride;
 
 fn default_provider() -> String {
@@ -278,6 +280,7 @@ pub struct AgentConfig {
     pub system_include_directories: Option<Vec<String>>,
     pub custom_args: Option<String>,
     pub session_persistence: AgentSessionPersistenceOverride,
+    pub conversation_logging: AgentConversationLoggingSetting,
     pub fresh_provider_session_id: Option<String>,
     pub provider_config: ProviderConfig,
     pub provider_config_encoding: ProviderConfigEncoding,
@@ -330,6 +333,7 @@ impl Default for AgentConfig {
             system_include_directories: None,
             custom_args: None,
             session_persistence: AgentSessionPersistenceOverride::Default,
+            conversation_logging: AgentConversationLoggingSetting::Default,
             fresh_provider_session_id: None,
             provider_config: ProviderConfig::Claude(ClaudeProviderConfig::default()),
             provider_config_encoding: ProviderConfigEncoding::Nested,
@@ -382,6 +386,7 @@ struct AgentConfigCompat {
     pub system_include_directories: Option<Vec<String>>,
     pub custom_args: Option<String>,
     pub session_persistence: AgentSessionPersistenceOverride,
+    pub conversation_logging: AgentConversationLoggingSetting,
     pub provider_config: Option<serde_json::Value>,
     pub sandbox: Option<bool>,
     pub yolo: Option<bool>,
@@ -430,6 +435,7 @@ impl Default for AgentConfigCompat {
             system_include_directories: default.system_include_directories,
             custom_args: default.custom_args,
             session_persistence: default.session_persistence,
+            conversation_logging: default.conversation_logging,
             provider_config: None,
             sandbox: None,
             yolo: None,
@@ -547,6 +553,7 @@ impl From<AgentConfigCompat> for AgentConfig {
             system_include_directories: compat.system_include_directories,
             custom_args: compat.custom_args,
             session_persistence: compat.session_persistence,
+            conversation_logging: compat.conversation_logging,
             fresh_provider_session_id: None,
             provider_config,
             provider_config_encoding: if had_nested_provider_config {
@@ -777,6 +784,7 @@ impl AgentConfig {
         )?;
         map.serialize_entry("custom_args", &self.custom_args)?;
         map.serialize_entry("session_persistence", &self.session_persistence)?;
+        map.serialize_entry("conversation_logging", &self.conversation_logging)?;
         Ok(())
     }
 
@@ -864,6 +872,7 @@ pub struct AgentClassDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversations::AgentConversationLoggingSetting;
     use crate::models::AgentSessionPersistenceOverride;
 
     #[test]
@@ -909,6 +918,37 @@ mod tests {
         assert_eq!(
             config.session_persistence,
             AgentSessionPersistenceOverride::Default
+        );
+    }
+
+    #[test]
+    fn agent_config_defaults_missing_conversation_logging_to_global_default() {
+        let config: AgentConfig = serde_json::from_str(r#"{"session_id":"abc-123"}"#).unwrap();
+
+        assert_eq!(
+            config.conversation_logging,
+            AgentConversationLoggingSetting::Default
+        );
+    }
+
+    #[test]
+    fn agent_config_roundtrips_explicit_conversation_logging() {
+        let config: AgentConfig =
+            serde_json::from_str(r#"{"session_id":"abc-123","conversation_logging":"enabled"}"#)
+                .unwrap();
+
+        assert_eq!(
+            config.conversation_logging,
+            AgentConversationLoggingSetting::Enabled
+        );
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["conversation_logging"], "enabled");
+
+        let deserialized: AgentConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            deserialized.conversation_logging,
+            AgentConversationLoggingSetting::Enabled
         );
     }
 

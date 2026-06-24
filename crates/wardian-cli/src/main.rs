@@ -14,8 +14,9 @@ use std::{
 
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
-    QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs, TeamArgs, TeamCommand, WatchlistArgs,
-    WatchlistCommand, WorkflowArgs, WorkflowCommand, WorkflowScheduleCommand,
+    ConversationArgs, ConversationCommand, QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs,
+    TeamArgs, TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs, WorkflowCommand,
+    WorkflowScheduleCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
@@ -44,6 +45,7 @@ fn run() -> i32 {
     };
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
+        Command::Conversation(args) => handle_conversation(args),
         Command::Workflow(args) => handle_workflow(args),
         Command::Team(args) => handle_team(args),
         Command::Watchlist(args) => handle_watchlist(args),
@@ -75,6 +77,85 @@ fn handle_parse_error(error: clap::Error) -> i32 {
 
     CliError::generic(error.to_string()).emit();
     ExitCode::Generic as i32
+}
+
+// ---------------------------------------------------------------------------
+// wardian conversation
+// ---------------------------------------------------------------------------
+
+fn handle_conversation(args: ConversationArgs) -> Result<String, CliError> {
+    match args.command {
+        ConversationCommand::List { agent, scope } => render_conversation_list(agent, &scope),
+        ConversationCommand::Show { conversation_id } => render_conversation_show(&conversation_id),
+    }
+}
+
+fn render_conversation_list(agent: Option<String>, scope: &str) -> Result<String, CliError> {
+    let scope_all = match scope {
+        "current" => false,
+        "all" => true,
+        other => {
+            return Err(CliError::generic(format!(
+                "unsupported conversation scope `{other}`; expected current or all"
+            )))
+        }
+    };
+    let effective_agent = resolve_conversation_agent(agent, scope_all)?;
+    let response = live::conversation_list(effective_agent.as_deref(), scope_all).or_else(|_| {
+        disk::load_conversation_list(effective_agent.as_deref(), scope_all)
+            .map(wardian_core::control::ConversationListResponse::new)
+    });
+    render_conversation_response(response)
+}
+
+fn render_conversation_show(conversation_id: &str) -> Result<String, CliError> {
+    let response = live::conversation_show(conversation_id)
+        .or_else(|_| disk::load_conversation_show(conversation_id));
+    render_conversation_response(response)
+}
+
+fn render_conversation_response<T: serde::Serialize>(
+    response: std::io::Result<T>,
+) -> Result<String, CliError> {
+    response
+        .map_err(|error| CliError::generic(error.to_string()))
+        .and_then(|body| {
+            serde_json::to_string_pretty(&body)
+                .map(|json| format!("{json}\n"))
+                .map_err(|error| CliError::generic(error.to_string()))
+        })
+}
+
+fn resolve_conversation_agent(
+    agent: Option<String>,
+    scope_all: bool,
+) -> Result<Option<String>, CliError> {
+    if let Some(agent) = agent {
+        return Ok(Some(resolve_conversation_agent_target(&agent)));
+    }
+    if scope_all {
+        return Ok(None);
+    }
+
+    std::env::var("WARDIAN_SESSION_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(Some)
+        .ok_or_else(|| CliError::generic("--agent, --scope all, or WARDIAN_SESSION_ID is required"))
+}
+
+fn resolve_conversation_agent_target(target: &str) -> String {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    open_db()
+        .ok()
+        .and_then(|conn| identity::resolve_by_name_or_uuid(&conn, trimmed).ok())
+        .map(|agent| agent.uuid)
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1430,6 +1511,7 @@ mod tests {
     struct TestWardianHome {
         _lock: std::sync::MutexGuard<'static, ()>,
         previous_home: Option<std::ffi::OsString>,
+        previous_session_id: Option<std::ffi::OsString>,
     }
 
     impl TestWardianHome {
@@ -1437,8 +1519,10 @@ mod tests {
             let guard = Self {
                 _lock: crate::test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
+                previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
             };
             std::env::set_var("WARDIAN_HOME", path);
+            std::env::remove_var("WARDIAN_SESSION_ID");
             guard
         }
     }
@@ -1449,7 +1533,69 @@ mod tests {
                 Some(value) => std::env::set_var("WARDIAN_HOME", value),
                 None => std::env::remove_var("WARDIAN_HOME"),
             }
+            match self.previous_session_id.take() {
+                Some(value) => std::env::set_var("WARDIAN_SESSION_ID", value),
+                None => std::env::remove_var("WARDIAN_SESSION_ID"),
+            }
         }
+    }
+
+    #[test]
+    fn conversation_list_rejects_unknown_scope() {
+        let error = handle_conversation(args::ConversationArgs {
+            command: args::ConversationCommand::List {
+                agent: Some("agent-1".to_string()),
+                scope: "workspace".to_string(),
+            },
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "generic");
+        assert!(error.message.contains("unsupported conversation scope"));
+        assert!(error.message.contains("current"));
+        assert!(error.message.contains("all"));
+    }
+
+    #[test]
+    fn conversation_list_current_requires_agent_or_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestWardianHome::new(temp.path());
+
+        let error = handle_conversation(args::ConversationArgs {
+            command: args::ConversationCommand::List {
+                agent: None,
+                scope: "current".to_string(),
+            },
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "generic");
+        assert!(error.message.contains("--agent"));
+        assert!(error.message.contains("--scope all"));
+        assert!(error.message.contains("WARDIAN_SESSION_ID"));
+    }
+
+    #[test]
+    fn conversation_list_agent_accepts_persisted_agent_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestWardianHome::new(temp.path());
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db")).unwrap();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: "agent-uuid-1",
+            session_name: "AgentOne",
+            agent_class: "Coder",
+            provider: "codex",
+            workspace: Some("<absolute-workspace-path>"),
+            project: None,
+            is_off: false,
+            created_at: Some("2026-06-15T00:00:00.000Z"),
+        })
+        .unwrap();
+
+        let resolved = resolve_conversation_agent(Some("AgentOne".to_string()), false)
+            .expect("resolve agent name");
+
+        assert_eq!(resolved.as_deref(), Some("agent-uuid-1"));
     }
 
     #[test]

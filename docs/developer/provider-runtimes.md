@@ -51,6 +51,7 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Resume launches pass `--conversation <conversation-id>`.
 - Antigravity may write the useful assistant response only to `brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
 - Wardian discovers the active conversation from `cache/last_conversations.json` or the newest `brain/<conversation-id>` directory, stores that ID as `resume_session`, and parses completed `MODEL` `PLANNER_RESPONSE` transcript records for status and `wardian agent watch` transcript text.
+- The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
 ### Practical implications
 
@@ -88,6 +89,7 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - Claude depends heavily on the permission-hook path being writable and stable.
 - Bugs here are usually about hook setup, `CLAUDE.md` discovery, or resume/session flags.
 - On Windows, Claude may invoke both PowerShell and bash-family tool shells during one Wardian-managed session. Wardian therefore installs both `%USERPROFILE%\.wardian\bin\wardian.cmd` and `%USERPROFILE%\.wardian\bin\wardian`, then prepends the active Wardian `bin` directory to the managed provider process PATH. Verify shell parity from inside the managed runtime, not only from the parent Wardian process.
+- If `%USERPROFILE%\bin\wardian` or `%USERPROFILE%\bin\wardian.cmd` is a Wardian-owned legacy launcher, the Windows installer rewrites it to forward to the active `%USERPROFILE%\.wardian\bin\wardian-cli.exe`. This protects Claude bash tool shells that prepend `~/bin` ahead of the inherited provider PATH.
 - Windows manual smoke:
 
 ```powershell

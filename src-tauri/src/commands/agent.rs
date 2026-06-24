@@ -1,8 +1,10 @@
 use crate::manager;
 use crate::providers::ProviderFactory;
+use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tauri::{AppHandle, Emitter, State};
+use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
     DeployedSkillRef, ProviderConfig,
@@ -24,6 +26,26 @@ pub struct SpawnAgentRequest {
 pub enum CloneAgentMode {
     Fresh,
     Profile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentClearReason {
+    UserClear,
+    WorktreeSwitch,
+}
+
+fn agent_clear_reason_from_input(reason: Option<&str>) -> AgentClearReason {
+    match reason.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("worktree_switch") => AgentClearReason::WorktreeSwitch,
+        _ => AgentClearReason::UserClear,
+    }
+}
+
+fn conversation_boundary_for_clear_reason(reason: Option<&str>) -> ConversationBoundaryReason {
+    match agent_clear_reason_from_input(reason) {
+        AgentClearReason::UserClear => ConversationBoundaryReason::Clear,
+        AgentClearReason::WorktreeSwitch => ConversationBoundaryReason::WorktreeSwitch,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2506,14 +2528,128 @@ pub async fn resume_agent(
 #[tauri::command]
 pub async fn clear_agent_session(
     session_id: String,
+    reason: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
+) -> Result<(), String> {
+    clear_agent_session_with_reason(session_id, reason, state, app).await
+}
+
+async fn archive_agent_lifecycle_boundary_from_snapshot(
+    state: &AppState,
+    session_id: &str,
+    boundary_reason: ConversationBoundaryReason,
+    snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> Result<(), String> {
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    let effective_logging = effective_conversation_logging(
+        global_conversation_logging,
+        snapshot.agent_conversation_logging,
+    );
+    let capture = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)?;
+
+    if effective_logging == ConversationLoggingSetting::Enabled {
+        if let Err(error) = state
+            .conversation_archive
+            .append_chat_events_with_context(capture.context.clone(), &capture.events)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive pre-clear append failed for {session_id}: {error}"
+            ));
+        }
+        if let Err(error) = state
+            .conversation_archive
+            .append_lifecycle_boundary_with_context(capture.context, boundary_reason)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive lifecycle append failed for {session_id}: {error}"
+            ));
+        }
+        if let Err(error) = state
+            .conversation_archive
+            .rollover_agent(session_id, boundary_reason)
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] conversation archive rollover failed for {session_id}: {error}"
+            ));
+        }
+    } else if let Err(error) = state
+        .conversation_archive
+        .discard_agent_with_context(capture.context, &capture.events)
+    {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive discard failed for {session_id}: {error}"
+        ));
+    }
+
+    Ok(())
+}
+
+async fn archive_agent_lifecycle_boundary(
+    state: &AppState,
+    session_id: &str,
+    boundary_reason: ConversationBoundaryReason,
+) -> Result<(), String> {
+    let snapshot =
+        match crate::commands::chat::agent_archive_capture_snapshot(state, session_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.contains("agent not found") => return Ok(()),
+            Err(error) => return Err(error),
+        };
+    archive_agent_lifecycle_boundary_from_snapshot(state, session_id, boundary_reason, snapshot)
+        .await
+}
+
+pub async fn clear_agent_session_with_reason(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    clear_agent_session_inner(session_id, reason, state, app, None).await
+}
+
+async fn clear_agent_session_with_archive_snapshot(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> Result<(), String> {
+    clear_agent_session_inner(session_id, reason, state, app, Some(archive_snapshot)).await
+}
+
+async fn clear_agent_session_inner(
+    session_id: String,
+    reason: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
 ) -> Result<(), String> {
     manager::log_debug(&format!(
         "[WARDIAN] clear_agent_session called for session: {}",
         session_id
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    let archive_result = if let Some(snapshot) = archive_snapshot {
+        archive_agent_lifecycle_boundary_from_snapshot(
+            &state,
+            &session_id,
+            boundary_reason,
+            snapshot,
+        )
+        .await
+    } else {
+        archive_agent_lifecycle_boundary(&state, &session_id, boundary_reason).await
+    };
+    if let Err(error) = archive_result {
+        manager::log_debug(&format!(
+            "[WARDIAN] conversation archive lifecycle boundary failed for {session_id}: {error}"
+        ));
+    }
     let mut prepared = {
         let mut agents = state.agents.lock().await;
         let Some(agent) = agents.get_mut(&session_id) else {
@@ -2882,13 +3018,11 @@ fn build_agent_cli_command_with_shells(
         &workspace_cwd,
         provider_args,
     );
-    let launch =
-        manager::interactive_provider_launch(&resume_config.provider, &bin, &provider_args)?;
     let envs = external_terminal_env(&resume_config, habitat_root.as_deref(), &provider_cwd)?;
 
     crate::utils::build_copyable_program_command_with_settings(
-        &launch.executable,
-        &launch.args,
+        &bin,
+        &provider_args,
         &provider_cwd,
         &envs,
         shell_settings,
@@ -3015,6 +3149,10 @@ pub async fn enable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
 
     let worktree_name = worktree_name
         .as_deref()
@@ -3065,18 +3203,35 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            enable_worktree_config(&mut config, &worktree_path);
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                enable_worktree_config(&mut config, &worktree_path);
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
+    }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
+}
+
+async fn clear_agent_after_worktree_mutation(
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
+) -> Result<(), String> {
+    let reason = Some("worktree_switch".to_string());
+    if let Some(snapshot) = archive_snapshot {
+        clear_agent_session_with_archive_snapshot(session_id, reason, state, app, snapshot).await
     } else {
-        Err(format!("Agent {} not found", session_id))
+        clear_agent_session_with_reason(session_id, reason, state, app).await
     }
 }
 
@@ -3112,6 +3267,10 @@ pub async fn assign_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
     let worktree_path = std::path::Path::new(worktree_folder.trim());
     if !worktree_path.is_dir() {
         return Err("Worktree folder does not exist".to_string());
@@ -3130,31 +3289,34 @@ pub async fn assign_agent_worktree(
     let managed_worktree =
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            let source_folder = config
-                .git_worktree_source
-                .as_deref()
-                .map(str::trim)
-                .filter(|folder| !folder.is_empty())
-                .unwrap_or(config.folder.trim())
-                .to_string();
-            validate_assignable_worktree_for_agent(
-                &source_folder,
-                &managed_worktree,
-                worktree_path,
-            )?;
-            assign_worktree_config(&mut config, &worktree_folder)?;
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                let source_folder = config
+                    .git_worktree_source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|folder| !folder.is_empty())
+                    .unwrap_or(config.folder.trim())
+                    .to_string();
+                validate_assignable_worktree_for_agent(
+                    &source_folder,
+                    &managed_worktree,
+                    worktree_path,
+                )?;
+                assign_worktree_config(&mut config, &worktree_folder)?;
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
     }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
 }
 
 #[tauri::command]
@@ -3206,20 +3368,27 @@ pub async fn disable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let archive_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+            .await
+            .ok();
 
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    if let Some(agent) = agents.get_mut(&session_id) {
-        {
-            let mut config = agent.config.lock().unwrap();
-            disable_worktree_config(&mut config)?;
+    {
+        let mut agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        if let Some(agent) = agents.get_mut(&session_id) {
+            {
+                let mut config = agent.config.lock().unwrap();
+                disable_worktree_config(&mut config)?;
+            }
+            manager::save_state(&app, &agents, &order);
+            let _ = app.emit("agents-updated", ());
+        } else {
+            return Err(format!("Agent {} not found", session_id));
         }
-        manager::save_state(&app, &agents, &order);
-        let _ = app.emit("agents-updated", ());
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", session_id))
     }
+
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
 }
 
 #[tauri::command]
@@ -3239,7 +3408,8 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, assign_worktree_config,
+        agent_status_update_payload, archive_agent_lifecycle_boundary,
+        archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
         build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
         build_agent_clone_preview, capture_opencode_pause_resume_session,
         capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
@@ -3250,9 +3420,10 @@ mod tests {
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
         clone_validate_selected_profile_files, codex_provider_session_is_new,
         collect_agent_worktrees, collect_agent_worktrees_with_discovered,
-        configured_new_agent_order_placement, detach_agent_for_kill, disable_worktree_config,
-        discover_git_worktrees_for_configs, discover_git_worktrees_for_sources_with,
-        enable_worktree_config, ensure_existing_worktree_is_git_registered,
+        configured_new_agent_order_placement, conversation_boundary_for_clear_reason,
+        detach_agent_for_kill, disable_worktree_config, discover_git_worktrees_for_configs,
+        discover_git_worktrees_for_sources_with, enable_worktree_config,
+        ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
@@ -3280,8 +3451,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use wardian_core::models::provider::AgentProvider;
     use wardian_core::models::{
-        AgentConfig, AgentSessionPersistenceOverride, ClaudeProviderConfig, CodexProviderConfig,
-        DeployedSkillRef, GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
+        AgentConfig, AgentSessionPersistenceOverride, AntigravityProviderConfig,
+        ClaudeProviderConfig, CodexProviderConfig, DeployedSkillRef, GeminiProviderConfig,
+        OpenCodeProviderConfig, ProviderConfig,
     };
 
     struct WardianHomeGuard;
@@ -3388,6 +3560,184 @@ mod tests {
                 default_args: vec!["-NoProfile".to_string(), "-Command".to_string()],
             }],
         )
+    }
+
+    #[cfg(windows)]
+    fn test_external_command_shell() -> (ShellSettings, Vec<ShellOption>, &'static str, &'static str)
+    {
+        (
+            ShellSettings {
+                shell_id: "cmd".to_string(),
+                ..Default::default()
+            },
+            vec![ShellOption {
+                id: "cmd".to_string(),
+                label: "Command Prompt".to_string(),
+                executable: "cmd.exe".to_string(),
+                default_args: vec!["/C".to_string()],
+            }],
+            "cmd.exe",
+            "/C",
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn test_external_command_shell() -> (ShellSettings, Vec<ShellOption>, &'static str, &'static str)
+    {
+        (
+            ShellSettings {
+                shell_id: "sh".to_string(),
+                ..Default::default()
+            },
+            vec![ShellOption {
+                id: "sh".to_string(),
+                label: "sh".to_string(),
+                executable: "sh".to_string(),
+                default_args: vec!["-c".to_string()],
+            }],
+            "sh",
+            "-c",
+        )
+    }
+
+    #[cfg(windows)]
+    fn write_fake_provider_executable(
+        bin_dir: &std::path::Path,
+        executable_name: &str,
+        provider: &str,
+    ) {
+        let ps1_path = bin_dir.join(format!("{executable_name}.ps1"));
+        let ps1_path_text = ps1_path.to_string_lossy().replace('\\', "\\\\");
+        let provider = provider.replace('\'', "''");
+        let script = format!(
+            r#"@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps1_path_text}" %*
+"#
+        );
+        let ps1 = format!(
+            r#"
+$lines = @(
+  'provider={provider}',
+  "cwd=$PWD",
+  "session=$env:WARDIAN_SESSION_ID",
+  "args=$($args -join ' ')",
+  "codex_home=$env:CODEX_HOME",
+  "claude_additional=$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+)
+Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
+"#
+        );
+        std::fs::write(&ps1_path, ps1).expect("fake provider powershell executable");
+        std::fs::write(bin_dir.join(format!("{executable_name}.cmd")), script)
+            .expect("fake provider executable");
+    }
+
+    #[cfg(not(windows))]
+    fn write_fake_provider_executable(
+        bin_dir: &std::path::Path,
+        executable_name: &str,
+        provider: &str,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = format!(
+            r#"#!/bin/sh
+{{
+  echo "provider={provider}"
+  echo "cwd=$PWD"
+  echo "session=$WARDIAN_SESSION_ID"
+  echo "args=$*"
+  echo "codex_home=$CODEX_HOME"
+  echo "claude_additional=$CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+}} >> "$WARDIAN_COMMAND_SMOKE_LOG"
+"#
+        );
+        let path = bin_dir.join(executable_name);
+        std::fs::write(&path, script).expect("fake provider executable");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("fake provider permissions");
+    }
+
+    struct PathEnvGuard(Option<std::ffi::OsString>);
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn prepend_path_for_test(path: &std::path::Path) -> PathEnvGuard {
+        let original = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(existing) = original.as_ref() {
+            paths.extend(std::env::split_paths(existing));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        std::env::set_var("PATH", joined);
+        PathEnvGuard(original)
+    }
+
+    fn fake_provider_log_block(log: &str, provider: &str) -> String {
+        let marker = format!("provider={provider}");
+        let mut lines = log.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line != marker {
+                continue;
+            }
+
+            let mut block = vec![line.to_string()];
+            while let Some(next) = lines.peek() {
+                if next.starts_with("provider=") {
+                    break;
+                }
+                block.push(lines.next().unwrap_or_default().to_string());
+            }
+            return block.join("\n");
+        }
+
+        panic!("{provider} fake executable should run: {log}");
+    }
+
+    #[cfg(windows)]
+    fn run_copyable_command_for_test(
+        temp: &std::path::Path,
+        provider: &str,
+        _shell_executable: &str,
+        _shell_command_arg: &str,
+        command: &str,
+        log_path: &std::path::Path,
+    ) -> std::process::Output {
+        let script_path = temp.join(format!("run-{provider}.cmd"));
+        std::fs::write(&script_path, format!("{command}\r\n")).expect("copy command script");
+        std::process::Command::new("cmd.exe")
+            .arg("/C")
+            .arg(&script_path)
+            .env("WARDIAN_COMMAND_SMOKE_LOG", log_path)
+            .output()
+            .unwrap_or_else(|err| panic!("{provider} command should run: {err}"))
+    }
+
+    #[cfg(not(windows))]
+    fn run_copyable_command_for_test(
+        _temp: &std::path::Path,
+        provider: &str,
+        shell_executable: &str,
+        shell_command_arg: &str,
+        command: &str,
+        log_path: &std::path::Path,
+    ) -> std::process::Output {
+        std::process::Command::new(shell_executable)
+            .arg(shell_command_arg)
+            .arg(command)
+            .env("WARDIAN_COMMAND_SMOKE_LOG", log_path)
+            .output()
+            .unwrap_or_else(|err| panic!("{provider} command should run: {err}"))
     }
 
     #[test]
@@ -3543,6 +3893,274 @@ mod tests {
         assert!(command.contains("sonnet"));
         assert!(!command.contains("stream-json"));
         assert!(!command.contains("--verbose"));
+    }
+
+    #[test]
+    fn full_agent_command_builds_copyable_resume_for_each_non_gemini_provider() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+        let workspace_text = workspace.to_string_lossy().to_string();
+
+        let cases = vec![
+            (
+                "codex",
+                AgentConfig {
+                    session_id: "codex-agent".to_string(),
+                    session_name: "CodexAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "codex".to_string(),
+                    resume_session: Some("codex-resume".to_string()),
+                    model: Some("gpt-5-codex".to_string()),
+                    provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                        sandbox_mode: Some("danger-full-access".to_string()),
+                        approval_policy: Some("never".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "codex-agent",
+                    "CODEX_HOME",
+                    "resume",
+                    "codex-resume",
+                    "--cd",
+                    "gpt-5-codex",
+                ],
+                vec!["--no-alt-screen", "--disable plugins", "--disable apps"],
+            ),
+            (
+                "claude",
+                AgentConfig {
+                    session_id: "claude-agent".to_string(),
+                    session_name: "ClaudeAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "claude".to_string(),
+                    resume_session: Some("claude-resume".to_string()),
+                    model: Some("sonnet".to_string()),
+                    provider_config: ProviderConfig::Claude(ClaudeProviderConfig {
+                        permission_mode: Some("acceptEdits".to_string()),
+                        max_turns: Some(3),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "claude-agent",
+                    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+                    "--resume",
+                    "claude-resume",
+                    "--model",
+                    "sonnet",
+                ],
+                vec!["stream-json", "--verbose"],
+            ),
+            (
+                "opencode",
+                AgentConfig {
+                    session_id: "opencode-agent".to_string(),
+                    session_name: "OpenCodeAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "opencode".to_string(),
+                    resume_session: Some("opencode-resume".to_string()),
+                    model: Some("opencode-model".to_string()),
+                    provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig {
+                        agent: Some("build".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "opencode-agent",
+                    "--session",
+                    "opencode-resume",
+                    "--agent",
+                    "build",
+                    "opencode-model",
+                ],
+                vec![],
+            ),
+            (
+                "antigravity",
+                AgentConfig {
+                    session_id: "antigravity-agent".to_string(),
+                    session_name: "AntigravityAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "antigravity".to_string(),
+                    resume_session: Some("antigravity-resume".to_string()),
+                    provider_config: ProviderConfig::Antigravity(AntigravityProviderConfig {
+                        sandbox: Some(true),
+                        dangerously_skip_permissions: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "antigravity-agent",
+                    "--conversation",
+                    "antigravity-resume",
+                    "--sandbox",
+                    "--dangerously-skip-permissions",
+                    "--prompt-interactive",
+                ],
+                vec![],
+            ),
+        ];
+
+        for (provider, config, expected_fragments, forbidden_fragments) in cases {
+            let command = build_agent_cli_command_with_shells(&config, &settings, &shells)
+                .unwrap_or_else(|err| panic!("{provider} command should build: {err}"));
+
+            assert!(
+                command.contains("$env:WARDIAN_SESSION_ID = "),
+                "{provider} command should preserve Wardian identity: {command}"
+            );
+            assert!(
+                command.contains("Set-Location -LiteralPath "),
+                "{provider} command should set a working directory: {command}"
+            );
+            assert!(
+                !command.contains("WARDIAN_E2E_REAL_"),
+                "{provider} command should not expose test/provider opt-in secrets: {command}"
+            );
+            for fragment in expected_fragments {
+                assert!(
+                    command.contains(fragment),
+                    "{provider} command missing {fragment:?}: {command}"
+                );
+            }
+            for fragment in forbidden_fragments {
+                assert!(
+                    !command.contains(fragment),
+                    "{provider} command unexpectedly included {fragment:?}: {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_agent_command_runs_with_fake_external_provider_executables() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        let bin_dir = temp.path().join("bin");
+        let log_path = temp.path().join("external-command.log");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let _path_guard = prepend_path_for_test(&bin_dir);
+        std::env::set_var("WARDIAN_COMMAND_SMOKE_LOG", &log_path);
+
+        for (provider, executable_name) in [
+            ("codex", "codex"),
+            ("claude", "claude"),
+            ("opencode", "opencode"),
+            ("antigravity", "agy"),
+        ] {
+            write_fake_provider_executable(&bin_dir, executable_name, provider);
+        }
+
+        let (settings, shells, shell_executable, shell_command_arg) = test_external_command_shell();
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let cases = vec![
+            AgentConfig {
+                session_id: "codex-agent".to_string(),
+                session_name: "CodexAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "codex".to_string(),
+                resume_session: Some("codex-resume".to_string()),
+                provider_config: ProviderConfig::Codex(CodexProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "claude-agent".to_string(),
+                session_name: "ClaudeAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "claude".to_string(),
+                resume_session: Some("claude-resume".to_string()),
+                provider_config: ProviderConfig::Claude(ClaudeProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "opencode-agent".to_string(),
+                session_name: "OpenCodeAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "opencode".to_string(),
+                resume_session: Some("opencode-resume".to_string()),
+                provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "antigravity-agent".to_string(),
+                session_name: "AntigravityAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "antigravity".to_string(),
+                resume_session: Some("antigravity-resume".to_string()),
+                provider_config: ProviderConfig::Antigravity(AntigravityProviderConfig::default()),
+                ..Default::default()
+            },
+        ];
+
+        let mut generated_commands = Vec::new();
+        for config in &cases {
+            let command = build_agent_cli_command_with_shells(config, &settings, &shells)
+                .unwrap_or_else(|err| panic!("{} command should build: {err}", config.provider));
+            generated_commands.push(format!("{}: {}", config.provider, command));
+            let output = run_copyable_command_for_test(
+                temp.path(),
+                &config.provider,
+                shell_executable,
+                shell_command_arg,
+                &command,
+                &log_path,
+            );
+
+            assert!(
+                output.status.success(),
+                "{} command failed with status {:?}\nstdout:\n{}\nstderr:\n{}\ncommand:\n{}",
+                config.provider,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                command
+            );
+        }
+
+        let log = std::fs::read_to_string(&log_path).expect("external command smoke log");
+        for config in cases {
+            let provider_log = fake_provider_log_block(&log, &config.provider);
+            assert!(
+                provider_log.contains(&format!("session={}", config.session_id)),
+                "{} command should pass Wardian identity.\nlog:\n{}\ncommands:\n{}",
+                config.provider,
+                log,
+                generated_commands.join("\n")
+            );
+        }
+        let codex_log = fake_provider_log_block(&log, "codex");
+        assert!(
+            codex_log
+                .lines()
+                .find_map(|line| line.strip_prefix("codex_home="))
+                .is_some_and(|value| !value.trim().is_empty()),
+            "Codex command should set CODEX_HOME before invoking provider: {log}"
+        );
+        let claude_log = fake_provider_log_block(&log, "claude");
+        assert!(
+            claude_log.contains("claude_additional=1"),
+            "Claude command should set additional-directory env before invoking provider: {log}"
+        );
     }
 
     #[test]
@@ -5982,6 +6600,216 @@ mod tests {
             "019db30f-12fc-7ef0-8faa-8d88703dc124",
             &excluded
         ));
+    }
+
+    #[test]
+    fn conversation_rollover_reason_for_worktree_switch_is_worktree_switch() {
+        assert_eq!(
+            conversation_boundary_for_clear_reason(Some("worktree_switch")),
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn clear_lifecycle_archive_uses_live_agent_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<absolute-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+            config.conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Default;
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        archive_agent_lifecycle_boundary(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::Clear,
+        )
+        .await
+        .expect("archive lifecycle boundary");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_name, "CoderOne");
+        assert_eq!(entries[0].agent_class, "Coder");
+        assert_eq!(entries[0].workspace, "<absolute-workspace-path>");
+        assert_eq!(entries[0].provider, "codex");
+        assert_eq!(
+            entries[0].provider_session_ids,
+            vec!["codex-session-1".to_string()]
+        );
+        assert_ne!(entries[0].provider, "unknown");
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn worktree_lifecycle_archive_uses_pre_move_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<old-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("pre-move snapshot");
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").expect("agent");
+            let mut config = agent.config.lock().unwrap();
+            config.git_worktree_folder = Some("<new-worktree-path>".to_string());
+            config.folder = "<new-worktree-path>".to_string();
+        }
+
+        archive_agent_lifecycle_boundary_from_snapshot(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch,
+            snapshot,
+        )
+        .await
+        .expect("archive lifecycle boundary");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace, "<old-workspace-path>");
+        assert_eq!(entries[0].provider, "codex");
+        assert_eq!(entries[0].agent_name, "CoderOne");
+        assert_eq!(
+            entries[0].provider_session_ids,
+            vec!["codex-session-1".to_string()]
+        );
+        assert_eq!(
+            entries[0].boundary_reason,
+            wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn clear_ingests_watch_transcript_before_turn_index_is_written() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.folder = "<absolute-workspace-path>".to_string();
+            config.resume_session = Some("codex-session-1".to_string());
+        }
+        {
+            let mut watch = agent.watch_state.lock().unwrap();
+            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "user".to_string(),
+                text: "Run tests.".to_string(),
+                provider: "codex".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                source: Some("watch_transcript".to_string()),
+            });
+            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Tests failed.".to_string(),
+                provider: "codex".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                source: Some("watch_transcript".to_string()),
+            });
+        }
+        {
+            let mut agents = state.agents.lock().await;
+            let mut order = state.agent_order.lock().await;
+            agents.insert("agent-1".to_string(), agent);
+            order.push("agent-1".to_string());
+        }
+
+        archive_agent_lifecycle_boundary(
+            &state,
+            "agent-1",
+            wardian_core::conversations::ConversationBoundaryReason::Clear,
+        )
+        .await
+        .expect("archive clear");
+
+        let entries = state
+            .conversation_archive
+            .list(Some("agent-1"), false)
+            .expect("list conversations");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].record_count >= 3);
+        assert!(entries[0].has_turns);
+        assert!(entries[0].turn_count >= 1);
+
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &entries[0].conversation_id)
+                .expect("conversation dir");
+        assert!(conversation_dir.join("events.jsonl").exists());
+        assert!(conversation_dir.join("sources.jsonl").exists());
+        assert!(conversation_dir.join("turns.jsonl").exists());
+
+        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]

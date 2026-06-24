@@ -2,6 +2,7 @@ use crate::utils::get_wardian_home;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::models::AgentSessionPersistence;
 
 const SHELL_SETTINGS_FILE: &str = "settings/shell.json";
@@ -38,6 +39,11 @@ pub struct ShellSettings {
     pub codex_runtime_policy: CodexRuntimePolicy,
     #[serde(default = "default_default_provider")]
     pub default_provider: String,
+    #[serde(
+        default = "default_conversation_logging",
+        deserialize_with = "deserialize_conversation_logging"
+    )]
+    pub conversation_logging: ConversationLoggingSetting,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +70,12 @@ pub struct ShellSettingsOverrides {
     pub codex_runtime_policy: Option<CodexRuntimePolicyOverrides>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_conversation_logging"
+    )]
+    pub conversation_logging: Option<ConversationLoggingSetting>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,12 +118,17 @@ impl Default for ShellSettings {
             agent_session_persistence: AgentSessionPersistence::Resume,
             codex_runtime_policy: CodexRuntimePolicy::default(),
             default_provider: default_default_provider(),
+            conversation_logging: default_conversation_logging(),
         }
     }
 }
 
 fn default_default_provider() -> String {
     "auto".to_string()
+}
+
+fn default_conversation_logging() -> ConversationLoggingSetting {
+    ConversationLoggingSetting::Enabled
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +324,38 @@ fn normalize_settings(mut settings: ShellSettings) -> ShellSettings {
     settings
 }
 
+fn conversation_logging_from_value(
+    value: &serde_json::Value,
+) -> Option<ConversationLoggingSetting> {
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "enabled" => Some(ConversationLoggingSetting::Enabled),
+        "disabled" => Some(ConversationLoggingSetting::Disabled),
+        _ => None,
+    }
+}
+
+fn deserialize_conversation_logging<'de, D>(
+    deserializer: D,
+) -> Result<ConversationLoggingSetting, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(conversation_logging_from_value(&value).unwrap_or_else(default_conversation_logging))
+}
+
+fn deserialize_optional_conversation_logging<'de, D>(
+    deserializer: D,
+) -> Result<Option<ConversationLoggingSetting>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.map(|value| {
+        conversation_logging_from_value(&value).unwrap_or_else(default_conversation_logging)
+    }))
+}
+
 fn normalize_default_provider(value: &str) -> String {
     let trimmed = value.trim().to_ascii_lowercase();
     if DEFAULT_PROVIDER_VALUES.contains(&trimmed.as_str()) {
@@ -349,6 +398,9 @@ fn shell_settings_from_overrides(overrides: &ShellSettingsOverrides) -> ShellSet
             .default_provider
             .clone()
             .unwrap_or(defaults.default_provider),
+        conversation_logging: overrides
+            .conversation_logging
+            .unwrap_or(defaults.conversation_logging),
     })
 }
 
@@ -400,6 +452,9 @@ fn normalize_shell_overrides(mut overrides: ShellSettingsOverrides) -> ShellSett
     overrides.default_provider = overrides
         .default_provider
         .map(|provider| normalize_default_provider(&provider));
+    if overrides.conversation_logging == Some(ShellSettings::default().conversation_logging) {
+        overrides.conversation_logging = None;
+    }
     overrides
 }
 
@@ -443,6 +498,8 @@ fn shell_overrides_from_settings(
         codex_runtime_policy,
         default_provider: (settings.default_provider != defaults.default_provider)
             .then(|| settings.default_provider.clone()),
+        conversation_logging: (settings.conversation_logging != defaults.conversation_logging)
+            .then_some(settings.conversation_logging),
     }
 }
 
@@ -1215,6 +1272,7 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+    use wardian_core::conversations::ConversationLoggingSetting;
 
     #[test]
     fn interactive_shell_launch_omits_command_execution_flags() {
@@ -1299,6 +1357,16 @@ mod tests {
                 approval_policy: "on-request".to_string(),
                 full_auto: false,
             }
+        );
+    }
+
+    #[test]
+    fn shell_settings_default_conversation_logging_is_enabled() {
+        let settings = ShellSettings::default();
+
+        assert_eq!(
+            settings.conversation_logging,
+            ConversationLoggingSetting::Enabled
         );
     }
 
@@ -1416,6 +1484,24 @@ mod tests {
     }
 
     #[test]
+    fn shell_settings_backfills_conversation_logging_for_legacy_files() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        std::fs::write(
+            &path,
+            r#"{"shell_id":"auto","custom_executable":null,"custom_args":null,"agent_session_persistence":"resume"}"#,
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(
+            loaded.conversation_logging,
+            ConversationLoggingSetting::Enabled
+        );
+    }
+
+    #[test]
     fn shell_settings_normalizes_invalid_default_provider_to_auto() {
         let temp_dir = tempdir().expect("temp dir");
         let path = temp_dir.path().join("shell_settings.json");
@@ -1444,6 +1530,31 @@ mod tests {
 
         assert_eq!(saved.default_provider, "codex");
         assert_eq!(loaded.default_provider, "codex");
+    }
+
+    #[test]
+    fn shell_settings_round_trips_disabled_conversation_logging() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        let settings = ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Disabled,
+            ..Default::default()
+        };
+
+        let saved = save_shell_settings_to_path(&path, &settings).expect("save settings");
+        let raw = std::fs::read_to_string(&path).expect("read settings");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse settings");
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(json["overrides"]["conversation_logging"], "disabled");
+        assert_eq!(
+            saved.conversation_logging,
+            ConversationLoggingSetting::Disabled
+        );
+        assert_eq!(
+            loaded.conversation_logging,
+            ConversationLoggingSetting::Disabled
+        );
     }
 
     #[test]

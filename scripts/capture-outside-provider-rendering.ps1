@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("codex", "claude", "gemini", "opencode")]
+  [ValidateSet("codex", "claude", "gemini", "opencode", "antigravity")]
   [string]$Provider,
 
   [string]$Workspace = (Get-Location).Path,
@@ -213,6 +213,7 @@ $escapedCodexHome = ""
 $codexExecutable = "codex"
 $claudeExecutable = "claude"
 $geminiExecutable = "gemini"
+$antigravityExecutable = "agy"
 $escapedOpenCodeConfigDir = ""
 $escapedOpenCodeConfig = ""
 $escapedOpenCodeStateHome = ""
@@ -317,6 +318,16 @@ if ($Provider -eq "gemini") {
   }
 }
 $escapedGeminiExecutable = $geminiExecutable.Replace("'", "''")
+if ($Provider -eq "antigravity") {
+  $antigravityCommand = Get-Command "agy.exe" -ErrorAction SilentlyContinue
+  if (-not $antigravityCommand) {
+    $antigravityCommand = Get-Command "agy.cmd" -ErrorAction SilentlyContinue
+  }
+  if ($antigravityCommand -and $antigravityCommand.Source) {
+    $antigravityExecutable = $antigravityCommand.Source
+  }
+}
+$escapedAntigravityExecutable = $antigravityExecutable.Replace("'", "''")
 if ($Provider -eq "opencode" -and $WardianHome.Trim().Length -gt 0 -and $SessionId.Trim().Length -gt 0) {
   $habitatRoot = Join-Path $WardianHome (Join-Path "agents" (Join-Path $SessionId "habitat"))
   $providerCwd = $habitatRoot
@@ -374,6 +385,8 @@ $providerInvocation = if ($Provider -eq "codex") {
   }
 } elseif ($Provider -eq "gemini") {
   "& '$escapedGeminiExecutable'"
+} elseif ($Provider -eq "antigravity") {
+  "& '$escapedAntigravityExecutable' --prompt-interactive ''"
 } elseif ($Provider -eq "opencode" -and $escapedOpenCodeTarget.Trim().Length -gt 0) {
   "& opencode --session '$escapedOpenCodeProviderSessionId' '$escapedOpenCodeTarget'"
 } else {
@@ -445,6 +458,7 @@ if ($Columns -gt 0 -and $Rows -gt 0) {
   codex_home = `$env:CODEX_HOME
   codex_executable = '$escapedCodexExecutable'
   claude_executable = '$escapedClaudeExecutable'
+  antigravity_executable = '$escapedAntigravityExecutable'
   gemini_executable = '$escapedGeminiExecutable'
   font_zoom_steps = $FontZoomSteps
   initial_wait_seconds = $InitialWaitSeconds
