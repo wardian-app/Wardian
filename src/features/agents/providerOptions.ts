@@ -17,7 +17,7 @@ export function providerDisplayName(provider: UserFacingProviderName): string {
     case "codex":
       return "Codex";
     case "gemini":
-      return "Gemini (Unmaintained)";
+      return "Gemini";
     case "antigravity":
       return "Antigravity";
     case "opencode":

@@ -115,6 +115,7 @@ where
 
     if should_update_user_path_for_target(target_home) {
         update_path(&target_dir)?;
+        update_legacy_home_bin_forwarders(&target_dir)?;
     }
     Ok(outcome)
 }
@@ -146,6 +147,91 @@ fn launcher_needs_update(path: &Path, expected_contents: &str) -> bool {
         Ok(existing) => normalize_line_endings(&existing) != expected_contents,
         Err(_) => true,
     }
+}
+
+#[cfg(windows)]
+fn update_legacy_home_bin_forwarders(active_bin_dir: &Path) -> Result<(), String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    let legacy_bin = home.join("bin");
+    update_legacy_forwarder_if_wardian_owned(
+        &legacy_bin.join("wardian.cmd"),
+        &legacy_windows_cmd_forwarder(active_bin_dir),
+    )?;
+    update_legacy_forwarder_if_wardian_owned(
+        &legacy_bin.join("wardian"),
+        &legacy_windows_posix_forwarder(active_bin_dir),
+    )?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn update_legacy_home_bin_forwarders(_active_bin_dir: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn update_legacy_forwarder_if_wardian_owned(path: &Path, replacement: &str) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let existing = std::fs::read_to_string(path).map_err(|err| {
+        format!(
+            "Failed to read legacy Wardian launcher {}: {err}",
+            path.display()
+        )
+    })?;
+    if !is_legacy_wardian_launcher(&existing) {
+        return Ok(());
+    }
+    if normalize_line_endings(&existing) == normalize_line_endings(replacement) {
+        return Ok(());
+    }
+    write_launcher_contents(path, replacement)
+}
+
+#[cfg(windows)]
+fn is_legacy_wardian_launcher(contents: &str) -> bool {
+    let normalized = normalize_line_endings(contents);
+    normalized == normalize_line_endings(&launcher_contents())
+        || normalized == normalize_line_endings(&windows_posix_launcher_contents())
+        || ((normalized.starts_with("@echo off") || normalized.starts_with("#!/usr/bin/env sh"))
+            && normalized.contains("wardian-cli.exe"))
+}
+
+#[cfg(windows)]
+fn legacy_windows_cmd_forwarder(active_bin_dir: &Path) -> String {
+    format!(
+        "@echo off\n\"{}\" %*\n",
+        active_bin_dir.join(bundled_cli_file_name()).display()
+    )
+}
+
+#[cfg(windows)]
+fn legacy_windows_posix_forwarder(active_bin_dir: &Path) -> String {
+    let target = windows_path_to_msys_shell_path(&active_bin_dir.join(bundled_cli_file_name()));
+    format!(
+        "#!/usr/bin/env sh\nexec {} \"$@\"\n",
+        shell_quote_text(&target)
+    )
+}
+
+#[cfg(windows)]
+fn windows_path_to_msys_shell_path(path: &Path) -> String {
+    let text = path.display().to_string().replace('\\', "/");
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("/{drive}{}", &text[2..])
+    } else {
+        text
+    }
+}
+
+#[cfg(windows)]
+fn shell_quote_text(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn binary_needs_update(source: &Path, target: &Path) -> Result<bool, String> {
@@ -207,27 +293,29 @@ fn shell_quote_path(path: &Path) -> String {
 }
 
 #[cfg(windows)]
-fn path_contains_dir(path_value: &str, dir: &Path) -> bool {
-    let target = normalize_windows_path_segment(dir);
-    path_value
-        .split(';')
-        .any(|segment| !segment.trim().is_empty() && normalize_windows_path_text(segment) == target)
+pub(crate) fn child_path_with_cli_bin(current_path: Option<&str>) -> Option<String> {
+    let bin_dir = wardian_core::paths::cli_bin_dir()?;
+    Some(windows_path_with_bin_first(
+        current_path.unwrap_or(""),
+        &bin_dir,
+    ))
 }
 
 #[cfg(windows)]
-pub(crate) fn child_path_with_cli_bin(current_path: Option<&str>) -> Option<String> {
-    let bin_dir = wardian_core::paths::cli_bin_dir()?;
+fn windows_path_with_bin_first(current_path: &str, bin_dir: &Path) -> String {
     let bin_value = bin_dir.display().to_string();
-    let current_path = current_path.unwrap_or("");
+    let normalized_bin = normalize_windows_path_segment(bin_dir);
+    let existing_segments = current_path
+        .split(';')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| normalize_windows_path_text(segment) != normalized_bin)
+        .collect::<Vec<_>>();
 
-    if path_contains_dir(current_path, &bin_dir) {
-        return Some(current_path.to_string());
-    }
-
-    if current_path.trim().is_empty() {
-        Some(bin_value)
+    if existing_segments.is_empty() {
+        bin_value
     } else {
-        Some(format!("{bin_value};{current_path}"))
+        format!("{bin_value};{}", existing_segments.join(";"))
     }
 }
 
@@ -321,16 +409,10 @@ fn ensure_cli_bin_on_path(bin_dir: &Path) -> Result<(), String> {
         .get_value::<String, _>("Path")
         .unwrap_or_default();
 
-    if path_contains_dir(&current_path, bin_dir) {
+    let next_path = windows_path_with_bin_first(&current_path, bin_dir);
+    if next_path == current_path {
         return Ok(());
     }
-
-    let bin_value = bin_dir.display().to_string();
-    let next_path = if current_path.trim().is_empty() {
-        bin_value
-    } else {
-        format!("{current_path};{bin_value}")
-    };
     environment
         .set_value("Path", &next_path)
         .map_err(|err| format!("Failed to update user PATH: {err}"))?;
@@ -641,11 +723,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_path_detection_is_case_insensitive() {
+    fn windows_path_rewrite_deduplicates_case_insensitively() {
         let dir = PathBuf::from(r"C:\Users\Alice\.wardian\bin");
         let value = r"C:\Windows\System32;c:\users\alice\.WARDIAN\BIN";
 
-        assert!(path_contains_dir(value, &dir));
+        assert_eq!(
+            windows_path_with_bin_first(value, &dir),
+            r"C:\Users\Alice\.wardian\bin;C:\Windows\System32"
+        );
     }
 
     #[cfg(windows)]
@@ -689,6 +774,82 @@ mod tests {
         assert_eq!(second, first);
 
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_child_path_moves_existing_cli_bin_to_front() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = TempDir::new().unwrap();
+        std::env::set_var("WARDIAN_HOME", home.path());
+        let bin_dir = home.path().join("bin");
+        let existing = format!(
+            r"C:\Users\Alice\bin;{};C:\Windows\System32",
+            bin_dir.display()
+        );
+
+        let path = child_path_with_cli_bin(Some(&existing)).unwrap();
+
+        assert!(path.starts_with(&bin_dir.display().to_string()));
+        assert_eq!(path.matches(&bin_dir.display().to_string()).count(), 1);
+        assert!(path.contains(r"C:\Users\Alice\bin"));
+        assert!(path.contains(r"C:\Windows\System32"));
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_user_path_rewrite_moves_existing_cli_bin_to_front() {
+        let bin_dir = PathBuf::from(r"C:\Users\Alice\.wardian\bin");
+        let current = r"C:\Users\Alice\bin;C:\Users\Alice\.wardian\bin;C:\Windows\System32";
+
+        let path = windows_path_with_bin_first(current, &bin_dir);
+
+        assert_eq!(
+            path,
+            r"C:\Users\Alice\.wardian\bin;C:\Users\Alice\bin;C:\Windows\System32"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_forwarder_rewrites_wardian_owned_launcher() {
+        let temp = TempDir::new().unwrap();
+        let legacy = temp.path().join("wardian");
+        let active_bin = PathBuf::from(r"C:\Users\Alice\.wardian\bin");
+        std::fs::write(&legacy, windows_posix_launcher_contents()).unwrap();
+
+        update_legacy_forwarder_if_wardian_owned(
+            &legacy,
+            &legacy_windows_posix_forwarder(&active_bin),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "#!/usr/bin/env sh\nexec '/c/Users/Alice/.wardian/bin/wardian-cli.exe' \"$@\"\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_forwarder_leaves_unrelated_user_file_untouched() {
+        let temp = TempDir::new().unwrap();
+        let legacy = temp.path().join("wardian");
+        let active_bin = PathBuf::from(r"C:\Users\Alice\.wardian\bin");
+        std::fs::write(&legacy, "#!/usr/bin/env sh\necho user script\n").unwrap();
+
+        update_legacy_forwarder_if_wardian_owned(
+            &legacy,
+            &legacy_windows_posix_forwarder(&active_bin),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "#!/usr/bin/env sh\necho user script\n"
+        );
     }
 
     #[cfg(unix)]

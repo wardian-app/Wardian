@@ -26,7 +26,21 @@ const DEFAULT_SCROLLBACK_PROMPT =
   "Print exactly 50 lines of numbers, one per line, from 1 through 50. Output no other text. " +
   "Do not run any shell commands or use any tools; write the numbers directly in your reply.";
 const DEFAULT_SCROLLBACK_RESPONSE_MARKER = "50";
-const auditInputText = process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT ?? DEFAULT_SCROLLBACK_PROMPT;
+const DEFAULT_ANTIGRAVITY_RENDERING_RESPONSE_MARKER = "WARDIAN_ANTIGRAVITY_RENDER_OK";
+const DEFAULT_ANTIGRAVITY_RENDERING_PROMPT =
+  `Reply exactly ${DEFAULT_ANTIGRAVITY_RENDERING_RESPONSE_MARKER}. Output no other text.`;
+const renderingProvidersForDefaults = parseRenderingProvidersForDefaults(
+  process.env.WARDIAN_E2E_RENDERING_PROVIDERS,
+);
+const onlyAntigravityRendering =
+  renderingProvidersForDefaults.length === 1 && renderingProvidersForDefaults[0] === "antigravity";
+const defaultRenderingInputText = onlyAntigravityRendering
+  ? DEFAULT_ANTIGRAVITY_RENDERING_PROMPT
+  : DEFAULT_SCROLLBACK_PROMPT;
+const defaultRenderingResponseMarker = onlyAntigravityRendering
+  ? DEFAULT_ANTIGRAVITY_RENDERING_RESPONSE_MARKER
+  : DEFAULT_SCROLLBACK_RESPONSE_MARKER;
+const auditInputText = process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT ?? defaultRenderingInputText;
 const parsedTerminalFontSize = Number.parseFloat(process.env.WARDIAN_E2E_TERMINAL_FONT_SIZE ?? "10");
 const auditTerminalFontSize = Number.isFinite(parsedTerminalFontSize) && parsedTerminalFontSize > 0
   ? parsedTerminalFontSize
@@ -68,13 +82,16 @@ const auditExpectedResponseText =
   process.env.WARDIAN_E2E_RENDERING_EXPECT_RESPONSE_TEXT !== undefined
     ? process.env.WARDIAN_E2E_RENDERING_EXPECT_RESPONSE_TEXT.trim()
     : process.env.WARDIAN_E2E_RENDERING_INPUT_TEXT === undefined
-      ? DEFAULT_SCROLLBACK_RESPONSE_MARKER
+      ? defaultRenderingResponseMarker
       : "";
 const DEFAULT_CLAUDE_RENDERING_MODEL = "haiku";
+const DEFAULT_GEMINI_RENDERING_MODEL = "gemini-2.5-flash";
 const DEFAULT_OPENCODE_RENDERING_MODEL = "opencode/deepseek-v4-flash-free";
 const auditCodexModel = process.env.WARDIAN_E2E_RENDERING_CODEX_MODEL?.trim() || "";
 const auditClaudeModel =
   process.env.WARDIAN_E2E_RENDERING_CLAUDE_MODEL?.trim() || DEFAULT_CLAUDE_RENDERING_MODEL;
+const auditGeminiModel =
+  process.env.WARDIAN_E2E_RENDERING_GEMINI_MODEL?.trim() || DEFAULT_GEMINI_RENDERING_MODEL;
 const auditOpenCodeModel =
   process.env.WARDIAN_E2E_RENDERING_OPENCODE_MODEL?.trim() || DEFAULT_OPENCODE_RENDERING_MODEL;
 const auditRapidResizeSequence = parseWindowSizeSequence(
@@ -117,6 +134,14 @@ function decodeInputSequence(value) {
     }
     return String.fromCharCode(Number.parseInt(code.slice(1), 16));
   });
+}
+
+function parseRenderingProvidersForDefaults(value) {
+  try {
+    return parseRenderingProviders(value);
+  } catch {
+    return [];
+  }
 }
 
 function inputSequenceLabel(value) {
@@ -178,6 +203,9 @@ function modelForProvider(provider) {
   }
   if (provider === "claude") {
     return auditClaudeModel || null;
+  }
+  if (provider === "gemini") {
+    return auditGeminiModel || null;
   }
   if (provider === "opencode") {
     return auditOpenCodeModel || null;
@@ -516,6 +544,24 @@ function countTextOccurrences(text, expectedText) {
   return String(text ?? "").split(expectedText).length - 1;
 }
 
+function assertNoProviderAuthFailure(capture, sessionId, provider) {
+  const text = terminalTextFromCapture(capture);
+  const authFailures = [
+    "API_KEY_INVALID",
+    "Please pass a valid API key",
+    "Enter Gemini API Key",
+    "Paste your API key here",
+  ];
+  const matchedFailure = authFailures.find((failure) => text.includes(failure));
+  if (!matchedFailure) {
+    return;
+  }
+
+  throw new Error(
+    `Provider auth failure while waiting for ${provider ?? "provider"} rendering response for ${sessionId}: ${matchedFailure}`,
+  );
+}
+
 function providerReadyText(provider) {
   if (provider === "gemini") {
     return "Type your message or @path/to/file";
@@ -650,6 +696,7 @@ async function waitForTerminalTextOccurrences(driver, sessionId, expectedText, m
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     last = await readTerminalCapture(driver, sessionId);
+    assertNoProviderAuthFailure(last, sessionId, null);
     if (countTextOccurrences(providerResponseTextFromCapture(last), expectedText) >= minCount) {
       return last;
     }
@@ -743,6 +790,21 @@ async function submitAuditInput(driver, sessionId, provider, text) {
   }
 
   const startupModal = await dismissProviderStartupModal(driver, sessionId, provider);
+  if (provider === "antigravity" && auditSubmitInput && auditInputSubmitSequence.length > 0) {
+    const submittedAt = nowIso();
+    const deliveryDetail = await invokeTauri(driver, "submit_prompt_to_agent", { sessionId, prompt: text });
+    return {
+      input_text: text,
+      input_submitted: true,
+      input_submit_sequence: "submit_prompt_to_agent",
+      typed_at: submittedAt,
+      submitted_at: submittedAt,
+      startup_modal: startupModal,
+      echo_confirmed: null,
+      delivery_detail: deliveryDetail,
+    };
+  }
+
   const typedAt = nowIso();
   await invokeTauri(driver, "send_input_to_agent", { sessionId, input: text });
   // Best-effort echo sync: narrow TUI input boxes wrap typed text around
@@ -828,7 +890,7 @@ async function waitForSubmittedProviderTurn(driver, sessionId, options = {}) {
   }
 
   if (auditExpectedResponseText.length > 0) {
-    const minOccurrences = 1;
+    const minOccurrences = expectedResponseTextOccurrences(options.provider ?? null);
     const capture = await waitForTerminalTextOccurrences(
       driver,
       sessionId,
@@ -862,6 +924,13 @@ async function waitForSubmittedProviderTurn(driver, sessionId, options = {}) {
     stable: stability.stable,
     capture_debug: compactDebug(stability.capture?.debug),
   };
+}
+
+function expectedResponseTextOccurrences(provider) {
+  if (provider === "antigravity") {
+    return 2;
+  }
+  return 1;
 }
 
 function expectedPlainNumberedResponseMax() {
@@ -1086,6 +1155,7 @@ async function waitForScrollableNumberedResponse(driver, sessionId, max, timeout
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     last = await readTerminalCapture(driver, sessionId);
+    assertNoProviderAuthFailure(last, sessionId, provider);
     await maybeAnswerApprovalPrompt(driver, sessionId, last, approvalState);
     await maybeResubmitNumberedPrompt(driver, sessionId, last, max, minOccurrences, resubmitState);
     if (!requireScrollback) {
@@ -1695,7 +1765,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
   let changedXdgStateHome = false;
 
   try {
-    if (!skipNativeBuild) {
+    if (!skipNativeBuild || runRealRendering) {
       process.env.VITE_WARDIAN_TERMINAL_DEBUG = "1";
       ensureNativeAppBuilt(harness);
     }
@@ -1770,6 +1840,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     provider_models: {
       codex: auditCodexModel || null,
       claude: auditClaudeModel || null,
+      gemini: auditGeminiModel || null,
       opencode: auditOpenCodeModel || null,
     },
     stable_rows_quiet_ms: positiveInt(auditStableRowsQuietMs, 750),
@@ -1958,7 +2029,8 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     await waitForAgentTerminal(driver, sessionId);
     await waitForReadableTerminal(driver, sessionId);
     await waitForProviderInputReady(driver, sessionId, provider);
-    if (auditInputText.trim().length > 0) {
+    const submitAfterClear = provider !== "antigravity";
+    if (submitAfterClear && auditInputText.trim().length > 0) {
       const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
       inputEvent.phase = "after-clear";
       inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, { provider });
@@ -1966,7 +2038,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     }
     await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "cleared-immediate", {
       resize: clearResize,
-      expectAuditText: auditInputText.trim().length > 0,
+      expectAuditText: submitAfterClear && auditInputText.trim().length > 0,
     });
 
     await invokeTauri(driver, "pause_agent", { sessionId });
@@ -1984,7 +2056,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     await waitForProviderInputReady(driver, sessionId, provider);
     await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "resumed", {
       resize: resumeResize,
-      expectAuditText: auditSubmitInput && auditInputText.trim().length > 0,
+      expectAuditText: submitAfterClear && auditSubmitInput && auditInputText.trim().length > 0,
     });
 
     record.raw_output_log = await dumpRawOutputLog(driver, sessionId, `${provider}-final`);

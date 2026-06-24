@@ -1545,6 +1545,9 @@ fn claude_ready_prompt_trailing_metadata_line(line: &str) -> bool {
 
 fn gemini_output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    if gemini_output_has_api_key_prompt(&cleaned) {
+        return false;
+    }
     let tail = cleaned
         .lines()
         .rev()
@@ -1557,6 +1560,10 @@ fn gemini_output_has_ready_prompt(output: &str) -> bool {
         }
     }
     false
+}
+
+fn gemini_output_has_api_key_prompt(output: &str) -> bool {
+    output.contains("Enter Gemini API Key") || output.contains("Paste your API key here")
 }
 
 fn antigravity_output_has_ready_prompt(output: &str) -> bool {
@@ -3381,6 +3388,19 @@ mod tests {
         assert!(!codex_output_has_prompt_echo(
             "\r\n› Explain this codebase\r\n\r\n  gpt-5.5 high · Context 100% left · ~\r\n",
             "From Test: Ping. Reply with exactly: pong\n\nWardian request id: ask_123"
+        ));
+    }
+
+    #[test]
+    fn gemini_ready_prompt_rejects_api_key_modal_over_composer() {
+        assert!(!gemini_output_has_ready_prompt(
+            "\r\n╭────────────────────────────────────────────────────────╮\r\n\
+             │ Enter Gemini API Key                                  │\r\n\
+             │ Paste your API key here                               │\r\n\
+             ╰────────────────────────────────────────────────────────╯\r\n\
+             \r\n\
+             >   Type your message or @path/to/file\r\n\
+             workspace (/directory)        Auto (Gemini 3)       2% used\r\n",
         ));
     }
 

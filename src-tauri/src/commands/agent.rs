@@ -2882,13 +2882,11 @@ fn build_agent_cli_command_with_shells(
         &workspace_cwd,
         provider_args,
     );
-    let launch =
-        manager::interactive_provider_launch(&resume_config.provider, &bin, &provider_args)?;
     let envs = external_terminal_env(&resume_config, habitat_root.as_deref(), &provider_cwd)?;
 
     crate::utils::build_copyable_program_command_with_settings(
-        &launch.executable,
-        &launch.args,
+        &bin,
+        &provider_args,
         &provider_cwd,
         &envs,
         shell_settings,
@@ -3280,8 +3278,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use wardian_core::models::provider::AgentProvider;
     use wardian_core::models::{
-        AgentConfig, AgentSessionPersistenceOverride, ClaudeProviderConfig, CodexProviderConfig,
-        DeployedSkillRef, GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
+        AgentConfig, AgentSessionPersistenceOverride, AntigravityProviderConfig,
+        ClaudeProviderConfig, CodexProviderConfig, DeployedSkillRef, GeminiProviderConfig,
+        OpenCodeProviderConfig, ProviderConfig,
     };
 
     struct WardianHomeGuard;
@@ -3388,6 +3387,163 @@ mod tests {
                 default_args: vec!["-NoProfile".to_string(), "-Command".to_string()],
             }],
         )
+    }
+
+    #[cfg(windows)]
+    fn test_external_command_shell() -> (ShellSettings, Vec<ShellOption>, &'static str, &'static str)
+    {
+        (
+            ShellSettings {
+                shell_id: "cmd".to_string(),
+                ..Default::default()
+            },
+            vec![ShellOption {
+                id: "cmd".to_string(),
+                label: "Command Prompt".to_string(),
+                executable: "cmd.exe".to_string(),
+                default_args: vec!["/C".to_string()],
+            }],
+            "cmd.exe",
+            "/C",
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn test_external_command_shell() -> (ShellSettings, Vec<ShellOption>, &'static str, &'static str)
+    {
+        (
+            ShellSettings {
+                shell_id: "sh".to_string(),
+                ..Default::default()
+            },
+            vec![ShellOption {
+                id: "sh".to_string(),
+                label: "sh".to_string(),
+                executable: "sh".to_string(),
+                default_args: vec!["-c".to_string()],
+            }],
+            "sh",
+            "-c",
+        )
+    }
+
+    #[cfg(windows)]
+    fn write_fake_provider_executable(
+        bin_dir: &std::path::Path,
+        executable_name: &str,
+        provider: &str,
+    ) {
+        let ps1_path = bin_dir.join(format!("{executable_name}.ps1"));
+        let ps1_path_text = ps1_path.to_string_lossy().replace('\\', "\\\\");
+        let provider = provider.replace('\'', "''");
+        let script = format!(
+            r#"@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{ps1_path_text}" %*
+"#
+        );
+        let ps1 = format!(
+            r#"
+$lines = @(
+  'provider={provider}',
+  "cwd=$PWD",
+  "session=$env:WARDIAN_SESSION_ID",
+  "args=$($args -join ' ')",
+  "codex_home=$env:CODEX_HOME",
+  "claude_additional=$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+)
+Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
+"#
+        );
+        std::fs::write(&ps1_path, ps1).expect("fake provider powershell executable");
+        std::fs::write(bin_dir.join(format!("{executable_name}.cmd")), script)
+            .expect("fake provider executable");
+    }
+
+    #[cfg(not(windows))]
+    fn write_fake_provider_executable(
+        bin_dir: &std::path::Path,
+        executable_name: &str,
+        provider: &str,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = format!(
+            r#"#!/bin/sh
+{{
+  echo "provider={provider}"
+  echo "cwd=$PWD"
+  echo "session=$WARDIAN_SESSION_ID"
+  echo "args=$*"
+  echo "codex_home=$CODEX_HOME"
+  echo "claude_additional=$CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+}} >> "$WARDIAN_COMMAND_SMOKE_LOG"
+"#
+        );
+        let path = bin_dir.join(executable_name);
+        std::fs::write(&path, script).expect("fake provider executable");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("fake provider permissions");
+    }
+
+    struct PathEnvGuard(Option<std::ffi::OsString>);
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn prepend_path_for_test(path: &std::path::Path) -> PathEnvGuard {
+        let original = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(existing) = original.as_ref() {
+            paths.extend(std::env::split_paths(existing));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        std::env::set_var("PATH", joined);
+        PathEnvGuard(original)
+    }
+
+    #[cfg(windows)]
+    fn run_copyable_command_for_test(
+        temp: &std::path::Path,
+        provider: &str,
+        _shell_executable: &str,
+        _shell_command_arg: &str,
+        command: &str,
+        log_path: &std::path::Path,
+    ) -> std::process::Output {
+        let script_path = temp.join(format!("run-{provider}.cmd"));
+        std::fs::write(&script_path, format!("{command}\r\n")).expect("copy command script");
+        std::process::Command::new("cmd.exe")
+            .arg("/C")
+            .arg(&script_path)
+            .env("WARDIAN_COMMAND_SMOKE_LOG", log_path)
+            .output()
+            .unwrap_or_else(|err| panic!("{provider} command should run: {err}"))
+    }
+
+    #[cfg(not(windows))]
+    fn run_copyable_command_for_test(
+        _temp: &std::path::Path,
+        provider: &str,
+        shell_executable: &str,
+        shell_command_arg: &str,
+        command: &str,
+        log_path: &std::path::Path,
+    ) -> std::process::Output {
+        std::process::Command::new(shell_executable)
+            .arg(shell_command_arg)
+            .arg(command)
+            .env("WARDIAN_COMMAND_SMOKE_LOG", log_path)
+            .output()
+            .unwrap_or_else(|err| panic!("{provider} command should run: {err}"))
     }
 
     #[test]
@@ -3543,6 +3699,278 @@ mod tests {
         assert!(command.contains("sonnet"));
         assert!(!command.contains("stream-json"));
         assert!(!command.contains("--verbose"));
+    }
+
+    #[test]
+    fn full_agent_command_builds_copyable_resume_for_each_non_gemini_provider() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let (settings, shells) = test_pwsh_shell();
+        let workspace_text = workspace.to_string_lossy().to_string();
+
+        let cases = vec![
+            (
+                "codex",
+                AgentConfig {
+                    session_id: "codex-agent".to_string(),
+                    session_name: "CodexAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "codex".to_string(),
+                    resume_session: Some("codex-resume".to_string()),
+                    model: Some("gpt-5-codex".to_string()),
+                    provider_config: ProviderConfig::Codex(CodexProviderConfig {
+                        sandbox_mode: Some("danger-full-access".to_string()),
+                        approval_policy: Some("never".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "codex-agent",
+                    "CODEX_HOME",
+                    "resume",
+                    "codex-resume",
+                    "--cd",
+                    "gpt-5-codex",
+                ],
+                vec!["--no-alt-screen", "--disable plugins", "--disable apps"],
+            ),
+            (
+                "claude",
+                AgentConfig {
+                    session_id: "claude-agent".to_string(),
+                    session_name: "ClaudeAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "claude".to_string(),
+                    resume_session: Some("claude-resume".to_string()),
+                    model: Some("sonnet".to_string()),
+                    provider_config: ProviderConfig::Claude(ClaudeProviderConfig {
+                        permission_mode: Some("acceptEdits".to_string()),
+                        max_turns: Some(3),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "claude-agent",
+                    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+                    "--resume",
+                    "claude-resume",
+                    "--model",
+                    "sonnet",
+                ],
+                vec!["stream-json", "--verbose"],
+            ),
+            (
+                "opencode",
+                AgentConfig {
+                    session_id: "opencode-agent".to_string(),
+                    session_name: "OpenCodeAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "opencode".to_string(),
+                    resume_session: Some("opencode-resume".to_string()),
+                    model: Some("opencode-model".to_string()),
+                    provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig {
+                        agent: Some("build".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "opencode-agent",
+                    "--session",
+                    "opencode-resume",
+                    "--agent",
+                    "build",
+                    "opencode-model",
+                ],
+                vec![],
+            ),
+            (
+                "antigravity",
+                AgentConfig {
+                    session_id: "antigravity-agent".to_string(),
+                    session_name: "AntigravityAgent".to_string(),
+                    agent_class: "Coder".to_string(),
+                    folder: workspace_text.clone(),
+                    provider: "antigravity".to_string(),
+                    resume_session: Some("antigravity-resume".to_string()),
+                    provider_config: ProviderConfig::Antigravity(AntigravityProviderConfig {
+                        sandbox: Some(true),
+                        dangerously_skip_permissions: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                vec![
+                    "antigravity-agent",
+                    "--conversation",
+                    "antigravity-resume",
+                    "--sandbox",
+                    "--dangerously-skip-permissions",
+                    "--prompt-interactive",
+                ],
+                vec![],
+            ),
+        ];
+
+        for (provider, config, expected_fragments, forbidden_fragments) in cases {
+            let command = build_agent_cli_command_with_shells(&config, &settings, &shells)
+                .unwrap_or_else(|err| panic!("{provider} command should build: {err}"));
+
+            assert!(
+                command.contains("$env:WARDIAN_SESSION_ID = "),
+                "{provider} command should preserve Wardian identity: {command}"
+            );
+            assert!(
+                command.contains("Set-Location -LiteralPath "),
+                "{provider} command should set a working directory: {command}"
+            );
+            assert!(
+                !command.contains("WARDIAN_E2E_REAL_"),
+                "{provider} command should not expose test/provider opt-in secrets: {command}"
+            );
+            for fragment in expected_fragments {
+                assert!(
+                    command.contains(fragment),
+                    "{provider} command missing {fragment:?}: {command}"
+                );
+            }
+            for fragment in forbidden_fragments {
+                assert!(
+                    !command.contains(fragment),
+                    "{provider} command unexpectedly included {fragment:?}: {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_agent_command_runs_with_fake_external_provider_executables() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let workspace = temp.path().join("workspace");
+        let bin_dir = temp.path().join("bin");
+        let log_path = temp.path().join("external-command.log");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let _path_guard = prepend_path_for_test(&bin_dir);
+        std::env::set_var("WARDIAN_COMMAND_SMOKE_LOG", &log_path);
+
+        for (provider, executable_name) in [
+            ("codex", "codex"),
+            ("claude", "claude"),
+            ("opencode", "opencode"),
+            ("antigravity", "agy"),
+        ] {
+            write_fake_provider_executable(&bin_dir, executable_name, provider);
+        }
+
+        let (settings, shells, shell_executable, shell_command_arg) = test_external_command_shell();
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let cases = vec![
+            AgentConfig {
+                session_id: "codex-agent".to_string(),
+                session_name: "CodexAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "codex".to_string(),
+                resume_session: Some("codex-resume".to_string()),
+                provider_config: ProviderConfig::Codex(CodexProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "claude-agent".to_string(),
+                session_name: "ClaudeAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "claude".to_string(),
+                resume_session: Some("claude-resume".to_string()),
+                provider_config: ProviderConfig::Claude(ClaudeProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "opencode-agent".to_string(),
+                session_name: "OpenCodeAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "opencode".to_string(),
+                resume_session: Some("opencode-resume".to_string()),
+                provider_config: ProviderConfig::OpenCode(OpenCodeProviderConfig::default()),
+                ..Default::default()
+            },
+            AgentConfig {
+                session_id: "antigravity-agent".to_string(),
+                session_name: "AntigravityAgent".to_string(),
+                agent_class: "Coder".to_string(),
+                folder: workspace_text.clone(),
+                provider: "antigravity".to_string(),
+                resume_session: Some("antigravity-resume".to_string()),
+                provider_config: ProviderConfig::Antigravity(AntigravityProviderConfig::default()),
+                ..Default::default()
+            },
+        ];
+
+        let mut generated_commands = Vec::new();
+        for config in &cases {
+            let command = build_agent_cli_command_with_shells(config, &settings, &shells)
+                .unwrap_or_else(|err| panic!("{} command should build: {err}", config.provider));
+            assert!(
+                command.contains(&format!("WARDIAN_SESSION_ID={}", config.session_id)),
+                "{} command should set its own Wardian identity: {command}",
+                config.provider
+            );
+            generated_commands.push(format!("{}: {}", config.provider, command));
+            let output = run_copyable_command_for_test(
+                temp.path(),
+                &config.provider,
+                shell_executable,
+                shell_command_arg,
+                &command,
+                &log_path,
+            );
+
+            assert!(
+                output.status.success(),
+                "{} command failed with status {:?}\nstdout:\n{}\nstderr:\n{}\ncommand:\n{}",
+                config.provider,
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                command
+            );
+        }
+
+        let log = std::fs::read_to_string(&log_path).expect("external command smoke log");
+        for config in cases {
+            assert!(
+                log.contains(&format!("provider={}", config.provider)),
+                "{} fake executable should run: {log}",
+                config.provider
+            );
+            assert!(
+                log.contains(&format!("session={}", config.session_id)),
+                "{} command should pass Wardian identity.\nlog:\n{}\ncommands:\n{}",
+                config.provider,
+                log,
+                generated_commands.join("\n")
+            );
+        }
+        assert!(
+            log.contains("codex_home=") && !log.contains("codex_home=\r\n"),
+            "Codex command should set CODEX_HOME before invoking provider: {log}"
+        );
+        assert!(
+            log.contains("claude_additional=1"),
+            "Claude command should set additional-directory env before invoking provider: {log}"
+        );
     }
 
     #[test]
