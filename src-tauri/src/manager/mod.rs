@@ -254,6 +254,27 @@ pub(crate) fn set_agent_status(
                         );
                     }
                 }
+                drop(agents);
+
+                let normalized_status = wardian_core::identity::normalize_status(&status);
+                if matches!(normalized_status.as_str(), "idle" | "action_required") {
+                    let archive_app = status_app.clone();
+                    let archive_session_id = status_session_id.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = archive_app.state::<AppState>();
+                        if let Err(error) =
+                            crate::commands::chat::archive_agent_chat_events_for_state(
+                                state.inner(),
+                                &archive_session_id,
+                            )
+                            .await
+                        {
+                            log_debug(&format!(
+                                "[WARDIAN] conversation archive status sync failed for {archive_session_id}: {error}"
+                            ));
+                        }
+                    });
+                }
 
                 let _ = status_app.emit(
                     "agent-status-updated",

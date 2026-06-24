@@ -4,9 +4,10 @@ use crate::utils::append_bounded_pty_output;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
 use tauri::{AppHandle, Emitter};
 
@@ -44,6 +45,141 @@ pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
     .map_err(|error| error.to_string())
 }
 
+pub(crate) async fn archive_delivered_prompt_for_agent_state(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(state, session_id).await?;
+    let capture = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)?;
+    let global_conversation_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+
+    if crate::state::conversation_archive::effective_conversation_logging(
+        global_conversation_logging,
+        snapshot.agent_conversation_logging,
+    ) == wardian_core::conversations::ConversationLoggingSetting::Enabled
+    {
+        state
+            .conversation_archive
+            .append_delivered_input_with_context(capture.context, prompt, None)
+            .map_err(|error| error.to_string())?;
+    } else {
+        state
+            .conversation_archive
+            .discard_agent_with_context(capture.context, &capture.events)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct RawTerminalPromptAccumulator {
+    buffer: String,
+    in_bracketed_paste: bool,
+}
+
+impl RawTerminalPromptAccumulator {
+    fn push_input(&mut self, input: &str) -> Vec<String> {
+        let mut completed = Vec::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                let mut sequence = String::from("\u{1b}");
+                while let Some(&next) = chars.peek() {
+                    sequence.push(next);
+                    chars.next();
+                    if next == '~' || next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+
+                match sequence.as_str() {
+                    "\u{1b}[200~" => self.in_bracketed_paste = true,
+                    "\u{1b}[201~" => self.in_bracketed_paste = false,
+                    _ => {}
+                }
+                continue;
+            }
+
+            if ch == '\u{3}' {
+                self.clear();
+                continue;
+            }
+
+            if ch == '\u{8}' || ch == '\u{7f}' {
+                self.buffer.pop();
+                continue;
+            }
+
+            if (ch == '\r' || ch == '\n') && !self.in_bracketed_paste {
+                if ch == '\r' && matches!(chars.peek(), Some('\n')) {
+                    chars.next();
+                }
+                let prompt = self.buffer.trim().to_string();
+                self.buffer.clear();
+                if !prompt.is_empty() {
+                    completed.push(prompt);
+                }
+                continue;
+            }
+
+            if ch == '\r' || ch == '\n' || ch == '\t' || !ch.is_control() {
+                self.buffer.push(ch);
+            }
+        }
+
+        completed
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.in_bracketed_paste = false;
+    }
+}
+
+fn raw_terminal_prompt_accumulators(
+) -> &'static Mutex<HashMap<String, RawTerminalPromptAccumulator>> {
+    static ACCUMULATORS: OnceLock<Mutex<HashMap<String, RawTerminalPromptAccumulator>>> =
+        OnceLock::new();
+    ACCUMULATORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn completed_raw_terminal_prompts(session_id: &str, input: &str) -> Vec<String> {
+    let mut accumulators = raw_terminal_prompt_accumulators()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    accumulators
+        .entry(session_id.to_string())
+        .or_default()
+        .push_input(input)
+}
+
+fn clear_raw_terminal_prompt_buffer(session_id: &str) {
+    let mut accumulators = raw_terminal_prompt_accumulators()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(accumulator) = accumulators.get_mut(session_id) {
+        accumulator.clear();
+    }
+}
+
+async fn archive_completed_raw_terminal_prompts(state: &AppState, session_id: &str, input: &str) {
+    let prompts = completed_raw_terminal_prompts(session_id, input);
+    for prompt in prompts {
+        if let Err(error) =
+            archive_delivered_prompt_for_agent_state(state, session_id, &prompt).await
+        {
+            crate::manager::log_debug(&format!(
+                "[WARDIAN] conversation archive raw terminal prompt failed for {session_id}: {error}"
+            ));
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn send_input_to_agent(
     session_id: String,
@@ -66,9 +202,10 @@ pub async fn send_input_to_agent(
     .get(&session_id)
     .cloned();
     if let Some(tx) = tx {
-        match tx.try_send(input.into_bytes()) {
+        match tx.try_send(input.as_bytes().to_vec()) {
             Ok(()) => {
                 if is_interrupt {
+                    clear_raw_terminal_prompt_buffer(&session_id);
                     let agents = state.agents.lock().await;
                     if let Some(agent) = agents.get(&session_id) {
                         manager::set_agent_status(&app, &session_id, &agent.current_status, "Idle");
@@ -90,6 +227,10 @@ pub async fn send_input_to_agent(
                             );
                         }
                     }
+                }
+                if !is_interrupt {
+                    archive_completed_raw_terminal_prompts(state.inner(), &session_id, &input)
+                        .await;
                 }
                 Ok(())
             }
@@ -152,14 +293,31 @@ pub async fn submit_prompt_to_agent(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<wardian_core::control::DeliveryDetail, String> {
-    crate::delivery::submit_live_surface_prompt(
+    let result = crate::delivery::submit_live_surface_prompt(
         Some(&app),
         &state,
-        crate::delivery::LiveSurfacePromptRequest::message(session_id, prompt),
+        crate::delivery::LiveSurfacePromptRequest::message(session_id.clone(), prompt.clone()),
     )
     .await
-    .map_err(|error| error.to_string())
-    .map(|result| result.detail)
+    .map_err(|error| error.to_string())?;
+
+    if let Err(error) =
+        archive_delivered_prompt_for_agent_state(state.inner(), &session_id, &prompt).await
+    {
+        crate::manager::log_debug(&format!(
+            "[WARDIAN] conversation archive delivered prompt failed for {session_id}: {error}"
+        ));
+    }
+
+    if let Err(error) =
+        crate::commands::chat::archive_agent_chat_events_for_state(state.inner(), &session_id).await
+    {
+        crate::manager::log_debug(&format!(
+            "[WARDIAN] conversation archive prompt sync failed for {session_id}: {error}"
+        ));
+    }
+
+    Ok(result.detail)
 }
 
 #[tauri::command]
@@ -623,11 +781,13 @@ pub async fn set_user_terminal_cwd(path: String, state: State<'_, AppState>) -> 
 #[cfg(test)]
 mod tests {
     use super::{
+        archive_completed_raw_terminal_prompts, archive_delivered_prompt_for_agent_state,
         read_pty_buffer, submit_prompt_to_agent_with_codex_echo_guard, validate_user_terminal_cwd,
-        ReadAgentPtyOptions,
+        RawTerminalPromptAccumulator, ReadAgentPtyOptions,
     };
     use crate::state::{ActiveAgent, AppState};
     use std::sync::{Arc, Mutex};
+    use wardian_core::conversations::{ConversationLoggingSetting, ConversationRecordKind};
     use wardian_core::models::AgentConfig;
 
     #[test]
@@ -653,6 +813,33 @@ mod tests {
         );
 
         assert_eq!(normalized, "hello world");
+    }
+
+    #[test]
+    fn raw_terminal_prompt_accumulator_emits_prompt_on_enter() {
+        let mut accumulator = RawTerminalPromptAccumulator::default();
+
+        assert!(accumulator.push_input("I rebuilt release ver. ").is_empty());
+
+        assert_eq!(
+            accumulator.push_input("Please try again.\r"),
+            vec!["I rebuilt release ver. Please try again.".to_string()]
+        );
+    }
+
+    #[test]
+    fn raw_terminal_prompt_accumulator_handles_editing_and_paste() {
+        let mut editing = RawTerminalPromptAccumulator::default();
+        assert_eq!(
+            editing.push_input("hellp\u{8}o\r"),
+            vec!["hello".to_string()]
+        );
+
+        let mut paste = RawTerminalPromptAccumulator::default();
+        assert_eq!(
+            paste.push_input("\u{1b}[200~line one\nline two\u{1b}[201~\r"),
+            vec!["line one\nline two".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -703,6 +890,95 @@ mod tests {
 
         assert_eq!(rx.recv().await.expect("submit key"), b"\r".to_vec());
         submit.await.expect("submit task").expect("submit succeeds");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn delivered_terminal_prompt_is_archived_as_user_record() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            262_144,
+        )));
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            test_agent("agent-1", "codex", watch_state),
+        );
+
+        archive_delivered_prompt_for_agent_state(&state, "agent-1", "Run the focused tests.")
+            .await
+            .expect("archive delivered prompt");
+
+        let conversation_id = state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation id");
+        let (_manifest, records) = state
+            .conversation_archive
+            .show(&conversation_id)
+            .expect("show conversation");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, ConversationRecordKind::Message);
+        assert_eq!(records[0].role.as_deref(), Some("user"));
+        assert_eq!(records[0].text.as_deref(), Some("Run the focused tests."));
+
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn raw_terminal_submitted_prompt_is_archived_as_user_record() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+
+        let state = AppState::new();
+        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "agent-raw".to_string(),
+            16,
+            262_144,
+        )));
+        state.agents.lock().await.insert(
+            "agent-raw".to_string(),
+            test_agent("agent-raw", "codex", watch_state),
+        );
+
+        archive_completed_raw_terminal_prompts(&state, "agent-raw", "I rebuilt release ver. ")
+            .await;
+        archive_completed_raw_terminal_prompts(&state, "agent-raw", "Please try again.\r").await;
+
+        let conversation_id = state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-raw")
+            .expect("active conversation id");
+        let (_manifest, records) = state
+            .conversation_archive
+            .show(&conversation_id)
+            .expect("show conversation");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, ConversationRecordKind::Message);
+        assert_eq!(records[0].role.as_deref(), Some("user"));
+        assert_eq!(
+            records[0].text.as_deref(),
+            Some("I rebuilt release ver. Please try again.")
+        );
+
+        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]

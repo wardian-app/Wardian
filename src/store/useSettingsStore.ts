@@ -9,6 +9,7 @@ import type {
   CodexRuntimePolicyOverrides,
   CodexRuntimePolicy,
   CodexSandboxMode,
+  ConversationLoggingSetting,
   DefaultProviderSetting,
   ExplorerFileClickAction,
   ExternalEditorSetting,
@@ -74,6 +75,7 @@ export function effectiveTerminalFontFamily(value: string | null | undefined) {
 const CODEX_SANDBOX_MODES: CodexSandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
 const CODEX_APPROVAL_POLICIES: CodexApprovalPolicy[] = ['untrusted', 'on-failure', 'on-request', 'never'];
 const DEFAULT_PROVIDER_SETTINGS: DefaultProviderSetting[] = ['auto', 'claude', 'codex', 'gemini', 'antigravity', 'opencode'];
+const CONVERSATION_LOGGING_SETTINGS: ConversationLoggingSetting[] = ['enabled', 'disabled'];
 const GRID_CARD_DISPLAY_MODES: GridCardDisplayMode[] = ['terminal', 'chat'];
 const WATCHLIST_NEW_AGENT_POSITIONS: WatchlistNewAgentPosition[] = ['top', 'bottom'];
 const EXTERNAL_EDITOR_SETTINGS: ExternalEditorSetting[] = ['system', 'vscode', 'custom'];
@@ -109,6 +111,14 @@ export function normalizeDefaultProviderSetting(
   return DEFAULT_PROVIDER_SETTINGS.includes(value as DefaultProviderSetting)
     ? value as DefaultProviderSetting
     : 'auto';
+}
+
+export function normalizeConversationLoggingSetting(
+  value: string | null | undefined,
+): ConversationLoggingSetting {
+  return CONVERSATION_LOGGING_SETTINGS.includes(value as ConversationLoggingSetting)
+    ? value as ConversationLoggingSetting
+    : 'enabled';
 }
 
 export function normalizeGridCardDisplayMode(
@@ -160,6 +170,7 @@ interface SettingsState {
   agent_session_persistence: 'fresh' | 'resume';
   codex_runtime_policy: CodexRuntimePolicy;
   default_provider: DefaultProviderSetting;
+  conversation_logging: ConversationLoggingSetting;
   app_settings_overrides: AppSettingsOverrides;
   shell_settings_overrides: ShellSettingsOverrides;
   available_shells: ShellOption[];
@@ -181,6 +192,7 @@ interface SettingsState {
   setCustomArgs: (value: string) => void;
   setAgentSessionPersistence: (value: 'fresh' | 'resume') => void;
   setDefaultProvider: (value: DefaultProviderSetting) => void;
+  setConversationLogging: (value: ConversationLoggingSetting) => void;
   setCodexSandboxMode: (value: CodexSandboxMode) => void;
   setCodexApprovalPolicy: (value: CodexApprovalPolicy) => void;
   setCodexFullAuto: (value: boolean) => void;
@@ -213,6 +225,7 @@ const DEFAULT_SHELL_SETTINGS: ShellSettings = {
   agent_session_persistence: 'resume',
   codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
   default_provider: 'auto',
+  conversation_logging: 'enabled',
 };
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -353,6 +366,9 @@ function shellOverridesFromSettings(settings: ShellSettings): ShellSettingsOverr
     ...(normalizeDefaultProviderSetting(settings.default_provider) !== (DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto')
       ? { default_provider: normalizeDefaultProviderSetting(settings.default_provider) }
       : {}),
+    ...(normalizeConversationLoggingSetting(settings.conversation_logging) !== DEFAULT_SHELL_SETTINGS.conversation_logging
+      ? { conversation_logging: normalizeConversationLoggingSetting(settings.conversation_logging) }
+      : {}),
   };
 }
 
@@ -407,6 +423,9 @@ function normalizeShellOverrides(overrides: ShellSettingsOverrides | undefined):
       : {}),
     ...(Object.keys(codexOverrides).length > 0 ? { codex_runtime_policy: codexOverrides } : {}),
     ...(overrides?.default_provider ? { default_provider: normalizeDefaultProviderSetting(overrides.default_provider) } : {}),
+    ...(normalizeConversationLoggingSetting(overrides?.conversation_logging) !== DEFAULT_SHELL_SETTINGS.conversation_logging
+      ? { conversation_logging: normalizeConversationLoggingSetting(overrides?.conversation_logging) }
+      : {}),
   };
 }
 
@@ -444,6 +463,7 @@ export const useSettingsStore = create<SettingsState>()(
       agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
       codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
       default_provider: DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto',
+      conversation_logging: DEFAULT_SHELL_SETTINGS.conversation_logging ?? 'enabled',
       app_settings_overrides: EMPTY_APP_SETTINGS_OVERRIDES,
       shell_settings_overrides: EMPTY_SHELL_SETTINGS_OVERRIDES,
       available_shells: [],
@@ -545,6 +565,13 @@ export const useSettingsStore = create<SettingsState>()(
         return {
           default_provider: normalized,
           shell_settings_overrides: { ...state.shell_settings_overrides, default_provider: normalized },
+        };
+      }),
+      setConversationLogging: (conversation_logging) => set((state) => {
+        const normalized = normalizeConversationLoggingSetting(conversation_logging);
+        return {
+          conversation_logging: normalized,
+          shell_settings_overrides: { ...state.shell_settings_overrides, conversation_logging: normalized },
         };
       }),
       setCodexSandboxMode: (sandbox_mode) => set((state) => ({
@@ -660,6 +687,7 @@ export const useSettingsStore = create<SettingsState>()(
             agent_session_persistence: settings.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             codex_runtime_policy: normalizeCodexRuntimePolicy(settings.codex_runtime_policy),
             default_provider: normalizeDefaultProviderSetting(settings.default_provider),
+            conversation_logging: normalizeConversationLoggingSetting(settings.conversation_logging),
             shell_settings_overrides: normalizeShellOverrides(overrides),
             shell_settings_loaded: true,
           });
@@ -672,6 +700,7 @@ export const useSettingsStore = create<SettingsState>()(
             agent_session_persistence: DEFAULT_SHELL_SETTINGS.agent_session_persistence,
             codex_runtime_policy: DEFAULT_CODEX_RUNTIME_POLICY,
             default_provider: DEFAULT_SHELL_SETTINGS.default_provider ?? 'auto',
+            conversation_logging: DEFAULT_SHELL_SETTINGS.conversation_logging ?? 'enabled',
             shell_settings_overrides: EMPTY_SHELL_SETTINGS_OVERRIDES,
             shell_settings_loaded: true,
           });
@@ -694,6 +723,7 @@ export const useSettingsStore = create<SettingsState>()(
           agent_session_persistence: get().agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(get().codex_runtime_policy),
           default_provider: normalizeDefaultProviderSetting(get().default_provider),
+          conversation_logging: normalizeConversationLoggingSetting(get().conversation_logging),
         };
         const settings: SettingsDocument<ShellSettings, ShellSettingsOverrides> = {
           schema_version: 2,
@@ -709,6 +739,7 @@ export const useSettingsStore = create<SettingsState>()(
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? fallbackSettings.codex_runtime_policy),
           default_provider: normalizeDefaultProviderSetting(saved.default_provider ?? fallbackSettings.default_provider),
+          conversation_logging: normalizeConversationLoggingSetting(saved.conversation_logging ?? fallbackSettings.conversation_logging),
           shell_settings_overrides: normalizeShellOverrides(overrides),
           shell_settings_loaded: true,
         });
@@ -724,6 +755,7 @@ export const useSettingsStore = create<SettingsState>()(
           agent_session_persistence: saved.agent_session_persistence ?? DEFAULT_SHELL_SETTINGS.agent_session_persistence,
           codex_runtime_policy: normalizeCodexRuntimePolicy(saved.codex_runtime_policy ?? get().codex_runtime_policy),
           default_provider: normalizeDefaultProviderSetting(saved.default_provider ?? get().default_provider),
+          conversation_logging: normalizeConversationLoggingSetting(saved.conversation_logging ?? get().conversation_logging),
           shell_settings_loaded: true,
         });
       },
