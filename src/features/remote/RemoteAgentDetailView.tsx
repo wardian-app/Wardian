@@ -10,7 +10,6 @@ import {
   Search,
   Send,
   ShieldAlert,
-  Slash,
   Terminal as TerminalIcon,
   Wrench,
   type LucideIcon,
@@ -335,7 +334,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const refreshActiveAgentChat = useRemoteStore((state) => state.refreshActiveAgentChat);
   const sendPromptToActiveAgent = useRemoteStore((state) => state.sendPromptToActiveAgent);
   const [prompt, setPrompt] = useState("");
-  const [commandMode, setCommandMode] = useState(false);
   const contentEndRef = useRef<HTMLDivElement | null>(null);
   const edgeBackSwipeStartRef = useRef<EdgeBackSwipeStart | null>(null);
 
@@ -356,9 +354,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     event.preventDefault();
     const trimmed = prompt.trim();
     if (!trimmed || chatInputDisabledReason(agent.status, sending)) return;
-    await sendPromptToActiveAgent(trimmed, commandMode ? "command" : "message");
+    await sendPromptToActiveAgent(trimmed, trimmed.startsWith("/") ? "command" : "message");
     setPrompt("");
-    setCommandMode(false);
   };
 
   const refresh = () => {
@@ -496,21 +493,6 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
               className="min-h-14 flex-1 resize-none rounded-md border border-wardian-border bg-wardian-card px-3 py-2 text-sm text-primary outline-none transition-colors placeholder:text-muted-neutral focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-70"
               placeholder={disabledReason ?? "Prompt agent"}
             />
-            <button
-              type="button"
-              aria-label="Command mode"
-              aria-pressed={commandMode}
-              title="Command mode"
-              disabled={Boolean(disabledReason)}
-              onClick={() => setCommandMode((value) => !value)}
-              className={`inline-flex h-14 w-11 shrink-0 items-center justify-center rounded-md border text-muted-neutral transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                commandMode
-                  ? "border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]"
-                  : "border-wardian-border bg-wardian-card hover:border-[var(--color-wardian-accent)] hover:text-primary"
-              }`}
-            >
-              <Slash className="h-4 w-4" aria-hidden="true" />
-            </button>
             <button
               type="submit"
               disabled={!canSubmit}

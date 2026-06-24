@@ -1036,7 +1036,7 @@ describe("RemoteMobileApp", () => {
     });
   });
 
-  it("sends selected-agent slash commands through command input mode", async () => {
+  it("sends typed slash commands through command input mode without a composer toggle", async () => {
     mockRemoteAgentDetailFetch("codex");
 
     render(<RemoteMobileApp />);
@@ -1044,7 +1044,7 @@ describe("RemoteMobileApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
 
-    await userEvent.click(await screen.findByRole("button", { name: "Command mode" }));
+    expect(screen.queryByRole("button", { name: "Command mode" })).not.toBeInTheDocument();
     await userEvent.type(await screen.findByLabelText("Prompt Coder"), "/status");
     await userEvent.click(screen.getByRole("button", { name: "Send prompt" }));
 
