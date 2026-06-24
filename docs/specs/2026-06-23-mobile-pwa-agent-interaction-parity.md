@@ -10,19 +10,17 @@ The desktop remains the authoritative runtime for PTY state, provider lifecycle,
 
 - The mobile watchlist keeps its first screen focused on agent status. Multi-agent broadcast is exposed through an explicit collapsed action and requires confirmation before dispatch.
 - Mobile agent detail uses the same approval-choice parser and markdown copy behavior as desktop chat where the browser environment permits it.
-- Provider slash-command style input is represented as an explicit command mode in the mobile composer and sent through the remote action endpoint as `input_mode: "command"`.
+- Provider slash-command style input is inferred from prompts that start with `/` and sent through the remote action endpoint as `input_mode: "command"`.
 - Selected-agent clone remains desktop-only. The mobile action strip keeps lifecycle controls, but remote clone is not exposed or accepted by the gateway.
 - The mobile Queue tab shows browser-local completion cards derived from streamed remote terminal output and status transitions. This is intentionally not durable queue storage; a future gateway queue endpoint should replace or hydrate this browser-local model.
 
 ## Current Scope
 
-The parity audit is tracked in `docs/audits/mobile-pwa-agent-interaction-parity.csv`.
-
 The implemented PWA parity slice covers:
 
 - chat rendering, copying, approvals, and disabled-input states;
 - selected-agent lifecycle actions;
-- command-mode prompt dispatch;
+- slash-command prompt dispatch;
 - collapsed broadcast prompt dispatch with confirmation;
 - compact activity rows for diff, todo, terminal, and changed-file evidence;
 - mobile queue completion summaries from streamed OpenCode terminal output followed by an Idle status frame.
