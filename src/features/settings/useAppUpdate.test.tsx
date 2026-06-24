@@ -119,7 +119,7 @@ describe('useAppUpdate', () => {
   it('loads the current app version and silently checks for updates', async () => {
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent(mockedRuntimeVersion);
+    await waitFor(() => expect(screen.getByTestId('version')).toHaveTextContent(mockedRuntimeVersion));
     await waitFor(() => expect(mockCheck).toHaveBeenCalledTimes(1));
     expect(screen.getByTestId('status')).toHaveTextContent('up-to-date');
     expect(screen.getByTestId('updates-enabled')).toHaveTextContent('true');
@@ -134,10 +134,12 @@ describe('useAppUpdate', () => {
 
     render(<Probe />);
 
-    expect(await screen.findByTestId('available-version')).toHaveTextContent('0.3.6');
-    expect(screen.getByTestId('available-date')).toHaveTextContent('2026-05-20');
-    expect(screen.getByTestId('available-body')).toHaveTextContent('Bug fixes');
-    expect(screen.getByTestId('status')).toHaveTextContent('available');
+    await waitFor(() => {
+      expect(screen.getByTestId('available-version')).toHaveTextContent('0.3.6');
+      expect(screen.getByTestId('available-date')).toHaveTextContent('2026-05-20');
+      expect(screen.getByTestId('available-body')).toHaveTextContent('Bug fixes');
+      expect(screen.getByTestId('status')).toHaveTextContent('available');
+    });
   });
 
   it('updates download progress and relaunches after installation completes', async () => {
@@ -252,7 +254,7 @@ describe('useAppUpdate', () => {
 
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent(packageVersion);
+    await waitFor(() => expect(screen.getByTestId('version')).toHaveTextContent(packageVersion));
     expect(screen.getByTestId('status')).toHaveTextContent('disabled');
     expect(screen.getByTestId('eligibility-reason')).toHaveTextContent(
       'Updates are unavailable outside the Wardian desktop runtime.',
@@ -272,7 +274,7 @@ describe('useAppUpdate', () => {
 
     render(<Probe />);
 
-    expect(await screen.findByTestId('version')).toHaveTextContent(mockedRuntimeVersion);
+    await waitFor(() => expect(screen.getByTestId('version')).toHaveTextContent(mockedRuntimeVersion));
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('get_update_eligibility');
     });
