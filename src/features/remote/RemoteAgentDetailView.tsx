@@ -266,6 +266,47 @@ function sendTerminalSocketMessage(socket: WebSocket | null, payload: Record<str
   }
 }
 
+type RemoteTerminalCompositionInputState = {
+  acceptedText: string;
+  active: boolean;
+  endedAt: number;
+};
+
+const REMOTE_TERMINAL_COMPOSITION_DEDUP_WINDOW_MS = 750;
+const REMOTE_TERMINAL_COMPOSITION_BUFFER_LIMIT = 256;
+
+function isPlainTextTerminalInput(input: string) {
+  return input.length > 0 && !/[\x00-\x1f\x7f]/.test(input);
+}
+
+function normalizeRemoteTerminalCompositionInput(
+  input: string,
+  state: RemoteTerminalCompositionInputState,
+  now = Date.now(),
+) {
+  if (!isPlainTextTerminalInput(input)) {
+    state.acceptedText = "";
+    return input;
+  }
+
+  const compositionRecentlyEnded =
+    state.endedAt > 0 && now - state.endedAt <= REMOTE_TERMINAL_COMPOSITION_DEDUP_WINDOW_MS;
+  if (!state.active && !compositionRecentlyEnded) {
+    state.acceptedText = "";
+    return input;
+  }
+
+  let nextInput = input;
+  if (state.acceptedText && input.startsWith(state.acceptedText)) {
+    nextInput = input.slice(state.acceptedText.length);
+  }
+
+  if (nextInput) {
+    state.acceptedText = `${state.acceptedText}${nextInput}`.slice(-REMOTE_TERMINAL_COMPOSITION_BUFFER_LIMIT);
+  }
+  return nextInput;
+}
+
 function setTerminalStdinEnabled(terminal: Terminal, enabled: boolean) {
   const terminalWithOptions = terminal as Terminal & { options?: { disableStdin?: boolean } };
   if (terminalWithOptions.options) {
@@ -562,6 +603,23 @@ function TerminalPane({
     terminalRef.current = terminal;
     let lastSentCols = terminal.cols || 80;
     let lastSentRows = terminal.rows || 24;
+    const compositionInputState: RemoteTerminalCompositionInputState = {
+      acceptedText: "",
+      active: false,
+      endedAt: 0,
+    };
+    const terminalTextarea = terminal.textarea;
+    const onCompositionStart = () => {
+      compositionInputState.active = true;
+      compositionInputState.endedAt = 0;
+      compositionInputState.acceptedText = "";
+    };
+    const onCompositionEnd = () => {
+      compositionInputState.active = false;
+      compositionInputState.endedAt = Date.now();
+    };
+    terminalTextarea?.addEventListener("compositionstart", onCompositionStart);
+    terminalTextarea?.addEventListener("compositionend", onCompositionEnd);
     const sendResizeIfChanged = () => {
       fitAddon.fit?.();
       const cols = terminal.cols || 80;
@@ -575,7 +633,8 @@ function TerminalPane({
     };
 
     terminal.onData?.((data) => {
-      const input = agent.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+      const strippedInput = agent.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+      const input = normalizeRemoteTerminalCompositionInput(strippedInput, compositionInputState);
       if (input.length === 0) return;
       sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
     });
@@ -706,6 +765,8 @@ function TerminalPane({
       removeTerminalScrollBridge();
       themeObserver?.disconnect();
       resizeObserver?.disconnect();
+      terminalTextarea?.removeEventListener("compositionstart", onCompositionStart);
+      terminalTextarea?.removeEventListener("compositionend", onCompositionEnd);
       window.removeEventListener("resize", sendResizeIfChanged);
       terminal.dispose?.();
       host.replaceChildren();
@@ -729,7 +790,7 @@ function TerminalPane({
         <div
           ref={terminalHostRef}
           data-testid="remote-terminal-attach"
-          className="remote-terminal-hide-composition h-full w-full bg-wardian-card"
+          className="remote-terminal-input-guard remote-terminal-hide-composition h-full w-full overflow-hidden bg-wardian-card"
         />
       </div>
       <div ref={endRef} aria-hidden="true" />
