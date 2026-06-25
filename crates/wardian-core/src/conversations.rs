@@ -76,7 +76,7 @@ pub struct ConversationFormatVersions {
     pub conversation: u8,
     pub events: u8,
     pub sources: u8,
-    #[serde(default = "default_format_version")]
+    #[serde(default = "default_turns_format_version")]
     pub turns: u8,
 }
 
@@ -87,21 +87,22 @@ impl Default for ConversationFormatVersions {
             conversation: 1,
             events: 1,
             sources: 1,
-            turns: 1,
+            turns: 2,
         }
     }
 }
 
-fn default_format_version() -> u8 {
+fn default_turns_format_version() -> u8 {
     1
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationTurnStatus {
-    Succeeded,
-    Failed,
-    Blocked,
+    InProgress,
+    Responded,
+    Interrupted,
+    Lifecycle,
     #[default]
     Unknown,
 }
@@ -167,31 +168,82 @@ pub struct ConversationNarrativeRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationTurnFailureSignal {
-    pub signal: String,
+    pub kind: String,
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnRequest {
+    pub seq: u64,
+    pub kind: String,
+    pub text: Option<String>,
+    pub text_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnAssistantResult {
+    pub seq: u64,
+    pub text: Option<String>,
+    pub text_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnCounts {
+    pub records: u64,
+    pub assistant_messages: u64,
+    pub tool_calls: u64,
+    pub tool_results: u64,
+    pub nonzero_tool_results: u64,
+    pub failed_tool_results: u64,
+    pub timeouts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnFiles {
+    pub read: Vec<String>,
+    pub written: Vec<String>,
+    pub mentioned: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnSideEffect {
+    pub kind: String,
+    pub evidence_seq: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnRecordRefs {
+    pub conversation_seq_start: u64,
+    pub conversation_seq_end: u64,
+    pub event_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationTurnRecord {
     pub schema: u8,
-    pub turn_id: Option<String>,
+    pub conversation_id: String,
+    pub turn_index: u64,
+    pub turn_key: String,
+    pub status: ConversationTurnStatus,
+    pub status_source: String,
     pub seq_start: u64,
     pub seq_end: u64,
-    pub user_message_seq: Option<u64>,
-    pub assistant_message_seq: Option<u64>,
-    pub user_message_text: Option<String>,
-    pub user_message_excerpt: Option<String>,
-    pub assistant_message_text: Option<String>,
-    pub assistant_message_excerpt: Option<String>,
-    pub status: ConversationTurnStatus,
-    pub status_source: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub request: ConversationTurnRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_result: Option<ConversationTurnAssistantResult>,
+    pub counts: ConversationTurnCounts,
     pub tools_used: BTreeMap<String, u64>,
-    pub failed_tool_count: u64,
-    pub command_nonzero_count: u64,
-    pub files_read: Vec<String>,
-    pub files_written: Vec<String>,
-    pub external_side_effects: Vec<String>,
+    pub files: ConversationTurnFiles,
+    pub external_side_effects: Vec<ConversationTurnSideEffect>,
     pub failure_signals: Vec<ConversationTurnFailureSignal>,
+    pub record_refs: ConversationTurnRecordRefs,
     pub provider_native_refs: Vec<ConversationProviderNativeRef>,
 }
 
@@ -486,9 +538,41 @@ mod tests {
         assert_eq!(json["status"], "interrupted");
         assert_eq!(json["boundary_reason"], "provider_source_changed");
         assert_eq!(json["effective_logging"], "enabled");
+        assert_eq!(json["format_versions"]["turns"], 2);
         assert_eq!(json["record_count"], 2);
         assert_eq!(json["turn_count"], 1);
         assert!(json.get("capture_quality").is_none());
+    }
+
+    #[test]
+    fn manifest_missing_turns_format_deserializes_as_v1() {
+        let manifest: ConversationManifest = serde_json::from_str(
+            r#"{
+              "schema": 1,
+              "conversation_id": "conv_legacy",
+              "agent_id": "agent-1",
+              "agent_name": "Coder One",
+              "agent_class": "coder",
+              "workspace": "<absolute-workspace-path>",
+              "provider": "codex",
+              "provider_session_ids": [],
+              "effective_logging": "enabled",
+              "created_at": "2026-06-15T00:00:00.000Z",
+              "updated_at": "2026-06-15T00:01:00.000Z",
+              "closed_at": null,
+              "status": "open",
+              "boundary_reason": "spawn",
+              "format_versions": {
+                "manifest": 1,
+                "conversation": 1,
+                "events": 1,
+                "sources": 1
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.format_versions.turns, 1);
     }
 
     #[test]
@@ -526,27 +610,57 @@ mod tests {
         tools_used.insert("shell_command".to_string(), 2);
         let record = ConversationTurnRecord {
             schema: CONVERSATION_SCHEMA,
-            turn_id: Some("turn-1".to_string()),
+            conversation_id: "conv-1".to_string(),
+            turn_index: 1,
+            turn_key: "conv-1:turn:000001".to_string(),
+            status: ConversationTurnStatus::Responded,
+            status_source: "mechanical_assistant_message".to_string(),
             seq_start: 1,
             seq_end: 4,
-            user_message_seq: Some(1),
-            assistant_message_seq: Some(4),
-            user_message_text: Some("Run the tests.".to_string()),
-            user_message_excerpt: None,
-            assistant_message_text: Some("Tests failed.".to_string()),
-            assistant_message_excerpt: None,
-            status: ConversationTurnStatus::Failed,
-            status_source: Some("tool_failure".to_string()),
+            started_at: "2026-06-15T00:00:01.000Z".to_string(),
+            updated_at: "2026-06-15T00:00:04.000Z".to_string(),
+            request: ConversationTurnRequest {
+                seq: 1,
+                kind: "user_request".to_string(),
+                text: Some("Run the tests.".to_string()),
+                text_truncated: false,
+            },
+            assistant_result: Some(ConversationTurnAssistantResult {
+                seq: 4,
+                text: Some("Tests failed.".to_string()),
+                text_truncated: false,
+            }),
+            counts: ConversationTurnCounts {
+                records: 4,
+                assistant_messages: 1,
+                tool_calls: 1,
+                tool_results: 1,
+                nonzero_tool_results: 1,
+                failed_tool_results: 1,
+                timeouts: 0,
+            },
             tools_used,
-            failed_tool_count: 1,
-            command_nonzero_count: 1,
-            files_read: vec!["src/lib.rs".to_string()],
-            files_written: vec!["src/lib.rs".to_string()],
-            external_side_effects: Vec::new(),
-            failure_signals: vec![ConversationTurnFailureSignal {
-                signal: "command_nonzero_exit".to_string(),
-                seq: 3,
+            files: ConversationTurnFiles {
+                read: vec!["src/lib.rs".to_string()],
+                written: vec!["src/lib.rs".to_string()],
+                mentioned: vec!["docs/specs/archive.md".to_string()],
+            },
+            external_side_effects: vec![ConversationTurnSideEffect {
+                kind: "git_commit".to_string(),
+                evidence_seq: 4,
+                summary: "commit created".to_string(),
             }],
+            failure_signals: vec![ConversationTurnFailureSignal {
+                kind: "command_nonzero_exit".to_string(),
+                seq: 3,
+                tool: Some("shell_command".to_string()),
+                summary: Some("Exit code: 1".to_string()),
+            }],
+            record_refs: ConversationTurnRecordRefs {
+                conversation_seq_start: 1,
+                conversation_seq_end: 4,
+                event_refs: vec!["event-1".to_string()],
+            },
             provider_native_refs: vec![ConversationProviderNativeRef {
                 provider: "codex".to_string(),
                 provider_session_id: Some("session-1".to_string()),
@@ -557,10 +671,19 @@ mod tests {
 
         let json = serde_json::to_value(&record).unwrap();
 
-        assert_eq!(json["turn_id"], "turn-1");
-        assert_eq!(json["status"], "failed");
-        assert_eq!(json["status_source"], "tool_failure");
+        assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["turn_index"], 1);
+        assert_eq!(json["turn_key"], "conv-1:turn:000001");
+        assert_eq!(json["status"], "responded");
+        assert_eq!(json["status_source"], "mechanical_assistant_message");
+        assert_eq!(json["request"]["kind"], "user_request");
+        assert_eq!(json["assistant_result"]["text"], "Tests failed.");
+        assert_eq!(json["counts"]["failed_tool_results"], 1);
         assert_eq!(json["tools_used"]["shell_command"], 2);
+        assert_eq!(json["files"]["written"][0], "src/lib.rs");
+        assert_eq!(json["external_side_effects"][0]["kind"], "git_commit");
+        assert_eq!(json["failure_signals"][0]["kind"], "command_nonzero_exit");
+        assert!(json.get("turn_id").is_none());
         assert!(json.get("capture_quality").is_none());
         assert!(json.get("notes_for_evolver").is_none());
         assert!(json.get("user_correction").is_none());

@@ -354,7 +354,7 @@ pub(super) fn close_conversation_dir(
     let events: Vec<AgentChatEvent> = read_jsonl_records(&conversation_dir.join("events.jsonl"))?;
     let sources: Vec<ConversationSourceRecord> =
         read_jsonl_records(&conversation_dir.join("sources.jsonl"))?;
-    let turns = derive_turn_records(&records, &events, &sources);
+    let turns = derive_turn_records(conversation_id, &records, &events, &sources, false);
     write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
     let summary = archive_summary(&records, &turns, &sources);
     let now = current_rfc3339_millis();

@@ -2,10 +2,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use wardian_core::conversations::{
     ConversationManifest, ConversationNarrativeRecord, ConversationProviderNativeRef,
-    ConversationRecordKind, ConversationSourceRecord, ConversationTurnFailureSignal,
-    ConversationTurnRecord, ConversationTurnStatus, CONVERSATION_SCHEMA,
+    ConversationRecordKind, ConversationSourceRecord, ConversationTurnAssistantResult,
+    ConversationTurnCounts, ConversationTurnFailureSignal, ConversationTurnFiles,
+    ConversationTurnRecord, ConversationTurnRecordRefs, ConversationTurnRequest,
+    ConversationTurnSideEffect, ConversationTurnStatus, CONVERSATION_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatStatus};
+
+use super::records::metadata_string;
+
+const TURN_TEXT_LIMIT_CHARS: usize = 4_000;
 
 #[derive(Debug)]
 pub(super) struct ConversationArchiveSummary {
@@ -18,16 +24,17 @@ pub(super) struct ConversationArchiveSummary {
 
 #[derive(Debug)]
 struct TurnAccumulator {
-    turn_id: Option<String>,
     records: Vec<ConversationNarrativeRecord>,
     events: Vec<AgentChatEvent>,
     sources: Vec<ConversationSourceRecord>,
 }
 
 pub(super) fn derive_turn_records(
+    conversation_id: &str,
     records: &[ConversationNarrativeRecord],
     events: &[AgentChatEvent],
     sources: &[ConversationSourceRecord],
+    is_open: bool,
 ) -> Vec<ConversationTurnRecord> {
     let events_by_id = events
         .iter()
@@ -37,53 +44,28 @@ pub(super) fn derive_turn_records(
         .iter()
         .map(|source| (source.source_id.as_str(), source))
         .collect::<HashMap<_, _>>();
-    let mut turns: Vec<TurnAccumulator> = Vec::new();
-    let mut current_unkeyed: Option<usize> = None;
+    let mut ordered_records = records.iter().collect::<Vec<_>>();
+    ordered_records.sort_by_key(|record| record.seq);
 
-    for record in records
-        .iter()
-        .filter(|record| record.kind != ConversationRecordKind::Lifecycle)
-    {
-        let turn_index = if let Some(turn_id) = record.turn_id.as_deref() {
-            current_unkeyed = None;
-            if turns
-                .last()
-                .is_some_and(|turn| turn.turn_id.as_deref() == Some(turn_id))
-            {
-                turns.len() - 1
-            } else {
+    let mut turns: Vec<TurnAccumulator> = Vec::new();
+    let mut current_turn: Option<usize> = None;
+
+    for record in ordered_records {
+        let starts_request_turn = is_user_request_record(record);
+        let starts_lifecycle_turn =
+            record.kind == ConversationRecordKind::Lifecycle && current_turn.is_none();
+        let turn_index = match current_turn {
+            Some(index) if !starts_request_turn && !starts_lifecycle_turn => index,
+            _ => {
                 turns.push(TurnAccumulator {
-                    turn_id: Some(turn_id.to_string()),
                     records: Vec::new(),
                     events: Vec::new(),
                     sources: Vec::new(),
                 });
-                turns.len() - 1
+                let index = turns.len() - 1;
+                current_turn = Some(index);
+                index
             }
-        } else if record.kind == ConversationRecordKind::Message
-            && record.role.as_deref() == Some("user")
-        {
-            turns.push(TurnAccumulator {
-                turn_id: None,
-                records: Vec::new(),
-                events: Vec::new(),
-                sources: Vec::new(),
-            });
-            let index = turns.len() - 1;
-            current_unkeyed = Some(index);
-            index
-        } else if let Some(index) = current_unkeyed {
-            index
-        } else {
-            turns.push(TurnAccumulator {
-                turn_id: None,
-                records: Vec::new(),
-                events: Vec::new(),
-                sources: Vec::new(),
-            });
-            let index = turns.len() - 1;
-            current_unkeyed = Some(index);
-            index
         };
 
         let turn = &mut turns[turn_index];
@@ -102,13 +84,23 @@ pub(super) fn derive_turn_records(
         turn.records.push(record.clone());
     }
 
+    let turn_count = turns.len();
     turns
         .into_iter()
-        .map(turn_record_from_accumulator)
+        .enumerate()
+        .map(|(index, turn)| {
+            let is_open_tail = is_open && index + 1 == turn_count;
+            turn_record_from_accumulator(conversation_id, (index + 1) as u64, turn, is_open_tail)
+        })
         .collect()
 }
 
-fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord {
+fn turn_record_from_accumulator(
+    conversation_id: &str,
+    turn_index: u64,
+    turn: TurnAccumulator,
+    is_open: bool,
+) -> ConversationTurnRecord {
     let seq_start = turn
         .records
         .iter()
@@ -121,9 +113,23 @@ fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord
         .map(|record| record.seq)
         .max()
         .unwrap_or(seq_start);
-    let user_message = turn.records.iter().find(|record| {
-        record.kind == ConversationRecordKind::Message && record.role.as_deref() == Some("user")
-    });
+    let started_at = turn
+        .records
+        .iter()
+        .min_by_key(|record| record.seq)
+        .map(|record| record.at.clone())
+        .unwrap_or_default();
+    let updated_at = turn
+        .records
+        .iter()
+        .max_by_key(|record| record.seq)
+        .map(|record| record.at.clone())
+        .unwrap_or_else(|| started_at.clone());
+    let request_record = turn
+        .records
+        .iter()
+        .find(|record| is_user_request_record(record))
+        .or_else(|| turn.records.first());
     let assistant_message = turn.records.iter().rev().find(|record| {
         record.kind == ConversationRecordKind::Message
             && record.role.as_deref() == Some("assistant")
@@ -145,11 +151,34 @@ fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord
         tools_used.entry(tool).or_insert(1);
     }
 
-    let mut failed_tool_count = 0;
-    let mut command_nonzero_count = 0;
+    let mut counts = ConversationTurnCounts {
+        records: turn.records.len() as u64,
+        assistant_messages: turn
+            .records
+            .iter()
+            .filter(|record| {
+                record.kind == ConversationRecordKind::Message
+                    && record.role.as_deref() == Some("assistant")
+            })
+            .count() as u64,
+        tool_calls: turn
+            .records
+            .iter()
+            .filter(|record| record.kind == ConversationRecordKind::ToolCall)
+            .count() as u64,
+        tool_results: turn
+            .records
+            .iter()
+            .filter(|record| record.kind == ConversationRecordKind::ToolResult)
+            .count() as u64,
+        nonzero_tool_results: 0,
+        failed_tool_results: 0,
+        timeouts: 0,
+    };
     let mut failure_signals = Vec::new();
     let mut files_read = Vec::new();
     let mut files_written = Vec::new();
+    let mut files_mentioned = Vec::new();
     let mut external_side_effects = Vec::new();
     let events_by_record_seq = turn
         .records
@@ -164,22 +193,33 @@ fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord
         })
         .collect::<Vec<_>>();
     for (seq, event) in events_by_record_seq {
-        if matches!(
-            event.kind,
-            AgentChatEventKind::ToolCall | AgentChatEventKind::ToolResult
-        ) && event.status == Some(AgentChatStatus::Failed)
+        if event.kind == AgentChatEventKind::ToolResult
+            && event.status == Some(AgentChatStatus::Failed)
         {
-            failed_tool_count += 1;
+            counts.failed_tool_results += 1;
             failure_signals.push(ConversationTurnFailureSignal {
-                signal: "tool_failed".to_string(),
+                kind: "tool_failed".to_string(),
                 seq,
+                tool: event_tool_name(event),
+                summary: Some("tool status failed".to_string()),
             });
         }
-        if event.exit_code.is_some_and(|exit_code| exit_code != 0) {
-            command_nonzero_count += 1;
+        if let Some(exit_code) = event.exit_code.filter(|exit_code| *exit_code != 0) {
+            counts.nonzero_tool_results += 1;
             failure_signals.push(ConversationTurnFailureSignal {
-                signal: "command_nonzero_exit".to_string(),
+                kind: "command_nonzero_exit".to_string(),
                 seq,
+                tool: event_tool_name(event),
+                summary: Some(format!("Exit code: {exit_code}")),
+            });
+        }
+        if is_timeout_event(event) {
+            counts.timeouts += 1;
+            failure_signals.push(ConversationTurnFailureSignal {
+                kind: "tool_timeout".to_string(),
+                seq,
+                tool: event_tool_name(event),
+                summary: Some("tool timeout".to_string()),
             });
         }
         extend_unique(
@@ -191,44 +231,124 @@ fn turn_record_from_accumulator(turn: TurnAccumulator) -> ConversationTurnRecord
             metadata_string_array(&event.metadata, "files_written"),
         );
         extend_unique(
+            &mut files_mentioned,
+            metadata_string_array(&event.metadata, "files_mentioned"),
+        );
+        extend_side_effects(
             &mut external_side_effects,
-            metadata_string_array(&event.metadata, "external_side_effects"),
+            metadata_string_array(&event.metadata, "external_side_effects")
+                .into_iter()
+                .map(|summary| ConversationTurnSideEffect {
+                    kind: "external_side_effect".to_string(),
+                    evidence_seq: seq,
+                    summary,
+                })
+                .collect(),
+        );
+        extend_side_effects(
+            &mut external_side_effects,
+            side_effects_from_event(seq, event),
         );
     }
 
-    let (status, status_source) = if failed_tool_count > 0 {
+    for record in &turn.records {
+        if record.kind == ConversationRecordKind::ToolCall
+            && record.tool.as_deref() == Some("apply_patch")
+        {
+            extend_side_effects(
+                &mut external_side_effects,
+                vec![ConversationTurnSideEffect {
+                    kind: "file_edit".to_string(),
+                    evidence_seq: record.seq,
+                    summary: "apply_patch".to_string(),
+                }],
+            );
+        }
+        if record.kind == ConversationRecordKind::Error {
+            failure_signals.push(ConversationTurnFailureSignal {
+                kind: "tool_failed".to_string(),
+                seq: record.seq,
+                tool: record.tool.clone(),
+                summary: record.summary.clone().or_else(|| record.status.clone()),
+            });
+        }
+    }
+
+    let lifecycle_only = turn
+        .records
+        .iter()
+        .all(|record| record.kind == ConversationRecordKind::Lifecycle);
+    let interrupted = turn.records.iter().any(is_interruption_record);
+    let is_final_open_turn = is_open;
+    let (status, status_source) = if interrupted {
         (
-            ConversationTurnStatus::Failed,
-            Some("tool_failure".to_string()),
+            ConversationTurnStatus::Interrupted,
+            "mechanical_lifecycle_marker".to_string(),
         )
-    } else if command_nonzero_count > 0 {
+    } else if lifecycle_only {
         (
-            ConversationTurnStatus::Failed,
-            Some("command_nonzero_exit".to_string()),
+            ConversationTurnStatus::Lifecycle,
+            "mechanical_lifecycle_only".to_string(),
+        )
+    } else if assistant_message.is_some() {
+        (
+            ConversationTurnStatus::Responded,
+            "mechanical_assistant_message".to_string(),
+        )
+    } else if is_final_open_turn {
+        (
+            ConversationTurnStatus::InProgress,
+            "mechanical_open_tail".to_string(),
         )
     } else {
-        (ConversationTurnStatus::Unknown, None)
+        (
+            ConversationTurnStatus::Unknown,
+            "mechanical_grouping".to_string(),
+        )
     };
+
+    let request = request_record
+        .map(request_from_record)
+        .unwrap_or(ConversationTurnRequest {
+            seq: seq_start,
+            kind: "unknown".to_string(),
+            text: None,
+            text_truncated: false,
+        });
+    let assistant_result = assistant_message.map(assistant_result_from_record);
+    let event_refs = turn
+        .records
+        .iter()
+        .flat_map(|record| record.event_refs.iter().cloned())
+        .collect();
+
     ConversationTurnRecord {
         schema: CONVERSATION_SCHEMA,
-        turn_id: turn.turn_id,
-        seq_start,
-        seq_end,
-        user_message_seq: user_message.map(|record| record.seq),
-        assistant_message_seq: assistant_message.map(|record| record.seq),
-        user_message_text: user_message.and_then(|record| record.text.clone()),
-        user_message_excerpt: user_message.and_then(|record| record.excerpt.clone()),
-        assistant_message_text: assistant_message.and_then(|record| record.text.clone()),
-        assistant_message_excerpt: assistant_message.and_then(|record| record.excerpt.clone()),
+        conversation_id: conversation_id.to_string(),
+        turn_index,
+        turn_key: format!("{conversation_id}:turn:{turn_index:06}"),
         status,
         status_source,
+        seq_start,
+        seq_end,
+        started_at,
+        updated_at,
+        request,
+        assistant_result,
+        counts,
         tools_used,
-        failed_tool_count,
-        command_nonzero_count,
-        files_read,
-        files_written,
+        files: ConversationTurnFiles {
+            read: files_read,
+            written: files_written,
+            mentioned: files_mentioned,
+        },
         external_side_effects,
         failure_signals,
+        record_refs: ConversationTurnRecordRefs {
+            conversation_seq_start: seq_start,
+            conversation_seq_end: seq_end,
+            event_refs,
+        },
         provider_native_refs: provider_native_refs_from_sources(&turn.sources),
     }
 }
@@ -322,6 +442,196 @@ fn extend_unique(values: &mut Vec<String>, next_values: Vec<String>) {
     let mut seen = values.iter().cloned().collect::<HashSet<_>>();
     for value in next_values {
         if seen.insert(value.clone()) {
+            values.push(value);
+        }
+    }
+}
+
+fn is_user_request_record(record: &ConversationNarrativeRecord) -> bool {
+    record.kind == ConversationRecordKind::Message && record.role.as_deref() == Some("user")
+}
+
+fn request_from_record(record: &ConversationNarrativeRecord) -> ConversationTurnRequest {
+    let (text, text_truncated) = bounded_record_text(record);
+    ConversationTurnRequest {
+        seq: record.seq,
+        kind: request_kind_for_record(record),
+        text,
+        text_truncated,
+    }
+}
+
+fn assistant_result_from_record(
+    record: &ConversationNarrativeRecord,
+) -> ConversationTurnAssistantResult {
+    let (text, text_truncated) = bounded_record_text(record);
+    ConversationTurnAssistantResult {
+        seq: record.seq,
+        text,
+        text_truncated,
+    }
+}
+
+fn request_kind_for_record(record: &ConversationNarrativeRecord) -> String {
+    if record.kind == ConversationRecordKind::Lifecycle {
+        return "lifecycle".to_string();
+    }
+    if record.kind != ConversationRecordKind::Message || record.role.as_deref() != Some("user") {
+        return "unknown".to_string();
+    }
+    let text = record
+        .text
+        .as_deref()
+        .or(record.excerpt.as_deref())
+        .unwrap_or_default()
+        .trim();
+    if text.starts_with("/goal") {
+        "goal_start".to_string()
+    } else if text.contains("<codex_internal_context source=\"goal\">") {
+        "goal_continuation".to_string()
+    } else if text.starts_with("# AGENTS.md instructions")
+        || text.contains("AGENTS.md instructions for")
+    {
+        "agent_context".to_string()
+    } else if text.is_empty() {
+        "unknown_user_message".to_string()
+    } else {
+        "user_request".to_string()
+    }
+}
+
+fn bounded_record_text(record: &ConversationNarrativeRecord) -> (Option<String>, bool) {
+    let source_text = record.text.as_deref().or(record.excerpt.as_deref());
+    let Some(text) = source_text else {
+        return (None, false);
+    };
+    let mut truncated = record.text.is_none() && record.excerpt.is_some();
+    let mut end = 0;
+    for (index, ch) in text.char_indices() {
+        if index >= TURN_TEXT_LIMIT_CHARS {
+            truncated = true;
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    if text.chars().count() <= TURN_TEXT_LIMIT_CHARS {
+        (Some(text.to_string()), truncated)
+    } else {
+        (Some(text[..end].to_string()), true)
+    }
+}
+
+fn is_interruption_record(record: &ConversationNarrativeRecord) -> bool {
+    if record.kind != ConversationRecordKind::Lifecycle {
+        return false;
+    }
+    matches!(
+        record.status.as_deref(),
+        Some("shutdown" | "provider_source_changed")
+    )
+}
+
+fn is_timeout_event(event: &AgentChatEvent) -> bool {
+    event
+        .metadata
+        .get("timeout")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || event
+            .metadata
+            .get("timed_out")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn event_tool_name(event: &AgentChatEvent) -> Option<String> {
+    metadata_string(&event.metadata, "tool_name")
+        .or_else(|| event.title.clone())
+        .map(|tool| tool.trim().to_string())
+        .filter(|tool| !tool.is_empty())
+}
+
+fn side_effects_from_event(seq: u64, event: &AgentChatEvent) -> Vec<ConversationTurnSideEffect> {
+    let mut effects = Vec::new();
+    let command = event.command.as_deref().unwrap_or_default();
+    let text = event.text.as_deref().unwrap_or_default();
+    let lower_command = command.to_ascii_lowercase();
+    if lower_command.contains("git commit") {
+        effects.push(side_effect(seq, "git_commit", "commit created"));
+    }
+    if lower_command.contains("git push") {
+        effects.push(side_effect(seq, "git_push", "git push"));
+    }
+    if lower_command.contains("wardian agent spawn") {
+        effects.push(side_effect(
+            seq,
+            "wardian_agent_spawn",
+            "wardian agent spawn",
+        ));
+    }
+    if lower_command.contains("wardian agent kill") {
+        effects.push(side_effect(seq, "wardian_agent_kill", "wardian agent kill"));
+    }
+    if lower_command.contains("wardian send") {
+        effects.push(side_effect(seq, "wardian_send", "wardian send"));
+    }
+    if lower_command.contains("wardian reply") {
+        effects.push(side_effect(seq, "wardian_reply", "wardian reply"));
+    }
+    if lower_command.contains("npm install")
+        || lower_command.contains("pnpm add")
+        || lower_command.contains("yarn add")
+        || lower_command.contains("cargo add")
+    {
+        effects.push(side_effect(seq, "package_install", "package install"));
+    }
+    if let Some(url) = first_github_url(text) {
+        let kind = if url.contains("/pull/") {
+            "github_pr"
+        } else if url.contains("/issues/") {
+            "github_issue"
+        } else {
+            "github_url"
+        };
+        effects.push(side_effect(seq, kind, &url));
+    }
+    effects
+}
+
+fn side_effect(seq: u64, kind: &str, summary: &str) -> ConversationTurnSideEffect {
+    ConversationTurnSideEffect {
+        kind: kind.to_string(),
+        evidence_seq: seq,
+        summary: summary.to_string(),
+    }
+}
+
+fn first_github_url(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | ',')))
+        .find(|token| token.starts_with("https://github.com/"))
+        .map(ToString::to_string)
+}
+
+fn extend_side_effects(
+    values: &mut Vec<ConversationTurnSideEffect>,
+    next_values: Vec<ConversationTurnSideEffect>,
+) {
+    let mut seen = values
+        .iter()
+        .map(|value| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}",
+                value.kind, value.evidence_seq, value.summary
+            )
+        })
+        .collect::<HashSet<_>>();
+    for value in next_values {
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}",
+            value.kind, value.evidence_seq, value.summary
+        );
+        if seen.insert(key) {
             values.push(value);
         }
     }

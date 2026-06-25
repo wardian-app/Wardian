@@ -175,29 +175,35 @@ tool metadata, provider-specific normalized fields, and lifecycle events.
 ### `turns.jsonl`
 
 Stores a compact derived index over `conversation.jsonl`, `events.jsonl`, and
-`sources.jsonl` for completed conversation archives. It exists to save agents
-joins and bounded scans; it is not a semantic analysis file. Wardian materializes
-it when a conversation is closed rather than rewriting it on every append.
+`sources.jsonl` for open and closed conversation archives. Request-based turn
+rows use turns format version 2. The file exists to save agents joins and
+bounded scans; it is not a semantic analysis file. Wardian rewrites it
+atomically whenever the normalized archive is refreshed.
 
-Turn rows are factual aggregations only. They may include:
+One row represents one request/response unit: a user-originated request plus
+the assistant, tool, and lifecycle records that follow it until the next
+user-originated request or conversation boundary. Provider-native `turn_id`
+values remain on `conversation.jsonl` narrative records for provenance, but
+they do not define `turns.jsonl` row boundaries because some providers use tool
+call IDs as turn IDs.
 
-- `turn_id`, when provided by a provider or Wardian structured event
-- `seq_start` and `seq_end`
-- `user_message_seq` and `assistant_message_seq`
-- `user_message_text` or `user_message_excerpt`
-- `assistant_message_text` or `assistant_message_excerpt`
-- `status` and `status_source`, only when mechanically supported
-- `tools_used`, counted by normalized structured tool name
-- `failed_tool_count`
-- `command_nonzero_count`
-- `files_read` and `files_written`, only from structured metadata
-- `external_side_effects`, only from structured metadata
-- `failure_signals` with `seq` references
-- `provider_native_refs`
+Turn rows are factual aggregations only. They include stable derived ordering
+fields (`turn_index`, `turn_key`), seq and time bounds, typed `request` data,
+the last `assistant_result` when present, nested mechanical `counts`,
+`tools_used`, `files`, `external_side_effects`, `failure_signals`, `record_refs`,
+and `provider_native_refs`.
+
+`status` is mechanically derived as `in_progress`, `responded`, `interrupted`,
+`lifecycle`, or `unknown`. Wardian does not infer task success from assistant
+prose. Context records such as AGENTS.md injections and goal continuations are
+typed through `request.kind` so readers can skip them when constructing
+human-level summaries.
 
 The archive writer must not infer user intent, corrections, complaints,
 causality, recovery, task success, file access, or side effects from arbitrary
-prose or command strings. There is no `notes_for_evolver` field in v1.
+prose. Side effects may come from structured metadata, structured command
+fields, explicit `apply_patch` records, or exact URL-pattern extraction. There
+is no `notes_for_evolver` field in the request-turn index.
 
 ### `sources.jsonl`
 
