@@ -227,6 +227,20 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("disables OpenCode terminal stdin until the card is selected", async () => {
+    const view = render(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" isSelected={false} />);
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().options.disableStdin).toBe(true);
+    });
+
+    view.rerender(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" isSelected />);
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().options.disableStdin).toBe(false);
+    });
+  });
+
   it("installs terminal link handling that opens files with the configured external editor", async () => {
     useSettingsStore.setState({
       externalEditor: "vscode",
@@ -2099,10 +2113,11 @@ describe("AgentTerminal scrollback", () => {
       }
     });
 
-    render(<AgentTerminal sessionId="opencode-1" provider="opencode" theme="dark" />);
+    render(<AgentTerminal sessionId="opencode-1" provider="opencode" theme="dark" isSelected={false} />);
 
     await waitFor(() => {
       const instance = getLatestTerminalInstance();
+      expect(instance.options.disableStdin).toBe(true);
       expect(instance.write).toHaveBeenCalledWith(
         "\u001b[6n\u001b[>0q\u001b[?u\u001b[?996n\u001b[?1004h\u001b[14t\u001b]4;0;?\u0007\u001b]10;?\u0007\u001b]11;?\u001b\\",
         expect.any(Function),

@@ -38,7 +38,7 @@ import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
-  stripTerminalColorReportInputs,
+  stripProviderTerminalReportInputs,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -630,7 +630,7 @@ function TerminalPane({
     };
 
     terminal.onData?.((data) => {
-      const strippedInput = agent.provider === "codex" ? stripTerminalColorReportInputs(data) : data;
+      const strippedInput = stripProviderTerminalReportInputs(agent.provider ?? undefined, data);
       const input = normalizeRemoteTerminalCompositionInput(strippedInput, compositionInputState);
       if (input.length === 0) return;
       sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
