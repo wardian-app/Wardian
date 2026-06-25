@@ -64,6 +64,46 @@ interface GridViewProps {
   onTerminalFocus?: (agentId: string) => void;
 }
 
+interface AgentTerminalSlotProps {
+  sessionId: string;
+  provider?: string;
+  isMaximized: boolean;
+  theme: "dark" | "light" | "system";
+  workspacePath?: string;
+  onTerminalFocus?: (agentId: string) => void;
+  onTitleChange: (agentId: string, title: string) => void;
+}
+
+const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
+  sessionId,
+  provider,
+  isMaximized,
+  theme,
+  workspacePath,
+  onTerminalFocus,
+  onTitleChange,
+}: AgentTerminalSlotProps) {
+  const handleTerminalFocus = React.useCallback(() => {
+    onTerminalFocus?.(sessionId);
+  }, [onTerminalFocus, sessionId]);
+
+  const handleTitleChange = React.useCallback((title: string) => {
+    onTitleChange(sessionId, title);
+  }, [onTitleChange, sessionId]);
+
+  return (
+    <AgentTerminal
+      sessionId={sessionId}
+      provider={provider}
+      isMaximized={isMaximized}
+      theme={theme}
+      workspacePath={workspacePath}
+      onTerminalFocus={handleTerminalFocus}
+      onTitleChange={handleTitleChange}
+    />
+  );
+});
+
 export const GridView: React.FC<GridViewProps> = ({
   filteredAgents,
   telemetry,
@@ -355,7 +395,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     }}
                   />
                 ) : (
-                  <AgentTerminal
+                  <AgentTerminalSlot
                     sessionId={agentId}
                     provider={agent.provider}
                     isMaximized={isAgentMaximized}
@@ -366,8 +406,8 @@ export const GridView: React.FC<GridViewProps> = ({
                         ? agent.git_worktree_folder
                         : agent.folder
                     }
-                    onTerminalFocus={() => onTerminalFocus?.(agentId)}
-                    onTitleChange={(title) => handleTitleChange(agentId, title)}
+                    onTerminalFocus={onTerminalFocus}
+                    onTitleChange={handleTitleChange}
                   />
                 )}
               </div>

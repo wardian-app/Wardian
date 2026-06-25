@@ -32,6 +32,7 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
   ...initialState,
   async loadRuns() {
     const runs = await invoke<RunSummary[]>('workflow_list_runs');
+    if (runSummariesEqual(get().runs, runs)) return;
     set({ runs });
   },
   async openRun(blueprintId, runId) {
@@ -67,3 +68,25 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
     set(initialState);
   },
 }));
+
+function runSummariesEqual(left: RunSummary[], right: RunSummary[]) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!runSummaryEqual(left[index], right[index])) return false;
+  }
+  return true;
+}
+
+function runSummaryEqual(left: RunSummary, right: RunSummary) {
+  return left.run_id === right.run_id
+    && left.blueprint_id === right.blueprint_id
+    && left.status === right.status
+    && left.node_count === right.node_count
+    && left.path === right.path
+    && left.blueprint_path === right.blueprint_path
+    && left.started_at === right.started_at
+    && left.updated_at === right.updated_at
+    && left.completed_at === right.completed_at
+    && left.failure === right.failure
+    && left.schedule_id === right.schedule_id;
+}

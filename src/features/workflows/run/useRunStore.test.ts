@@ -52,6 +52,18 @@ describe('useRunStore', () => {
     expect(useRunStore.getState().runs).toEqual([summary]);
   });
 
+  it('keeps the existing run summary array when polling returns unchanged summaries', async () => {
+    invokeMock
+      .mockResolvedValueOnce([summary])
+      .mockResolvedValueOnce([{ ...summary }]);
+
+    await useRunStore.getState().loadRuns();
+    const firstRuns = useRunStore.getState().runs;
+    await useRunStore.getState().loadRuns();
+
+    expect(useRunStore.getState().runs).toBe(firstRuns);
+  });
+
   it('opens a run and scrubs to the final event', async () => {
     invokeMock.mockResolvedValueOnce(result);
 

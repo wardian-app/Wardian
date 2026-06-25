@@ -1,10 +1,14 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bot, ChevronDown, ChevronUp, GitBranch, ListFilter, Terminal, Trash2 } from "lucide-react";
 import { useQueueStore } from "../store/useQueueStore";
 import type { QueueItem } from "../types";
 import { DocsLink } from "../components/DocsLink";
 import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES, queueItemIsVisible } from "../features/queue/queueFilters";
 import { parseQueueActionChoices, type QueueActionChoice } from "../features/queue/actionChoices";
+
+const INITIAL_QUEUE_RENDER_LIMIT = 80;
+const QUEUE_RENDER_CHUNK_SIZE = 80;
+const QUEUE_RENDER_CHUNK_DELAY_MS = 120;
 
 function relativeTime(ts: number): string {
   const diffMs = Date.now() - ts;
@@ -15,6 +19,49 @@ function relativeTime(ts: number): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function queueItemsKey(items: QueueItem[]) {
+  if (items.length === 0) return "empty";
+  return `${items.length}:${items[0]?.id ?? ""}:${items[items.length - 1]?.id ?? ""}`;
+}
+
+function useProgressiveQueueItems(items: QueueItem[]) {
+  const key = queueItemsKey(items);
+  const [progress, setProgress] = useState({ key, limit: INITIAL_QUEUE_RENDER_LIMIT });
+  const renderLimit = progress.key === key ? progress.limit : INITIAL_QUEUE_RENDER_LIMIT;
+
+  useEffect(() => {
+    setProgress({ key, limit: INITIAL_QUEUE_RENDER_LIMIT });
+    if (items.length <= INITIAL_QUEUE_RENDER_LIMIT) return;
+
+    let disposed = false;
+    let timeoutId: number | undefined;
+    const revealNextChunk = () => {
+      setProgress((current) => {
+        if (current.key !== key) return current;
+        const nextLimit = Math.min(items.length, current.limit + QUEUE_RENDER_CHUNK_SIZE);
+        if (!disposed && nextLimit < items.length) {
+          timeoutId = window.setTimeout(revealNextChunk, QUEUE_RENDER_CHUNK_DELAY_MS);
+        }
+        return { key, limit: nextLimit };
+      });
+    };
+
+    timeoutId = window.setTimeout(revealNextChunk, QUEUE_RENDER_CHUNK_DELAY_MS);
+
+    return () => {
+      disposed = true;
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [items.length, key]);
+
+  return useMemo(
+    () => items.slice(0, Math.min(renderLimit, items.length)),
+    [items, renderLimit],
+  );
 }
 
 function queueItemLabel(item: QueueItem) {
@@ -310,7 +357,11 @@ export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
   const markAllRead = useQueueStore((s) => s.markAllRead);
   const clearRead = useQueueStore((s) => s.clearRead);
   const hasReadItems = items.some((item) => item.read);
-  const visibleItems = items.filter((item) => queueItemIsVisible(item, preferences));
+  const visibleItems = useMemo(
+    () => items.filter((item) => queueItemIsVisible(item, preferences)),
+    [items, preferences],
+  );
+  const renderedItems = useProgressiveQueueItems(visibleItems);
 
   return (
     <div className="flex flex-col h-full min-h-0 p-4 gap-4">
@@ -335,7 +386,7 @@ export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
         </div>
       ) : (
         <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto pr-1">
-          {visibleItems.map((item) => (
+          {renderedItems.map((item) => (
             <QueueCard
               key={item.id}
               item={item}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -66,6 +66,7 @@ const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
 const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
 const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
+const CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
 
 type NativeWindowResizePayload = {
   width?: number;
@@ -141,6 +142,12 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
+function cachedCanvasPaneClass(active: boolean) {
+  return active
+    ? "flex-1 flex flex-col min-h-0"
+    : "absolute inset-2 flex flex-col min-h-0 invisible pointer-events-none";
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -158,6 +165,7 @@ function AppBody() {
   const fetchAgentsRequestRef = React.useRef(0);
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
@@ -256,6 +264,16 @@ function AppBody() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (!CACHED_CANVAS_VIEWS.has(viewMode)) return;
+    setCachedCanvasViews((prev) => {
+      if (prev.has(viewMode)) return prev;
+      const next = new Set(prev);
+      next.add(viewMode);
+      return next;
+    });
+  }, [viewMode]);
 
   const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
   const [appTelemetry, setAppTelemetry] = useState<AppTelemetry>({ cpu_usage: 0, memory_mb: 0 });
@@ -452,7 +470,10 @@ function AppBody() {
   };
 
   const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
-  const filteredAgents = getAgentsForList(agents, activeList, teams);
+  const filteredAgents = useMemo(
+    () => getAgentsForList(agents, activeList, teams),
+    [agents, activeList, teams],
+  );
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
@@ -971,6 +992,8 @@ function AppBody() {
     lastSelectedIdRef.current = sessionId;
     window.setTimeout(() => scrollToAgent(sessionId), 0);
   }, [scrollToAgent]);
+  const shouldRenderGraph = viewMode === "graph" || cachedCanvasViews.has("graph");
+  const shouldRenderGarden = viewMode === "garden" || cachedCanvasViews.has("garden");
 
   return (
     <div
@@ -1047,8 +1070,11 @@ function AppBody() {
               </div>
             )}
 
-            {viewMode === "graph" && (
-              <div className="flex-1 flex flex-col min-h-0">
+            {shouldRenderGraph && (
+              <div
+                className={cachedCanvasPaneClass(viewMode === "graph")}
+                aria-hidden={viewMode !== "graph"}
+              >
                 <GraphView
                   filteredAgents={filteredAgents}
                   allAgents={agents}
@@ -1097,23 +1123,28 @@ function AppBody() {
               </div>
             )}
 
-            {viewMode === "garden" && (
-              <GardenView
-                filteredAgents={filteredAgents}
-                telemetry={telemetry}
-                teams={teams}
-                activeList={activeList}
-                interactions={agentInteractions}
-                selectedAgentIds={selectedAgentIds}
-                offAgentIds={offAgentIds}
-                onSelectionChange={setSelectedAgentIds}
-                onOpenAgentInGrid={(id) => {
-                  setViewMode("grid");
-                  setSelectedAgentIds(new Set([id]));
-                  lastSelectedIdRef.current = id;
-                  window.setTimeout(() => scrollToAgent(id), 0);
-                }}
-              />
+            {shouldRenderGarden && (
+              <div
+                className={cachedCanvasPaneClass(viewMode === "garden")}
+                aria-hidden={viewMode !== "garden"}
+              >
+                <GardenView
+                  filteredAgents={filteredAgents}
+                  telemetry={telemetry}
+                  teams={teams}
+                  activeList={activeList}
+                  interactions={agentInteractions}
+                  selectedAgentIds={selectedAgentIds}
+                  offAgentIds={offAgentIds}
+                  onSelectionChange={setSelectedAgentIds}
+                  onOpenAgentInGrid={(id) => {
+                    setViewMode("grid");
+                    setSelectedAgentIds(new Set([id]));
+                    lastSelectedIdRef.current = id;
+                    window.setTimeout(() => scrollToAgent(id), 0);
+                  }}
+                />
+              </div>
             )}
 
             {viewMode === "grid" && (

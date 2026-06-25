@@ -36,7 +36,12 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const schedules = await invoke<WorkflowSchedule[]>('schedule_list');
-      set({ schedules: Array.isArray(schedules) ? schedules : [], loading: false });
+      const nextSchedules = Array.isArray(schedules) ? schedules : [];
+      if (workflowSchedulesEqual(get().schedules, nextSchedules)) {
+        set({ loading: false });
+        return;
+      }
+      set({ schedules: nextSchedules, loading: false });
     } catch (error) {
       set({ error: String(error), loading: false });
     }
@@ -102,3 +107,15 @@ export const useSchedulesStore = create<SchedulesState>((set, get) => ({
     }
   },
 }));
+
+function workflowSchedulesEqual(left: WorkflowSchedule[], right: WorkflowSchedule[]) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (workflowScheduleSignature(left[index]) !== workflowScheduleSignature(right[index])) return false;
+  }
+  return true;
+}
+
+function workflowScheduleSignature(schedule: WorkflowSchedule) {
+  return JSON.stringify(schedule);
+}

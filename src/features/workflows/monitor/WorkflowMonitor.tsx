@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ExternalLink, Pause, Pencil, Play, RotateCcw } from 'lucide-react';
 import { useSchedulesStore } from '../../../store/useSchedulesStore';
@@ -32,6 +33,18 @@ interface WorkflowActivity {
   issue: string | null;
 }
 
+export interface WorkflowMonitorModel {
+  activities: WorkflowActivity[];
+  historyRuns: RunSummary[];
+  upcomingSchedules: WorkflowSchedule[];
+  stats: {
+    failedCount: number;
+    runningCount: number;
+    awaitingCount: number;
+    pausedCount: number;
+  };
+}
+
 const FILTERS: Array<{ id: ActivityFilter; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'attention', label: 'Needs attention' },
@@ -49,6 +62,10 @@ const SECTION_LABELS: Record<ActivitySection, string> = {
 
 const SECTION_ORDER: ActivitySection[] = ['attention', 'running', 'scheduled', 'history'];
 const HISTORY_PAGE_SIZE = 10;
+const HISTORY_ROW_ESTIMATE_PX = 128;
+const HISTORY_OVERSCAN_ROWS = 6;
+const HISTORY_MAX_RENDERED_ROWS = 32;
+const HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX = 720;
 
 const toneClass: Record<ActivityTone, string> = {
   error: 'text-[var(--color-wardian-error)]',
@@ -70,6 +87,10 @@ const toneDotClass: Record<ActivityTone, string> = {
 
 const actionClass =
   'inline-flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]';
+const activityRowScrollStyle = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: '128px',
+} satisfies CSSProperties;
 
 export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorProps) {
   const schedules = useSchedulesStore((state) => state.schedules);
@@ -84,6 +105,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [filter, setFilter] = useState<ActivityFilter>('all');
   const [visibleOlderHistoryCount, setVisibleOlderHistoryCount] = useState(0);
+  const historyScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void load();
@@ -111,16 +133,11 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     };
   }, []);
 
-  const latestRuns = useMemo(() => latestRunPerBlueprint(runs), [runs]);
-  const upcomingSchedules = useMemo(
-    () => [...schedules]
-      .filter((schedule) => !schedule.is_paused && schedule.next_run_epoch_ms)
-      .sort((left, right) => (left.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER) - (right.next_run_epoch_ms ?? Number.MAX_SAFE_INTEGER)),
-    [schedules],
-  );
-  const activities = useMemo(() => buildActivities(runs, schedules), [runs, schedules]);
+  const monitorModel = useMemo(() => buildMonitorModel(runs, schedules), [runs, schedules]);
+  const upcomingSchedules = monitorModel.upcomingSchedules;
+  const activities = monitorModel.activities;
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
-  const historyRuns = useMemo(() => chronologicalHistoryRuns(runs), [runs]);
+  const historyRuns = monitorModel.historyRuns;
   const visibleHistoryLimit = Math.min(HISTORY_PAGE_SIZE + visibleOlderHistoryCount, historyRuns.length);
   const visibleHistoryRuns = useMemo(
     () => historyRuns.slice(0, visibleHistoryLimit),
@@ -133,13 +150,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     ? historyRuns.length > 0
     : visibleSections.some((section) => groupedActivities[section].length > 0);
 
-  const failedRuns = latestRuns.filter((run) => run.status === 'failed');
-  const failedRunBlueprintIds = new Set(failedRuns.map((run) => run.blueprint_id));
-  const failedCount = failedRuns.length
-    + schedules.filter((schedule) => schedule.last_run_status === 'failed' && !failedRunBlueprintIds.has(schedule.blueprint_id)).length;
-  const runningCount = runs.filter((run) => run.status === 'running').length;
-  const awaitingCount = runs.filter((run) => run.status === 'awaiting_approval').length;
-  const pausedCount = schedules.filter((schedule) => schedule.is_paused).length;
+  const { failedCount, runningCount, awaitingCount, pausedCount } = monitorModel.stats;
 
   return (
     <div
@@ -183,7 +194,11 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
           </div>
         </div>
 
-        <div className="min-h-0 overflow-y-auto p-3">
+        <div
+          ref={historyScrollRef}
+          data-testid="workflow-history-scroll"
+          className="min-h-0 flex-1 overflow-y-auto p-3"
+        >
           {visibleSections.map((section) => {
             const isHistorySection = historyFilterActive && section === 'history';
             const items = isHistorySection ? [] : groupedActivities[section];
@@ -197,6 +212,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
                 olderRuns={historyItems}
                 remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
                 agentLabels={agentLabels}
+                historyScrollRef={historyScrollRef}
                 onOpenRun={onOpenRun}
                 onPause={pause}
                 onResume={resume}
@@ -225,6 +241,7 @@ function ActivitySection({
   olderRuns,
   remainingOlderRuns,
   agentLabels,
+  historyScrollRef,
   onOpenRun,
   onPause,
   onResume,
@@ -239,6 +256,7 @@ function ActivitySection({
   olderRuns: RunSummary[];
   remainingOlderRuns: number;
   agentLabels: Record<string, string>;
+  historyScrollRef: RefObject<HTMLDivElement | null>;
   onOpenRun: (blueprintId: string, runId: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -270,19 +288,18 @@ function ActivitySection({
             onEditSchedule={onEditSchedule}
           />
         ))}
-        {olderRuns.map((run) => (
-          <ActivityRow
-            key={run.run_id}
-            activity={historyActivityFromRun(run)}
+        {olderRuns.length > 0 ? (
+          <VirtualHistoryRows
+            runs={olderRuns}
             agentLabels={agentLabels}
-            testId={`workflow-history-run-${run.run_id}`}
+            scrollContainerRef={historyScrollRef}
             onOpenRun={onOpenRun}
             onPause={onPause}
             onResume={onResume}
             onRunNow={onRunNow}
             onEditSchedule={onEditSchedule}
           />
-        ))}
+        ) : null}
         {remainingOlderRuns > 0 || canResetOlderRuns ? (
           <div className="flex flex-wrap items-center justify-center gap-2 border-t border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2">
             {remainingOlderRuns > 0 ? (
@@ -308,6 +325,117 @@ function ActivitySection({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function VirtualHistoryRows({
+  runs,
+  agentLabels,
+  scrollContainerRef,
+  onOpenRun,
+  onPause,
+  onResume,
+  onRunNow,
+  onEditSchedule,
+}: {
+  runs: RunSummary[];
+  agentLabels: Record<string, string>;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
+  onOpenRun: (blueprintId: string, runId: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onRunNow: (id: string) => void;
+  onEditSchedule: (schedule: WorkflowSchedule) => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<number | null>(null);
+  const [viewportState, setViewportState] = useState({
+    scrollTop: 0,
+    viewportHeight: HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
+    listTop: 0,
+  });
+
+  const updateViewportState = useCallback(() => {
+    const scroller = scrollContainerRef.current;
+    const nextState = {
+      scrollTop: scroller?.scrollTop ?? 0,
+      viewportHeight: scroller?.clientHeight || HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
+      listTop: listRef.current?.offsetTop ?? 0,
+    };
+    setViewportState((previous) => (
+      previous.scrollTop === nextState.scrollTop
+      && previous.viewportHeight === nextState.viewportHeight
+      && previous.listTop === nextState.listTop
+        ? previous
+        : nextState
+    ));
+  }, [scrollContainerRef]);
+
+  const scheduleViewportStateUpdate = useCallback(() => {
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      updateViewportState();
+    });
+  }, [updateViewportState]);
+
+  useEffect(() => {
+    updateViewportState();
+    const scroller = scrollContainerRef.current;
+    if (!scroller) return undefined;
+
+    scroller.addEventListener('scroll', scheduleViewportStateUpdate, { passive: true });
+    window.addEventListener('resize', scheduleViewportStateUpdate);
+
+    return () => {
+      scroller.removeEventListener('scroll', scheduleViewportStateUpdate);
+      window.removeEventListener('resize', scheduleViewportStateUpdate);
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+  }, [runs.length, scheduleViewportStateUpdate, scrollContainerRef, updateViewportState]);
+
+  const relativeScrollTop = Math.max(0, viewportState.scrollTop - viewportState.listTop);
+  const firstIndex = Math.max(0, Math.floor(relativeScrollTop / HISTORY_ROW_ESTIMATE_PX) - HISTORY_OVERSCAN_ROWS);
+  const visibleCount = Math.min(
+    HISTORY_MAX_RENDERED_ROWS,
+    Math.ceil(viewportState.viewportHeight / HISTORY_ROW_ESTIMATE_PX) + HISTORY_OVERSCAN_ROWS * 2,
+  );
+  const lastIndex = Math.min(runs.length, firstIndex + visibleCount);
+  const visibleRuns = runs.slice(firstIndex, lastIndex).slice(0, HISTORY_MAX_RENDERED_ROWS);
+
+  return (
+    <div
+      ref={listRef}
+      data-testid="workflow-history-virtual-list"
+      data-rendered-count={visibleRuns.length}
+      className="relative"
+      style={{ height: runs.length * HISTORY_ROW_ESTIMATE_PX }}
+    >
+      {visibleRuns.map((run, index) => {
+        const runIndex = firstIndex + index;
+        return (
+          <div
+            key={run.run_id}
+            className="absolute left-0 right-0"
+            style={{ top: runIndex * HISTORY_ROW_ESTIMATE_PX }}
+          >
+            <ActivityRow
+              activity={historyActivityFromRun(run)}
+              agentLabels={agentLabels}
+              testId={`workflow-history-run-${run.run_id}`}
+              onOpenRun={onOpenRun}
+              onPause={onPause}
+              onResume={onResume}
+              onRunNow={onRunNow}
+              onEditSchedule={onEditSchedule}
+            />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -341,6 +469,7 @@ function ActivityRow({
     <div
       data-testid={testId ?? `workflow-activity-row-${activity.blueprintId}`}
       className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] p-3 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
+      style={activityRowScrollStyle}
     >
       <div className="min-w-[180px] flex-[1.4_1_220px]">
         <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
@@ -444,23 +573,69 @@ function ActivityRow({
   );
 }
 
-function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowActivity[] {
+export function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowActivity[] {
+  return buildMonitorModel(runs, schedules).activities;
+}
+
+export function buildMonitorModel(runs: RunSummary[], schedules: WorkflowSchedule[]): WorkflowMonitorModel {
   const activities: WorkflowActivity[] = [];
-  const activeRuns = runs
-    .filter((run) => run.status === 'running' || run.status === 'awaiting_approval')
-    .sort(compareRunRecency);
-  const activeBlueprintIds = new Set(activeRuns.map((run) => run.blueprint_id));
-  const activeScheduleIds = new Set(activeRuns.map((run) => run.schedule_id).filter(isPresent));
-  const scheduleBlueprintIds = new Set(schedules.map((schedule) => schedule.blueprint_id));
-  const scheduleCounts = schedules.reduce<Record<string, number>>((counts, schedule) => {
-    counts[schedule.blueprint_id] = (counts[schedule.blueprint_id] ?? 0) + 1;
-    return counts;
-  }, {});
+  const historyRuns: RunSummary[] = [];
+  const upcomingSchedules: WorkflowSchedule[] = [];
+  const activeRuns: RunSummary[] = [];
+  const activeBlueprintIds = new Set<string>();
+  const activeScheduleIds = new Set<string>();
+  const scheduleBlueprintIds = new Set<string>();
+  const manualBlueprintIds = new Set<string>();
+  const scheduleCounts = new Map<string, number>();
+  const schedulesByBlueprint = new Map<string, WorkflowSchedule[]>();
+  const latestRunByBlueprint = new Map<string, RunSummary>();
+  const latestScheduledRunBySchedule = new Map<string, RunSummary>();
+  const latestUnscheduledRunByBlueprint = new Map<string, RunSummary>();
+  let runningCount = 0;
+  let awaitingCount = 0;
+  let pausedCount = 0;
+
+  for (const schedule of schedules) {
+    scheduleBlueprintIds.add(schedule.blueprint_id);
+    if (schedule.is_paused) pausedCount += 1;
+    if (!schedule.is_paused && schedule.next_run_epoch_ms) upcomingSchedules.push(schedule);
+    scheduleCounts.set(schedule.blueprint_id, (scheduleCounts.get(schedule.blueprint_id) ?? 0) + 1);
+    const blueprintSchedules = schedulesByBlueprint.get(schedule.blueprint_id) ?? [];
+    blueprintSchedules.push(schedule);
+    schedulesByBlueprint.set(schedule.blueprint_id, blueprintSchedules);
+  }
+
+  upcomingSchedules.sort(compareScheduleRecency);
+
+  for (const blueprintSchedules of schedulesByBlueprint.values()) {
+    blueprintSchedules.sort(compareScheduleRecency);
+  }
+
+  for (const run of runs) {
+    manualBlueprintIds.add(run.blueprint_id);
+    setLatestRun(latestRunByBlueprint, run.blueprint_id, run);
+    if (run.status !== 'running' && run.status !== 'awaiting_approval') {
+      historyRuns.push(run);
+    }
+    if (run.schedule_id) {
+      setLatestRun(latestScheduledRunBySchedule, run.schedule_id, run);
+    } else {
+      setLatestRun(latestUnscheduledRunByBlueprint, run.blueprint_id, run);
+    }
+    if (run.status === 'running' || run.status === 'awaiting_approval') {
+      if (run.status === 'running') runningCount += 1;
+      if (run.status === 'awaiting_approval') awaitingCount += 1;
+      activeRuns.push(run);
+      activeBlueprintIds.add(run.blueprint_id);
+      if (run.schedule_id) activeScheduleIds.add(run.schedule_id);
+    }
+  }
+
+  activeRuns.sort(compareRunRecency);
+  historyRuns.sort(compareRunRecency);
 
   for (const run of activeRuns) {
-    const workflowSchedules = schedules
-      .filter((schedule) => schedule.blueprint_id === run.blueprint_id)
-      .sort(compareScheduleRecency);
+    const workflowSchedules = schedulesByBlueprint.get(run.blueprint_id) ?? [];
     const matchingSchedule = run.schedule_id
       ? workflowSchedules.find((schedule) => schedule.id === run.schedule_id) ?? null
       : null;
@@ -478,9 +653,14 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
 
   for (const schedule of schedules) {
     if (activeScheduleIds.has(schedule.id)) continue;
-    if (activeBlueprintIds.has(schedule.blueprint_id) && scheduleCounts[schedule.blueprint_id] === 1) continue;
-    const workflowRuns = runs.filter((run) => runBelongsToSchedule(run, schedule, scheduleCounts[schedule.blueprint_id] ?? 0));
-    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
+    const scheduleCount = scheduleCounts.get(schedule.blueprint_id) ?? 0;
+    if (activeBlueprintIds.has(schedule.blueprint_id) && scheduleCount === 1) continue;
+    const latestRun = latestRunForSchedule(
+      schedule,
+      scheduleCount,
+      latestScheduledRunBySchedule,
+      latestUnscheduledRunByBlueprint,
+    );
     activities.push(activityFromParts({
       activityId: `schedule:${schedule.id}`,
       blueprintId: schedule.blueprint_id,
@@ -492,11 +672,9 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     }));
   }
 
-  const manualBlueprintIds = new Set(runs.map((run) => run.blueprint_id));
   for (const blueprintId of manualBlueprintIds) {
     if (activeBlueprintIds.has(blueprintId) || scheduleBlueprintIds.has(blueprintId)) continue;
-    const workflowRuns = runs.filter((run) => run.blueprint_id === blueprintId);
-    const latestRun = workflowRuns.sort(compareRunRecency)[0] ?? null;
+    const latestRun = latestRunByBlueprint.get(blueprintId) ?? null;
     activities.push(activityFromParts({
       activityId: `workflow:${blueprintId}`,
       blueprintId,
@@ -508,17 +686,54 @@ function buildActivities(runs: RunSummary[], schedules: WorkflowSchedule[]): Wor
     }));
   }
 
-  return activities.sort(compareActivities);
+  const failedRunBlueprintIds = new Set<string>();
+  let failedCount = 0;
+  for (const run of latestRunByBlueprint.values()) {
+    if (run.status !== 'failed') continue;
+    failedCount += 1;
+    failedRunBlueprintIds.add(run.blueprint_id);
+  }
+  for (const schedule of schedules) {
+    if (schedule.last_run_status === 'failed' && !failedRunBlueprintIds.has(schedule.blueprint_id)) {
+      failedCount += 1;
+    }
+  }
+
+  return {
+    activities: activities.sort(compareActivities),
+    historyRuns,
+    upcomingSchedules,
+    stats: {
+      failedCount,
+      runningCount,
+      awaitingCount,
+      pausedCount,
+    },
+  };
 }
 
-function runBelongsToSchedule(run: RunSummary, schedule: WorkflowSchedule, scheduleCount: number) {
-  if (run.blueprint_id !== schedule.blueprint_id) return false;
-  if (run.schedule_id) return run.schedule_id === schedule.id;
-  return scheduleCount === 1;
+function latestRunForSchedule(
+  schedule: WorkflowSchedule,
+  scheduleCount: number,
+  latestScheduledRunBySchedule: Map<string, RunSummary>,
+  latestUnscheduledRunByBlueprint: Map<string, RunSummary>,
+) {
+  const latestScheduledRun = latestScheduledRunBySchedule.get(schedule.id) ?? null;
+  if (scheduleCount !== 1) return latestScheduledRun;
+  return mostRecentRun(latestScheduledRun, latestUnscheduledRunByBlueprint.get(schedule.blueprint_id) ?? null);
 }
 
-function isPresent<T>(value: T | null | undefined): value is T {
-  return value !== null && value !== undefined;
+function setLatestRun(target: Map<string, RunSummary>, key: string, run: RunSummary) {
+  const current = target.get(key);
+  if (!current || compareRunRecency(run, current) < 0) {
+    target.set(key, run);
+  }
+}
+
+function mostRecentRun(left: RunSummary | null, right: RunSummary | null) {
+  if (!left) return right;
+  if (!right) return left;
+  return compareRunRecency(left, right) <= 0 ? left : right;
 }
 
 function activityFromParts(parts: {
@@ -655,23 +870,6 @@ function agentLabelMap(agents: AgentConfig[]) {
 function providerLabel(provider: string) {
   if (provider.toLowerCase() === 'opencode') return 'OpenCode';
   return provider.charAt(0).toUpperCase() + provider.slice(1);
-}
-
-function latestRunPerBlueprint(runs: RunSummary[]) {
-  const latest = new Map<string, RunSummary>();
-  for (const run of runs) {
-    const current = latest.get(run.blueprint_id);
-    if (!current || compareRunRecency(run, current) < 0) {
-      latest.set(run.blueprint_id, run);
-    }
-  }
-  return [...latest.values()];
-}
-
-function chronologicalHistoryRuns(runs: RunSummary[]) {
-  return runs
-    .filter((run) => run.status !== 'running' && run.status !== 'awaiting_approval')
-    .sort(compareRunRecency);
 }
 
 function compareRunRecency(left: RunSummary, right: RunSummary) {
