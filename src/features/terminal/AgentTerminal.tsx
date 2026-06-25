@@ -15,7 +15,12 @@ import {
   stripProviderTerminalReportInputs,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
-import { installTerminalLinkProvider } from "./terminalLinks";
+import {
+  getTerminalLinksForBufferLine,
+  installTerminalLinkProvider,
+  type TerminalLinkProviderOptions,
+  type TerminalProviderLinkSnapshot,
+} from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AgentConfig } from "../../types";
@@ -61,6 +66,7 @@ type TerminalRendererEntry = {
   webglAddon: WebglAddon | null;
   webglAttempted: boolean;
   host: HTMLDivElement;
+  terminalLinkOptions: TerminalLinkProviderOptions;
   // Pixel-perfect still of the last WebGL frame, overlaid while the terminal
   // is demoted to the DOM renderer. Strictly cosmetic (pointer-events: none);
   // removed on promotion or when fresh output arrives.
@@ -246,6 +252,7 @@ declare global {
         recentWritePreviews: string[];
         recentNormalizedWritePreviews: string[];
       } | null;
+      terminalLinks: (sessionId: string, bufferLineNumber: number) => Promise<TerminalProviderLinkSnapshot[] | null>;
       rawOutputLog: (sessionId: string) => string[] | null;
     };
   }
@@ -425,6 +432,14 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
       rawOutputLog: (sessionId: string) => {
         const entry = terminalSessionMap.get(sessionId);
         return entry ? [...entry.rawOutputLog] : null;
+      },
+      terminalLinks: async (sessionId: string, bufferLineNumber: number) => {
+        const entry = terminalSessionMap.get(sessionId);
+        const renderer = entry?.renderer;
+        if (!renderer) {
+          return null;
+        }
+        return getTerminalLinksForBufferLine(renderer.term, bufferLineNumber, renderer.terminalLinkOptions);
       },
     }),
   });
@@ -1865,7 +1880,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     applyProviderTerminalOptions(term, entry.provider);
   }
   installConservativeTerminalShortcuts(term);
-  installTerminalLinkProvider(term, {
+  const terminalLinkOptions: TerminalLinkProviderOptions = {
     getBasePath: () => entry.terminalLinkContextRef.current.basePath,
     getExternalEditor: () => {
       const { externalEditor, externalEditorCustomExecutable } = useSettingsStore.getState();
@@ -1877,7 +1892,8 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     onOpenError: (message) => {
       entry.terminalLinkContextRef.current.onOpenError?.(message);
     },
-  });
+  };
+  installTerminalLinkProvider(term, terminalLinkOptions);
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -1915,6 +1931,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     webglAddon: null,
     webglAttempted: false,
     host,
+    terminalLinkOptions,
     snapshotOverlay: null,
   };
 

@@ -56,10 +56,11 @@ management:
 - **Delete**: Permanently removes the file or directory from your disk (requires confirmation).
 
 Agent terminals and the bottom user terminal also make recognized file paths and
-URLs clickable. File paths use the same Explorer external editor preference as
-**Open in External App**; URLs open as URLs. Wardian validates terminal file
-links before showing them, so slash-looking command names or prose fragments are
-ignored unless they resolve to a real file or folder.
+URLs clickable, including links that wrap across terminal rows. File paths use
+the same Explorer external editor preference as **Open in External App**; URLs
+open as URLs. Wardian validates terminal file links before showing them, so
+slash-looking command names or prose fragments are ignored unless they resolve
+to a real file or folder.
 
 ## Git Status Markers
 
