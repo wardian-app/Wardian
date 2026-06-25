@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkflowMonitor, buildActivities, buildMonitorModel } from './WorkflowMonitor';
 import type { RunSummary } from '../run/runTypes';
@@ -628,7 +628,7 @@ describe('WorkflowMonitor', () => {
     });
   });
 
-  it('keeps expanded history rendering bounded', () => {
+  it('keeps expanded history rendering bounded', async () => {
     runState.runs = Array.from({ length: 60 }, (_, index) => ({
       run_id: `run-${String(index + 1).padStart(3, '0')}`,
       blueprint_id: 'audit',
@@ -652,7 +652,32 @@ describe('WorkflowMonitor', () => {
       target: { scrollTop: 40 * 128 },
     });
 
-    expect(screen.getByText('run-041')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
+    expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
+  });
+
+  it('defers history virtual-row recalculation out of the scroll event', async () => {
+    runState.runs = Array.from({ length: 60 }, (_, index) => ({
+      run_id: `run-${String(index + 1).padStart(3, '0')}`,
+      blueprint_id: 'audit',
+      status: 'completed' as const,
+      node_count: 2,
+      path: `/runs/${index + 1}`,
+      updated_at: `2026-06-01T${String(23 - Math.floor(index / 8)).padStart(2, '0')}:${String(59 - (index % 8)).padStart(2, '0')}:00Z`,
+    }));
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    for (let i = 0; i < 5; i += 1) {
+      fireEvent.click(screen.getByRole('button', { name: /show .*older/i }));
+    }
+
+    const scroller = screen.getByTestId('workflow-history-scroll');
+    fireEvent.scroll(scroller, { target: { scrollTop: 40 * 128 } });
+
+    expect(screen.queryByText('run-041')).toBeNull();
+    await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
   });
 

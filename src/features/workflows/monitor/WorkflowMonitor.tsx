@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ExternalLink, Pause, Pencil, Play, RotateCcw } from 'lucide-react';
 import { useSchedulesStore } from '../../../store/useSchedulesStore';
@@ -106,10 +106,6 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   const [filter, setFilter] = useState<ActivityFilter>('all');
   const [visibleOlderHistoryCount, setVisibleOlderHistoryCount] = useState(0);
   const historyScrollRef = useRef<HTMLDivElement>(null);
-  const [historyScrollState, setHistoryScrollState] = useState({
-    scrollTop: 0,
-    viewportHeight: HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
-  });
 
   useEffect(() => {
     void load();
@@ -155,18 +151,6 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     : visibleSections.some((section) => groupedActivities[section].length > 0);
 
   const { failedCount, runningCount, awaitingCount, pausedCount } = monitorModel.stats;
-  const updateHistoryScrollState = () => {
-    const scroller = historyScrollRef.current;
-    if (!scroller) return;
-    setHistoryScrollState({
-      scrollTop: scroller.scrollTop,
-      viewportHeight: scroller.clientHeight || HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
-    });
-  };
-
-  useEffect(() => {
-    updateHistoryScrollState();
-  }, [filter, historyRuns.length, visibleHistoryLimit]);
 
   return (
     <div
@@ -214,7 +198,6 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
           ref={historyScrollRef}
           data-testid="workflow-history-scroll"
           className="min-h-0 flex-1 overflow-y-auto p-3"
-          onScroll={updateHistoryScrollState}
         >
           {visibleSections.map((section) => {
             const isHistorySection = historyFilterActive && section === 'history';
@@ -229,8 +212,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
                 olderRuns={historyItems}
                 remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
                 agentLabels={agentLabels}
-                historyScrollTop={historyScrollState.scrollTop}
-                historyViewportHeight={historyScrollState.viewportHeight}
+                historyScrollRef={historyScrollRef}
                 onOpenRun={onOpenRun}
                 onPause={pause}
                 onResume={resume}
@@ -259,8 +241,7 @@ function ActivitySection({
   olderRuns,
   remainingOlderRuns,
   agentLabels,
-  historyScrollTop,
-  historyViewportHeight,
+  historyScrollRef,
   onOpenRun,
   onPause,
   onResume,
@@ -275,8 +256,7 @@ function ActivitySection({
   olderRuns: RunSummary[];
   remainingOlderRuns: number;
   agentLabels: Record<string, string>;
-  historyScrollTop: number;
-  historyViewportHeight: number;
+  historyScrollRef: RefObject<HTMLDivElement | null>;
   onOpenRun: (blueprintId: string, runId: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -312,8 +292,7 @@ function ActivitySection({
           <VirtualHistoryRows
             runs={olderRuns}
             agentLabels={agentLabels}
-            scrollTop={historyScrollTop}
-            viewportHeight={historyViewportHeight}
+            scrollContainerRef={historyScrollRef}
             onOpenRun={onOpenRun}
             onPause={onPause}
             onResume={onResume}
@@ -352,8 +331,7 @@ function ActivitySection({
 function VirtualHistoryRows({
   runs,
   agentLabels,
-  scrollTop,
-  viewportHeight,
+  scrollContainerRef,
   onOpenRun,
   onPause,
   onResume,
@@ -362,8 +340,7 @@ function VirtualHistoryRows({
 }: {
   runs: RunSummary[];
   agentLabels: Record<string, string>;
-  scrollTop: number;
-  viewportHeight: number;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
   onOpenRun: (blueprintId: string, runId: string) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -371,17 +348,60 @@ function VirtualHistoryRows({
   onEditSchedule: (schedule: WorkflowSchedule) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
-  const [listTop, setListTop] = useState(0);
+  const frameRef = useRef<number | null>(null);
+  const [viewportState, setViewportState] = useState({
+    scrollTop: 0,
+    viewportHeight: HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
+    listTop: 0,
+  });
+
+  const updateViewportState = useCallback(() => {
+    const scroller = scrollContainerRef.current;
+    const nextState = {
+      scrollTop: scroller?.scrollTop ?? 0,
+      viewportHeight: scroller?.clientHeight || HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX,
+      listTop: listRef.current?.offsetTop ?? 0,
+    };
+    setViewportState((previous) => (
+      previous.scrollTop === nextState.scrollTop
+      && previous.viewportHeight === nextState.viewportHeight
+      && previous.listTop === nextState.listTop
+        ? previous
+        : nextState
+    ));
+  }, [scrollContainerRef]);
+
+  const scheduleViewportStateUpdate = useCallback(() => {
+    if (frameRef.current !== null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      updateViewportState();
+    });
+  }, [updateViewportState]);
 
   useEffect(() => {
-    setListTop(listRef.current?.offsetTop ?? 0);
-  }, [runs.length]);
+    updateViewportState();
+    const scroller = scrollContainerRef.current;
+    if (!scroller) return undefined;
 
-  const relativeScrollTop = Math.max(0, scrollTop - listTop);
+    scroller.addEventListener('scroll', scheduleViewportStateUpdate, { passive: true });
+    window.addEventListener('resize', scheduleViewportStateUpdate);
+
+    return () => {
+      scroller.removeEventListener('scroll', scheduleViewportStateUpdate);
+      window.removeEventListener('resize', scheduleViewportStateUpdate);
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+  }, [runs.length, scheduleViewportStateUpdate, scrollContainerRef, updateViewportState]);
+
+  const relativeScrollTop = Math.max(0, viewportState.scrollTop - viewportState.listTop);
   const firstIndex = Math.max(0, Math.floor(relativeScrollTop / HISTORY_ROW_ESTIMATE_PX) - HISTORY_OVERSCAN_ROWS);
   const visibleCount = Math.min(
     HISTORY_MAX_RENDERED_ROWS,
-    Math.ceil(viewportHeight / HISTORY_ROW_ESTIMATE_PX) + HISTORY_OVERSCAN_ROWS * 2,
+    Math.ceil(viewportState.viewportHeight / HISTORY_ROW_ESTIMATE_PX) + HISTORY_OVERSCAN_ROWS * 2,
   );
   const lastIndex = Math.min(runs.length, firstIndex + visibleCount);
   const visibleRuns = runs.slice(firstIndex, lastIndex).slice(0, HISTORY_MAX_RENDERED_ROWS);

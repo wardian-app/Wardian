@@ -1,6 +1,9 @@
 use crate::{state::AppState, workflow::runs};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use wardian_core::control::WorkflowRunResponse;
 use wardian_core::engine::store::{read_checkpoint, read_events};
@@ -8,6 +11,8 @@ use wardian_core::engine::RunStatus;
 use wardian_core::models::{InvocationKind, WorkflowAssignments, WorkflowSchedule};
 use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
 use wardian_core::workflow::{self, Blueprint};
+
+const WORKFLOW_EVENTS_FILE: &str = "events.jsonl";
 
 /// Parse + validate a blueprint `.md` at `path`. Returns the structured graph
 /// and any diagnostics (parse errors surface as an Err string).
@@ -59,12 +64,23 @@ pub fn workflow_list_blueprints() -> Result<Vec<serde_json::Value>, String> {
 #[tauri::command]
 pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
     let root = wardian_core::paths::workflow_runs_dir().ok_or("no wardian home")?;
+    workflow_list_runs_from_root(&root, resolve_blueprint_path)
+}
+
+fn workflow_list_runs_from_root<F>(
+    root: &Path,
+    mut resolve_blueprint_path: F,
+) -> Result<Vec<serde_json::Value>, String>
+where
+    F: FnMut(&str) -> Option<PathBuf>,
+{
     let mut out = Vec::new();
     if !root.exists() {
         return Ok(out);
     }
+    let mut blueprint_paths: HashMap<String, Option<PathBuf>> = HashMap::new();
 
-    for bp in std::fs::read_dir(&root)
+    for bp in std::fs::read_dir(root)
         .map_err(|e| e.to_string())?
         .flatten()
     {
@@ -79,9 +95,17 @@ pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
             if !dir.is_dir() {
                 continue;
             }
-            if let Some(summary) = summarize_run_dir(&dir) {
-                out.push(summary);
-            }
+            let Some(state) = read_checkpoint(&dir).ok().flatten() else {
+                continue;
+            };
+            let blueprint_path = blueprint_paths
+                .entry(state.blueprint_id.clone())
+                .or_insert_with(|| resolve_blueprint_path(&state.blueprint_id));
+            out.push(run_summary_from_state(
+                &dir,
+                state,
+                blueprint_path.as_deref(),
+            ));
         }
     }
 
@@ -98,23 +122,34 @@ pub fn workflow_list_runs() -> Result<Vec<serde_json::Value>, String> {
     Ok(out)
 }
 
-fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
+#[cfg(test)]
+fn summarize_run_dir(dir: &Path) -> Option<serde_json::Value> {
     let state = read_checkpoint(dir).ok().flatten()?;
-    let events = read_events(dir).unwrap_or_default();
-    let started_at = events.first().map(|event| event.ts.clone());
-    let updated_at = events.last().map(|event| event.ts.clone());
+    let blueprint_path = resolve_blueprint_path(&state.blueprint_id);
+    Some(run_summary_from_state(
+        dir,
+        state,
+        blueprint_path.as_deref(),
+    ))
+}
+
+fn run_summary_from_state(
+    dir: &Path,
+    state: wardian_core::engine::RunState,
+    blueprint_path: Option<&Path>,
+) -> serde_json::Value {
+    let (started_at, updated_at) = event_log_timestamp_bounds(dir);
     let completed_at = match state.status {
         RunStatus::Completed => updated_at.clone(),
         RunStatus::Running | RunStatus::AwaitingApproval | RunStatus::Failed => None,
     };
-    let blueprint_path =
-        resolve_blueprint_path(&state.blueprint_id).map(|path| path.to_string_lossy().to_string());
+    let blueprint_path = blueprint_path.map(|path| path.to_string_lossy().to_string());
     let schedule_id = runs::read_run_invocation(dir)
         .ok()
         .flatten()
         .and_then(|invocation| invocation.schedule_id);
 
-    Some(serde_json::json!({
+    serde_json::json!({
         "run_id": state.run_id,
         "blueprint_id": state.blueprint_id,
         "schedule_id": schedule_id,
@@ -126,7 +161,67 @@ fn summarize_run_dir(dir: &std::path::Path) -> Option<serde_json::Value> {
         "started_at": started_at,
         "updated_at": updated_at,
         "completed_at": completed_at,
-    }))
+    })
+}
+
+fn event_log_timestamp_bounds(dir: &Path) -> (Option<String>, Option<String>) {
+    let path = dir.join(WORKFLOW_EVENTS_FILE);
+    if !path.exists() {
+        return (None, None);
+    }
+
+    let started_at = first_event_timestamp(&path);
+    let updated_at = last_event_timestamp(&path).or_else(|| started_at.clone());
+    (started_at, updated_at)
+}
+
+fn first_event_timestamp(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    for line in BufReader::new(file).lines() {
+        let line = line.ok()?;
+        if let Some(timestamp) = timestamp_from_event_line(&line) {
+            return Some(timestamp);
+        }
+    }
+    None
+}
+
+fn last_event_timestamp(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut remaining = file.metadata().ok()?.len();
+    let mut tail = Vec::new();
+    let mut chunk = [0_u8; 8192];
+
+    while remaining > 0 {
+        let read_len = remaining.min(chunk.len() as u64) as usize;
+        remaining -= read_len as u64;
+        file.seek(SeekFrom::Start(remaining)).ok()?;
+        file.read_exact(&mut chunk[..read_len]).ok()?;
+
+        let mut combined = Vec::with_capacity(read_len + tail.len());
+        combined.extend_from_slice(&chunk[..read_len]);
+        combined.extend_from_slice(&tail);
+        tail = combined;
+
+        while matches!(tail.last(), Some(b'\n' | b'\r' | b' ' | b'\t')) {
+            tail.pop();
+        }
+        if let Some(newline_index) = tail.iter().rposition(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&tail[newline_index + 1..]);
+            if let Some(timestamp) = timestamp_from_event_line(line.trim()) {
+                return Some(timestamp);
+            }
+            tail.truncate(newline_index);
+        }
+    }
+
+    let line = String::from_utf8_lossy(&tail);
+    timestamp_from_event_line(line.trim())
+}
+
+fn timestamp_from_event_line(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    value.get("ts").and_then(Value::as_str).map(str::to_string)
 }
 
 /// Read one run: its RunState checkpoint, full event trace, and optional blueprint.
@@ -783,6 +878,68 @@ edges:
         assert_eq!(summary["started_at"], "2026-05-31T12:00:00Z");
         assert_eq!(summary["updated_at"], "2026-05-31T12:01:00Z");
         assert_eq!(summary["completed_at"], "2026-05-31T12:01:00Z");
+    }
+
+    #[test]
+    fn run_summary_reads_event_timestamp_bounds_without_full_event_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("wf").join("run-1");
+        let mut state = RunState::new("run-1", "wf");
+        state.status = RunStatus::Completed;
+        write_checkpoint(&run_root, &state).unwrap();
+        std::fs::write(
+            run_root.join("events.jsonl"),
+            r#"{"seq":0,"ts":"2026-05-31T12:00:00Z","kind":"run_started","blueprint_id":"wf","schema":2,"trigger":{}}
+{"seq":1,"ts":"2026-05-31T12:00:30Z","kind":"node_completed","node":"large","output":
+{"seq":2,"ts":"2026-05-31T12:01:00Z","kind":"run_completed"}
+"#,
+        )
+        .unwrap();
+
+        let summary = summarize_run_dir(&run_root).unwrap();
+
+        assert_eq!(summary["started_at"], "2026-05-31T12:00:00Z");
+        assert_eq!(summary["updated_at"], "2026-05-31T12:01:00Z");
+        assert_eq!(summary["completed_at"], "2026-05-31T12:01:00Z");
+    }
+
+    #[test]
+    fn workflow_run_listing_resolves_blueprint_paths_once_per_blueprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("logs").join("workflows");
+        for index in 0..3 {
+            let run_root = root.join("wf").join(format!("run-{index}"));
+            let mut state = RunState::new(format!("run-{index}"), "wf");
+            state.status = RunStatus::Completed;
+            write_checkpoint(&run_root, &state).unwrap();
+            append_event(
+                &run_root,
+                &Event::at(
+                    0,
+                    format!("2026-05-31T12:0{index}:00Z"),
+                    EventKind::RunCompleted,
+                ),
+            )
+            .unwrap();
+        }
+        let resolve_count = std::cell::Cell::new(0);
+
+        let runs = workflow_list_runs_from_root(&root, |blueprint_id| {
+            resolve_count.set(resolve_count.get() + 1);
+            Some(
+                dir.path()
+                    .join("library")
+                    .join("workflows")
+                    .join(format!("{blueprint_id}.md")),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(runs.len(), 3);
+        assert_eq!(resolve_count.get(), 1);
+        assert!(runs.iter().all(|run| run["blueprint_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("wf.md"))));
     }
 
     #[test]
