@@ -166,6 +166,7 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("terminal ready from e2e")).toBeVisible();
+  await captureFeatureScreenshot("terminal-detail.png", page.locator('[data-testid="remote-agent-detail"]'));
   await expect.poll(() => statusStream !== null).toBe(true);
   statusStream?.send(
     JSON.stringify({

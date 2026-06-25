@@ -140,6 +140,7 @@ describe("RemoteMobileApp", () => {
       value: { writeText: clipboardWriteTextMock },
     });
     vi.mocked(Terminal).mockImplementation(function MockTerminal(options) {
+      const textarea = document.createElement("textarea");
       return {
         open: vi.fn(),
         write: vi.fn(),
@@ -159,6 +160,7 @@ describe("RemoteMobileApp", () => {
         scrollLines: vi.fn(),
         scrollToBottom: vi.fn(),
         scrollToTop: vi.fn(),
+        textarea,
         options: { ...(options ?? {}) },
         cols: 80,
         rows: 24,
@@ -908,12 +910,11 @@ describe("RemoteMobileApp", () => {
     expect(terminalCalls).toBe(0);
     const terminalHost = screen.getByTestId("remote-terminal-attach");
     expect(terminalHost).toBeVisible();
-    expect(terminalHost).toHaveClass("remote-terminal-hide-composition");
+    expect(terminalHost).toHaveClass("remote-terminal-input-guard", "remote-terminal-hide-composition", "overflow-hidden");
     expect(screen.getByTestId("remote-agent-detail")).toHaveClass("h-dvh", "overflow-hidden");
     expect(screen.getByRole("region", { name: "Coder terminal" })).toHaveClass("flex", "min-h-0", "flex-col", "overflow-hidden");
     expect(screen.getByTestId("remote-terminal-scroll-surface")).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
     expect(screen.getByTestId("remote-terminal-scroll-surface")).not.toHaveClass("h-full");
-    expect(terminalHost).not.toHaveClass("overflow-hidden");
     expect(terminalHost).not.toHaveClass("min-h-[280px]");
     const terminalCallsForOptions = vi.mocked(Terminal).mock.calls;
     const terminalOptions = terminalCallsForOptions[terminalCallsForOptions.length - 1]?.[0] as Record<string, unknown> | undefined;
@@ -2581,6 +2582,55 @@ describe("RemoteMobileApp", () => {
 
     const sentAfterColorReply = terminalSocket?.sent.slice(sentBeforeColorReply).map((payload) => JSON.parse(payload));
     expect(sentAfterColorReply).toEqual([{ type: "input", data: "ls -la\r" }]);
+  });
+
+  it("forwards only the new suffix from cumulative mobile composition input frames", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalSocket = MockWebSocket.instances[1];
+    const terminalInstance = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find((value) => value?.onData?.mock && value?.textarea) as {
+      onData: ReturnType<typeof vi.fn>;
+      textarea: HTMLTextAreaElement;
+    };
+    const onData = terminalInstance.onData.mock.calls[0]?.[0] as ((data: string) => void) | undefined;
+
+    act(() => {
+      terminalSocket?.emit("open");
+      terminalSocket?.emit("message", {
+        data: JSON.stringify({
+          type: "snapshot",
+          attachment_id: "attach-1",
+          owner_attachment_id: "attach-1",
+          cols: 80,
+          rows: 24,
+          state_base64: btoa("ready"),
+        }),
+      });
+    });
+    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+
+    const sentBeforeTyping = terminalSocket?.sent.length ?? 0;
+    act(() => {
+      terminalInstance.textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+      terminalInstance.textarea.dispatchEvent(new CompositionEvent("compositionend"));
+      onData?.("h");
+      onData?.("he");
+      onData?.("hel");
+    });
+
+    const sentAfterTyping = terminalSocket?.sent.slice(sentBeforeTyping).map((payload) => JSON.parse(payload));
+    expect(sentAfterTyping).toEqual([
+      { type: "input", data: "h" },
+      { type: "input", data: "e" },
+      { type: "input", data: "l" },
+    ]);
   });
 
   it("normalizes OpenCode synchronized-output noise from remote terminal live updates", async () => {
