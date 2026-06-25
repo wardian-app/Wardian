@@ -5,7 +5,6 @@ import {
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
   stripTerminalColorReportInputs,
-  type AntigravityRenderState,
   type TerminalCapabilityContext,
 } from "./terminalCapabilities";
 
@@ -62,31 +61,20 @@ describe("terminal capability broker", () => {
     expect(plan.focusReported).toBe(true);
   });
 
-  it("brightens Antigravity primary response text without rewriting explicit gray UI colors", () => {
+  it("leaves Antigravity primary response text unchanged", () => {
     const output =
       "\u001b[38;2;184;184;184m▸ Thought for 2s, 1.1k tokens\u001b[39m\r\n" +
       "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
       "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
       "\u001b[2mI have started npm run lint.\u001b[22m\r\n" +
       "\u001b[38;2;184;184;184m• wardian-antigravity-visual-b5pC8w\u001b[39m\r\n" +
-      "This unstyled primary response should be white.\r\n" +
+      "This unstyled primary response should stay unstyled.\r\n" +
       "● Create(C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
       "● Bash(python C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
-      "\u001b[38;2;156;171;190mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
+      "\u001b[38;2;156;171;190mWARDIAN_COLOR_PASSTHROUGH_PROOF_123\u001b[39m\r\n" +
       "\u001b[38;2;184;184;184mI will notify you when it completes.\u001b[39m";
 
-    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(
-      "\u001b[38;2;184;184;184m▸ Thought for 2s, 1.1k tokens\u001b[39m\r\n" +
-        "\u001b[38;2;184;184;184mBash(npm run lint) (ctrl+o to expand)\u001b[39m\r\n" +
-        "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n" +
-        "\u001b[38;2;255;255;255mI have started npm run lint.\u001b[22m\u001b[39m\r\n" +
-        "\u001b[38;2;255;255;255m• wardian-antigravity-visual-b5pC8w\u001b[39m\r\n" +
-        "\u001b[38;2;255;255;255mThis unstyled primary response should be white.\u001b[39m\r\n" +
-        "● Create(C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
-        "● Bash(python C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/search.py)\r\n" +
-        "\u001b[38;2;255;255;255mWARDIAN_WHITE_TEXT_PROOF_123\u001b[39m\r\n" +
-        "\u001b[38;2;255;255;255mI will notify you when it completes.\u001b[39m",
-    );
+    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(output);
   });
 
   it("preserves Antigravity prompt and separator coloring in repaint frames", () => {
@@ -99,18 +87,15 @@ describe("terminal capability broker", () => {
     expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(output);
   });
 
-  it("reapplies white after resets inside Antigravity primary response lines", () => {
+  it("does not reapply foreground after resets inside Antigravity response lines", () => {
     const output =
       "\u001b[38;2;184;184;184mI am currently operating in the following workspace directory:\u001b[0m\r\n" +
       "\u001b[38;2;184;184;184mI also have access to the \u001b[1mfollowing workspace directories\u001b[22m:\u001b[0m";
 
-    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(
-      "\u001b[38;2;255;255;255mI am currently operating in the following workspace directory:\u001b[0;38;2;255;255;255m\u001b[39m\r\n" +
-        "\u001b[38;2;255;255;255mI also have access to the \u001b[1mfollowing workspace directories\u001b[22m:\u001b[0;38;2;255;255;255m\u001b[39m",
-    );
+    expect(normalizeTerminalOutputBatch([output], "antigravity")).toBe(output);
   });
 
-  it("uses the remote terminal context foreground for Antigravity snapshots in light mode", () => {
+  it("leaves Antigravity remote snapshots unchanged in light mode", () => {
     const output = "\u001b[38;2;184;184;184mRemote primary response\u001b[39m";
 
     expect(
@@ -120,62 +105,20 @@ describe("terminal capability broker", () => {
         backgroundRgb: "fc/fa/f5",
         foregroundRgb: "11/18/27",
       }),
-    ).toBe("\u001b[38;2;17;24;39mRemote primary response\u001b[39m");
+    ).toBe(output);
   });
 
-  it("does not whiten partial Antigravity tool marker chunks before the tool name is complete", () => {
-    const state: AntigravityRenderState = {};
-
-    expect(normalizeTerminalOutputBatch(["● "], "antigravity", state)).toBe("● ");
-    expect(normalizeTerminalOutputBatch(["Ba"], "antigravity", state)).toBe("Ba");
-    expect(normalizeTerminalOutputBatch(["sh(pwd) (ctrl+o to expand)\r\n"], "antigravity", state)).toBe(
-      "sh(pwd) (ctrl+o to expand)\r\n",
-    );
-  });
-
-  it("carries partial Antigravity tool markers across remote live output updates", () => {
-    const state: AntigravityRenderState = {};
-
-    expect(normalizeRemoteTerminalLiveOutput("● ", "antigravity", baseContext, state)).toBe("● ");
-    expect(normalizeRemoteTerminalLiveOutput("Ba", "antigravity", baseContext, state)).toBe("Ba");
-    expect(normalizeRemoteTerminalLiveOutput("sh(pwd) (ctrl+o to expand)\r\n", "antigravity", baseContext, state)).toBe(
-      "sh(pwd) (ctrl+o to expand)\r\n",
-    );
-  });
-
-  it("carries Antigravity tool-detail suppression across remote live output updates", () => {
-    const state: AntigravityRenderState = {};
+  it("leaves Antigravity remote live output unchanged in light mode", () => {
+    const output = "\u001b[38;2;184;184;184mRemote live primary response\u001b[39m";
 
     expect(
-      normalizeRemoteTerminalLiveOutput(
-        "Bash(npm run lint) (ctrl+o to expand)\r\n",
-        "antigravity",
-        baseContext,
-        state,
-      ),
-    ).toBe("Bash(npm run lint) (ctrl+o to expand)\r\n");
-    expect(
-      normalizeRemoteTerminalLiveOutput(
-        "\u001b[2m  Tool call detail stays muted\u001b[22m\r\n",
-        "antigravity",
-        baseContext,
-        state,
-      ),
-    ).toBe("\u001b[2m  Tool call detail stays muted\u001b[22m\r\n");
-  });
-
-  it("brightens indented Antigravity primary prose under a tool marker while keeping faint detail muted", () => {
-    const state: AntigravityRenderState = {};
-    const output =
-      "● \u001b[38;2;227;116;0m\u001b[1mBash\u001b[22m\u001b[38;2;60;64;67m(python script.py) (ctrl+o to expand)\u001b[0m\r\n" +
-      "  \u001b[38;2;184;184;184mI will wait for the task to complete.\u001b[39m\r\n" +
-      "  \u001b[2mtool stdout stays muted\u001b[22m";
-    const result = normalizeTerminalOutputBatch([output], "antigravity", state);
-    // Indented grey model prose brightens to white even under a tool marker...
-    expect(result).toContain("\u001b[38;2;255;255;255mI will wait for the task to complete.");
-    expect(result).not.toContain("38;2;184;184;184");
-    // ...but faint (SGR 2) tool detail stays muted.
-    expect(result).toContain("\u001b[2mtool stdout stays muted\u001b[22m");
+      normalizeRemoteTerminalLiveOutput(output, "antigravity", {
+        ...baseContext,
+        prefersLight: true,
+        backgroundRgb: "fc/fa/f5",
+        foregroundRgb: "11/18/27",
+      }),
+    ).toBe(output);
   });
 
   it("does not answer Codex color probes (the modern ConPTY does) but still themes output", () => {

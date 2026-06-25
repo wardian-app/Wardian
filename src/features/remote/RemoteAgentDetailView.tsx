@@ -39,7 +39,6 @@ import {
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
   stripTerminalColorReportInputs,
-  type AntigravityRenderState,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -564,8 +563,6 @@ function TerminalPane({
   const terminalScrollSurfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  // Cross-chunk render state for antigravity tool-marker/foreground tracking.
-  const outputStateRef = useRef<AntigravityRenderState>({});
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
   const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
@@ -683,7 +680,7 @@ function TerminalPane({
         normalizeRemoteTerminalOutput(
           plan.output,
           agent.provider ?? undefined,
-          outputStateRef.current,
+          undefined,
           plan.context,
         ),
       );
@@ -698,7 +695,6 @@ function TerminalPane({
             plan.output,
             agent.provider ?? undefined,
             plan.context,
-            outputStateRef.current,
           ),
         );
       }
