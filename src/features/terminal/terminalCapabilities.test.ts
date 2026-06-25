@@ -5,6 +5,7 @@ import {
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
   stripTerminalColorReportInputs,
+  stripProviderTerminalReportInputs,
   type TerminalCapabilityContext,
 } from "./terminalCapabilities";
 
@@ -150,11 +151,27 @@ describe("terminal capability broker", () => {
     expect(stripTerminalColorReportInputs(replies)).toBe("");
   });
 
+  it("strips xterm's primary device attributes report from Codex input", () => {
+    const ESC = String.fromCharCode(27);
+
+    expect(stripTerminalColorReportInputs(ESC + "[?1;2chello")).toBe("hello");
+  });
+
   it("preserves real keystrokes around a stripped color reply", () => {
     const ESC = String.fromCharCode(27);
     const ST = ESC + String.fromCharCode(92);
     const data = ESC + "]11;rgb:1a/1a/1a" + ST + "ls -la\r";
     expect(stripTerminalColorReportInputs(data)).toBe("ls -la\r");
+  });
+
+  it("strips xterm-generated report replies for providers brokered by Wardian", () => {
+    const ESC = String.fromCharCode(27);
+    const reply = ESC + "[?1;2c";
+
+    expect(stripProviderTerminalReportInputs("codex", reply + "typed")).toBe("typed");
+    expect(stripProviderTerminalReportInputs("opencode", reply + "typed")).toBe("typed");
+    expect(stripProviderTerminalReportInputs("antigravity", reply + "typed")).toBe("typed");
+    expect(stripProviderTerminalReportInputs("gemini", reply + "typed")).toBe(reply + "typed");
   });
 
   it("strips ConPTY-echoed color/light-dark replies from Codex output even when fragmented across chunks", () => {
@@ -167,6 +184,12 @@ describe("terminal capability broker", () => {
       "/1a/1a" + ST + ESC + "]10;rgb:eb/eb/eb" + ST + ESC + "]4;0;rgb:1a/1a/1a" + ST + "after",
     ];
     expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("beforeafter");
+  });
+
+  it("strips ConPTY-echoed primary device attributes replies from Codex output", () => {
+    const ESC = String.fromCharCode(27);
+
+    expect(normalizeTerminalOutputBatch(["before" + ESC + "[?1;2cafter"], "codex")).toBe("beforeafter");
   });
 
   it("strips fragmented Codex color/light-dark probes from output (suppresses xterm auto-reply)", () => {

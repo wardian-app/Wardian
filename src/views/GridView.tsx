@@ -359,6 +359,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     sessionId={agentId}
                     provider={agent.provider}
                     isMaximized={isAgentMaximized}
+                    isSelected={isSelected}
                     theme={theme}
                     workspacePath={
                       agent.git_worktree && agent.git_worktree_folder?.trim()
