@@ -1502,7 +1502,8 @@ describe("Agent Watchlist Sidebar", () => {
     fireEvent.contextMenu(alphaWatchlistRow);
     fireEvent.mouseEnter(within(screen.getByTestId("agent-context-menu")).getByRole("button", { name: "Clone" }));
     fireEvent.click(await screen.findByRole("button", { name: "Custom Clone" }));
-    fireEvent.click(await screen.findByTestId("custom-clone-submit"));
+    await screen.findByDisplayValue("Alpha-copy");
+    fireEvent.click(screen.getByTestId("custom-clone-submit"));
 
     await waitFor(() => {
       const state = normalizeWatchlistState(currentWatchlists);
