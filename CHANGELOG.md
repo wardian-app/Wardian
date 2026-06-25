@@ -4,6 +4,41 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.2](https://github.com/wardian-app/Wardian/compare/v0.4.1...v0.4.2) (2026-06-25)
+
+
+### Features
+
+* **comms:** add durable provider-native delivery ([#528](https://github.com/wardian-app/Wardian/issues/528)) ([1c834e5](https://github.com/wardian-app/Wardian/commit/1c834e52fed065e906299c916cdde228d178df98))
+* **conversations:** preserve agent-owned conversation archives ([#567](https://github.com/wardian-app/Wardian/issues/567)) ([cd306dd](https://github.com/wardian-app/Wardian/commit/cd306dd91c1d8e4aada3fe6ae46ac9376ecd1831))
+* **garden:** preliminary spatial Garden canvas ([#573](https://github.com/wardian-app/Wardian/issues/573)) ([247fdac](https://github.com/wardian-app/Wardian/commit/247fdace7f110701dac3a25a8c02f0beb3db1877))
+* **remote:** bring mobile PWA agent interactions to parity ([#575](https://github.com/wardian-app/Wardian/issues/575)) ([5b84326](https://github.com/wardian-app/Wardian/commit/5b84326121600a0fa7ec90d7cca17e08c129992c))
+
+
+### Bug Fixes
+
+* **chat:** keep chat cleared after terminal clear ([#549](https://github.com/wardian-app/Wardian/issues/549)) ([88a3da8](https://github.com/wardian-app/Wardian/commit/88a3da8b40a516e2d0fd60a3020453d47e43318e))
+* **chat:** keep composer editable while processing ([#557](https://github.com/wardian-app/Wardian/issues/557)) ([d1cabe6](https://github.com/wardian-app/Wardian/commit/d1cabe62f94ebe4e4cbf9b132ab85623d6eea973))
+* **e2e:** align Vite optimizer target ([#565](https://github.com/wardian-app/Wardian/issues/565)) ([9b6190f](https://github.com/wardian-app/Wardian/commit/9b6190f73e5c78040096ad48d9bc0bd58353855e))
+* **explorer:** normalize watcher paths for refresh ([#547](https://github.com/wardian-app/Wardian/issues/547)) ([669773c](https://github.com/wardian-app/Wardian/commit/669773c783abac8c39a670f9f401a95f4c590df3))
+* **grid:** restore terminal selection prop forwarding ([#593](https://github.com/wardian-app/Wardian/issues/593)) ([960d762](https://github.com/wardian-app/Wardian/commit/960d762f899483ebd05cd3d1a8d20a4dbc1c230b))
+* **opencode:** launch Windows CLI through PATH ([#569](https://github.com/wardian-app/Wardian/issues/569)) ([30e34fd](https://github.com/wardian-app/Wardian/commit/30e34fd9a858ae3ea1cb15d43c6275d4b8ef6ca9))
+* **performance:** reduce main view render lag ([#587](https://github.com/wardian-app/Wardian/issues/587)) ([2c016ae](https://github.com/wardian-app/Wardian/commit/2c016ae7a0390178a91bd23a3bc2da3c1a35307e))
+* **remote:** hide mobile terminal composition echo ([#559](https://github.com/wardian-app/Wardian/issues/559)) ([252c70e](https://github.com/wardian-app/Wardian/commit/252c70e6d4df21d6fa0f0a82a7852036f09aee28))
+* **remote:** prevent mobile terminal composer duplication ([#585](https://github.com/wardian-app/Wardian/issues/585)) ([7f7b29b](https://github.com/wardian-app/Wardian/commit/7f7b29b8b3ed2c67ae4555f00398ae0fd67de932))
+* **security:** bump ws and vite overrides to clear all npm audit highs ([#563](https://github.com/wardian-app/Wardian/issues/563)) ([785f7a6](https://github.com/wardian-app/Wardian/commit/785f7a67d99020fe425907e8f633c44ee41d5504))
+* **security:** resolve npm audit esbuild advisory ([#554](https://github.com/wardian-app/Wardian/issues/554)) ([20702fd](https://github.com/wardian-app/Wardian/commit/20702fd1696c05601d2b9070bd14676bee5f8514))
+* **terminal:** brighten Antigravity dark text ([#555](https://github.com/wardian-app/Wardian/issues/555)) ([ddd57ae](https://github.com/wardian-app/Wardian/commit/ddd57ae4d8aa3d6e47ed1c4a8a5de256a0f63844))
+* **terminal:** eliminate WebGL context churn and stale provider redraw quirks ([#544](https://github.com/wardian-app/Wardian/issues/544)) ([8c0086a](https://github.com/wardian-app/Wardian/commit/8c0086aaff51ba029212f7f217f8390bc6d32950))
+* **terminal:** filter provider report injections ([#589](https://github.com/wardian-app/Wardian/issues/589)) ([3684517](https://github.com/wardian-app/Wardian/commit/36845176fb180c3597b4f3317f9d2804f33b4a2f))
+* **terminal:** remove Antigravity response whitening ([#591](https://github.com/wardian-app/Wardian/issues/591)) ([3aeaab4](https://github.com/wardian-app/Wardian/commit/3aeaab413e24b177589fdf1d0d50f1b20aecfc9d))
+* **terminal:** stop typed Codex color-probe garbage and theme its composer correctly ([#561](https://github.com/wardian-app/Wardian/issues/561)) ([7e91c29](https://github.com/wardian-app/Wardian/commit/7e91c2907662f674c4144798741a2d84c76f826c))
+
+
+### Documentation
+
+* **providers:** mark Gemini CLI as unmaintained, prefer Antigravity ([#572](https://github.com/wardian-app/Wardian/issues/572)) ([5050c0c](https://github.com/wardian-app/Wardian/commit/5050c0c2c48f8c1d627886ba82c31def52772dac))
+
 ## [0.4.1](https://github.com/wardian-app/Wardian/compare/v0.4.0...v0.4.1) (2026-06-12)
 
 

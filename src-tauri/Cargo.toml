@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.4.1"
+version = "0.4.2"
 description = "A local desktop command center for supervising and shaping AI agent teams."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
