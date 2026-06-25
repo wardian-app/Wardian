@@ -369,4 +369,35 @@ describe("QueueView", () => {
     expect(firstCard).toHaveClass("shrink-0");
     expect(firstCard?.parentElement).toHaveClass("flex-1", "min-h-0", "overflow-y-auto");
   });
+
+  it("bounds the initial backlog render and fills the rest after idle work", async () => {
+    vi.useFakeTimers();
+    try {
+      useQueueStore.setState({
+        items: Array.from({ length: 120 }, (_, index) => ({
+          id: `item-${index}`,
+          type: "agent_completed",
+          timestamp: Date.now() - index,
+          read: false,
+          agent_name: `Agent ${index}`,
+          summary: `Completed task ${index}.`,
+        })),
+      });
+
+      render(<QueueView />);
+
+      expect(screen.getByText("Agent 0")).toBeInTheDocument();
+      expect(screen.getByText("Agent 79")).toBeInTheDocument();
+      expect(screen.queryByText("Agent 80")).not.toBeInTheDocument();
+      expect(screen.queryByText("Agent 119")).not.toBeInTheDocument();
+
+      await act(async () => {
+        vi.runOnlyPendingTimers();
+      });
+
+      expect(screen.getByText("Agent 119")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -15,6 +15,11 @@ interface ParsedBlueprint {
   nodeCount: number;
 }
 
+type GardenInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+let cachedBlueprintKey: string | null = null;
+let cachedBlueprints: ParsedBlueprint[] = [];
+
 /** Pure: attach each blueprint's most-recent run status (by updated_at). */
 export function mergeWorkflowRunStatus(
   blueprints: ParsedBlueprint[],
@@ -35,16 +40,16 @@ export function mergeWorkflowRunStatus(
   }));
 }
 
-/** Loads the blueprint catalog (list + parse, mirroring WorkflowsView) and merges run status. */
-export function useGardenWorkflows(): GardenWorkflowInput[] {
-  const [workflows, setWorkflows] = useState<GardenWorkflowInput[]>([]);
+export async function loadGardenWorkflowInputs(invoker: GardenInvoke = invoke as GardenInvoke): Promise<GardenWorkflowInput[]> {
+  // `invoke` can resolve to null (not just reject), so coalesce to [] before mapping.
+  const refs = ((await invoker("workflow_list_blueprints").catch(() => [])) ?? []) as BlueprintRef[];
+  const nextBlueprintKey = blueprintRefsKey(refs);
+  let blueprints = cachedBlueprintKey === nextBlueprintKey ? cachedBlueprints : null;
 
-  const load = useCallback(async () => {
-    // `invoke` can resolve to null (not just reject), so coalesce to [] before mapping.
-    const refs = (await invoke<BlueprintRef[]>("workflow_list_blueprints").catch(() => [])) ?? [];
+  if (!blueprints) {
     const parsedRaw = await Promise.all(
       refs.map(async (ref) => {
-        const result = await invoke<{ blueprint: Blueprint }>("workflow_parse", { path: ref.path }).catch(() => null);
+        const result = await invoker("workflow_parse", { path: ref.path }).catch(() => null) as { blueprint?: Blueprint } | null;
         if (!result?.blueprint) return null;
         return {
           id: result.blueprint.id,
@@ -53,9 +58,30 @@ export function useGardenWorkflows(): GardenWorkflowInput[] {
         } satisfies ParsedBlueprint;
       }),
     );
-    const blueprints = parsedRaw.filter((bp): bp is ParsedBlueprint => bp !== null);
-    const runs = (await invoke<RunSummary[]>("workflow_list_runs").catch(() => [])) ?? [];
-    setWorkflows(mergeWorkflowRunStatus(blueprints, runs));
+    blueprints = parsedRaw.filter((bp): bp is ParsedBlueprint => bp !== null);
+    cachedBlueprintKey = nextBlueprintKey;
+    cachedBlueprints = blueprints;
+  }
+
+  const runs = ((await invoker("workflow_list_runs").catch(() => [])) ?? []) as RunSummary[];
+  return mergeWorkflowRunStatus(blueprints, runs);
+}
+
+export function resetGardenWorkflowCacheForTests() {
+  cachedBlueprintKey = null;
+  cachedBlueprints = [];
+}
+
+function blueprintRefsKey(refs: BlueprintRef[]) {
+  return JSON.stringify(refs.map((ref) => [ref.id, ref.path]));
+}
+
+/** Loads the blueprint catalog (list + parse, mirroring WorkflowsView) and merges run status. */
+export function useGardenWorkflows(): GardenWorkflowInput[] {
+  const [workflows, setWorkflows] = useState<GardenWorkflowInput[]>([]);
+
+  const load = useCallback(async () => {
+    setWorkflows(await loadGardenWorkflowInputs());
   }, []);
 
   useEffect(() => {

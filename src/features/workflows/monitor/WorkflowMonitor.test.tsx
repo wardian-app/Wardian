@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { WorkflowMonitor } from './WorkflowMonitor';
+import { WorkflowMonitor, buildActivities, buildMonitorModel } from './WorkflowMonitor';
 import type { RunSummary } from '../run/runTypes';
 import type { WorkflowSchedule } from '../../../types/workflow';
 
@@ -609,6 +609,69 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
   });
 
+  it('marks history rows for offscreen rendering containment while scrolling', () => {
+    runState.runs = [{
+      run_id: 'run-contained',
+      blueprint_id: 'audit',
+      status: 'completed',
+      node_count: 2,
+      path: '/runs/contained',
+      updated_at: '2026-06-01T16:00:00Z',
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    expect(screen.getByTestId('workflow-history-run-run-contained')).toHaveStyle({
+      contentVisibility: 'auto',
+      containIntrinsicSize: '128px',
+    });
+  });
+
+  it('keeps expanded history rendering bounded', () => {
+    runState.runs = Array.from({ length: 60 }, (_, index) => ({
+      run_id: `run-${String(index + 1).padStart(3, '0')}`,
+      blueprint_id: 'audit',
+      status: 'completed' as const,
+      node_count: 2,
+      path: `/runs/${index + 1}`,
+      updated_at: `2026-06-01T${String(23 - Math.floor(index / 8)).padStart(2, '0')}:${String(59 - (index % 8)).padStart(2, '0')}:00Z`,
+    }));
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    for (let i = 0; i < 5; i += 1) {
+      fireEvent.click(screen.getByRole('button', { name: /show .*older/i }));
+    }
+
+    expect(screen.getByText('run-001')).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
+
+    fireEvent.scroll(screen.getByTestId('workflow-history-scroll'), {
+      target: { scrollTop: 40 * 128 },
+    });
+
+    expect(screen.getByText('run-041')).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
+  });
+
+  it('uses a bounded flex scroll pane for monitor history', () => {
+    runState.runs = [{
+      run_id: 'run-scroll',
+      blueprint_id: 'audit',
+      status: 'completed',
+      node_count: 2,
+      path: '/runs/scroll',
+      updated_at: '2026-06-01T16:00:00Z',
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    expect(screen.getByTestId('workflow-history-scroll')).toHaveClass('flex-1', 'min-h-0', 'overflow-y-auto');
+  });
+
   it('renders scheduled agent assignments as agent names', async () => {
     invokeMock.mockResolvedValue([
       {
@@ -634,5 +697,132 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(await screen.findAllByText('reasoning_gate: Assistant - Gemini')).toHaveLength(1);
+  });
+
+  it('builds schedule activities without rescanning the full run array per schedule', () => {
+    const runs = Object.assign([
+      {
+        run_id: 'run-primary',
+        blueprint_id: 'shared-workflow',
+        schedule_id: 'schedule-primary',
+        status: 'completed' as const,
+        node_count: 2,
+        path: '/runs/primary',
+        updated_at: '2026-06-01T16:00:00Z',
+      },
+      {
+        run_id: 'run-secondary',
+        blueprint_id: 'shared-workflow',
+        schedule_id: 'schedule-secondary',
+        status: 'failed' as const,
+        node_count: 2,
+        path: '/runs/secondary',
+        updated_at: '2026-06-01T17:00:00Z',
+      },
+    ], {
+      filter: () => {
+        throw new Error('run array was rescanned with filter');
+      },
+    }) as RunSummary[];
+    const schedules: WorkflowSchedule[] = [
+      {
+        id: 'schedule-primary',
+        blueprint_id: 'shared-workflow',
+        name: 'Primary Schedule',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+      },
+      {
+        id: 'schedule-secondary',
+        blueprint_id: 'shared-workflow',
+        name: 'Secondary Schedule',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 120, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 17, 0, 0),
+      },
+    ];
+
+    const activities = buildActivities(runs, schedules);
+
+    expect(activities).toHaveLength(2);
+    expect(activities.find((activity) => activity.name === 'Primary Schedule')?.latestRun?.run_id).toBe('run-primary');
+    expect(activities.find((activity) => activity.name === 'Secondary Schedule')?.latestRun?.run_id).toBe('run-secondary');
+  });
+
+  it('builds monitor history, stats, and schedules without repeated run-array helpers', () => {
+    const runs = Object.assign([
+      {
+        run_id: 'run-latest',
+        blueprint_id: 'audit',
+        status: 'failed' as const,
+        node_count: 2,
+        path: '/runs/latest',
+        updated_at: '2026-06-01T18:00:00Z',
+      },
+      {
+        run_id: 'run-running',
+        blueprint_id: 'active',
+        status: 'running' as const,
+        node_count: 2,
+        path: '/runs/running',
+        updated_at: '2026-06-01T19:00:00Z',
+      },
+      {
+        run_id: 'run-old',
+        blueprint_id: 'audit',
+        status: 'completed' as const,
+        node_count: 2,
+        path: '/runs/old',
+        updated_at: '2026-06-01T17:00:00Z',
+      },
+    ], {
+      filter: () => {
+        throw new Error('run array was filtered');
+      },
+      sort: () => {
+        throw new Error('run array was sorted in place');
+      },
+    }) as RunSummary[];
+    const schedules = Object.assign([
+      {
+        id: 'schedule-audit',
+        blueprint_id: 'audit',
+        name: 'Audit',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval' as const, interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 20, 0, 0),
+      },
+      {
+        id: 'schedule-paused',
+        blueprint_id: 'paused',
+        name: 'Paused',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval' as const, interval_minutes: 60, active: true },
+        is_paused: true,
+      },
+    ], {
+      filter: () => {
+        throw new Error('schedule array was filtered');
+      },
+    }) as WorkflowSchedule[];
+
+    const model = buildMonitorModel(runs, schedules);
+
+    expect(model.historyRuns.map((run) => run.run_id)).toEqual(['run-latest', 'run-old']);
+    expect(model.upcomingSchedules.map((schedule) => schedule.id)).toEqual(['schedule-audit']);
+    expect(model.stats).toMatchObject({
+      failedCount: 1,
+      runningCount: 1,
+      awaitingCount: 0,
+      pausedCount: 1,
+    });
   });
 });

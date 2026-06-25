@@ -6,23 +6,28 @@ import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 
-vi.mock('../features/terminal/AgentTerminal', () => ({
-  AgentTerminal: ({
-    sessionId,
-    onTerminalFocus,
-  }: {
-    sessionId: string;
-    onTerminalFocus?: () => void;
-  }) => (
-    <div
-      data-testid={`terminal-${sessionId}`}
-      tabIndex={0}
-      onFocus={onTerminalFocus}
-    >
-      Terminal {sessionId}
-    </div>
-  ),
-}));
+const terminalRenderSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('../features/terminal/AgentTerminal', async () => {
+  const React = await vi.importActual<typeof import('react')>('react');
+  return {
+    AgentTerminal: React.memo((props: {
+      sessionId: string;
+      onTerminalFocus?: () => void;
+    }) => {
+      terminalRenderSpy(props.sessionId);
+      return React.createElement(
+        'div',
+        {
+          'data-testid': `terminal-${props.sessionId}`,
+          tabIndex: 0,
+          onFocus: props.onTerminalFocus,
+        },
+        `Terminal ${props.sessionId}`,
+      );
+    }),
+  };
+});
 
 vi.mock('../features/grid/AgentChatView', () => ({
   AgentChatView: ({
@@ -139,6 +144,7 @@ function renderGrid(
 beforeEach(() => {
   localStorage.clear();
   useSettingsStore.setState({ gridCardDisplayMode: 'terminal' });
+  terminalRenderSpy.mockClear();
 });
 
 describe('GridView maximize behavior', () => {
@@ -230,6 +236,55 @@ describe('GridView maximize behavior', () => {
     expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+  });
+
+  it('keeps terminal panes memoized when only card header state changes', () => {
+    const stableProps = {
+      filteredAgents: agents,
+      telemetry,
+      terminalTitles: {},
+      selectedAgentIds: new Set<string>(),
+      offAgentIds: new Set<string>(),
+      maximizedAgentId: null,
+      draggedAgentId: null,
+      dragOverAgentId: null,
+      editingAgentId: null,
+      tempName: "",
+      theme: "dark" as const,
+      onMouseEnterCard: vi.fn(),
+      onMouseUp: vi.fn(),
+      onMouseDown: vi.fn(),
+      onCardClick: vi.fn(),
+      onMaximize: vi.fn(),
+      onDelete: vi.fn(),
+      onRename: vi.fn(),
+      setEditingAgentId: vi.fn(),
+      setTempName: vi.fn(),
+      handleTitleChange: vi.fn(),
+      deriveCurrentThought: vi.fn(() => ({ thought: '', status: 'Idle' })),
+      getStatusColorClass: vi.fn(() => 'bg-wardian-success'),
+      currentThoughts: {},
+      watchlists: [],
+      onAddToList: vi.fn(),
+      onRemoveFromList: vi.fn(),
+      onQuery: vi.fn(),
+      onPause: vi.fn(),
+      onRestart: vi.fn(),
+      onClear: vi.fn(),
+      onTerminalFocus: vi.fn(),
+    };
+    const { rerender } = render(<GridView {...stableProps} />);
+    expect(terminalRenderSpy).toHaveBeenCalledTimes(2);
+
+    terminalRenderSpy.mockClear();
+    rerender(
+      <GridView
+        {...stableProps}
+        currentThoughts={{ 'agent-1': 'Indexing files' }}
+      />,
+    );
+
+    expect(terminalRenderSpy).not.toHaveBeenCalled();
   });
 
   it('renders chat cards when Grid card display is chat', () => {

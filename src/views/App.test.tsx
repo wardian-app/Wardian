@@ -32,6 +32,7 @@ Object.defineProperty(window, 'matchMedia', {
 const originalOuterWidth = window.outerWidth;
 const originalOuterHeight = window.outerHeight;
 const originalInnerWidth = window.innerWidth;
+const graphViewFilteredAgentsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("../features/terminal/AgentTerminal", () => ({
   AgentTerminal: ({
@@ -64,6 +65,17 @@ vi.mock("../features/terminal/UserTerminalPanel", () => ({
       <span data-testid="selected-terminal-workspace">{selectedWorkspace ?? ""}</span>
     </div>
   ),
+}));
+
+vi.mock("./GraphView", () => ({
+  GraphView: ({ filteredAgents }: { filteredAgents: unknown[] }) => {
+    graphViewFilteredAgentsSpy(filteredAgents);
+    return (
+      <div data-testid="graph-view">
+        <div data-testid="graph-canvas" />
+      </div>
+    );
+  },
 }));
 
 vi.mock("../features/graph/GraphCanvas", () => ({
@@ -1674,6 +1686,50 @@ describe("View Mode Toggle", () => {
     expect(screen.queryByText(/Advanced graph features coming/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
+  });
+
+  it("keeps graph agent-list input stable when only a live thought changes", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitJson } = captureQueueAgentListeners();
+    graphViewFilteredAgentsSpy.mockClear();
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+
+    fireEvent.click(screen.getByText("Graph"));
+    await screen.findByTestId("graph-view");
+    const initialFilteredAgents =
+      graphViewFilteredAgentsSpy.mock.calls[graphViewFilteredAgentsSpy.mock.calls.length - 1]?.[0];
+
+    await act(async () => {
+      emitJson({ session_id: "agent-1", data: { type: "progress", content: "Reading files" } });
+    });
+
+    await waitFor(() => expect(graphViewFilteredAgentsSpy.mock.calls.length).toBeGreaterThan(1));
+    expect(graphViewFilteredAgentsSpy.mock.calls[graphViewFilteredAgentsSpy.mock.calls.length - 1]?.[0]).toBe(initialFilteredAgents);
+  });
+
+  it("keeps heavy canvas views mounted after first visit so tab switches stay warm", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+
+    expect(screen.queryByTestId("graph-view")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("garden-canvas")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Graph"));
+    expect(await screen.findByTestId("graph-view")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Grid"));
+    await screen.findByTestId("agent-grid");
+    expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Garden"));
+    expect(await screen.findByTestId("garden-canvas")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Grid"));
+    await screen.findByTestId("agent-grid");
+    expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+    expect(screen.getByTestId("garden-canvas")).toBeInTheDocument();
   });
 });
 

@@ -33,6 +33,18 @@ describe('useSchedulesStore', () => {
     expect(useSchedulesStore.getState().schedules).toHaveLength(1);
   });
 
+  it('keeps the existing schedule array when polling returns unchanged schedules', async () => {
+    invokeMock
+      .mockResolvedValueOnce([sample])
+      .mockResolvedValueOnce([{ ...sample }]);
+
+    await useSchedulesStore.getState().load();
+    const firstSchedules = useSchedulesStore.getState().schedules;
+    await useSchedulesStore.getState().load();
+
+    expect(useSchedulesStore.getState().schedules).toBe(firstSchedules);
+  });
+
   it('pause invokes schedule_pause with the id', async () => {
     invokeMock.mockResolvedValue([]);
     await useSchedulesStore.getState().pause('s1');
