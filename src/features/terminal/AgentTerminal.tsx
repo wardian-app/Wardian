@@ -13,7 +13,6 @@ import {
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
   stripTerminalColorReportInputs,
-  type AntigravityRenderState,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import { installTerminalLinkProvider } from "./terminalLinks";
@@ -99,7 +98,7 @@ type TerminalSessionEntry = {
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
-} & AntigravityRenderState;
+};
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
 
@@ -1383,12 +1382,6 @@ async function writeTerminalOutputBatch(
     entry.recentWritePreviews.splice(0, entry.recentWritePreviews.length - 12);
   }
 
-  const antigravityPrimaryForeground =
-    entry.currentTheme === LIGHT_TERM_THEME ? entry.currentTheme.foreground : "#ffffff";
-  entry.antigravityForegroundRgb =
-    entry.provider === "antigravity"
-      ? rgbTripletFromHex(antigravityPrimaryForeground, "255;255;255")
-      : undefined;
   const batchedWrite = normalizeTerminalOutputBatch(renderChunks, entry.provider, entry);
   // Sampled before the awaited writes below. While a provider streams, drain
   // batches run nearly back-to-back, so a user wheel-scroll usually lands in
