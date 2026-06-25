@@ -68,6 +68,7 @@ interface AgentTerminalSlotProps {
   sessionId: string;
   provider?: string;
   isMaximized: boolean;
+  isSelected: boolean;
   theme: "dark" | "light" | "system";
   workspacePath?: string;
   onTerminalFocus?: (agentId: string) => void;
@@ -78,6 +79,7 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
   sessionId,
   provider,
   isMaximized,
+  isSelected,
   theme,
   workspacePath,
   onTerminalFocus,
@@ -96,6 +98,7 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
       sessionId={sessionId}
       provider={provider}
       isMaximized={isMaximized}
+      isSelected={isSelected}
       theme={theme}
       workspacePath={workspacePath}
       onTerminalFocus={handleTerminalFocus}
