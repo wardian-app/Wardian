@@ -206,4 +206,138 @@ describe("installTerminalLinkProvider", () => {
     expect(openUrl).toHaveBeenCalledWith("https://wardian.org/docs");
     expect(openFile).not.toHaveBeenCalled();
   });
+
+  it("routes xterm OSC 8 hyperlinks through the URL opener", () => {
+    const openUrl = vi.fn(async () => {});
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+      buffer: {
+        active: {
+          getLine: () => undefined,
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getExternalEditor: () => ({
+        external_editor: "system",
+        external_editor_custom_executable: null,
+      }),
+      openUrl,
+    });
+
+    term.options.linkHandler.activate(
+      new MouseEvent("click"),
+      "https://wardian.org/from-osc",
+      { start: { x: 1, y: 1 }, end: { x: 24, y: 1 } },
+    );
+
+    expect(term.options.linkHandler.allowNonHttpProtocols).toBe(false);
+    expect(openUrl).toHaveBeenCalledWith("https://wardian.org/from-osc");
+  });
+
+  it("opens URLs that wrap across physical terminal rows", async () => {
+    const openUrl = vi.fn(async () => {});
+    let provider:
+      | { provideLinks: (line: number, callback: (links: any[] | undefined) => void) => void }
+      | null = null;
+    const rows = [
+      { isWrapped: false, translateToString: (trimRight?: boolean) => trimRight ? "prefix https://wardi" : "prefix https://wardi" },
+      { isWrapped: true, translateToString: (trimRight?: boolean) => trimRight ? "an.org/docs suffix" : "an.org/docs suffix" },
+    ];
+    const term = {
+      cols: 20,
+      registerLinkProvider: vi.fn((nextProvider) => {
+        provider = nextProvider;
+        return { dispose: vi.fn() };
+      }),
+      buffer: {
+        active: {
+          getLine: (index: number) => rows[index],
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getExternalEditor: () => ({
+        external_editor: "system",
+        external_editor_custom_executable: null,
+      }),
+      openFile: vi.fn(async () => {}),
+      openUrl,
+    });
+
+    const firstRowLinks = await new Promise<any[] | undefined>((resolve) => {
+      provider?.provideLinks(1, resolve);
+    });
+    const secondRowLinks = await new Promise<any[] | undefined>((resolve) => {
+      provider?.provideLinks(2, resolve);
+    });
+
+    expect(firstRowLinks?.[0]).toMatchObject({
+      range: {
+        start: { x: 8, y: 1 },
+        end: { x: 11, y: 2 },
+      },
+      text: "https://wardian.org/docs",
+    });
+    expect(secondRowLinks?.[0]).toMatchObject({
+      range: firstRowLinks?.[0].range,
+      text: firstRowLinks?.[0].text,
+    });
+
+    secondRowLinks?.[0].activate(new MouseEvent("click"), secondRowLinks[0].text);
+
+    expect(openUrl).toHaveBeenCalledWith("https://wardian.org/docs");
+  });
+
+  it("opens URLs that provider TUIs hard-wrap onto indented continuation rows", async () => {
+    const openUrl = vi.fn(async () => {});
+    let provider:
+      | { provideLinks: (line: number, callback: (links: any[] | undefined) => void) => void }
+      | null = null;
+    const rows = [
+      { isWrapped: false, translateToString: () => "› Terminal link smoke https://wardian.org/terminal-link-" },
+      { isWrapped: false, translateToString: () => "  validation/123/wrapped-segment-wrapped-" },
+      { isWrapped: false, translateToString: () => "  segment" },
+    ];
+    const term = {
+      cols: 80,
+      registerLinkProvider: vi.fn((nextProvider) => {
+        provider = nextProvider;
+        return { dispose: vi.fn() };
+      }),
+      buffer: {
+        active: {
+          getLine: (index: number) => rows[index],
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getExternalEditor: () => ({
+        external_editor: "system",
+        external_editor_custom_executable: null,
+      }),
+      openFile: vi.fn(async () => {}),
+      openUrl,
+    });
+
+    const links = await new Promise<any[] | undefined>((resolve) => {
+      provider?.provideLinks(2, resolve);
+    });
+
+    expect(links?.[0]).toMatchObject({
+      range: {
+        start: { x: 23, y: 1 },
+        end: { x: 9, y: 3 },
+      },
+      text: "https://wardian.org/terminal-link-validation/123/wrapped-segment-wrapped-segment",
+    });
+
+    links?.[0].activate(new MouseEvent("click"), links[0].text);
+
+    expect(openUrl).toHaveBeenCalledWith("https://wardian.org/terminal-link-validation/123/wrapped-segment-wrapped-segment");
+  });
 });

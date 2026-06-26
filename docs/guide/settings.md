@@ -151,11 +151,11 @@ If VS Code does not open, Wardian shows the launch error in Explorer. Verify the
 `code` command is available on Wardian's app process PATH or use Custom
 executable to point directly at your editor.
 
-Terminal URLs open as URLs. Terminal file paths use this External editor
-preference so agent terminals and the bottom user terminal match Explorer's
-external-open behavior. Terminal file paths are validated before they become
-clickable, which keeps command names such as `/model` from being treated as
-files unless they resolve to a real target.
+Terminal URLs open as URLs, including OSC hyperlinks emitted by provider TUIs.
+Terminal file paths use this External editor preference so agent terminals and
+the bottom user terminal match Explorer's external-open behavior. Terminal file
+paths are validated before they become clickable, which keeps command names such
+as `/model` from being treated as files unless they resolve to a real target.
 
 ## Watchlist
 

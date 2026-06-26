@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Terminal, ILink } from "@xterm/xterm";
+import type { Terminal, ILink, IBufferLine } from "@xterm/xterm";
 import type { ExternalEditorSetting } from "../../types/settings";
 
 type ExternalEditorLaunchSettings = {
@@ -15,7 +15,7 @@ export type TerminalDetectedLink = {
   startIndex: number;
 };
 
-type TerminalLinkProviderOptions = {
+export type TerminalLinkProviderOptions = {
   getBasePath?: () => string | null | undefined;
   getExternalEditor: () => ExternalEditorLaunchSettings;
   onOpenError?: (message: string) => void;
@@ -24,12 +24,27 @@ type TerminalLinkProviderOptions = {
   validateFile?: (path: string) => Promise<boolean>;
 };
 
+type WrappedTerminalLine = {
+  cells: Array<{ x: number; y: number }>;
+  text: string;
+};
+
+export type TerminalProviderLinkSnapshot = {
+  kind: TerminalDetectedLink["kind"];
+  range: ILink["range"];
+  target: string;
+  text: string;
+};
+
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/gi;
 const FILE_PATTERN =
   /file:\/\/\/?[^\s<>"'`]+|[A-Za-z]:[\\/][^\s<>"'`]+|\\\\[^\s<>"'`]+|(?:\/|~[\\/]|\.{1,2}[\\/])[^\s<>"'`]+|(?:[A-Za-z0-9_@+~.-]+[\\/])+[^\s<>"'`]+|[A-Za-z0-9_@+~-]+\.[A-Za-z0-9]{1,16}(?::\d+(?::\d+)?)?/g;
 const MAX_LINE_LENGTH = 2000;
 const MAX_LINK_LENGTH = 1024;
 const MAX_RESOLVED_FILE_LINKS = 10;
+const MAX_HARD_WRAPPED_URL_ROWS = 8;
+const URL_CONTINUATION_PATTERN = /^[A-Za-z0-9/?#[\]@!$&'()*+,;=:%._~-]/;
+const URL_WRAP_END_PATTERN = /[-/._~=%&?#]$/;
 const KNOWN_FILE_EXTENSIONS = new Set([
   "bat",
   "c",
@@ -76,6 +91,18 @@ function defaultOpenUrl(url: string) {
 
 function defaultValidateFile(path: string) {
   return invoke<boolean>("terminal_link_target_exists", { path });
+}
+
+function openBrowserLink(url: string, options: TerminalLinkProviderOptions) {
+  const open = options.openUrl ?? defaultOpenUrl;
+  open(url).catch((error) => {
+    const fallback = typeof window !== "undefined"
+      ? window.open(url, "_blank", "noopener,noreferrer")
+      : null;
+    if (!fallback) {
+      options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
+    }
+  });
 }
 
 function trimTerminalToken(token: string) {
@@ -207,6 +234,152 @@ function overlapsExistingLink(startIndex: number, length: number, links: Termina
   });
 }
 
+function lineText(line: IBufferLine, trimRight: boolean) {
+  return line.translateToString(trimRight);
+}
+
+function hardWrappedLineText(line: IBufferLine) {
+  return line.translateToString(true);
+}
+
+function leadingWhitespaceLength(text: string) {
+  return text.length - text.trimStart().length;
+}
+
+function startsWithUrlContinuation(text: string) {
+  const leading = leadingWhitespaceLength(text);
+  if (leading === 0) {
+    return false;
+  }
+  const trimmed = text.slice(leading);
+  return URL_CONTINUATION_PATTERN.test(trimmed);
+}
+
+function trailingWrappableUrl(text: string) {
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const url = trimTerminalToken(match[0]);
+    const startIndex = match.index ?? 0;
+    if (startIndex + url.length === text.length && URL_WRAP_END_PATTERN.test(url)) {
+      return url;
+    }
+  }
+  return null;
+}
+
+function hardWrappedTextBetween(activeBuffer: Terminal["buffer"]["active"], startIndex: number, endIndex: number) {
+  const parts: string[] = [];
+  for (let index = startIndex; index <= endIndex; index++) {
+    const line = activeBuffer.getLine(index);
+    if (!line) {
+      break;
+    }
+    const text = hardWrappedLineText(line);
+    parts.push(index === startIndex ? text : text.slice(leadingWhitespaceLength(text)));
+  }
+  return parts.join("");
+}
+
+function appendMappedText(target: WrappedTerminalLine, bufferLineNumber: number, text: string, startColumn: number) {
+  target.text += text;
+  for (let index = 0; index < text.length; index++) {
+    target.cells.push({
+      x: startColumn + index + 1,
+      y: bufferLineNumber,
+    });
+  }
+}
+
+function readWrappedTerminalLine(term: Terminal, bufferLineNumber: number): WrappedTerminalLine | null {
+  const activeBuffer = term.buffer.active;
+  const requestedIndex = bufferLineNumber - 1;
+  const requestedLine = activeBuffer.getLine(requestedIndex);
+  if (!requestedLine) {
+    return null;
+  }
+
+  let startIndex = requestedIndex;
+  while (startIndex > 0 && activeBuffer.getLine(startIndex)?.isWrapped) {
+    startIndex--;
+  }
+
+  let endIndex = requestedIndex;
+  while (activeBuffer.getLine(endIndex + 1)?.isWrapped) {
+    endIndex++;
+  }
+
+  let logicalStartIndex = startIndex;
+  let logicalEndIndex = endIndex;
+  while (
+    logicalStartIndex > 0 &&
+    startIndex - logicalStartIndex < MAX_HARD_WRAPPED_URL_ROWS &&
+    startsWithUrlContinuation(hardWrappedLineText(activeBuffer.getLine(logicalStartIndex) as IBufferLine)) &&
+    trailingWrappableUrl(hardWrappedTextBetween(activeBuffer, logicalStartIndex - 1, logicalEndIndex))
+  ) {
+    logicalStartIndex--;
+  }
+
+  while (
+    activeBuffer.getLine(logicalEndIndex + 1) &&
+    logicalEndIndex - endIndex < MAX_HARD_WRAPPED_URL_ROWS &&
+    startsWithUrlContinuation(hardWrappedLineText(activeBuffer.getLine(logicalEndIndex + 1) as IBufferLine)) &&
+    trailingWrappableUrl(hardWrappedTextBetween(activeBuffer, logicalStartIndex, logicalEndIndex))
+  ) {
+    logicalEndIndex++;
+  }
+
+  const mapped: WrappedTerminalLine = { cells: [], text: "" };
+  const hasHardWrappedUrl = logicalStartIndex !== startIndex || logicalEndIndex !== endIndex;
+  for (let index = logicalStartIndex; index <= logicalEndIndex; index++) {
+    const line = activeBuffer.getLine(index);
+    if (!line) {
+      break;
+    }
+    if (hasHardWrappedUrl) {
+      const rawText = hardWrappedLineText(line);
+      const leading = index === logicalStartIndex ? 0 : leadingWhitespaceLength(rawText);
+      appendMappedText(mapped, index + 1, rawText.slice(leading), leading);
+    } else {
+      appendMappedText(mapped, index + 1, lineText(line, index === logicalEndIndex), 0);
+    }
+  }
+
+  return mapped;
+}
+
+function terminalLinkRange(line: WrappedTerminalLine, link: TerminalDetectedLink): ILink["range"] {
+  const start = line.cells[link.startIndex];
+  const end = line.cells[link.startIndex + link.text.length - 1] ?? start;
+
+  return {
+    start,
+    end,
+  };
+}
+
+export async function getTerminalLinksForBufferLine(
+  term: Terminal,
+  bufferLineNumber: number,
+  options: TerminalLinkProviderOptions,
+): Promise<TerminalProviderLinkSnapshot[]> {
+  const line = readWrappedTerminalLine(term, bufferLineNumber);
+  if (!line?.text) {
+    return [];
+  }
+
+  const links = await findValidatedTerminalLinks(
+    line.text,
+    options.getBasePath?.(),
+    options.validateFile ?? defaultValidateFile,
+  );
+
+  return links.map((link) => ({
+    kind: link.kind,
+    range: terminalLinkRange(line, link),
+    target: link.target,
+    text: link.text,
+  }));
+}
+
 export function findTerminalLinks(line: string, basePath?: string | null): TerminalDetectedLink[] {
   const links: TerminalDetectedLink[] = [];
   if (line.length > MAX_LINE_LENGTH) {
@@ -312,30 +485,29 @@ export async function findValidatedTerminalLinks(
 }
 
 export function installTerminalLinkProvider(term: Terminal, options: TerminalLinkProviderOptions) {
+  if (term.options) {
+    term.options.linkHandler = {
+      allowNonHttpProtocols: false,
+      activate: (_event, text) => openBrowserLink(text, options),
+    };
+  }
+
   return term.registerLinkProvider({
     provideLinks(bufferLineNumber, callback) {
-      const line = term.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true);
-      if (!line) {
-        callback(undefined);
-        return;
-      }
-
-      findValidatedTerminalLinks(line, options.getBasePath?.(), options.validateFile ?? defaultValidateFile)
+      getTerminalLinksForBufferLine(term, bufferLineNumber, options)
         .then((links) => links.map<ILink>((link) => ({
-          range: {
-            start: { x: link.startIndex + 1, y: bufferLineNumber },
-            end: { x: link.startIndex + link.text.length, y: bufferLineNumber },
-          },
+          range: link.range,
           text: link.text,
           decorations: {
             pointerCursor: true,
             underline: true,
           },
           activate: () => {
-            const action = link.kind === "url"
-              ? (options.openUrl ?? defaultOpenUrl)(link.target)
-              : (options.openFile ?? defaultOpenFile)(link.target, options.getExternalEditor());
-            action.catch((error) => {
+            if (link.kind === "url") {
+              openBrowserLink(link.target, options);
+              return;
+            }
+            (options.openFile ?? defaultOpenFile)(link.target, options.getExternalEditor()).catch((error) => {
               options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
             });
           },
