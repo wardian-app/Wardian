@@ -188,22 +188,28 @@ they do not define `turns.jsonl` row boundaries because some providers use tool
 call IDs as turn IDs.
 
 Turn rows are factual aggregations only. They include stable derived ordering
-fields (`turn_index`, `turn_key`), seq and time bounds, typed `request` data,
-the last `assistant_result` when present, nested mechanical `counts`,
+fields (`schema: 2`, `turn_index`, `turn_key`), seq and time bounds, typed
+`request` data, the last `assistant_result` when present, nested mechanical `counts`,
 `tools_used`, `files`, `external_side_effects`, `failure_signals`, `record_refs`,
 and `provider_native_refs`.
 
-`status` is mechanically derived as `in_progress`, `responded`, `interrupted`,
-`lifecycle`, or `unknown`. Wardian does not infer task success from assistant
-prose. Context records such as AGENTS.md injections and goal continuations are
-typed through `request.kind` so readers can skip them when constructing
-human-level summaries.
+`status` is mechanically derived as `in_progress`, `pending_response`,
+`responded`, `interrupted`, `lifecycle`, `context_only`, `superseded`, or
+`unknown`. Wardian does not infer task success from assistant prose. Context
+records such as AGENTS.md injections and goal continuations are typed through
+`request.kind`, and AGENTS.md-only rows use `context_only`, so readers can skip
+them when constructing human-level summaries. `manifest.turn_count` is the
+physical `turns.jsonl` row count; readers that want task counts should filter
+context rows explicitly.
 
 The archive writer must not infer user intent, corrections, complaints,
-causality, recovery, task success, file access, or side effects from arbitrary
-prose. Side effects may come from structured metadata, structured command
-fields, explicit `apply_patch` records, or exact URL-pattern extraction. There
-is no `notes_for_evolver` field in the request-turn index.
+causality, recovery, or task success from arbitrary prose. File evidence may
+come from structured metadata, explicit patch headers, conservative command-path
+extraction, and exact path mentions. Side effects may come from structured
+metadata, structured command fields, explicit `apply_patch` records, or exact
+URL-pattern extraction, and file-edit side effects carry touched paths when the
+patch header names them. There is no `notes_for_evolver` field in the
+request-turn index.
 
 ### `sources.jsonl`
 

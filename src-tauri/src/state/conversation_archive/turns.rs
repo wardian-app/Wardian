@@ -5,7 +5,7 @@ use wardian_core::conversations::{
     ConversationRecordKind, ConversationSourceRecord, ConversationTurnAssistantResult,
     ConversationTurnCounts, ConversationTurnFailureSignal, ConversationTurnFiles,
     ConversationTurnRecord, ConversationTurnRecordRefs, ConversationTurnRequest,
-    ConversationTurnSideEffect, ConversationTurnStatus, CONVERSATION_SCHEMA,
+    ConversationTurnSideEffect, ConversationTurnStatus, CONVERSATION_TURNS_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatStatus};
 
@@ -29,12 +29,33 @@ struct TurnAccumulator {
     sources: Vec<ConversationSourceRecord>,
 }
 
+#[cfg(test)]
 pub(super) fn derive_turn_records(
     conversation_id: &str,
     records: &[ConversationNarrativeRecord],
     events: &[AgentChatEvent],
     sources: &[ConversationSourceRecord],
     is_open: bool,
+) -> Vec<ConversationTurnRecord> {
+    derive_turn_records_with_context(
+        conversation_id,
+        records,
+        events,
+        sources,
+        is_open,
+        None,
+        &[],
+    )
+}
+
+pub(super) fn derive_turn_records_with_context(
+    conversation_id: &str,
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+    sources: &[ConversationSourceRecord],
+    is_open: bool,
+    fallback_provider: Option<&str>,
+    fallback_provider_session_ids: &[String],
 ) -> Vec<ConversationTurnRecord> {
     let events_by_id = events
         .iter()
@@ -90,7 +111,14 @@ pub(super) fn derive_turn_records(
         .enumerate()
         .map(|(index, turn)| {
             let is_open_tail = is_open && index + 1 == turn_count;
-            turn_record_from_accumulator(conversation_id, (index + 1) as u64, turn, is_open_tail)
+            turn_record_from_accumulator(
+                conversation_id,
+                (index + 1) as u64,
+                turn,
+                is_open_tail,
+                fallback_provider,
+                fallback_provider_session_ids,
+            )
         })
         .collect()
 }
@@ -100,6 +128,8 @@ fn turn_record_from_accumulator(
     turn_index: u64,
     turn: TurnAccumulator,
     is_open: bool,
+    fallback_provider: Option<&str>,
+    fallback_provider_session_ids: &[String],
 ) -> ConversationTurnRecord {
     let seq_start = turn
         .records
@@ -234,6 +264,19 @@ fn turn_record_from_accumulator(
             &mut files_mentioned,
             metadata_string_array(&event.metadata, "files_mentioned"),
         );
+        if let Some(path) = event.path.as_deref().and_then(normalize_path) {
+            extend_unique(&mut files_mentioned, vec![path]);
+        }
+        if let Some(command) = event.command.as_deref() {
+            let command_paths = extract_mentioned_paths(command);
+            if is_read_command(command) {
+                extend_unique(&mut files_read, command_paths.clone());
+            }
+            extend_unique(&mut files_mentioned, command_paths);
+        }
+        if let Some(text) = event.text.as_deref() {
+            extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+        }
         extend_side_effects(
             &mut external_side_effects,
             metadata_string_array(&event.metadata, "external_side_effects")
@@ -242,6 +285,7 @@ fn turn_record_from_accumulator(
                     kind: "external_side_effect".to_string(),
                     evidence_seq: seq,
                     summary,
+                    paths: Vec::new(),
                 })
                 .collect(),
         );
@@ -252,15 +296,23 @@ fn turn_record_from_accumulator(
     }
 
     for record in &turn.records {
+        let record_text = record.text.as_deref().or(record.excerpt.as_deref());
+        if let Some(text) = record_text {
+            extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+        }
         if record.kind == ConversationRecordKind::ToolCall
             && record.tool.as_deref() == Some("apply_patch")
         {
+            let paths = record_text.map(extract_patch_paths).unwrap_or_default();
+            extend_unique(&mut files_written, paths.clone());
+            extend_unique(&mut files_mentioned, paths.clone());
             extend_side_effects(
                 &mut external_side_effects,
                 vec![ConversationTurnSideEffect {
                     kind: "file_edit".to_string(),
                     evidence_seq: record.seq,
-                    summary: "apply_patch".to_string(),
+                    summary: side_effect_summary_with_paths("apply_patch", &paths),
+                    paths,
                 }],
             );
         }
@@ -280,6 +332,15 @@ fn turn_record_from_accumulator(
         .all(|record| record.kind == ConversationRecordKind::Lifecycle);
     let interrupted = turn.records.iter().any(is_interruption_record);
     let is_final_open_turn = is_open;
+    let request = request_record
+        .map(request_from_record)
+        .unwrap_or(ConversationTurnRequest {
+            seq: seq_start,
+            kind: "unknown".to_string(),
+            text: None,
+            text_truncated: false,
+            objective_text: None,
+        });
     let (status, status_source) = if interrupted {
         (
             ConversationTurnStatus::Interrupted,
@@ -290,6 +351,11 @@ fn turn_record_from_accumulator(
             ConversationTurnStatus::Lifecycle,
             "mechanical_lifecycle_only".to_string(),
         )
+    } else if request.kind == "agent_context" {
+        (
+            ConversationTurnStatus::ContextOnly,
+            "mechanical_context_only".to_string(),
+        )
     } else if assistant_message.is_some() {
         (
             ConversationTurnStatus::Responded,
@@ -297,24 +363,15 @@ fn turn_record_from_accumulator(
         )
     } else if is_final_open_turn {
         (
-            ConversationTurnStatus::InProgress,
-            "mechanical_open_tail".to_string(),
+            ConversationTurnStatus::PendingResponse,
+            "mechanical_open_tail_pending_response".to_string(),
         )
     } else {
         (
-            ConversationTurnStatus::Unknown,
-            "mechanical_grouping".to_string(),
+            ConversationTurnStatus::PendingResponse,
+            "mechanical_no_assistant_message".to_string(),
         )
     };
-
-    let request = request_record
-        .map(request_from_record)
-        .unwrap_or(ConversationTurnRequest {
-            seq: seq_start,
-            kind: "unknown".to_string(),
-            text: None,
-            text_truncated: false,
-        });
     let assistant_result = assistant_message.map(assistant_result_from_record);
     let event_refs = turn
         .records
@@ -323,7 +380,7 @@ fn turn_record_from_accumulator(
         .collect();
 
     ConversationTurnRecord {
-        schema: CONVERSATION_SCHEMA,
+        schema: CONVERSATION_TURNS_SCHEMA,
         conversation_id: conversation_id.to_string(),
         turn_index,
         turn_key: format!("{conversation_id}:turn:{turn_index:06}"),
@@ -349,7 +406,11 @@ fn turn_record_from_accumulator(
             conversation_seq_end: seq_end,
             event_refs,
         },
-        provider_native_refs: provider_native_refs_from_sources(&turn.sources),
+        provider_native_refs: provider_native_refs_from_sources(
+            &turn.sources,
+            fallback_provider,
+            fallback_provider_session_ids,
+        ),
     }
 }
 
@@ -367,7 +428,7 @@ pub(super) fn archive_summary(
         turn_count: turns.len() as u64,
         has_turns: !turns.is_empty(),
         lifecycle_only,
-        provider_native_refs: provider_native_refs_from_sources(sources),
+        provider_native_refs: provider_native_refs_from_sources(sources, None, &[]),
     }
 }
 
@@ -384,29 +445,58 @@ pub(super) fn apply_archive_summary_to_manifest(
 
 fn provider_native_refs_from_sources(
     sources: &[ConversationSourceRecord],
+    fallback_provider: Option<&str>,
+    fallback_provider_session_ids: &[String],
 ) -> Vec<ConversationProviderNativeRef> {
     let mut seen = HashSet::new();
     let mut refs = Vec::new();
+    let fallback_provider = fallback_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
     for source in sources {
         if source.provider == "wardian"
             || (source.provider_session_id.is_none() && source.source_path.is_none())
         {
             continue;
         }
+        let provider_session_id = source.provider_session_id.clone().or_else(|| {
+            (Some(source.provider.as_str()) == fallback_provider
+                && fallback_provider_session_ids.len() == 1)
+                .then(|| fallback_provider_session_ids[0].clone())
+        });
         let key = format!(
             "{}\u{1f}{}\u{1f}{}\u{1f}{}",
             source.provider,
-            source.provider_session_id.as_deref().unwrap_or_default(),
+            provider_session_id.as_deref().unwrap_or_default(),
             source.source_kind,
             source.source_path.as_deref().unwrap_or_default()
         );
         if seen.insert(key) {
             refs.push(ConversationProviderNativeRef {
                 provider: source.provider.clone(),
-                provider_session_id: source.provider_session_id.clone(),
+                provider_session_id,
                 source_kind: source.source_kind.clone(),
                 source_path: source.source_path.clone(),
             });
+        }
+    }
+    if refs.is_empty() {
+        if let Some(provider) = fallback_provider {
+            for session_id in fallback_provider_session_ids {
+                let session_id = session_id.trim();
+                if session_id.is_empty() {
+                    continue;
+                }
+                let key = format!("{provider}\u{1f}{session_id}\u{1f}provider_session\u{1f}");
+                if seen.insert(key) {
+                    refs.push(ConversationProviderNativeRef {
+                        provider: provider.to_string(),
+                        provider_session_id: Some(session_id.to_string()),
+                        source_kind: "provider_session".to_string(),
+                        source_path: None,
+                    });
+                }
+            }
         }
     }
     refs
@@ -453,9 +543,11 @@ fn is_user_request_record(record: &ConversationNarrativeRecord) -> bool {
 
 fn request_from_record(record: &ConversationNarrativeRecord) -> ConversationTurnRequest {
     let (text, text_truncated) = bounded_record_text(record);
+    let kind = request_kind_for_record(record);
     ConversationTurnRequest {
         seq: record.seq,
-        kind: request_kind_for_record(record),
+        objective_text: objective_text_for_request(&kind, record),
+        kind,
         text,
         text_truncated,
     }
@@ -603,6 +695,7 @@ fn side_effect(seq: u64, kind: &str, summary: &str) -> ConversationTurnSideEffec
         kind: kind.to_string(),
         evidence_seq: seq,
         summary: summary.to_string(),
+        paths: Vec::new(),
     }
 }
 
@@ -613,6 +706,162 @@ fn first_github_url(text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn objective_text_for_request(kind: &str, record: &ConversationNarrativeRecord) -> Option<String> {
+    let text = record.text.as_deref().or(record.excerpt.as_deref())?;
+    let objective = match kind {
+        "goal_start" => text.trim_start_matches("/goal").trim(),
+        "goal_continuation" => goal_continuation_objective(text),
+        _ => "",
+    };
+    compact_text(objective, 500)
+}
+
+fn goal_continuation_objective(text: &str) -> &str {
+    let inner = text
+        .split_once("<codex_internal_context source=\"goal\">")
+        .map(|(_, rest)| rest)
+        .unwrap_or(text)
+        .split_once("</codex_internal_context>")
+        .map(|(before, _)| before)
+        .unwrap_or(text);
+    inner
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            line.strip_prefix("Goal:")
+                .or_else(|| line.strip_prefix("Objective:"))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| {
+            inner
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('<'))
+                .unwrap_or(inner)
+        })
+}
+
+fn compact_text(text: &str, limit_chars: usize) -> Option<String> {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    let mut end = 0;
+    for (index, ch) in compact.char_indices() {
+        if index >= limit_chars {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    if compact.chars().count() <= limit_chars {
+        Some(compact)
+    } else {
+        Some(compact[..end].to_string())
+    }
+}
+
+fn extract_patch_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in text.lines().map(str::trim) {
+        let path = line
+            .strip_prefix("*** Update File:")
+            .or_else(|| line.strip_prefix("*** Add File:"))
+            .or_else(|| line.strip_prefix("*** Delete File:"))
+            .or_else(|| line.strip_prefix("*** Move to:"))
+            .map(str::trim)
+            .and_then(normalize_path);
+        if let Some(path) = path {
+            extend_unique(&mut paths, vec![path]);
+        }
+    }
+    paths
+}
+
+fn extract_mentioned_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in text.split_whitespace() {
+        if let Some(path) = normalize_path(token) {
+            extend_unique(&mut paths, vec![path]);
+        }
+    }
+    paths
+}
+
+fn normalize_path(value: &str) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '{' | '}'
+            )
+        })
+        .trim_end_matches('.');
+    if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return None;
+    }
+    let without_line = trimmed
+        .rsplit_once(':')
+        .and_then(|(path, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()).then_some(path))
+        .unwrap_or(trimmed);
+    let normalized = without_line.replace('\\', "/");
+    let known_file = matches!(
+        normalized.as_str(),
+        "Cargo.toml" | "package.json" | "package-lock.json" | "README.md" | "AGENTS.md"
+    );
+    let known_prefix = [
+        "src/",
+        "src-tauri/",
+        "crates/",
+        "docs/",
+        "e2e/",
+        "e2e-native/",
+        "scripts/",
+        "tools/",
+        ".github/",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix));
+    let has_extension = normalized
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.') && !name.starts_with('.'));
+    if known_file || (known_prefix && (has_extension || normalized.ends_with('/'))) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn is_read_command(command: &str) -> bool {
+    let lower = command.trim_start().to_ascii_lowercase();
+    [
+        "cat ",
+        "type ",
+        "more ",
+        "less ",
+        "sed ",
+        "rg ",
+        "grep ",
+        "head ",
+        "tail ",
+        "get-content ",
+        "gc ",
+        "select-string ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn side_effect_summary_with_paths(summary: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        summary.to_string()
+    } else {
+        format!("{summary}: {}", paths.join(", "))
+    }
+}
+
 fn extend_side_effects(
     values: &mut Vec<ConversationTurnSideEffect>,
     next_values: Vec<ConversationTurnSideEffect>,
@@ -621,15 +870,21 @@ fn extend_side_effects(
         .iter()
         .map(|value| {
             format!(
-                "{}\u{1f}{}\u{1f}{}",
-                value.kind, value.evidence_seq, value.summary
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                value.kind,
+                value.evidence_seq,
+                value.summary,
+                value.paths.join("\u{1e}")
             )
         })
         .collect::<HashSet<_>>();
     for value in next_values {
         let key = format!(
-            "{}\u{1f}{}\u{1f}{}",
-            value.kind, value.evidence_seq, value.summary
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            value.kind,
+            value.evidence_seq,
+            value.summary,
+            value.paths.join("\u{1e}")
         );
         if seen.insert(key) {
             values.push(value);

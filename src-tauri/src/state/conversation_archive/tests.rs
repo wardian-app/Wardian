@@ -350,7 +350,7 @@ fn request_kind_marks_goal_continuation_and_agent_context_rows() {
         ),
         narrative_from_delivered_input(
             "2026-06-15T00:00:02.000Z",
-            "<codex_internal_context source=\"goal\">Continue the active goal.</codex_internal_context>",
+            "<codex_internal_context source=\"goal\">\nGoal: Fix the archive index.\n\nLarge scaffold omitted.\n</codex_internal_context>",
             None,
             2,
         ),
@@ -367,8 +367,30 @@ fn request_kind_marks_goal_continuation_and_agent_context_rows() {
     assert_eq!(turns.len(), 3);
     assert_eq!(turns[0].request.kind, "goal_start");
     assert_eq!(turns[1].request.kind, "goal_continuation");
+    let goal_json = serde_json::to_value(&turns[1]).unwrap();
+    assert_eq!(
+        goal_json["request"]["objective_text"],
+        "Fix the archive index."
+    );
     assert_eq!(turns[2].request.kind, "agent_context");
-    assert_eq!(turns[2].status, ConversationTurnStatus::InProgress);
+    assert_eq!(turns[2].status, ConversationTurnStatus::ContextOnly);
+    assert_eq!(turns[2].status_source, "mechanical_context_only");
+}
+
+#[test]
+fn closed_user_request_without_assistant_is_pending_response() {
+    let records = vec![narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        "Please inspect the archive.",
+        None,
+        1,
+    )];
+
+    let turns = derive_turn_records("conv-pending", &records, &[], &[], false);
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].status, ConversationTurnStatus::PendingResponse);
+    assert_eq!(turns[0].status_source, "mechanical_no_assistant_message");
 }
 
 #[test]
@@ -537,6 +559,15 @@ fn active_conversation_refresh_writes_turns_index_and_manifest_summary() {
     assert_eq!(turns[0]["status_source"], "mechanical_assistant_message");
     assert_eq!(turns[0]["request"]["kind"], "user_request");
     assert_eq!(turns[0]["request"]["seq"], 1);
+    assert_eq!(turns[0]["schema"], 2);
+    assert_eq!(
+        turns[0]["provider_native_refs"][0]["provider_session_id"],
+        "session-one"
+    );
+    assert_eq!(
+        turns[0]["provider_native_refs"][0]["source_kind"],
+        "provider_session"
+    );
     assert_eq!(
         turns[0]["assistant_result"]["text"],
         "I am still working on it."
@@ -633,6 +664,86 @@ fn provider_tool_call_turn_ids_stay_inside_surrounding_user_request_turn() {
     assert_eq!(turns[0]["counts"]["tool_results"], 2);
     assert_eq!(turns[0]["tools_used"]["shell_command"], 1);
     assert_eq!(turns[0]["tools_used"]["apply_patch"], 1);
+}
+
+#[test]
+fn apply_patch_turn_extracts_written_and_mentioned_paths() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-paths",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Fix the turns index."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut patch = chat_event(
+        "event-tool-patch",
+        AgentChatEventKind::ToolCall,
+        None,
+        Some(
+            "*** Begin Patch\n\
+             *** Update File: src-tauri/src/state/conversation_archive/turns.rs\n\
+             @@\n\
+             -old\n\
+             +new\n\
+             *** Add File: docs/specs/2026-06-25-turns-jsonl-request-index.md\n\
+             +# Turns index\n\
+             *** End Patch",
+        ),
+    );
+    patch.turn_id = Some("tool-call-patch".to_string());
+    patch.title = Some("apply_patch".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-paths",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some(
+            "Updated src-tauri/src/state/conversation_archive/turns.rs and docs/specs/2026-06-25-turns-jsonl-request-index.md.",
+        ),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, patch, assistant])
+        .expect("append patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["schema"], 2);
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert_eq!(
+        turns[0]["files"]["mentioned"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert_eq!(turns[0]["external_side_effects"][0]["kind"], "file_edit");
+    assert_eq!(
+        turns[0]["external_side_effects"][0]["paths"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert!(turns[0]["external_side_effects"][0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("src-tauri/src/state/conversation_archive/turns.rs"));
 }
 
 #[test]

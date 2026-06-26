@@ -11,6 +11,7 @@ use std::{
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 pub const CONVERSATION_SCHEMA: u8 = 1;
+pub const CONVERSATION_TURNS_SCHEMA: u8 = 2;
 pub const CONVERSATION_INLINE_TEXT_LIMIT_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,9 +101,12 @@ fn default_turns_format_version() -> u8 {
 #[serde(rename_all = "snake_case")]
 pub enum ConversationTurnStatus {
     InProgress,
+    PendingResponse,
     Responded,
     Interrupted,
     Lifecycle,
+    ContextOnly,
+    Superseded,
     #[default]
     Unknown,
 }
@@ -182,6 +186,8 @@ pub struct ConversationTurnRequest {
     pub kind: String,
     pub text: Option<String>,
     pub text_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +220,8 @@ pub struct ConversationTurnSideEffect {
     pub kind: String,
     pub evidence_seq: u64,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -609,7 +617,7 @@ mod tests {
         let mut tools_used = std::collections::BTreeMap::new();
         tools_used.insert("shell_command".to_string(), 2);
         let record = ConversationTurnRecord {
-            schema: CONVERSATION_SCHEMA,
+            schema: CONVERSATION_TURNS_SCHEMA,
             conversation_id: "conv-1".to_string(),
             turn_index: 1,
             turn_key: "conv-1:turn:000001".to_string(),
@@ -624,6 +632,7 @@ mod tests {
                 kind: "user_request".to_string(),
                 text: Some("Run the tests.".to_string()),
                 text_truncated: false,
+                objective_text: None,
             },
             assistant_result: Some(ConversationTurnAssistantResult {
                 seq: 4,
@@ -649,6 +658,7 @@ mod tests {
                 kind: "git_commit".to_string(),
                 evidence_seq: 4,
                 summary: "commit created".to_string(),
+                paths: Vec::new(),
             }],
             failure_signals: vec![ConversationTurnFailureSignal {
                 kind: "command_nonzero_exit".to_string(),
@@ -672,6 +682,7 @@ mod tests {
         let json = serde_json::to_value(&record).unwrap();
 
         assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["schema"], CONVERSATION_TURNS_SCHEMA);
         assert_eq!(json["turn_index"], 1);
         assert_eq!(json["turn_key"], "conv-1:turn:000001");
         assert_eq!(json["status"], "responded");
