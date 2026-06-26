@@ -402,7 +402,7 @@ describe('AgentWatchlist', () => {
     expect(within(screen.getByTestId('team-block-team-1')).getByText('Beta')).toBeInTheDocument();
   });
 
-  it('toggles a team collapsed from the chevron without selecting the team', () => {
+  it('toggles a team collapsed from the chevron without selecting the team or writing global prefs', () => {
     render(
       <AgentWatchlist
         {...defaultProps}
@@ -415,10 +415,9 @@ describe('AgentWatchlist', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' }));
 
     expect(mockOnSelectionChange).not.toHaveBeenCalled();
-    expect(mockOnPrefsChange).toHaveBeenCalledWith({
-      ...defaultPrefs,
-      collapsed_team_ids: ['team-1'],
-    });
+    expect(mockOnPrefsChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Expand Core Dev Swarm' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('team-block-team-1')).queryByText('Alpha')).not.toBeInTheDocument();
   });
 
   it('hides team members when a team is collapsed but keeps team actions available', async () => {
@@ -438,6 +437,55 @@ describe('AgentWatchlist', () => {
 
     fireEvent.contextMenu(screen.getByTestId('team-header-team-1'));
     expect(await screen.findByRole('button', { name: 'Query Team' })).toBeInTheDocument();
+  });
+
+  it('keeps a collapsed team scoped to the active watchlist', () => {
+    const lists: Watchlist[] = [
+      { id: 'today', name: 'Today', entries: [{ type: 'team', teamId: 'team-1' }] },
+      { id: 'later', name: 'Later', entries: [{ type: 'team', teamId: 'team-1' }] },
+    ];
+    let controlledPrefs: WatchlistPrefs = { ...defaultPrefs, collapsed_team_ids: [] };
+    const handlePrefsChange = vi.fn((next: WatchlistPrefs) => {
+      controlledPrefs = next;
+    });
+    const { rerender } = render(
+      <AgentWatchlist
+        {...defaultProps}
+        watchlists={lists}
+        activeListId="today"
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={controlledPrefs}
+        onPrefsChange={handlePrefsChange}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' }));
+    rerender(
+      <AgentWatchlist
+        {...defaultProps}
+        watchlists={lists}
+        activeListId="today"
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={controlledPrefs}
+        onPrefsChange={handlePrefsChange}
+      />
+    );
+    expect(within(screen.getByTestId('team-block-team-1')).queryByText('Alpha')).not.toBeInTheDocument();
+
+    rerender(
+      <AgentWatchlist
+        {...defaultProps}
+        watchlists={lists}
+        activeListId="later"
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={controlledPrefs}
+        onPrefsChange={handlePrefsChange}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' })).toBeInTheDocument();
+    expect(within(screen.getByTestId('team-block-team-1')).getByText('Alpha')).toBeInTheDocument();
+    expect(within(screen.getByTestId('team-block-team-1')).getByText('Beta')).toBeInTheDocument();
   });
 
   it('batches list additions and removals from a multi-selection context menu', async () => {
@@ -466,6 +514,35 @@ describe('AgentWatchlist', () => {
 
     expect(mockOnRemoveAgentsFromList).toHaveBeenCalledWith('inbox', ['agent-1', 'agent-2']);
     expect(defaultProps.onRemoveFromList).not.toHaveBeenCalled();
+  });
+
+  it('reorders custom watchlist tabs while keeping All fixed', async () => {
+    const lists: Watchlist[] = [
+      { id: 'today', name: 'Today', entries: [] },
+      { id: 'later', name: 'Later', entries: [] },
+      { id: 'ops', name: 'Ops', entries: [] },
+    ];
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        watchlists={lists}
+        activeListId="today"
+      />
+    );
+    const todayTab = screen.getByTitle('Today');
+    const opsTab = screen.getByTitle('Ops');
+    setRect(todayTab, 100, 40);
+
+    fireEvent.mouseDown(opsTab);
+    fireEvent.mouseMove(todayTab, { clientY: 110 });
+    fireEvent.mouseUp(todayTab, { clientY: 110 });
+
+    await waitFor(() => expect(mockOnWatchlistsChange).toHaveBeenCalledWith([
+      { id: 'ops', name: 'Ops', entries: [] },
+      { id: 'today', name: 'Today', entries: [] },
+      { id: 'later', name: 'Later', entries: [] },
+    ]));
+    expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument();
   });
 
   it('renders sorted team members as individual rows by default', async () => {
