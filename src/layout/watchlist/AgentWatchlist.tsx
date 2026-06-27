@@ -39,6 +39,8 @@ type DropTarget =
   | { type: "agent"; agentId: string; position: DropPosition }
   | { type: "team"; teamId: string; position: "before" | "inside" | "after" };
 
+type TabDropTarget = { listId: string; position: DropPosition };
+
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "–";
   return isUserFacingProviderName(provider) ? providerDisplayName(provider) : provider;
@@ -174,7 +176,12 @@ export default function AgentWatchlist({
   const [isRenaming, setIsRenaming] = useState(false);
   const dragSourceRef = useRef<DragSource | null>(null);
   const dropTargetRef = useRef<DropTarget | null>(null);
+  const draggedListIdRef = useRef<string | null>(null);
+  const tabDropTargetRef = useRef<TabDropTarget | null>(null);
   const [dropTarget, setDropTargetState] = useState<DropTarget | null>(null);
+  const [draggedListId, setDraggedListId] = useState<string | null>(null);
+  const [tabDropTarget, setTabDropTargetState] = useState<TabDropTarget | null>(null);
+  const [collapsedTeamsByList, setCollapsedTeamsByList] = useState<Record<string, string[]>>({});
   const wasDragging = useRef(false);
   const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
@@ -220,6 +227,11 @@ export default function AgentWatchlist({
     activeListId === "all"
       ? null
       : watchlists.find((l) => l.id === activeListId) || null;
+  const activeCollapseScopeId = activeList?.id ?? "all";
+  const legacyAllCollapsedTeamIds = prefs.collapsed_team_ids ?? [];
+  const activeCollapsedTeamIds =
+    collapsedTeamsByList[activeCollapseScopeId] ??
+    (activeCollapseScopeId === "all" ? legacyAllCollapsedTeamIds : []);
 
   const baseDisplayItems = getDisplayItemsForList(agents, activeList, teams);
   const filteredDisplayItems = baseDisplayItems
@@ -338,11 +350,22 @@ export default function AgentWatchlist({
     setDropTargetState(target);
   };
 
+  const setTabDropTarget = (target: TabDropTarget | null) => {
+    tabDropTargetRef.current = target;
+    setTabDropTargetState(target);
+  };
+
   const resetDragState = () => {
     dragSourceRef.current = null;
     setDropTarget(null);
     setDraggedAgentId(null);
     setDraggedTeamId(null);
+  };
+
+  const resetTabDragState = () => {
+    draggedListIdRef.current = null;
+    setDraggedListId(null);
+    setTabDropTarget(null);
   };
 
   const rowDropPosition = (e: React.MouseEvent): DropPosition => {
@@ -569,16 +592,63 @@ export default function AgentWatchlist({
     setDropTarget({ type: "team", teamId, position });
   };
 
+  const handleListTabMouseDown = (listId: string) => {
+    draggedListIdRef.current = listId;
+    setDraggedListId(listId);
+  };
+
+  const updateListTabDropTarget = (targetListId: string, e?: React.MouseEvent) => {
+    const sourceListId = draggedListIdRef.current;
+    if (!sourceListId || sourceListId === targetListId) {
+      setTabDropTarget(null);
+      return;
+    }
+    let position: DropPosition = "before";
+    if (e) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      if (rect.width > 0 && e.clientX > rect.left + rect.width / 2) position = "after";
+    }
+    setTabDropTarget({ listId: targetListId, position });
+  };
+
+  const handleListTabMouseUp = async (target = tabDropTargetRef.current) => {
+    const sourceListId = draggedListIdRef.current;
+    if (!sourceListId || !target || sourceListId === target.listId) {
+      resetTabDragState();
+      return;
+    }
+    const sourceIndex = watchlists.findIndex((list) => list.id === sourceListId);
+    const targetIndex = watchlists.findIndex((list) => list.id === target.listId);
+    if (sourceIndex === -1 || targetIndex === -1) {
+      resetTabDragState();
+      return;
+    }
+
+    const nextWatchlists = [...watchlists];
+    const [moved] = nextWatchlists.splice(sourceIndex, 1);
+    const adjustedTargetIndex = nextWatchlists.findIndex((list) => list.id === target.listId);
+    if (adjustedTargetIndex === -1) {
+      resetTabDragState();
+      return;
+    }
+    nextWatchlists.splice(adjustedTargetIndex + (target.position === "after" ? 1 : 0), 0, moved);
+    await persistWatchlists(nextWatchlists);
+    resetTabDragState();
+  };
+
   // Cancel drag if mouse leaves the list area
   useEffect(() => {
     const cancelDrag = () => {
       if (dragSourceRef.current) {
         resetDragState();
       }
+      if (draggedListIdRef.current) {
+        resetTabDragState();
+      }
     };
     window.addEventListener("mouseup", cancelDrag);
     return () => window.removeEventListener("mouseup", cancelDrag);
-  }, [draggedAgentId, draggedTeamId]);
+  }, [draggedAgentId, draggedTeamId, draggedListId]);
 
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault();
@@ -626,11 +696,14 @@ export default function AgentWatchlist({
   }
 
   const handleToggleTeamCollapsed = (teamId: string) => {
-    if (!onPrefsChange) return;
-    const collapsed = new Set(prefs.collapsed_team_ids ?? []);
-    if (collapsed.has(teamId)) collapsed.delete(teamId);
-    else collapsed.add(teamId);
-    onPrefsChange({ ...prefs, collapsed_team_ids: Array.from(collapsed) });
+    setCollapsedTeamsByList((current) => {
+      const scopeCollapsed = current[activeCollapseScopeId] ??
+        (activeCollapseScopeId === "all" ? legacyAllCollapsedTeamIds : []);
+      const collapsed = new Set(scopeCollapsed);
+      if (collapsed.has(teamId)) collapsed.delete(teamId);
+      else collapsed.add(teamId);
+      return { ...current, [activeCollapseScopeId]: Array.from(collapsed) };
+    });
   };
 
   // ── Dynamic grid template: dot | name | [visible columns]
@@ -853,7 +926,17 @@ export default function AgentWatchlist({
                 onClick={() => onActiveListChange(list.id)}
                 onDoubleClick={() => { setEditingListId(list.id); setEditingListName(list.name); }}
                 onContextMenu={(e) => handleTabContextMenu(e, list.id)}
-                className={`watchlist-tab ${activeListId === list.id ? "active" : ""}`}
+                onMouseDown={() => handleListTabMouseDown(list.id)}
+                onMouseMove={(e) => updateListTabDropTarget(list.id, e)}
+                onMouseEnter={(e) => updateListTabDropTarget(list.id, e)}
+                onMouseUp={(e) => {
+                  e.stopPropagation();
+                  updateListTabDropTarget(list.id, e);
+                  handleListTabMouseUp();
+                }}
+                className={`watchlist-tab ${activeListId === list.id ? "active" : ""} ${
+                  tabDropTarget?.listId === list.id ? `drag-over-${tabDropTarget.position}` : ""
+                } ${draggedListId === list.id ? "opacity-50" : ""}`}
                 title={list.name}
               >
                 {list.name.charAt(0).toUpperCase()}
@@ -901,7 +984,7 @@ export default function AgentWatchlist({
             ? displayedAgents.map((agent) => renderAgentRow(agent))
             : sortedDisplayItems.map((item) => {
                 if (item.type === "agent") return renderAgentRow(item.agent);
-                const isCollapsed = (prefs.collapsed_team_ids ?? []).includes(item.team.id);
+                const isCollapsed = activeCollapsedTeamIds.includes(item.team.id);
                 return (
                   <div
                     key={item.team.id}

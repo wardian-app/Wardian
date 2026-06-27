@@ -516,6 +516,14 @@
   border-color: var(--color-wardian-accent);
   background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
 }
+.watchlist-tab.drag-over-before {
+  border-left-color: var(--color-wardian-accent);
+  box-shadow: -2px 0 0 0 var(--color-wardian-accent);
+}
+.watchlist-tab.drag-over-after {
+  border-right-color: var(--color-wardian-accent);
+  box-shadow: 2px 0 0 0 var(--color-wardian-accent);
+}
 
 /* ── Watchlist Agent Row ──────────────────────────────── */
 .watchlist-row {

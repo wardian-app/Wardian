@@ -51,6 +51,7 @@ interface RemoteState {
   activeWatchlistId: string;
   activeRemoteTab: ActiveRemoteTab;
   mobileCollapsedTeamIds: string[];
+  mobileCollapsedTeamIdsByList: Record<string, string[]>;
   status: RemoteStatus;
   activeAgentId: string | null;
   activeAgentViewMode: "terminal" | "chat";
@@ -578,7 +579,8 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       teams: watchlistState.teams,
       watchlistPrefs,
       activeWatchlistId,
-      mobileCollapsedTeamIds: watchlistPrefs.collapsed_team_ids,
+      mobileCollapsedTeamIdsByList: { all: watchlistPrefs.collapsed_team_ids },
+      mobileCollapsedTeamIds: activeWatchlistId === "all" ? watchlistPrefs.collapsed_team_ids : [],
       status: "ready",
       activeAgentId,
       ...(activeAgentId
@@ -608,6 +610,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   activeWatchlistId: "all",
   activeRemoteTab: "watchlist",
   mobileCollapsedTeamIds: [],
+  mobileCollapsedTeamIdsByList: {},
   status: "loading",
   activeAgentId: null,
   activeAgentViewMode: "terminal",
@@ -655,7 +658,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     closeStatusStream();
   },
   setActiveWatchlistId(id) {
-    set({ activeWatchlistId: id });
+    set((state) => ({
+      activeWatchlistId: id,
+      mobileCollapsedTeamIds: state.mobileCollapsedTeamIdsByList[id] ?? [],
+    }));
     try {
       window.localStorage.setItem(REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY, id);
     } catch {
@@ -667,9 +673,20 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   },
   toggleMobileTeamCollapsed(teamId) {
     set((state) => ({
-      mobileCollapsedTeamIds: state.mobileCollapsedTeamIds.includes(teamId)
-        ? state.mobileCollapsedTeamIds.filter((id) => id !== teamId)
-        : [...state.mobileCollapsedTeamIds, teamId],
+      ...(() => {
+        const scopeId = state.activeWatchlistId;
+        const current = state.mobileCollapsedTeamIdsByList[scopeId] ?? [];
+        const next = current.includes(teamId)
+          ? current.filter((id) => id !== teamId)
+          : [...current, teamId];
+        return {
+          mobileCollapsedTeamIdsByList: {
+            ...state.mobileCollapsedTeamIdsByList,
+            [scopeId]: next,
+          },
+          mobileCollapsedTeamIds: next,
+        };
+      })(),
     }));
   },
   async openAgent(id) {

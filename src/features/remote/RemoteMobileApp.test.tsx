@@ -256,6 +256,53 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByText("Core Team")).toBeVisible();
   });
 
+  it("keeps mobile team collapse scoped to the active watchlist", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+        {
+          session_id: "agent-2",
+          session_name: "Beta",
+          agent_class: "Reviewer",
+          provider: "claude",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [{ id: "team-1", name: "Core Team", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [
+        { id: "today", name: "Today", entries: [{ type: "team", teamId: "team-1" }] },
+        { id: "later", name: "Later", entries: [{ type: "team", teamId: "team-1" }] },
+      ],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      mobileCollapsedTeamIdsByList: {},
+      activeWatchlistId: "today",
+      activeRemoteTab: "watchlist",
+      status: "ready",
+    });
+
+    render(<RemoteWatchlistView />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Core Team" }));
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Later" }));
+
+    expect(screen.getByRole("button", { name: "Collapse Core Team" })).toBeVisible();
+    expect(screen.getByText("Alpha")).toBeVisible();
+    expect(screen.getByText("Beta")).toBeVisible();
+  });
+
   it("opens agent detail when a mobile watchlist row is tapped", async () => {
     useRemoteStore.setState({
       agents: [
