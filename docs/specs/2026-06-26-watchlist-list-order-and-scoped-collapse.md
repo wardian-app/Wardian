@@ -24,11 +24,12 @@ sidebar. The fixed **All** tab stays first and cannot be reordered. Dragging one
 custom list tab before or after another custom list tab updates the existing
 `watchlists` array order and persists through the current watchlist save path.
 
-Scope team collapsed state by active watchlist ID inside the watchlist
-component. The same team can be collapsed in one custom list and expanded in
-another. The **All** view has its own visual collapse scope. Existing global
-`collapsed_team_ids` preferences may seed the initial **All** scope, but new
-toggles should not write team IDs back as a global preference.
+Scope team collapsed state by active watchlist ID in both the desktop watchlist
+component and the remote mobile watchlist store. The same team can be collapsed
+in one custom list and expanded in another. The **All** view has its own visual
+collapse scope. Existing global `collapsed_team_ids` preferences may seed the
+initial **All** scope, but new toggles should not write team IDs back as a
+global preference.
 
 ## Rendering Behavior
 
@@ -42,8 +43,9 @@ Dragging a custom list tab over another custom list tab marks a before or after
 drop target based on pointer position and reorders only the custom list array.
 The **All** tab is not draggable and never becomes a custom-list drop target.
 
-Team chevrons continue to hide or reveal members in rendered team blocks. A
-collapsed team state is read from the current active list scope:
+Team chevrons continue to hide or reveal members in rendered team blocks. This
+applies to both the desktop sidebar and the mobile PWA watchlist. A collapsed
+team state is read from the current active list scope:
 
 - `all` for the **All Agents** view.
 - The custom watchlist ID for a custom list.
@@ -55,16 +57,19 @@ one scope does not affect any other scope.
 
 No persisted watchlist membership model changes are required.
 
-The component keeps scoped collapse state as UI state:
+The desktop component keeps scoped collapse state as UI state:
 
 ```ts
 type CollapsedTeamsByList = Record<string, string[]>;
 ```
 
+The remote mobile store keeps the same scoped state and exposes the current
+active scope as `mobileCollapsedTeamIds` for the mobile watchlist view.
+
 The existing `WatchlistPrefs.collapsed_team_ids` field remains in the type for
 backward compatibility with existing preference files and the remote mobile
-view. Desktop `AgentWatchlist` no longer treats it as the source of truth for
-all list scopes.
+endpoint. Desktop `AgentWatchlist` and the remote mobile store no longer treat
+it as the source of truth for all list scopes.
 
 ## Testing
 
@@ -78,11 +83,13 @@ Add focused frontend tests for `AgentWatchlist`:
   that watchlist.
 - Switching to another watchlist containing the same team still renders that
   team expanded.
+- Remote mobile store and view tests prove the same scoped collapse behavior in
+  the mobile watchlist.
 
 Run the focused component test before broader frontend verification.
 
 ## Documentation
 
 Update the watchlists guide to mention custom list tab reordering and clarify
-that desktop team collapse is scoped to the current watchlist view rather than
-shared across every watchlist.
+that desktop and mobile team collapse are scoped to the current watchlist view
+rather than shared across every watchlist.

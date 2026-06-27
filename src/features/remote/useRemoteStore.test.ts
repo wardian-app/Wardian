@@ -65,6 +65,30 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().watchlists[0]?.id).toBe("main");
     expect(useRemoteStore.getState().teams[0]?.agentIds).toEqual(["agent-2", "agent-1"]);
     expect(useRemoteStore.getState().activeWatchlistId).toBe("main");
+    expect(useRemoteStore.getState().mobileCollapsedTeamIds).toEqual([]);
+  });
+
+  it("scopes collapsed team state to the active remote watchlist", () => {
+    useRemoteStore.setState({
+      activeWatchlistId: "today",
+      watchlists: [
+        { id: "today", name: "Today", entries: [{ type: "team", teamId: "team-1" }] },
+        { id: "later", name: "Later", entries: [{ type: "team", teamId: "team-1" }] },
+      ],
+      teams: [{ id: "team-1", name: "Core Team", agentIds: ["agent-1", "agent-2"] }],
+      mobileCollapsedTeamIds: [],
+    });
+
+    useRemoteStore.getState().toggleMobileTeamCollapsed("team-1");
+    expect(useRemoteStore.getState().mobileCollapsedTeamIds).toEqual(["team-1"]);
+
+    useRemoteStore.getState().setActiveWatchlistId("later");
+    expect(useRemoteStore.getState().mobileCollapsedTeamIds).toEqual([]);
+
+    useRemoteStore.getState().toggleMobileTeamCollapsed("team-1");
+    expect(useRemoteStore.getState().mobileCollapsedTeamIds).toEqual(["team-1"]);
+
+    useRemoteStore.getState().setActiveWatchlistId("today");
     expect(useRemoteStore.getState().mobileCollapsedTeamIds).toEqual(["team-1"]);
   });
 
