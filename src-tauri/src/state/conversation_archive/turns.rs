@@ -264,6 +264,20 @@ fn turn_record_from_accumulator(
             &mut files_mentioned,
             metadata_string_array(&event.metadata, "files_mentioned"),
         );
+        let file_edit_paths = file_edit_paths_from_event(event);
+        if !file_edit_paths.is_empty() {
+            extend_unique(&mut files_written, file_edit_paths.clone());
+            extend_unique(&mut files_mentioned, file_edit_paths.clone());
+            extend_side_effects(
+                &mut external_side_effects,
+                vec![ConversationTurnSideEffect {
+                    kind: "file_edit".to_string(),
+                    evidence_seq: seq,
+                    summary: side_effect_summary_with_paths("apply_patch", &file_edit_paths),
+                    paths: file_edit_paths,
+                }],
+            );
+        }
         if let Some(path) = event.path.as_deref().and_then(normalize_path) {
             extend_unique(&mut files_mentioned, vec![path]);
         }
@@ -304,8 +318,13 @@ fn turn_record_from_accumulator(
             && record.tool.as_deref() == Some("apply_patch")
         {
             let paths = record_text.map(extract_patch_paths).unwrap_or_default();
-            extend_unique(&mut files_written, paths.clone());
-            extend_unique(&mut files_mentioned, paths.clone());
+            if !paths.is_empty() {
+                extend_unique(&mut files_written, paths.clone());
+                extend_unique(&mut files_mentioned, paths.clone());
+            }
+            if paths.is_empty() && has_file_edit_side_effect(&external_side_effects) {
+                continue;
+            }
             extend_side_effects(
                 &mut external_side_effects,
                 vec![ConversationTurnSideEffect {
@@ -332,7 +351,7 @@ fn turn_record_from_accumulator(
         .all(|record| record.kind == ConversationRecordKind::Lifecycle);
     let interrupted = turn.records.iter().any(is_interruption_record);
     let is_final_open_turn = is_open;
-    let request = request_record
+    let mut request = request_record
         .map(request_from_record)
         .unwrap_or(ConversationTurnRequest {
             seq: seq_start,
@@ -341,6 +360,12 @@ fn turn_record_from_accumulator(
             text_truncated: false,
             objective_text: None,
         });
+    if request.kind == "unknown" && is_tool_only_turn(&turn.records) {
+        request.kind = "tool_only".to_string();
+        if request.text.is_none() {
+            request.text = turn.records.first().and_then(tool_only_request_text);
+        }
+    }
     let (status, status_source) = if interrupted {
         (
             ConversationTurnStatus::Interrupted,
@@ -355,6 +380,11 @@ fn turn_record_from_accumulator(
         (
             ConversationTurnStatus::ContextOnly,
             "mechanical_context_only".to_string(),
+        )
+    } else if request.kind == "tool_only" {
+        (
+            ConversationTurnStatus::ContextOnly,
+            "mechanical_tool_only".to_string(),
         )
     } else if assistant_message.is_some() {
         (
@@ -541,6 +571,31 @@ fn is_user_request_record(record: &ConversationNarrativeRecord) -> bool {
     record.kind == ConversationRecordKind::Message && record.role.as_deref() == Some("user")
 }
 
+fn is_tool_only_turn(records: &[ConversationNarrativeRecord]) -> bool {
+    !records.is_empty()
+        && records.iter().all(|record| {
+            matches!(
+                record.kind,
+                ConversationRecordKind::ToolCall
+                    | ConversationRecordKind::ToolResult
+                    | ConversationRecordKind::Approval
+                    | ConversationRecordKind::Error
+                    | ConversationRecordKind::Status
+            )
+        })
+}
+
+fn tool_only_request_text(record: &ConversationNarrativeRecord) -> Option<String> {
+    record
+        .summary
+        .as_deref()
+        .or(record.tool.as_deref())
+        .or(record.status.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn request_from_record(record: &ConversationNarrativeRecord) -> ConversationTurnRequest {
     let (text, text_truncated) = bounded_record_text(record);
     let kind = request_kind_for_record(record);
@@ -699,6 +754,26 @@ fn side_effect(seq: u64, kind: &str, summary: &str) -> ConversationTurnSideEffec
     }
 }
 
+fn file_edit_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
+    let mut paths = Vec::new();
+    if is_apply_patch_event(event) {
+        if let Some(text) = event.text.as_deref() {
+            extend_unique(&mut paths, extract_patch_paths(text));
+        }
+        if let Some(input_text) = metadata_string(&event.metadata, "tool_input_text") {
+            extend_unique(&mut paths, extract_patch_paths(&input_text));
+        }
+    }
+    if let Some(text) = event.text.as_deref() {
+        extend_unique(&mut paths, extract_apply_patch_result_paths(text));
+    }
+    paths
+}
+
+fn is_apply_patch_event(event: &AgentChatEvent) -> bool {
+    event_tool_name(event).as_deref() == Some("apply_patch")
+}
+
 fn first_github_url(text: &str) -> Option<String> {
     text.split_whitespace()
         .map(|token| token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | ',')))
@@ -724,6 +799,9 @@ fn goal_continuation_objective(text: &str) -> &str {
         .split_once("</codex_internal_context>")
         .map(|(before, _)| before)
         .unwrap_or(text);
+    if let Some(objective) = tag_text(inner, "objective") {
+        return objective;
+    }
     inner
         .lines()
         .map(str::trim)
@@ -740,6 +818,14 @@ fn goal_continuation_objective(text: &str) -> &str {
                 .find(|line| !line.is_empty() && !line.starts_with('<'))
                 .unwrap_or(inner)
         })
+}
+
+fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(text[start..end].trim()).filter(|value| !value.is_empty())
 }
 
 fn compact_text(text: &str, limit_chars: usize) -> Option<String> {
@@ -778,6 +864,33 @@ fn extract_patch_paths(text: &str) -> Vec<String> {
     paths
 }
 
+fn extract_apply_patch_result_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut in_updated_files = false;
+    for line in text.lines().map(str::trim) {
+        if line.eq_ignore_ascii_case("success. updated the following files:") {
+            in_updated_files = true;
+            continue;
+        }
+        if !in_updated_files || line.is_empty() {
+            continue;
+        }
+        let candidate = line
+            .split_once(char::is_whitespace)
+            .and_then(|(status, path)| {
+                (status.len() == 1
+                    && matches!(status.as_bytes()[0], b'A' | b'M' | b'D' | b'R' | b'C'))
+                .then_some(path)
+            })
+            .unwrap_or(line)
+            .trim();
+        if let Some(path) = normalize_path(candidate) {
+            extend_unique(&mut paths, vec![path]);
+        }
+    }
+    paths
+}
+
 fn extract_mentioned_paths(text: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for token in text.split_whitespace() {
@@ -801,11 +914,27 @@ fn normalize_path(value: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         return None;
     }
-    let without_line = trimmed
-        .rsplit_once(':')
-        .and_then(|(path, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()).then_some(path))
-        .unwrap_or(trimmed);
-    let normalized = without_line.replace('\\', "/");
+    if trimmed
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|' | '{' | '}' | ','))
+    {
+        return None;
+    }
+    let mut without_line = trimmed;
+    while let Some((path, suffix)) = without_line.rsplit_once(':') {
+        if suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            without_line = path;
+        } else {
+            break;
+        }
+    }
+    let normalized = repo_relative_path(&without_line.replace('\\', "/"));
+    if normalized
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
+    }
     let known_file = matches!(
         normalized.as_str(),
         "Cargo.toml" | "package.json" | "package-lock.json" | "README.md" | "AGENTS.md"
@@ -832,6 +961,34 @@ fn normalize_path(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn repo_relative_path(path: &str) -> String {
+    let known_prefixes = [
+        "src-tauri/",
+        "crates/",
+        "docs/",
+        "e2e-native/",
+        "e2e/",
+        "scripts/",
+        "tools/",
+        ".github/",
+        "src/",
+    ];
+    if known_prefixes.iter().any(|prefix| path.starts_with(prefix))
+        || matches!(
+            path,
+            "Cargo.toml" | "package.json" | "package-lock.json" | "README.md" | "AGENTS.md"
+        )
+    {
+        return path.to_string();
+    }
+    for prefix in known_prefixes {
+        if let Some(index) = path.find(prefix) {
+            return path[index..].to_string();
+        }
+    }
+    path.to_string()
 }
 
 fn is_read_command(command: &str) -> bool {
@@ -890,4 +1047,8 @@ fn extend_side_effects(
             values.push(value);
         }
     }
+}
+
+fn has_file_edit_side_effect(values: &[ConversationTurnSideEffect]) -> bool {
+    values.iter().any(|value| value.kind == "file_edit")
 }

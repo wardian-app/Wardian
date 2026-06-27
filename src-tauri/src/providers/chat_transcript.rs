@@ -247,6 +247,7 @@ fn normalize_codex_payload(
         "function_call" | "custom_tool_call" => {
             let arguments = codex_tool_call_input(payload);
             let tool_name = str_field(payload, "name").unwrap_or(payload_type);
+            let raw_input_text = codex_tool_call_raw_input_text(payload);
             let command = arguments
                 .as_ref()
                 .and_then(|value| str_field(value, "command").map(str::to_string));
@@ -256,6 +257,10 @@ fn normalize_codex_payload(
             let text = arguments
                 .as_ref()
                 .and_then(|value| str_field(value, "justification").map(str::to_string));
+            let mut metadata = json!({"raw_type": payload_type, "tool_name": tool_name});
+            if let Some(input_text) = raw_input_text {
+                metadata["tool_input_text"] = json!(input_text);
+            }
             Some(event(
                 session_id,
                 provider,
@@ -273,7 +278,7 @@ fn normalize_codex_payload(
                     source: Some(source),
                     command: command.clone(),
                     language: command.as_ref().map(|_| "shell".to_string()),
-                    metadata: json!({"raw_type": payload_type, "tool_name": tool_name}),
+                    metadata,
                     ..Default::default()
                 },
             ))
@@ -1263,6 +1268,20 @@ fn codex_tool_call_input(payload: &Value) -> Option<Value> {
         .or_else(|| json_object_or_encoded_json(payload.get("input")))
 }
 
+fn codex_tool_call_raw_input_text(payload: &Value) -> Option<String> {
+    for key in ["input", "arguments"] {
+        let Some(Value::String(raw)) = payload.get(key) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || parse_json_string(trimmed).is_some() {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 fn json_object_or_encoded_json(value: Option<&Value>) -> Option<Value> {
     match value {
         Some(Value::Object(_)) => value.cloned(),
@@ -1373,6 +1392,22 @@ mod tests {
         assert_eq!(tool.command.as_deref(), Some("Get-ChildItem src-tauri"));
         assert_eq!(tool.language.as_deref(), Some("shell"));
         assert_eq!(tool.metadata["tool_name"], "shell_command");
+    }
+
+    #[test]
+    fn codex_apply_patch_tool_call_preserves_raw_patch_input() {
+        let tool = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"}}"#,
+        );
+
+        assert_eq!(tool.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(tool.title.as_deref(), Some("apply_patch"));
+        assert_eq!(tool.text, None);
+        assert_eq!(
+            tool.metadata["tool_input_text"],
+            "*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"
+        );
     }
 
     #[test]
