@@ -611,11 +611,13 @@ fn spawn_user_terminal_session(
 
 async fn resize_user_terminal_master(
     master_arc: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    native_resize_lock: Arc<tokio::sync::Mutex<()>>,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let size = normalized_user_terminal_size(cols, rows);
     tokio::task::spawn_blocking(move || {
+        let _native_resize_guard = native_resize_lock.blocking_lock();
         let master = match master_arc.lock() {
             Ok(master) => master,
             Err(poisoned) => poisoned.into_inner(),
@@ -658,7 +660,8 @@ pub async fn ensure_user_terminal(
     };
 
     if let Some(master) = existing_master {
-        resize_user_terminal_master(master, cols, rows).await?;
+        resize_user_terminal_master(master, state.pty_native_resize_lock.clone(), cols, rows)
+            .await?;
     }
 
     current_session_id.ok_or("User terminal is not running".to_string())
@@ -710,7 +713,7 @@ pub async fn resize_user_terminal(
             .ok_or("User terminal is not running".to_string())?;
         terminal.pty_master.clone()
     };
-    resize_user_terminal_master(master, cols, rows).await
+    resize_user_terminal_master(master, state.pty_native_resize_lock.clone(), cols, rows).await
 }
 
 #[tauri::command]

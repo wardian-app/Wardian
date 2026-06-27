@@ -79,6 +79,7 @@ winreg = "0.52"
 tauri-plugin-updater = "2.10.1"
 
 [dev-dependencies]
+anyhow = "1"
 tempfile = "3.26.0"
 
 # Optimize Disk Space for Debug Builds
