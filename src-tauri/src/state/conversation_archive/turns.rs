@@ -288,8 +288,10 @@ fn turn_record_from_accumulator(
             }
             extend_unique(&mut files_mentioned, command_paths);
         }
-        if let Some(text) = event.text.as_deref() {
-            extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+        if event.kind == AgentChatEventKind::Message {
+            if let Some(text) = event.text.as_deref() {
+                extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+            }
         }
         extend_side_effects(
             &mut external_side_effects,
@@ -311,8 +313,13 @@ fn turn_record_from_accumulator(
 
     for record in &turn.records {
         let record_text = record.text.as_deref().or(record.excerpt.as_deref());
-        if let Some(text) = record_text {
-            extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+        if record.kind == ConversationRecordKind::Message {
+            if let Some(text) = record_text {
+                extend_unique(&mut files_mentioned, extract_mentioned_paths(text));
+            }
+        }
+        if let Some(signal) = reported_verification_failure_from_record(record) {
+            failure_signals.push(signal);
         }
         if record.kind == ConversationRecordKind::ToolCall
             && record.tool.as_deref() == Some("apply_patch")
@@ -359,6 +366,7 @@ fn turn_record_from_accumulator(
             text: None,
             text_truncated: false,
             objective_text: None,
+            objective_text_truncated: None,
         });
     if request.kind == "unknown" && is_tool_only_turn(&turn.records) {
         request.kind = "tool_only".to_string();
@@ -599,9 +607,11 @@ fn tool_only_request_text(record: &ConversationNarrativeRecord) -> Option<String
 fn request_from_record(record: &ConversationNarrativeRecord) -> ConversationTurnRequest {
     let (text, text_truncated) = bounded_record_text(record);
     let kind = request_kind_for_record(record);
+    let (objective_text, objective_text_truncated) = objective_text_for_request(&kind, record);
     ConversationTurnRequest {
         seq: record.seq,
-        objective_text: objective_text_for_request(&kind, record),
+        objective_text,
+        objective_text_truncated,
         kind,
         text,
         text_truncated,
@@ -754,6 +764,75 @@ fn side_effect(seq: u64, kind: &str, summary: &str) -> ConversationTurnSideEffec
     }
 }
 
+fn reported_verification_failure_from_record(
+    record: &ConversationNarrativeRecord,
+) -> Option<ConversationTurnFailureSignal> {
+    if record.kind != ConversationRecordKind::Message || record.role.as_deref() != Some("assistant")
+    {
+        return None;
+    }
+    let text = record.text.as_deref().or(record.excerpt.as_deref())?;
+    let lower = text.to_ascii_lowercase();
+    if !(lower.contains("fail") && lower.contains("verification")) {
+        return None;
+    }
+    let command = reported_failed_command(text).or_else(|| {
+        [
+            "npm run check",
+            "npm test",
+            "npm run build",
+            "cargo test",
+            "cargo check",
+            "cargo clippy",
+        ]
+        .iter()
+        .find(|command| lower.contains(**command))
+        .map(|command| (*command).to_string())
+    });
+    Some(ConversationTurnFailureSignal {
+        kind: "reported_verification_failure".to_string(),
+        seq: record.seq,
+        tool: command,
+        summary: compact_text(text, 240),
+    })
+}
+
+fn reported_failed_command(text: &str) -> Option<String> {
+    let parts = text.split('`').collect::<Vec<_>>();
+    for index in (1..parts.len()).step_by(2) {
+        let command = parts[index];
+        let before = parts
+            .get(index.saturating_sub(1))
+            .map(|value| {
+                value
+                    .chars()
+                    .rev()
+                    .take(80)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let after = parts
+            .get(index + 1)
+            .map(|value| value.chars().take(160).collect::<String>())
+            .unwrap_or_default();
+        let nearby = format!("{before}{after}").to_ascii_lowercase();
+        if nearby.contains("fail") && looks_like_verification_command(command) {
+            return Some(command.trim().to_string());
+        }
+    }
+    None
+}
+
+fn looks_like_verification_command(command: &str) -> bool {
+    let lower = command.trim().to_ascii_lowercase();
+    ["npm ", "npm run ", "cargo ", "pnpm ", "yarn ", "node "]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
 fn file_edit_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
     let mut paths = Vec::new();
     if is_apply_patch_event(event) {
@@ -781,14 +860,20 @@ fn first_github_url(text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn objective_text_for_request(kind: &str, record: &ConversationNarrativeRecord) -> Option<String> {
-    let text = record.text.as_deref().or(record.excerpt.as_deref())?;
+fn objective_text_for_request(
+    kind: &str,
+    record: &ConversationNarrativeRecord,
+) -> (Option<String>, Option<bool>) {
+    let Some(text) = record.text.as_deref().or(record.excerpt.as_deref()) else {
+        return (None, None);
+    };
     let objective = match kind {
         "goal_start" => text.trim_start_matches("/goal").trim(),
         "goal_continuation" => goal_continuation_objective(text),
         _ => "",
     };
-    compact_text(objective, 500)
+    let (text, truncated) = compact_text_with_truncation(objective, 500);
+    (text, truncated.then_some(true))
 }
 
 fn goal_continuation_objective(text: &str) -> &str {
@@ -829,9 +914,13 @@ fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 fn compact_text(text: &str, limit_chars: usize) -> Option<String> {
+    compact_text_with_truncation(text, limit_chars).0
+}
+
+fn compact_text_with_truncation(text: &str, limit_chars: usize) -> (Option<String>, bool) {
     let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
-        return None;
+        return (None, false);
     }
     let mut end = 0;
     for (index, ch) in compact.char_indices() {
@@ -841,9 +930,9 @@ fn compact_text(text: &str, limit_chars: usize) -> Option<String> {
         end = index + ch.len_utf8();
     }
     if compact.chars().count() <= limit_chars {
-        Some(compact)
+        (Some(compact), false)
     } else {
-        Some(compact[..end].to_string())
+        (Some(compact[..end].to_string()), true)
     }
 }
 
@@ -916,7 +1005,7 @@ fn normalize_path(value: &str) -> Option<String> {
     }
     if trimmed
         .chars()
-        .any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|' | '{' | '}' | ','))
+        .any(|ch| ch.is_control() || matches!(ch, '*' | '?' | '<' | '>' | '|' | '{' | '}' | ','))
     {
         return None;
     }
@@ -927,6 +1016,9 @@ fn normalize_path(value: &str) -> Option<String> {
         } else {
             break;
         }
+    }
+    if without_line.contains(':') {
+        return None;
     }
     let normalized = repo_relative_path(&without_line.replace('\\', "/"));
     if normalized
@@ -1025,28 +1117,32 @@ fn extend_side_effects(
 ) {
     let mut seen = values
         .iter()
-        .map(|value| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
-                value.kind,
-                value.evidence_seq,
-                value.summary,
-                value.paths.join("\u{1e}")
-            )
-        })
+        .map(side_effect_dedupe_key)
         .collect::<HashSet<_>>();
     for value in next_values {
-        let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            value.kind,
-            value.evidence_seq,
-            value.summary,
-            value.paths.join("\u{1e}")
-        );
+        let key = side_effect_dedupe_key(&value);
         if seen.insert(key) {
             values.push(value);
         }
     }
+}
+
+fn side_effect_dedupe_key(value: &ConversationTurnSideEffect) -> String {
+    if value.kind == "file_edit" {
+        return format!(
+            "{}\u{1f}{}\u{1f}{}",
+            value.kind,
+            value.summary,
+            value.paths.join("\u{1e}")
+        );
+    }
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        value.kind,
+        value.evidence_seq,
+        value.summary,
+        value.paths.join("\u{1e}")
+    )
 }
 
 fn has_file_edit_side_effect(values: &[ConversationTurnSideEffect]) -> bool {

@@ -35,19 +35,24 @@ Each row includes:
 - Bounds: `seq_start`, `seq_end`, `started_at`, and `updated_at`.
 - Typed request data: `request.seq`, `request.kind`, `request.text`, and
   `request.text_truncated`. Goal rows may also include compact
-  `request.objective_text` so readers can avoid parsing large provider
-  continuation scaffolding for the active objective.
+  `request.objective_text` plus `request.objective_text_truncated` so readers
+  can avoid parsing large provider continuation scaffolding for the active
+  objective while still knowing when the compact objective was clipped.
 - Last assistant message in the row as `assistant_result`, when present.
 - Mechanical aggregates under `counts`, `tools_used`, `files`,
   `external_side_effects`, and `failure_signals`. `files` is populated from
   structured metadata, explicit patch headers, apply-patch result output,
   conservative command-path extraction, and exact path mentions in
-  request/assistant/tool text. Path mention extraction rejects globs, CSV-like
-  fragments, and malformed line-number suffixes. Side effects come from
+  request/assistant text. Generic path mention extraction intentionally ignores
+  tool output to avoid ANSI, search-result, and compiler-line noise; tool output
+  still feeds structured file edits and failure signals. Path mention extraction
+  rejects globs, CSV-like fragments, control characters, and malformed
+  line/column suffixes. Side effects come from
   structured metadata, structured command fields, explicit `apply_patch`
   records/results, or exact URL-pattern extraction; file-edit side effects
   include touched paths when the archive can recover them from patch input or
-  result output.
+  result output. Duplicate file-edit effects with the same path summary are
+  collapsed inside a turn.
 - Provenance under `record_refs` and `provider_native_refs`.
 
 Allowed turn statuses are `in_progress`, `pending_response`, `responded`,
@@ -63,6 +68,12 @@ starts, and Codex goal continuation context are typed so summary readers can
 skip them without parsing raw prompt text. For Codex goal continuations,
 `request.objective_text` prefers the compact value inside
 `<objective>...</objective>` when present.
+
+`failure_signals` are mechanical tool/runtime failures plus conservative
+assistant-reported verification failures. Assistant prose only contributes a
+`reported_verification_failure` signal when the assistant explicitly discusses
+verification and failure, and the command can be recovered from nearby
+backticked verification text or a known verification command phrase.
 
 `manifest.turn_count` is the physical number of rows in `turns.jsonl`, including
 filterable `context_only` rows. Readers that want user task counts should filter

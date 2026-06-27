@@ -188,6 +188,8 @@ pub struct ConversationTurnRequest {
     pub text_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective_text_truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -633,6 +635,7 @@ mod tests {
                 text: Some("Run the tests.".to_string()),
                 text_truncated: false,
                 objective_text: None,
+                objective_text_truncated: None,
             },
             assistant_result: Some(ConversationTurnAssistantResult {
                 seq: 4,

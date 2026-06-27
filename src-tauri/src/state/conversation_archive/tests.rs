@@ -396,6 +396,25 @@ fn goal_continuation_objective_prefers_objective_tag() {
 }
 
 #[test]
+fn goal_continuation_objective_reports_truncation() {
+    let long_objective = format!("{} tail", "review ".repeat(120));
+    let records = vec![narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        &format!(
+            "<codex_internal_context source=\"goal\">\n<objective>{long_objective}</objective>\n</codex_internal_context>"
+        ),
+        None,
+        1,
+    )];
+
+    let turns = derive_turn_records("conv-objective-truncated", &records, &[], &[], true);
+    let json = serde_json::to_value(&turns[0]).unwrap();
+
+    assert_eq!(turns[0].request.objective_text.as_ref().unwrap().len(), 500);
+    assert_eq!(json["request"]["objective_text_truncated"], true);
+}
+
+#[test]
 fn tool_started_only_turn_is_tool_only_context() {
     let mut tool = chat_event(
         "event-task-started",
@@ -906,6 +925,69 @@ fn apply_patch_result_output_populates_written_paths_when_call_text_is_missing()
 }
 
 #[test]
+fn apply_patch_call_and_result_do_not_duplicate_same_file_edit_side_effect() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-patch-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Patch the turns archive."),
+    );
+    let mut patch = chat_event(
+        "event-tool-patch-dedupe",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    patch.title = Some("apply_patch".to_string());
+    patch.turn_id = Some("call-patch-dedupe".to_string());
+    patch.metadata = serde_json::json!({
+        "raw_type": "custom_tool_call",
+        "tool_name": "apply_patch",
+        "tool_input_text": "*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"
+    });
+    let mut result = chat_event(
+        "event-result-patch-dedupe",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some(
+            "Exit code: 0\nOutput:\nSuccess. Updated the following files:\nM src-tauri/src/state/conversation_archive/turns.rs",
+        ),
+    );
+    result.turn_id = Some("call-patch-dedupe".to_string());
+    let assistant = chat_event(
+        "event-assistant-patch-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Patched the archive."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, patch, result, assistant],
+        )
+        .expect("append dedupe patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let file_edits = turns[0]["external_side_effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|effect| effect["kind"] == "file_edit")
+        .count();
+
+    assert_eq!(file_edits, 1);
+}
+
+#[test]
 fn mentioned_paths_filter_globs_fragments_and_csv_noise() {
     let records = vec![
         narrative_from_delivered_input(
@@ -926,6 +1008,71 @@ fn mentioned_paths_filter_globs_fragments_and_csv_noise() {
             "package.json".to_string(),
             "src-tauri/src/main.rs".to_string(),
         ]
+    );
+}
+
+#[test]
+fn mentioned_paths_ignore_tool_output_ansi_and_line_fragments() {
+    let user = narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        "Please inspect the check failure.",
+        None,
+        1,
+    );
+    let mut tool = chat_event(
+        "event-tool-output-noise",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some("src/features/git/GitPanel.tsx:14:import\nsrc/changed.ts\"\u{1b}[39m\nsrc/**/*.rs\n"),
+    );
+    tool.title = Some("shell_command".to_string());
+    let tool_record = narrative_from_chat_event(&tool, 2).expect("tool record");
+    let assistant = narrative_record_with_turn(
+        3,
+        "turn-1",
+        "I updated src-tauri/src/state/conversation_archive/turns.rs.",
+    );
+
+    let turns = derive_turn_records(
+        "conv-tool-output-noise",
+        &[user, tool_record, assistant],
+        &[tool],
+        &[],
+        false,
+    );
+
+    assert_eq!(
+        turns[0].files.mentioned,
+        vec!["src-tauri/src/state/conversation_archive/turns.rs".to_string()]
+    );
+}
+
+#[test]
+fn assistant_reported_verification_failure_adds_failure_signal() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Please finish the edit.",
+            None,
+            1,
+        ),
+        narrative_record_with_turn(
+            2,
+            "turn-1",
+            "Verification: `npm test` passes. `npm run check` still fails on a pre-existing issue.",
+        ),
+    ];
+
+    let turns = derive_turn_records("conv-reported-failure", &records, &[], &[], false);
+
+    assert_eq!(turns[0].failure_signals.len(), 1);
+    assert_eq!(
+        turns[0].failure_signals[0].kind,
+        "reported_verification_failure"
+    );
+    assert_eq!(
+        turns[0].failure_signals[0].tool.as_deref(),
+        Some("npm run check")
     );
 }
 

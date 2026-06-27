@@ -198,20 +198,28 @@ and `provider_native_refs`.
 `unknown`. Wardian does not infer task success from assistant prose. Context
 records such as AGENTS.md injections and goal continuations are typed through
 `request.kind`, and AGENTS.md-only plus tool-only rows use `context_only`, so
-readers can skip them when constructing human-level summaries. `manifest.turn_count` is the
-physical `turns.jsonl` row count; readers that want task counts should filter
-context rows explicitly.
+readers can skip them when constructing human-level summaries. Goal
+continuation rows may include `request.objective_text_truncated` when the
+compact objective was clipped. `manifest.turn_count` is the physical
+`turns.jsonl` row count; readers that want task counts should filter context
+rows explicitly.
 
 The archive writer must not infer user intent, corrections, complaints,
 causality, recovery, or task success from arbitrary prose. File evidence may
 come from structured metadata, explicit patch headers, conservative command-path
-extraction, apply-patch result output, and exact path mentions. Path mention
-extraction is intentionally conservative and rejects globs, CSV-like fragments,
-and malformed line-number suffixes. Side effects may come from structured
-metadata, structured command fields, explicit `apply_patch` records/results, or
-exact URL-pattern extraction, and file-edit side effects carry touched paths
-when the archive can recover them from patch input or result output. There is
-no `notes_for_evolver` field in the
+extraction, apply-patch result output, and exact request/assistant path
+mentions. Generic path extraction ignores tool output to avoid ANSI,
+search-result, and compiler-line noise; tool output still feeds structured file
+edits and failure signals. Path mention extraction is intentionally
+conservative and rejects globs, CSV-like fragments, control characters, and
+malformed line/column suffixes. Side effects may come from structured metadata,
+structured command fields, explicit `apply_patch` records/results, or exact
+URL-pattern extraction, and file-edit side effects carry touched paths when the
+archive can recover them from patch input or result output. Duplicate file-edit
+effects with the same path summary are collapsed inside a turn. Failure signals
+also include conservative assistant-reported verification failures when the
+assistant explicitly reports a verification command still failing. There is no
+`notes_for_evolver` field in the
 request-turn index.
 
 ### `sources.jsonl`
