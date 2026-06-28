@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarContentPane } from "./SidebarContentPane";
 import type { AgentClassDefinition, AgentConfig } from "../types";
+import type { SelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 
 const loadSchedulesMock = vi.hoisted(() => vi.fn());
 const pauseScheduleMock = vi.hoisted(() => vi.fn());
@@ -88,6 +89,17 @@ const agentClasses: AgentClassDefinition[] = [
 ];
 
 const agents: AgentConfig[] = [];
+const sourceControlStatus: SelectedAgentGitStatus = {
+  rootPath: null,
+  status: null,
+  error: null,
+  loading: false,
+  refreshing: false,
+  statusRevision: 0,
+  changeEventRevision: 0,
+  changeCount: 0,
+  refreshStatus: vi.fn(async () => false),
+};
 
 function renderPane({
   activeTab = "agent-config",
@@ -107,6 +119,7 @@ function renderPane({
       agents={agents}
       agentClasses={agentClasses}
       telemetry={{}}
+      sourceControlStatus={sourceControlStatus}
       onAgentsUpdated={vi.fn()}
       onClassesUpdated={vi.fn()}
       broadcastMessage=""

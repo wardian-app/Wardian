@@ -205,6 +205,7 @@ export interface GitStatusResult {
     files: GitFileEntry[];
     ahead: number;
     behind: number;
+    rebase_in_progress?: boolean;
 }
 
 export interface GitLogEntry {
@@ -212,6 +213,23 @@ export interface GitLogEntry {
     message: string;
     author: string;
     date: string;
+    parent_hashes?: string[];
+    refs?: string[];
+}
+
+export interface GitBranchSummary {
+    name: string;
+    current: boolean;
+}
+
+export interface GitCommitChangeEntry {
+    path: string;
+    status: string;
+}
+
+export interface GitStashEntry {
+    selector: string;
+    message: string;
 }
 
 export interface AgentWorktreeSummary {

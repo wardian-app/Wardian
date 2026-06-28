@@ -324,6 +324,7 @@ describe('ExplorerPanel', () => {
     render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
 
     expect(await screen.findByTestId('file-tree-refresh-token')).toHaveTextContent('0');
+    await waitFor(() => expect(handler).toBeDefined());
 
     await act(async () => {
       handler?.({

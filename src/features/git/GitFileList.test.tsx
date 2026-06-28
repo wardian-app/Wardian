@@ -46,4 +46,99 @@ describe('GitFileList', () => {
     await user.click(screen.getByRole('button', { name: 'Unstage src/main.ts' }));
     expect(onUnstage).toHaveBeenCalledWith('src/main.ts');
   });
+
+  it('labels status badges and strikes deleted file names like VS Code resource rows', () => {
+    render(
+      <GitFileList
+        files={[
+          { path: 'src/removed.ts', status: 'D', is_staged: false },
+          { path: 'src/conflicted.ts', status: 'UU', is_staged: false },
+        ]}
+      />,
+    );
+
+    expect(screen.getByLabelText('Deleted')).toHaveTextContent('D');
+    expect(screen.getByText('removed.ts')).toHaveClass('line-through');
+    expect(screen.getByLabelText('Both Modified')).toHaveTextContent('UU');
+  });
+
+  it('opens file context actions on right click', async () => {
+    const user = userEvent.setup();
+    const onDiff = vi.fn();
+    const onStage = vi.fn();
+    const onDiscard = vi.fn();
+
+    render(
+      <GitFileList
+        files={[{ path: 'src/app.tsx', status: 'M', is_staged: false }]}
+        onDiff={onDiff}
+        onStage={onStage}
+        onDiscard={onDiscard}
+      />,
+    );
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('button', { name: 'View diff for src/app.tsx' }) });
+    await user.click(await screen.findByRole('button', { name: 'Stage' }));
+
+    expect(onStage).toHaveBeenCalledWith('src/app.tsx');
+    expect(onDiff).not.toHaveBeenCalled();
+  });
+
+  it('renders nested paths as expandable tree rows', async () => {
+    const user = userEvent.setup();
+    const onDiff = vi.fn();
+
+    render(
+      <GitFileList
+        displayMode="tree"
+        files={[
+          { path: 'src/components/App.tsx', status: 'M', is_staged: false },
+          { path: 'src/main.ts', status: 'A', is_staged: false },
+          { path: 'README.md', status: '?', is_staged: false },
+        ]}
+        onDiff={onDiff}
+      />,
+    );
+
+    const srcFolder = screen.getByRole('button', { name: 'src' });
+    expect(srcFolder).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'components' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'View diff for src/components/App.tsx' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View diff for src/main.ts' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'components' }));
+
+    expect(screen.queryByRole('button', { name: 'View diff for src/components/App.tsx' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View diff for src/main.ts' })).toBeInTheDocument();
+  });
+
+  it('orders resources by VS Code-style status priority before path while preserving tree hierarchy', () => {
+    const priorityFiles: GitFileEntry[] = [
+      { path: 'zeta/new-file.ts', status: '?', is_staged: false },
+      { path: 'alpha/added.ts', status: 'A', is_staged: false },
+      { path: 'zeta/modified.ts', status: 'M', is_staged: false },
+      { path: 'alpha/conflict.ts', status: 'UU', is_staged: false },
+      { path: 'beta/modified.ts', status: 'M', is_staged: false },
+    ];
+
+    const { rerender } = render(<GitFileList files={priorityFiles} displayMode="list" />);
+
+    expect(screen.getAllByRole('button', { name: /View diff for/ }).map((button) => button.getAttribute('aria-label'))).toEqual([
+      'View diff for alpha/conflict.ts',
+      'View diff for beta/modified.ts',
+      'View diff for zeta/modified.ts',
+      'View diff for alpha/added.ts',
+      'View diff for zeta/new-file.ts',
+    ]);
+
+    rerender(<GitFileList files={priorityFiles} displayMode="tree" />);
+
+    expect(screen.getAllByRole('button', { name: /View diff for/ }).map((button) => button.getAttribute('aria-label'))).toEqual([
+      'View diff for alpha/conflict.ts',
+      'View diff for alpha/added.ts',
+      'View diff for beta/modified.ts',
+      'View diff for zeta/modified.ts',
+      'View diff for zeta/new-file.ts',
+    ]);
+  });
 });
