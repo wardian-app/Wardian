@@ -453,10 +453,11 @@ fn normalize_claude_assistant(
             .iter()
             .find(|item| str_field(item, "type") == Some("tool_use"))
     }) {
+        let tool_name = str_field(tool_use, "name").unwrap_or("tool_use");
         let command = tool_use
             .get("input")
             .and_then(|input| str_field(input, "command").map(str::to_string));
-        return Some(tool_call_event(
+        let mut event = tool_call_event(
             session_id,
             provider,
             sequence,
@@ -466,9 +467,21 @@ fn normalize_claude_assistant(
                 .or_else(|| turn_id_from(message)),
             command,
             text_from_value(tool_use),
-            str_field(tool_use, "name").unwrap_or("tool_use"),
+            tool_name,
             AgentChatStatus::Running,
-        ));
+        );
+        if let Some(input) = tool_use.get("input") {
+            event.metadata["tool_input"] = input.clone();
+            if let Some(file_path) = str_field(input, "file_path") {
+                event.metadata["file_path"] = json!(file_path);
+                if claude_tool_reads_file(tool_name) {
+                    event.metadata["files_read"] = json!([file_path]);
+                } else if claude_tool_writes_file(tool_name) {
+                    event.metadata["files_written"] = json!([file_path]);
+                }
+            }
+        }
+        return Some(event);
     }
 
     if let Some(text) = text_from_value(message) {
@@ -503,6 +516,17 @@ fn normalize_claude_assistant(
         )),
         _ => None,
     }
+}
+
+fn claude_tool_reads_file(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("Read")
+}
+
+fn claude_tool_writes_file(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit"
+    )
 }
 
 fn normalize_gemini(
@@ -1466,6 +1490,36 @@ mod tests {
             8
         )
         .is_none());
+    }
+
+    #[test]
+    fn claude_file_tool_calls_preserve_input_paths() {
+        let read = one(
+            "claude",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-read","name":"Read","input":{"file_path":"D:\\Development\\Wardian\\src-tauri\\src\\state\\conversation_archive\\turns.rs"}}],"stop_reason":"tool_use"}}"#,
+        );
+        assert_eq!(read.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(read.title.as_deref(), Some("Read"));
+        assert_eq!(
+            read.metadata["file_path"],
+            r#"D:\Development\Wardian\src-tauri\src\state\conversation_archive\turns.rs"#
+        );
+        assert_eq!(
+            read.metadata["tool_input"]["file_path"],
+            r#"D:\Development\Wardian\src-tauri\src\state\conversation_archive\turns.rs"#
+        );
+
+        let edit = one(
+            "claude",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-edit","name":"Edit","input":{"file_path":"docs/specs/2026-06-25-turns-jsonl-request-index.md","old_string":"old","new_string":"new"}}],"stop_reason":"tool_use"}}"#,
+        );
+        assert_eq!(edit.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(edit.title.as_deref(), Some("Edit"));
+        assert_eq!(
+            edit.metadata["file_path"],
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        );
+        assert_eq!(edit.metadata["tool_input"]["old_string"], "old");
     }
 
     #[test]

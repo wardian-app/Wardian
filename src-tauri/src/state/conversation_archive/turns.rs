@@ -264,6 +264,26 @@ fn turn_record_from_accumulator(
             &mut files_mentioned,
             metadata_string_array(&event.metadata, "files_mentioned"),
         );
+        let provider_file_paths = provider_file_paths_from_event(event);
+        if !provider_file_paths.is_empty() {
+            let tool_name = event_tool_name(event).unwrap_or_else(|| "unknown_tool".to_string());
+            if provider_tool_reads_file(&tool_name) {
+                extend_unique(&mut files_read, provider_file_paths.clone());
+            }
+            if provider_tool_writes_file(&tool_name) {
+                extend_unique(&mut files_written, provider_file_paths.clone());
+                extend_side_effects(
+                    &mut external_side_effects,
+                    vec![ConversationTurnSideEffect {
+                        kind: "file_edit".to_string(),
+                        evidence_seq: seq,
+                        summary: side_effect_summary_with_paths(&tool_name, &provider_file_paths),
+                        paths: provider_file_paths.clone(),
+                    }],
+                );
+            }
+            extend_unique(&mut files_mentioned, provider_file_paths);
+        }
         let file_edit_paths = file_edit_paths_from_event(event);
         if !file_edit_paths.is_empty() {
             extend_unique(&mut files_written, file_edit_paths.clone());
@@ -789,12 +809,33 @@ fn reported_verification_failure_from_record(
         .find(|command| lower.contains(**command))
         .map(|command| (*command).to_string())
     });
+    let command = command?;
+    if !reports_unresolved_verification_failure(&lower) {
+        return None;
+    }
     Some(ConversationTurnFailureSignal {
         kind: "reported_verification_failure".to_string(),
         seq: record.seq,
-        tool: command,
+        tool: Some(command),
         summary: compact_text(text, 240),
     })
+}
+
+fn reports_unresolved_verification_failure(lower_text: &str) -> bool {
+    [
+        "still fails",
+        "still failing",
+        "failed verification",
+        "verification failed",
+        "verification failure",
+        "check failed",
+        "test failed",
+        "tests failed",
+        "build failed",
+        "clippy failed",
+    ]
+    .iter()
+    .any(|phrase| lower_text.contains(phrase))
 }
 
 fn reported_failed_command(text: &str) -> Option<String> {
@@ -847,6 +888,39 @@ fn file_edit_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
         extend_unique(&mut paths, extract_apply_patch_result_paths(text));
     }
     paths
+}
+
+fn provider_file_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = event.path.as_deref().and_then(normalize_path) {
+        extend_unique(&mut paths, vec![path]);
+    }
+    if let Some(path) =
+        metadata_string(&event.metadata, "file_path").and_then(|path| normalize_path(&path))
+    {
+        extend_unique(&mut paths, vec![path]);
+    }
+    if let Some(path) = event
+        .metadata
+        .get("tool_input")
+        .and_then(|input| input.get("file_path"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_path)
+    {
+        extend_unique(&mut paths, vec![path]);
+    }
+    paths
+}
+
+fn provider_tool_reads_file(tool_name: &str) -> bool {
+    matches!(tool_name.to_ascii_lowercase().as_str(), "read")
+}
+
+fn provider_tool_writes_file(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit"
+    )
 }
 
 fn is_apply_patch_event(event: &AgentChatEvent) -> bool {

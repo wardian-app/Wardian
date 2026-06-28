@@ -1077,6 +1077,137 @@ fn assistant_reported_verification_failure_adds_failure_signal() {
 }
 
 #[test]
+fn claude_read_edit_and_write_tools_populate_turn_file_attribution() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-claude-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Update the conversation archive docs."),
+    );
+    let mut read = chat_event(
+        "event-claude-read",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    read.provider = "claude".to_string();
+    read.title = Some("Read".to_string());
+    read.metadata = serde_json::json!({
+        "raw_type": "Read",
+        "file_path": "src-tauri/src/state/conversation_archive/turns.rs",
+        "tool_input": {
+            "file_path": "src-tauri/src/state/conversation_archive/turns.rs"
+        }
+    });
+    let mut edit = chat_event(
+        "event-claude-edit",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    edit.provider = "claude".to_string();
+    edit.title = Some("Edit".to_string());
+    edit.metadata = serde_json::json!({
+        "raw_type": "Edit",
+        "file_path": "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+        "tool_input": {
+            "file_path": "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    });
+    let mut write = chat_event(
+        "event-claude-write",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    write.provider = "claude".to_string();
+    write.title = Some("Write".to_string());
+    write.metadata = serde_json::json!({
+        "raw_type": "Write",
+        "file_path": "src/summary.ts",
+        "tool_input": {
+            "file_path": "src/summary.ts",
+            "content": "export const summary = 'ok';"
+        }
+    });
+    let assistant = chat_event(
+        "event-assistant-claude-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Updated the archive docs."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, read, edit, write, assistant],
+        )
+        .expect("append claude file tool turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["read"],
+        serde_json::json!(["src-tauri/src/state/conversation_archive/turns.rs"])
+    );
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+            "src/summary.ts"
+        ])
+    );
+    assert_eq!(
+        turns[0]["external_side_effects"],
+        serde_json::json!([
+            {
+                "kind": "file_edit",
+                "evidence_seq": 3,
+                "summary": "Edit: docs/specs/2026-06-25-turns-jsonl-request-index.md",
+                "paths": ["docs/specs/2026-06-25-turns-jsonl-request-index.md"]
+            },
+            {
+                "kind": "file_edit",
+                "evidence_seq": 4,
+                "summary": "Write: src/summary.ts",
+                "paths": ["src/summary.ts"]
+            }
+        ])
+    );
+}
+
+#[test]
+fn assistant_progress_language_does_not_create_failure_signals() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Please continue TDD.",
+            None,
+            1,
+        ),
+        narrative_record_with_turn(
+            2,
+            "turn-1",
+            "Verification is in progress: I am rerunning red tests after adding coverage. Compile failures found in the first pass are expected before the implementation.",
+        ),
+    ];
+
+    let turns = derive_turn_records("conv-progress-not-failure", &records, &[], &[], false);
+
+    assert!(turns[0].failure_signals.is_empty());
+}
+
+#[test]
 fn active_open_task_with_one_hundred_tool_calls_writes_one_request_turn() {
     let (_guard, _temp) = isolated_home();
     let archive = ConversationArchiveState::default();

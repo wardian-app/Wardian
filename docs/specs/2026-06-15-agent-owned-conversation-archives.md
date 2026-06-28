@@ -207,18 +207,20 @@ rows explicitly.
 The archive writer must not infer user intent, corrections, complaints,
 causality, recovery, or task success from arbitrary prose. File evidence may
 come from structured metadata, explicit patch headers, conservative command-path
-extraction, apply-patch result output, and exact request/assistant path
-mentions. Generic path extraction ignores tool output to avoid ANSI,
-search-result, and compiler-line noise; tool output still feeds structured file
-edits and failure signals. Path mention extraction is intentionally
-conservative and rejects globs, CSV-like fragments, control characters, and
-malformed line/column suffixes. Side effects may come from structured metadata,
-structured command fields, explicit `apply_patch` records/results, or exact
-URL-pattern extraction, and file-edit side effects carry touched paths when the
-archive can recover them from patch input or result output. Duplicate file-edit
-effects with the same path summary are collapsed inside a turn. Failure signals
-also include conservative assistant-reported verification failures when the
-assistant explicitly reports a verification command still failing. There is no
+extraction, apply-patch result output, provider file-tool input metadata, and
+exact request/assistant path mentions. Generic path extraction ignores tool
+output to avoid ANSI, search-result, and compiler-line noise; tool output still
+feeds structured file edits and failure signals. Path mention extraction is
+intentionally conservative and rejects globs, CSV-like fragments, control
+characters, and malformed line/column suffixes. Side effects may come from
+structured metadata, structured command fields, explicit `apply_patch`
+records/results, provider file-write tools, or exact URL-pattern extraction, and
+file-edit side effects carry touched paths when the archive can recover them
+from patch input, result output, or provider tool input metadata. Duplicate
+file-edit effects with the same path summary are collapsed inside a turn.
+Failure signals also include conservative assistant-reported verification
+failures when the assistant explicitly reports a verification command still
+failing. There is no
 `notes_for_evolver` field in the
 request-turn index.
 
