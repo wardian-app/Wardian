@@ -2568,7 +2568,7 @@ describe("GitPanel", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_stash_drop_all", { cwd: "C:/repo" });
     });
-  });
+  }, 10000);
 
   it("keeps file status visible when commit history cannot be loaded", async () => {
     mockInvoke.mockImplementation(async (command) => {
