@@ -1737,6 +1737,21 @@ mod tests {
         fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error> {
             Ok(Box::new(std::io::sink()))
         }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<i32> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<std::path::PathBuf> {
+            None
+        }
     }
 
     #[test]
