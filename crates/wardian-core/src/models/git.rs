@@ -16,6 +16,7 @@ pub struct GitStatusResult {
     pub files: Vec<GitFileEntry>,
     pub ahead: u32,
     pub behind: u32,
+    pub rebase_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,4 +25,24 @@ pub struct GitLogEntry {
     pub message: String,
     pub author: String,
     pub date: String,
+    pub parent_hashes: Vec<String>,
+    pub refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchSummary {
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitChangeEntry {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitStashEntry {
+    pub selector: String,
+    pub message: String,
 }

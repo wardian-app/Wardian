@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { Check, GitBranch, Trash2, X } from "lucide-react";
-import { AgentConfig, AgentWorktreeSummary, GitStatusResult, GitLogEntry } from "../../types";
+import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
+import { AgentConfig, AgentWorktreeSummary, GitBranchSummary, GitFileEntry, GitLogEntry, GitStashEntry } from "../../types";
 import { GitFileList } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
+import { GitHistoryGraph } from "./GitHistoryGraph";
 import { useConfirm } from "../../components/ConfirmDialog";
+import { formatGitStatusError, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
+import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
-const GIT_STATUS_POLL_INTERVAL_MS = 3000;
+const MERGE_CONFLICT_STATUSES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+const COMMIT_SUMMARY_LIMIT = 50;
+const COMMIT_BODY_LINE_LIMIT = 72;
 
 const normalizeComparablePath = (path: string): string => {
   const normalized = path
@@ -20,11 +25,22 @@ const normalizeComparablePath = (path: string): string => {
   return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
 };
 
+const isAbsoluteResourcePath = (path: string) =>
+  /^[a-z]:[\\/]/i.test(path) || path.startsWith("/") || path.startsWith("\\\\");
+
+const resolveGitResourcePath = (rootPath: string, resourcePath: string) => {
+  if (isAbsoluteResourcePath(resourcePath)) {
+    return resourcePath;
+  }
+  return `${rootPath.replace(/[\\/]+$/g, "")}/${resourcePath.replace(/^[\\/]+/g, "")}`;
+};
+
 interface GitPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
   onAgentsUpdated: () => void;
   telemetry: Record<string, import("../../types").AgentTelemetry>;
+  sourceControlStatus: SelectedAgentGitStatus;
 }
 
 interface ActiveWorktreeName {
@@ -33,30 +49,115 @@ interface ActiveWorktreeName {
   name: string;
 }
 
-export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, onAgentsUpdated }) => {
+type PrimaryActionKind = "commit" | "publish" | "sync";
+type ResourceDisplayMode = "tree" | "list";
+type CommitMode = "staged" | "all";
+interface CommitMessageValidation {
+  message: string;
+  count: string;
+}
+
+const sourceControlStorageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") || "unknown-root";
+const resourceDisplayModeKey = (rootPath: string) =>
+  `wardian:source-control:resources:${sourceControlStorageRoot(rootPath)}:display-mode`;
+const commitActionStorageKey = "wardian:source-control:commit:last-action";
+
+const loadResourceDisplayMode = (rootPath: string): ResourceDisplayMode => {
+  if (typeof window === "undefined") return "tree";
+  const stored = window.localStorage.getItem(resourceDisplayModeKey(rootPath));
+  return stored === "list" || stored === "tree" ? stored : "tree";
+};
+
+const saveResourceDisplayMode = (rootPath: string, mode: ResourceDisplayMode) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(resourceDisplayModeKey(rootPath), mode);
+};
+
+const loadLastCommitMode = (): CommitMode | null => {
+  if (typeof window === "undefined") return null;
+  const stored = window.localStorage.getItem(commitActionStorageKey);
+  return stored === "all" || stored === "staged" ? stored : null;
+};
+
+const saveLastCommitMode = (mode: CommitMode) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(commitActionStorageKey, mode);
+};
+
+const validateCommitMessage = (message: string): CommitMessageValidation | null => {
+  const lines = message.replace(/\r\n/g, "\n").split("\n");
+  const summaryLength = lines[0]?.length ?? 0;
+
+  if (summaryLength > COMMIT_SUMMARY_LIMIT) {
+    return {
+      message: `Summary line is ${summaryLength} characters; VS Code marks commit subjects past ${COMMIT_SUMMARY_LIMIT} and body lines past ${COMMIT_BODY_LINE_LIMIT} for review.`,
+      count: `${summaryLength}/${COMMIT_SUMMARY_LIMIT}`,
+    };
+  }
+
+  const longBodyLine = lines.slice(1).find((line) => line.length > COMMIT_BODY_LINE_LIMIT);
+  if (longBodyLine) {
+    return {
+      message: `Commit body line is ${longBodyLine.length} characters; VS Code marks body lines past ${COMMIT_BODY_LINE_LIMIT} for review.`,
+      count: `${longBodyLine.length}/${COMMIT_BODY_LINE_LIMIT}`,
+    };
+  }
+
+  return null;
+};
+
+export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, onAgentsUpdated, sourceControlStatus }) => {
   const confirm = useConfirm();
-  const [rootPath, setRootPath] = useState<string | null>(null);
-  const [status, setStatus] = useState<GitStatusResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const externalEditor = useSettingsStore((state) => state.externalEditor);
+  const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
+  const {
+    rootPath,
+    status,
+    error: statusError,
+    loading: statusLoading,
+    refreshing: statusRefreshing,
+    changeEventRevision,
+    refreshStatus,
+  } = sourceControlStatus;
+  const [panelError, setPanelError] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const [diffContent, setDiffContent] = useState<string | null>(null);
   const [diffFilePath, setDiffFilePath] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [initializingRepository, setInitializingRepository] = useState(false);
+  const [isCloneRepositoryFormOpen, setIsCloneRepositoryFormOpen] = useState(false);
+  const [cloneRepositoryUrl, setCloneRepositoryUrl] = useState("");
+  const [cloningRepository, setCloningRepository] = useState(false);
   const [worktreeLoading, setWorktreeLoading] = useState(false);
   const [availableWorktrees, setAvailableWorktrees] = useState<AgentWorktreeSummary[]>([]);
   const [currentWorktreeName, setCurrentWorktreeName] = useState<ActiveWorktreeName | null>(null);
   const [isNamingWorktree, setIsNamingWorktree] = useState(false);
   const [worktreeName, setWorktreeName] = useState("");
+  const [groupContextMenu, setGroupContextMenu] = useState<{
+    x: number;
+    y: number;
+    items: ContextMenuItem[];
+  } | null>(null);
+  const [commitActionMenu, setCommitActionMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [branchMenu, setBranchMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [sourceControlActionMenu, setSourceControlActionMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [stashMenu, setStashMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [isCreatingBranch, setIsCreatingBranch] = useState(false);
+  const [branchName, setBranchName] = useState("");
   const createWorktreeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const branchNameInputRef = useRef<HTMLInputElement | null>(null);
   const worktreeNameInputRef = useRef<HTMLInputElement | null>(null);
 
   // Collapsible sections
   const [stagedOpen, setStagedOpen] = useState(true);
+  const [mergeOpen, setMergeOpen] = useState(true);
   const [changesOpen, setChangesOpen] = useState(true);
   const [untrackedOpen, setUntrackedOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
+  const [resourceDisplayMode, setResourceDisplayMode] = useState<ResourceDisplayMode>(() => loadResourceDisplayMode(""));
+  const [lastCommitMode, setLastCommitMode] = useState<CommitMode | null>(() => loadLastCommitMode());
 
   // Commit history
   const [history, setHistory] = useState<GitLogEntry[]>([]);
@@ -70,7 +171,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     selectedAgent?.git_worktree_source ?? "",
     selectedAgent?.git_worktree_folder ?? "",
   ].join("|");
+  const error = panelError ?? statusError;
+  const hasStatus = status !== null;
   const errorMessage = error === null ? "" : error.trim() || DEFAULT_GIT_ERROR;
+  const errorWorkspacePath = rootPath ?? selectedAgent?.folder ?? "";
   const isNotGitRepoError =
     errorMessage.toLowerCase().includes("not a git repository") ||
     errorMessage.toLowerCase().includes("not a git directory");
@@ -99,9 +203,50 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     selectedRuntimeFolder.length > 0 &&
     selectedRuntimeFolder !== selectedWorktreeFolder;
 
-  const formatError = (err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    return message.trim() || DEFAULT_GIT_ERROR;
+  const formatError = formatGitStatusError;
+
+  const handleRevealWorkspace = async () => {
+    if (!errorWorkspacePath) return;
+    try {
+      await invoke("reveal_in_explorer", { path: errorWorkspacePath });
+    } catch (err) {
+      setPanelError(formatError(err));
+    }
+  };
+
+  const handleInitializeRepository = async () => {
+    if (!errorWorkspacePath) return;
+    setInitializingRepository(true);
+    setPanelError(null);
+    setOperationError(null);
+    try {
+      await invoke("git_init", { cwd: errorWorkspacePath });
+      await refreshStatus();
+    } catch (err) {
+      setPanelError(formatError(err));
+    } finally {
+      setInitializingRepository(false);
+    }
+  };
+
+  const handleCloneRepository = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const repository = cloneRepositoryUrl.trim();
+    if (!errorWorkspacePath || !repository) return;
+
+    setCloningRepository(true);
+    setPanelError(null);
+    setOperationError(null);
+    try {
+      await invoke("git_clone_repository", { cwd: errorWorkspacePath, repository });
+      setCloneRepositoryUrl("");
+      setIsCloneRepositoryFormOpen(false);
+      await refreshStatus();
+    } catch (err) {
+      setPanelError(formatError(err));
+    } finally {
+      setCloningRepository(false);
+    }
   };
 
   const slugifyWorktreeName = (name: string) => {
@@ -119,46 +264,19 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   );
   const canCreateNamedWorktree = worktreeName.trim().length > 0 && !isWorktreeNameDuplicate && !worktreeLoading;
 
-  // Resolve the agent's working directory
   useEffect(() => {
-    const fetchPath = async () => {
-      setStatus(null);
-      setHistory([]);
-      setHistoryError(null);
-      setError(null);
-      setOperationError(null);
-      setRootPath(null);
-
-      if (!selectedAgentId) {
-        return;
-      }
-      try {
-        const path = await invoke<string>("get_explorer_root", { sessionId: selectedAgentId });
-        if (!path.trim()) {
-          setError("Agent workspace is not configured.");
-          return;
-        }
-        setRootPath(path);
-      } catch (err) {
-        setError(formatError(err));
-      }
-    };
-    fetchPath();
+    setHistory([]);
+    setHistoryError(null);
+    setOperationError(null);
+    setPanelError(null);
+    setDiffContent(null);
+    setCloneRepositoryUrl("");
+    setIsCloneRepositoryFormOpen(false);
+    setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
   }, [selectedAgentId, selectedWorkspaceRevision]);
 
-  // Fetch git status
-  const refreshStatus = useCallback(async () => {
-    if (!rootPath) return false;
-    try {
-      const result = await invoke<GitStatusResult>("git_status", { cwd: rootPath });
-      setStatus(result);
-      setError(null);
-      return true;
-    } catch (err) {
-      setStatus(null);
-      setError(formatError(err));
-      return false;
-    }
+  useEffect(() => {
+    setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
   }, [rootPath]);
 
   // Fetch commit history when root changes or after a commit
@@ -174,46 +292,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   }, [rootPath]);
 
-  // Watch .git/index + .git/HEAD via FSWatcher; refresh on change event
   useEffect(() => {
-    if (!rootPath) return;
-
-    let disposed = false;
-    let pollId: number | null = null;
-    let isWatching = false;
-
-    const unlistenPromise = listen<string>("git-changed", (event) => {
-      if (event.payload === rootPath) {
-        refreshStatus();
-        refreshHistory();
-      }
-    });
-
-    void (async () => {
-      const statusLoaded = await refreshStatus();
-      if (disposed || !statusLoaded) return;
-
-      await refreshHistory();
-      if (disposed) return;
-
-      pollId = window.setInterval(() => {
-        void refreshStatus();
-      }, GIT_STATUS_POLL_INTERVAL_MS);
-      isWatching = true;
-      invoke("git_watch", { cwd: rootPath }).catch(() => {});
-    })();
-
-    return () => {
-      disposed = true;
-      if (pollId !== null) {
-        window.clearInterval(pollId);
-      }
-      if (isWatching) {
-        invoke("git_unwatch", { cwd: rootPath }).catch(() => {});
-      }
-      unlistenPromise.then((fn) => fn());
-    };
-  }, [rootPath, refreshStatus, refreshHistory]);
+    if (!rootPath || !hasStatus) {
+      setHistory([]);
+      setHistoryError(null);
+      return;
+    }
+    void refreshHistory();
+  }, [changeEventRevision, hasStatus, refreshHistory, rootPath]);
 
   useEffect(() => {
     let isMounted = true;
@@ -270,6 +356,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     input.select();
   }, [isNamingWorktree]);
 
+  useEffect(() => {
+    if (!isCreatingBranch) return;
+    const input = branchNameInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [isCreatingBranch]);
+
   // File operations
   const handleStage = async (path: string) => {
     if (!rootPath) return;
@@ -305,6 +399,30 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
+  const handleDiscardPaths = async (paths: string[], label?: string) => {
+    if (!rootPath || paths.length === 0) return;
+    const target = label ? `${label}/` : `${paths.length} files`;
+    if (!(await confirm(`Discard changes in ${target}?`))) return;
+    setOperationError(null);
+    try {
+      await invoke("git_discard_changes", { cwd: rootPath, paths });
+      await refreshStatus();
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleIgnorePaths = async (paths: string[]) => {
+    if (!rootPath || paths.length === 0) return;
+    setOperationError(null);
+    try {
+      await invoke("git_ignore", { cwd: rootPath, paths });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
   const handleDiff = async (path: string, staged: boolean) => {
     if (!rootPath) return;
     setOperationError(null);
@@ -317,45 +435,505 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
-  // Stage all / Unstage all
-  const handleStageAll = async () => {
-    if (!rootPath || !status) return;
-    const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
-    if (unstaged.length === 0) return;
+  const handleCompareWithWorkspace = async (path: string) => {
+    if (!rootPath) return;
     setOperationError(null);
     try {
-      await invoke("git_stage", { cwd: rootPath, paths: unstaged });
+      const diff = await invoke<string>("git_diff_file_against_workspace", { cwd: rootPath, path });
+      setDiffContent(diff);
+      setDiffFilePath(`Workspace: ${path}`);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleOpenFile = async (path: string) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      await invoke("open_in_external_editor", {
+        path: resolveGitResourcePath(rootPath, path),
+        editor: {
+          external_editor: externalEditor,
+          external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+        },
+      });
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleOpenHeadFile = async (path: string) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      const content = await invoke<string>("git_show_file_revision", {
+        cwd: rootPath,
+        path,
+        revision: "HEAD",
+      });
+      setDiffContent(content);
+      setDiffFilePath(`HEAD: ${path}`);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleRevealFile = async (path: string) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      await invoke("reveal_in_explorer", { path: resolveGitResourcePath(rootPath, path) });
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleDiffGroup = async (label: string, files: GitFileEntry[]) => {
+    if (!rootPath || files.length === 0) return;
+    setOperationError(null);
+    try {
+      const diffs = await Promise.all(
+        files.map(async (file) => {
+          const diff = await invoke<string>("git_diff_file", {
+            cwd: rootPath,
+            path: file.path,
+            staged: file.is_staged,
+          });
+          return diff.trim();
+        }),
+      );
+      setDiffContent(diffs.filter(Boolean).join("\n"));
+      setDiffFilePath(label);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  // Stage all / Unstage all
+  const stagePaths = async (paths: string[]) => {
+    if (!rootPath || paths.length === 0) return;
+    setOperationError(null);
+    try {
+      await invoke("git_stage", { cwd: rootPath, paths });
       await refreshStatus();
     } catch (err) {
       setOperationError(formatError(err));
     }
   };
 
-  const handleUnstageAll = async () => {
-    if (!rootPath || !status) return;
-    const staged = status.files.filter((f) => f.is_staged).map((f) => f.path);
-    if (staged.length === 0) return;
+  const unstagePaths = async (paths: string[]) => {
+    if (!rootPath || paths.length === 0) return;
     setOperationError(null);
     try {
-      await invoke("git_unstage", { cwd: rootPath, paths: staged });
+      await invoke("git_unstage", { cwd: rootPath, paths });
       await refreshStatus();
     } catch (err) {
       setOperationError(formatError(err));
     }
   };
+
+  const handleStageTrackedAll = async () => {
+    await stagePaths(unstagedTracked.map((f) => f.path));
+  };
+
+  const handleStageUntrackedAll = async () => {
+    await stagePaths(untrackedFiles.map((f) => f.path));
+  };
+
+  const handleUnstageStagedAll = async () => {
+    await unstagePaths(stagedFiles.map((f) => f.path));
+  };
+
+  const handleStageMergeAll = async () => {
+    const paths = mergeFiles.map((f) => f.path);
+    if (paths.length === 0) return;
+    await stagePaths(paths);
+  };
+
+  const openResourceGroupContextMenu = (
+    event: React.MouseEvent,
+    items: ContextMenuItem[],
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setGroupContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items,
+    });
+  };
+
+  const openStagedGroupContextMenu = (event: React.MouseEvent) =>
+    openResourceGroupContextMenu(event, [
+      { label: "Open Staged Changes", onClick: () => void handleDiffGroup("Staged changes", stagedFiles) },
+      { label: "Unstage All Changes", onClick: () => void handleUnstageStagedAll() },
+      { label: stagedOpen ? "Collapse" : "Expand", onClick: () => setStagedOpen((open) => !open) },
+    ]);
+
+  const openMergeGroupContextMenu = (event: React.MouseEvent) => {
+    openResourceGroupContextMenu(event, [
+      { label: "Stage All Merge Changes", onClick: () => void handleStageMergeAll() },
+      { label: mergeOpen ? "Collapse" : "Expand", onClick: () => setMergeOpen((open) => !open) },
+    ]);
+  };
+
+  const openTrackedGroupContextMenu = (event: React.MouseEvent) =>
+    openResourceGroupContextMenu(event, [
+      { label: "Open Changes", onClick: () => void handleDiffGroup("Changes", unstagedTracked) },
+      {
+        label: "Discard All Tracked Changes",
+        danger: true,
+        onClick: () => void handleDiscardPaths(unstagedTracked.map((file) => file.path)),
+      },
+      { label: "Stage All Tracked Changes", onClick: () => void handleStageTrackedAll() },
+      { label: changesOpen ? "Collapse" : "Expand", onClick: () => setChangesOpen((open) => !open) },
+    ]);
+
+  const openUntrackedGroupContextMenu = (event: React.MouseEvent) =>
+    openResourceGroupContextMenu(event, [
+      { label: "Open Untracked Changes", onClick: () => void handleDiffGroup("Untracked", untrackedFiles) },
+      {
+        label: "Discard All Untracked Changes",
+        danger: true,
+        onClick: () => void handleDiscardPaths(untrackedFiles.map((file) => file.path)),
+      },
+      { label: "Stage All Untracked Changes", onClick: () => void handleStageUntrackedAll() },
+      { label: untrackedOpen ? "Collapse" : "Expand", onClick: () => setUntrackedOpen((open) => !open) },
+    ]);
 
   // Commit
-  const handleCommit = async () => {
+  const handleCommit = async (mode: CommitMode = "staged") => {
     if (!rootPath || !commitMsg.trim() || !status) return;
     const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
+    const shouldStageUnstaged = mode === "all" || (!hasStagedFiles && unstaged.length > 0);
     setLoading(true);
     setOperationError(null);
     try {
-      if (!hasStagedFiles && unstaged.length > 0) {
+      if (shouldStageUnstaged && unstaged.length > 0) {
         await invoke("git_stage", { cwd: rootPath, paths: unstaged });
       }
       await invoke("git_commit", { cwd: rootPath, message: commitMsg.trim() });
       setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAmend = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_amend", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAmendNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_amend_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitStagedAmendNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_staged_amend_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAllAmendNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_all_amend_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitStagedAmend = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_staged_amend", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAllAmend = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_all_amend", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim() || !status) return;
+    const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
+    const shouldStageUnstaged = !hasStagedFiles && unstaged.length > 0;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      if (shouldStageUnstaged) {
+        await invoke("git_stage", { cwd: rootPath, paths: unstaged });
+      }
+      await invoke("git_commit_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitSigned = async () => {
+    if (!rootPath || !commitMsg.trim() || !status) return;
+    const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
+    const shouldStageUnstaged = !hasStagedFiles && unstaged.length > 0;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      if (shouldStageUnstaged) {
+        await invoke("git_stage", { cwd: rootPath, paths: unstaged });
+      }
+      await invoke("git_commit_signed", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitStagedSigned = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_staged_signed", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAllSigned = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_all_signed", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitSignedNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim() || !status) return;
+    const unstaged = status.files.filter((f) => !f.is_staged).map((f) => f.path);
+    const shouldStageUnstaged = !hasStagedFiles && unstaged.length > 0;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      if (shouldStageUnstaged) {
+        await invoke("git_stage", { cwd: rootPath, paths: unstaged });
+      }
+      await invoke("git_commit_signed_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitStagedSignedNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_staged_signed_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAllSignedNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_all_signed_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitStagedNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_staged_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitAllNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_all_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitEmpty = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_empty", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCommitEmptyNoVerify = async () => {
+    if (!rootPath || !commitMsg.trim()) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_commit_empty_no_verify", { cwd: rootPath, message: commitMsg.trim() });
+      setCommitMsg("");
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUndoLastCommit = async () => {
+    if (!rootPath) return;
+    if (!(await confirm("Undo last commit and keep its changes in the working tree?"))) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      const message = await invoke<string>("git_undo_last_commit", { cwd: rootPath });
+      setCommitMsg(message);
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAbortRebase = async () => {
+    if (!rootPath) return;
+    setLoading(true);
+    setOperationError(null);
+    try {
+      await invoke("git_rebase_abort", { cwd: rootPath });
       await refreshStatus();
       await refreshHistory();
     } catch (err) {
@@ -390,7 +968,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setWorktreeName("");
       onAgentsUpdated();
     } catch (err) {
-      setError(formatError(err));
+      setPanelError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -409,7 +987,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       });
       onAgentsUpdated();
     } catch (err) {
-      setError(formatError(err));
+      setPanelError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -425,7 +1003,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       });
       onAgentsUpdated();
     } catch (err) {
-      setError(formatError(err));
+      setPanelError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -448,7 +1026,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       );
       onAgentsUpdated();
     } catch (err) {
-      setError(formatError(err));
+      setPanelError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -464,7 +1042,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       });
       onAgentsUpdated();
     } catch (err) {
-      setError(formatError(err));
+      setPanelError(formatError(err));
     } finally {
       setWorktreeLoading(false);
     }
@@ -499,6 +1077,355 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
+  const handleFetch = async () => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_fetch", { cwd: rootPath });
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const refreshAfterSourceControlOperation = async () => {
+    await refreshStatus();
+    await refreshHistory();
+  };
+
+  const handleStashPush = async (includeUntracked: boolean) => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_push", { cwd: rootPath, includeUntracked });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashStaged = async () => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_staged", { cwd: rootPath });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashPopLatest = async () => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_pop_latest", { cwd: rootPath });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const checkoutBranch = async (branch: string) => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke("git_checkout_branch", { cwd: rootPath, branch });
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashApplyLatest = async () => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_apply_latest", { cwd: rootPath });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashApply = async (stash: GitStashEntry) => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_apply", { cwd: rootPath, stash: stash.selector });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashPop = async (stash: GitStashEntry) => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_pop", { cwd: rootPath, stash: stash.selector });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashDrop = async (stash: GitStashEntry) => {
+    if (!rootPath) return;
+    if (!(await confirm(`Drop stash ${stash.selector}? This cannot be undone.`))) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_drop", { cwd: rootPath, stash: stash.selector });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleStashDropAll = async () => {
+    if (!rootPath) return;
+    if (!(await confirm("Drop all stashes for this workspace? This cannot be undone."))) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke<string>("git_stash_drop_all", { cwd: rootPath });
+      await refreshAfterSourceControlOperation();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleShowStash = async (stash: GitStashEntry) => {
+    if (!rootPath) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      const diff = await invoke<string>("git_show_stash", { cwd: rootPath, stash: stash.selector });
+      setDiffContent(diff);
+      setDiffFilePath(`Stash ${stash.selector}`);
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const openStashPickerMenu = async (onSelect: (stash: GitStashEntry) => void) => {
+    if (!rootPath) return;
+    const menuX = sourceControlActionMenu?.x ?? 0;
+    const menuY = sourceControlActionMenu?.y ?? 0;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      const stashes = await invoke<GitStashEntry[]>("git_list_stashes", { cwd: rootPath });
+      if (stashes.length === 0) {
+        setOperationError("No stashes found for this workspace.");
+        return;
+      }
+      setStashMenu({
+        x: menuX,
+        y: menuY,
+        items: stashes.map((stash) => ({
+          label: `${stash.selector} ${stash.message}`.trim(),
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => onSelect(stash),
+        })),
+      });
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const openStashViewMenu = async () => {
+    await openStashPickerMenu((stash) => void handleShowStash(stash));
+  };
+
+  const openStashApplyMenu = async () => {
+    await openStashPickerMenu((stash) => void handleStashApply(stash));
+  };
+
+  const openStashPopMenu = async () => {
+    await openStashPickerMenu((stash) => void handleStashPop(stash));
+  };
+
+  const openStashDropMenu = async () => {
+    await openStashPickerMenu((stash) => void handleStashDrop(stash));
+  };
+
+  const openSourceControlActionMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setSourceControlActionMenu({
+      x: rect.right - 220,
+      y: rect.bottom + 4,
+      items: [
+        {
+          label: "Stash Changes",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashPush(false),
+        },
+        {
+          label: "Stash Changes Including Untracked",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashPush(true),
+        },
+        {
+          label: "Stash Staged",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashStaged(),
+        },
+        { divider: true },
+        {
+          label: "Apply Latest Stash",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashApplyLatest(),
+        },
+        {
+          label: "Apply Stash...",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void openStashApplyMenu(),
+        },
+        {
+          label: "Pop Latest Stash",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashPopLatest(),
+        },
+        {
+          label: "Pop Stash...",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void openStashPopMenu(),
+        },
+        {
+          label: "View Stash...",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void openStashViewMenu(),
+        },
+        { divider: true },
+        {
+          label: "Drop Stash...",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void openStashDropMenu(),
+        },
+        {
+          label: "Drop All Stashes...",
+          icon: <Archive className="h-3.5 w-3.5" />,
+          onClick: () => void handleStashDropAll(),
+        },
+      ],
+    });
+  };
+
+  const createBranch = async () => {
+    if (!rootPath) return;
+    const branch = branchName.trim();
+    if (!branch) {
+      setOperationError("Branch name is required.");
+      return;
+    }
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      await invoke("git_create_branch", { cwd: rootPath, branch });
+      setBranchName("");
+      setIsCreatingBranch(false);
+      await refreshStatus();
+      await refreshHistory();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const openCheckoutMenu = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!rootPath) return;
+
+    setOperationError(null);
+    const rect = event.currentTarget.getBoundingClientRect();
+    try {
+      const branches = await invoke<GitBranchSummary[]>("git_list_branches", { cwd: rootPath });
+      setBranchMenu({
+        x: rect.right - 200,
+        y: rect.bottom + 4,
+        items: [
+          {
+            label: "Create Branch...",
+            icon: <GitBranch className="h-3.5 w-3.5" />,
+            onClick: () => {
+              setBranchName("");
+              setIsCreatingBranch(true);
+            },
+          },
+          { divider: true },
+          ...branches.map((branch) => ({
+            label: branch.name,
+            icon: branch.current ? <Check className="h-3.5 w-3.5" /> : undefined,
+            onClick: () => {
+              if (!branch.current) void checkoutBranch(branch.name);
+            },
+          })),
+        ],
+      });
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleSync = async () => {
+    if (!rootPath || !status) return;
+    setSyncing(true);
+    setOperationError(null);
+    try {
+      if (status.behind > 0) {
+        await invoke<string>("git_pull", { cwd: rootPath });
+      }
+      if (status.ahead > 0) {
+        await invoke<string>("git_push", { cwd: rootPath });
+      }
+      await refreshStatus();
+    } catch (err) {
+      setOperationError(formatError(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   // No agent selected
   if (!selectedAgentId) {
     return (
@@ -523,7 +1450,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       <div className="flex flex-col h-full w-full">
         <h2 className="text-sm font-bold text-primary tracking-tight mb-4">Source Control</h2>
         <div className="flex flex-col items-center justify-center flex-1 text-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="w-16 h-16 mb-4 text-gray-700/40">
+          <div className="w-16 h-16 mb-4 text-[color-mix(in_srgb,var(--color-wardian-text-muted),transparent_55%)]">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
               <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
@@ -537,6 +1464,82 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               ? "The agent's workspace is not initialized as a git repository."
               : errorMessage}
           </p>
+          {errorWorkspacePath && (
+            <p className="mt-3 max-w-full px-2 text-[10px] text-[var(--color-wardian-text-muted)]">
+              Workspace: <span className="font-mono text-primary break-all">{errorWorkspacePath}</span>
+            </p>
+          )}
+          {errorWorkspacePath && (
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              {isNotGitRepoError && (
+                <button
+                  type="button"
+                  onClick={() => void handleInitializeRepository()}
+                  disabled={initializingRepository}
+                  className="inline-flex items-center gap-1.5 rounded border border-wardian-border px-2 py-1 text-[11px] text-[var(--color-wardian-text-muted)] transition-colors hover:bg-wardian-card-bg-muted hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Plus size={12} aria-hidden="true" />
+                  {initializingRepository ? "Initializing..." : "Initialize Repository"}
+                </button>
+              )}
+              {isNotGitRepoError && (
+                <button
+                  type="button"
+                  onClick={() => setIsCloneRepositoryFormOpen(true)}
+                  disabled={cloningRepository}
+                  className="inline-flex items-center gap-1.5 rounded border border-wardian-border px-2 py-1 text-[11px] text-[var(--color-wardian-text-muted)] transition-colors hover:bg-wardian-card-bg-muted hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Download size={12} aria-hidden="true" />
+                  Clone Repository...
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void handleRevealWorkspace()}
+                className="rounded border border-wardian-border px-2 py-1 text-[11px] text-[var(--color-wardian-text-muted)] transition-colors hover:bg-wardian-card-bg-muted hover:text-primary"
+              >
+                Reveal Workspace
+              </button>
+            </div>
+          )}
+          {isCloneRepositoryFormOpen && isNotGitRepoError && errorWorkspacePath && (
+            <form
+              onSubmit={(event) => void handleCloneRepository(event)}
+              className="mt-3 flex w-full max-w-xs flex-col gap-2 rounded border border-wardian-border bg-wardian-card-bg-muted/40 p-2 text-left"
+            >
+              <label htmlFor="source-control-clone-url" className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-wardian-text-muted)]">
+                Repository URL
+              </label>
+              <input
+                id="source-control-clone-url"
+                type="text"
+                value={cloneRepositoryUrl}
+                onChange={(event) => setCloneRepositoryUrl(event.target.value)}
+                disabled={cloningRepository}
+                className="w-full rounded border border-wardian-border bg-wardian-input-bg px-2 py-1 text-xs text-primary outline-none focus:border-[var(--color-wardian-accent)] disabled:opacity-60"
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCloneRepositoryUrl("");
+                    setIsCloneRepositoryFormOpen(false);
+                  }}
+                  disabled={cloningRepository}
+                  className="rounded border border-wardian-border px-2 py-1 text-[11px] text-[var(--color-wardian-text-muted)] transition-colors hover:bg-wardian-card-bg-muted hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={cloningRepository || cloneRepositoryUrl.trim().length === 0}
+                  className="rounded border border-[color-mix(in_srgb,var(--color-wardian-accent),transparent_35%)] px-2 py-1 text-[11px] text-[var(--color-wardian-accent)] transition-colors hover:bg-wardian-card-bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {cloningRepository ? "Cloning..." : "Clone"}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     );
@@ -547,22 +1550,241 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     return (
       <div className="flex flex-col h-full w-full">
         <h2 className="text-sm font-bold text-primary tracking-tight mb-4">Source Control</h2>
-        <div className="text-sm text-[var(--color-wardian-text-muted)] animate-pulse px-1">Loading git status...</div>
+        <div role="status" aria-live="polite" className="text-sm text-[var(--color-wardian-text-muted)] animate-pulse px-1">
+          {statusLoading ? "Loading source control..." : "Loading git status..."}
+        </div>
       </div>
     );
   }
 
-  const stagedFiles = status.files.filter((f) => f.is_staged);
-  const unstagedTracked = status.files.filter((f) => !f.is_staged && f.status !== "?");
+  const mergeFiles = status.files.filter((f) => !f.is_staged && MERGE_CONFLICT_STATUSES.has(f.status));
+  const stagedFiles = status.files.filter((f) => f.is_staged && !MERGE_CONFLICT_STATUSES.has(f.status));
+  const unstagedTracked = status.files.filter(
+    (f) => !f.is_staged && f.status !== "?" && !MERGE_CONFLICT_STATUSES.has(f.status),
+  );
   const untrackedFiles = status.files.filter((f) => !f.is_staged && f.status === "?");
   const hasStagedFiles = stagedFiles.length > 0;
-  const hasUnstagedFiles = unstagedTracked.length > 0 || untrackedFiles.length > 0;
+  const hasUnstagedFiles = mergeFiles.length > 0 || unstagedTracked.length > 0 || untrackedFiles.length > 0;
   const canCommit = commitMsg.trim().length > 0 && (hasStagedFiles || hasUnstagedFiles);
+  const commitValidation = validateCommitMessage(commitMsg);
+  const hasPendingFiles = status.files.length > 0;
+  const canCommitEmpty = commitMsg.trim().length > 0 && !hasPendingFiles && !loading;
+  const canUndoLastCommit = history.length > 0 && !loading;
+  const canAbortRebase = Boolean(status.rebase_in_progress) && !loading;
+  const isCleanUnpublishedBranch = !hasPendingFiles && status.has_upstream === false;
+  const isCleanDivergedBranch = !hasPendingFiles && status.has_upstream && (status.ahead > 0 || status.behind > 0);
+  const primaryActionKind: PrimaryActionKind = isCleanUnpublishedBranch
+    ? "publish"
+    : isCleanDivergedBranch
+      ? "sync"
+      : "commit";
+  const effectiveCommitMode: CommitMode = lastCommitMode === "all" || (lastCommitMode === "staged" && hasStagedFiles) ? lastCommitMode : "staged";
+  const syncCountLabel = `${status.behind > 0 ? ` ↓${status.behind}` : ""}${status.ahead > 0 ? ` ↑${status.ahead}` : ""}`;
+  const commitActionLabel =
+    lastCommitMode === "all" ? "Commit All" : lastCommitMode === "staged" && hasStagedFiles ? "Commit Staged" : "Commit";
+  const primaryActionLabel =
+    primaryActionKind === "publish" ? "Publish Branch" : primaryActionKind === "sync" ? `Sync Changes${syncCountLabel}` : commitActionLabel;
+  const primaryActionBusyLabel =
+    primaryActionKind === "publish" ? "Publishing..." : primaryActionKind === "sync" ? "Syncing..." : "Committing...";
+  const primaryActionDisabled = primaryActionKind === "commit" ? loading || !canCommit : syncing;
+  const primaryActionTitle =
+    primaryActionKind === "publish"
+      ? `Publish ${status.branch}`
+      : primaryActionKind === "sync"
+        ? `Sync ${status.branch} with ${status.upstream ?? "upstream"}`
+        : commitActionLabel;
+  const isPrimaryActionBusy = primaryActionKind === "commit" ? loading : syncing;
   const pushTitle = status.has_upstream === false ? "Publish Branch" : "Push";
+  const progressMessage = loading
+    ? "Committing..."
+    : syncing
+      ? "Syncing source control..."
+      : worktreeLoading
+        ? "Updating worktree..."
+        : statusRefreshing
+          ? "Refreshing source control..."
+          : statusLoading
+            ? "Loading source control..."
+            : null;
+
+  const handlePrimaryAction = () => {
+    if (primaryActionKind === "publish") {
+      void handlePush();
+      return;
+    }
+    if (primaryActionKind === "sync") {
+      void handleSync();
+      return;
+    }
+    void handleCommit(effectiveCommitMode);
+  };
+
+  const runCommitAction = (mode: CommitMode) => {
+    setLastCommitMode(mode);
+    saveLastCommitMode(mode);
+    void handleCommit(mode);
+  };
+
+  const openCommitActionMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (primaryActionKind !== "commit" || (!canCommit && !canCommitEmpty && !canUndoLastCommit && !canAbortRebase)) return;
+
+    const items: ContextMenuItem[] = [];
+    if (canCommit && hasStagedFiles) {
+      items.push({
+        label: "Commit Staged",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => runCommitAction("staged"),
+      });
+    }
+    if (canCommit) {
+      items.push({
+        label: "Commit All",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => runCommitAction("all"),
+      });
+    }
+    if (canCommit) {
+      items.push({
+        label: "Commit (No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitNoVerify(),
+      });
+      items.push({
+        label: "Commit Staged (No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitStagedNoVerify(),
+      });
+      items.push({
+        label: "Commit All (No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAllNoVerify(),
+      });
+      items.push({
+        label: "Commit (Signed Off)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitSigned(),
+      });
+      items.push({
+        label: "Commit Staged (Signed Off)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitStagedSigned(),
+      });
+      items.push({
+        label: "Commit All (Signed Off)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAllSigned(),
+      });
+      items.push({
+        label: "Commit (Signed Off, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitSignedNoVerify(),
+      });
+      items.push({
+        label: "Commit Staged (Signed Off, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitStagedSignedNoVerify(),
+      });
+      items.push({
+        label: "Commit All (Signed Off, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAllSignedNoVerify(),
+      });
+    }
+    if (canCommitEmpty) {
+      items.push({
+        label: "Commit Empty",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitEmpty(),
+      });
+      items.push({
+        label: "Commit Empty (No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitEmptyNoVerify(),
+      });
+    }
+    if (canCommit && history.length > 0) {
+      items.push({
+        label: "Commit (Amend)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAmend(),
+      });
+      items.push({
+        label: "Commit Staged (Amend)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitStagedAmend(),
+      });
+      items.push({
+        label: "Commit All (Amend)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAllAmend(),
+      });
+      items.push({
+        label: "Commit (Amend, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAmendNoVerify(),
+      });
+      items.push({
+        label: "Commit Staged (Amend, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitStagedAmendNoVerify(),
+      });
+      items.push({
+        label: "Commit All (Amend, No Verify)",
+        icon: <Check className="h-3.5 w-3.5" />,
+        onClick: () => void handleCommitAllAmendNoVerify(),
+      });
+    }
+    if (canUndoLastCommit) {
+      items.push({
+        label: "Undo Last Commit",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        onClick: () => void handleUndoLastCommit(),
+      });
+    }
+    if (canAbortRebase) {
+      items.push({
+        label: "Abort Rebase",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        onClick: () => void handleAbortRebase(),
+      });
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    setCommitActionMenu({
+      x: rect.right - 200,
+      y: rect.bottom + 4,
+      items,
+    });
+  };
+
+  const updateResourceDisplayMode = (mode: ResourceDisplayMode) => {
+    setResourceDisplayMode(mode);
+    saveResourceDisplayMode(rootPath ?? "", mode);
+  };
+
+  const handleRefreshSourceControl = async () => {
+    setOperationError(null);
+    const refreshed = await refreshStatus();
+    if (refreshed) {
+      await refreshHistory();
+    }
+  };
 
   return (
     <div className="flex flex-col h-full w-full relative">
       <h2 className="text-sm font-bold text-primary tracking-tight mb-2">Source Control</h2>
+      {progressMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-2 flex items-center gap-1.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-processing),transparent_72%)] bg-[color-mix(in_srgb,var(--color-wardian-processing),transparent_90%)] px-2 py-1 text-[11px] text-[var(--color-wardian-processing)]"
+        >
+          <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" />
+          {progressMessage}
+        </div>
+      )}
 
       {/* Branch bar */}
       <div className="flex items-center gap-2 py-1.5 mb-3 border-b border-wardian-border/30">
@@ -571,6 +1793,30 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
         </svg>
         <span className="text-xs font-semibold text-primary truncate">{status.branch}</span>
+        {isCreatingBranch && (
+          <div className="flex min-w-[160px] max-w-[240px] items-center gap-1 rounded border border-wardian-border bg-[var(--color-wardian-input-bg)] px-1.5 py-0.5">
+            <GitBranch className="h-3 w-3 shrink-0 text-[var(--color-wardian-accent)]" aria-hidden="true" />
+            <input
+              ref={branchNameInputRef}
+              value={branchName}
+              onChange={(event) => setBranchName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void createBranch();
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setBranchName("");
+                  setIsCreatingBranch(false);
+                }
+              }}
+              readOnly={syncing}
+              placeholder="branch-name"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-primary outline-none placeholder:text-[var(--color-wardian-text-muted)]"
+            />
+          </div>
+        )}
         {status.ahead > 0 && (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_80%)] text-[var(--color-wardian-success)] font-mono">↑{status.ahead}</span>
         )}
@@ -578,6 +1824,56 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] text-[var(--color-wardian-warning)] font-mono">↓{status.behind}</span>
         )}
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => void handleRefreshSourceControl()}
+          disabled={statusLoading || statusRefreshing}
+          aria-label="Refresh Source Control"
+          title="Refresh Source Control"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <RefreshCw className={`h-4 w-4 ${statusRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => updateResourceDisplayMode("tree")}
+          aria-label="Use source control tree view"
+          aria-pressed={resourceDisplayMode === "tree"}
+          title="Use source control tree view"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary aria-pressed:text-[var(--color-wardian-accent)] transition-colors"
+        >
+          <ListTree className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => updateResourceDisplayMode("list")}
+          aria-label="Use source control list view"
+          aria-pressed={resourceDisplayMode === "list"}
+          title="Use source control list view"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary aria-pressed:text-[var(--color-wardian-accent)] transition-colors"
+        >
+          <List className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={(event) => void openCheckoutMenu(event)}
+          disabled={syncing}
+          aria-label="Checkout to..."
+          title="Checkout to..."
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <GitBranch className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleFetch()}
+          disabled={syncing}
+          aria-label="Fetch"
+          title="Fetch"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <Download className="h-4 w-4" aria-hidden="true" />
+        </button>
         <button
           onClick={handlePull}
           disabled={syncing}
@@ -597,6 +1893,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
+        </button>
+        <button
+          type="button"
+          onClick={openSourceControlActionMenu}
+          disabled={syncing}
+          aria-label="More Source Control Actions"
+          title="More Source Control Actions"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
 
@@ -733,8 +2039,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       <div className="pb-3 mb-1 border-b border-wardian-border/30 flex flex-col gap-2">
         <textarea
           className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-16 resize-none placeholder:text-[var(--color-wardian-text-muted)]"
-          placeholder="Message (Ctrl+Enter to commit)"
+          placeholder={`Message on ${status.branch} (Ctrl+Enter to commit)`}
           value={commitMsg}
+          aria-describedby={commitValidation ? "commit-message-validation" : undefined}
           onChange={(e) => setCommitMsg(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -743,16 +2050,49 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             }
           }}
         />
-        <button
-          onClick={handleCommit}
-          disabled={loading || !canCommit}
-          className="w-full py-1.5 rounded text-xs font-bold transition-colors bg-[var(--color-wardian-accent)] text-black hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
-          </svg>
-          {loading ? "Committing..." : "Commit"}
-        </button>
+        {commitValidation && (
+          <div
+            id="commit-message-validation"
+            role="status"
+            aria-label="Commit message validation"
+            className="flex items-center gap-2 rounded border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_55%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] px-2 py-1 text-[11px] text-[var(--color-wardian-warning)]"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">{commitValidation.message}</span>
+            <span className="shrink-0 rounded bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_82%)] px-1.5 py-0.5 font-mono text-[10px]">
+              {commitValidation.count}
+            </span>
+          </div>
+        )}
+        <div className="flex w-full items-stretch gap-1">
+          <button
+            onClick={handlePrimaryAction}
+            disabled={primaryActionDisabled}
+            title={primaryActionTitle}
+            className="min-w-0 flex-1 py-1.5 rounded text-xs font-bold transition-colors bg-[var(--color-wardian-accent)] text-black hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+          >
+            {primaryActionKind === "publish" ? (
+              <Upload className="w-3.5 h-3.5" />
+            ) : primaryActionKind === "sync" ? (
+              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
+            ) : (
+              <Check className="w-3.5 h-3.5" />
+            )}
+            {isPrimaryActionBusy ? primaryActionBusyLabel : primaryActionLabel}
+          </button>
+          <button
+            type="button"
+            onClick={openCommitActionMenu}
+            disabled={primaryActionKind !== "commit" || (!canCommit && !canCommitEmpty && !canUndoLastCommit && !canAbortRebase)}
+            aria-label="More Actions"
+            aria-haspopup="menu"
+            aria-expanded={commitActionMenu !== null}
+            title="More Commit Actions"
+            className="flex w-8 shrink-0 items-center justify-center rounded border border-[color-mix(in_srgb,var(--color-wardian-accent),transparent_35%)] bg-[var(--color-wardian-accent)] text-black transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       {/* Scrollable content */}
@@ -760,7 +2100,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Staged Changes */}
         {stagedFiles.length > 0 && (
           <section>
-            <div className="flex items-center gap-1.5 w-full py-1 group">
+            <div
+              className="flex items-center gap-1.5 w-full py-1 group"
+              onContextMenu={openStagedGroupContextMenu}
+            >
               <button
                 onClick={() => setStagedOpen(!stagedOpen)}
                 className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
@@ -772,9 +2115,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               </button>
               <div className="flex-1" />
               <button
-                onClick={(e) => { e.stopPropagation(); handleUnstageAll(); }}
+                onClick={(e) => { e.stopPropagation(); void handleUnstageStagedAll(); }}
                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-all"
-                title="Unstage All"
+                title="Unstage All Changes"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 12H4" />
@@ -787,8 +2130,62 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             {stagedOpen && (
               <GitFileList
                 files={stagedFiles}
+                displayMode={resourceDisplayMode}
                 onUnstage={handleUnstage}
+                onUnstagePaths={unstagePaths}
                 onDiff={handleDiff}
+                onCompareWithWorkspace={handleCompareWithWorkspace}
+                onOpenFile={handleOpenFile}
+                onOpenHeadFile={handleOpenHeadFile}
+                onRevealFile={handleRevealFile}
+              />
+            )}
+          </section>
+        )}
+
+        {/* Merge Changes */}
+        {mergeFiles.length > 0 && (
+          <section>
+            <div
+              className="flex items-center gap-1.5 w-full py-1 group"
+              onContextMenu={openMergeGroupContextMenu}
+            >
+              <button
+                onClick={() => setMergeOpen(!mergeOpen)}
+                className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              >
+                <svg className={`w-3 h-3 text-[var(--color-wardian-text-muted)] transition-transform ${mergeOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-[11px] font-bold text-[var(--color-wardian-warning)] tracking-wide">Merge Changes</span>
+              </button>
+              <div className="flex-1" />
+              <button
+                onClick={(e) => { e.stopPropagation(); void handleStageMergeAll(); }}
+                className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-all"
+                title="Stage All Merge Changes"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+              <span className="min-w-[18px] h-[18px] px-1 rounded bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] text-[10px] font-mono flex items-center justify-center ml-1">
+                {mergeFiles.length}
+              </span>
+            </div>
+            {mergeOpen && (
+              <GitFileList
+                files={mergeFiles}
+                displayMode={resourceDisplayMode}
+                onStage={handleStage}
+                onStagePaths={stagePaths}
+                onDiscard={handleDiscard}
+                onDiscardPaths={handleDiscardPaths}
+                onIgnorePaths={handleIgnorePaths}
+                onDiff={handleDiff}
+                onOpenFile={handleOpenFile}
+                onOpenHeadFile={handleOpenHeadFile}
+                onRevealFile={handleRevealFile}
               />
             )}
           </section>
@@ -797,7 +2194,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Changes (unstaged tracked) */}
         {unstagedTracked.length > 0 && (
           <section>
-            <div className="flex items-center gap-1.5 w-full py-1 group">
+            <div
+              className="flex items-center gap-1.5 w-full py-1 group"
+              onContextMenu={openTrackedGroupContextMenu}
+            >
               <button
                 onClick={() => setChangesOpen(!changesOpen)}
                 className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
@@ -809,9 +2209,19 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               </button>
               <div className="flex-1" />
               <button
-                onClick={(e) => { e.stopPropagation(); handleStageAll(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDiscardPaths(unstagedTracked.map((file) => file.path));
+                }}
+                className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] transition-all"
+                title="Discard All Tracked Changes"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); void handleStageTrackedAll(); }}
                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-all"
-                title="Stage All"
+                title="Stage All Tracked Changes"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -824,9 +2234,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             {changesOpen && (
               <GitFileList
                 files={unstagedTracked}
+                displayMode={resourceDisplayMode}
                 onStage={handleStage}
+                onStagePaths={stagePaths}
                 onDiscard={handleDiscard}
+                onDiscardPaths={handleDiscardPaths}
+                onIgnorePaths={handleIgnorePaths}
                 onDiff={handleDiff}
+                onOpenFile={handleOpenFile}
+                onOpenHeadFile={handleOpenHeadFile}
+                onRevealFile={handleRevealFile}
               />
             )}
           </section>
@@ -835,7 +2252,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         {/* Untracked Files */}
         {untrackedFiles.length > 0 && (
           <section>
-            <div className="flex items-center gap-1.5 w-full py-1 group">
+            <div
+              className="flex items-center gap-1.5 w-full py-1 group"
+              onContextMenu={openUntrackedGroupContextMenu}
+            >
               <button
                 onClick={() => setUntrackedOpen(!untrackedOpen)}
                 className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
@@ -847,9 +2267,19 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               </button>
               <div className="flex-1" />
               <button
-                onClick={(e) => { e.stopPropagation(); handleStageAll(); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDiscardPaths(untrackedFiles.map((file) => file.path));
+                }}
+                className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] transition-all"
+                title="Discard All Untracked Changes"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); void handleStageUntrackedAll(); }}
                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-all"
-                title="Stage All Untracked"
+                title="Stage All Untracked Changes"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -862,8 +2292,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
             {untrackedOpen && (
               <GitFileList
                 files={untrackedFiles}
+                displayMode={resourceDisplayMode}
                 onStage={handleStage}
+                onStagePaths={stagePaths}
+                onDiscard={handleDiscard}
+                onDiscardPaths={handleDiscardPaths}
+                onIgnorePaths={handleIgnorePaths}
                 onDiff={handleDiff}
+                onOpenFile={handleOpenFile}
+                onOpenHeadFile={handleOpenHeadFile}
+                onRevealFile={handleRevealFile}
               />
             )}
           </section>
@@ -901,17 +2339,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     History unavailable
                   </div>
                 ) : (
-                  history.map((entry, i) => (
-                    <div key={entry.hash} className="flex items-center gap-2 py-[3px] px-1 hover:bg-wardian-card-bg-muted rounded group cursor-default">
-                      <div className="relative flex flex-col items-center shrink-0" style={{ width: 12 }}>
-                        {i > 0 && <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                        <div className={`w-2 h-2 rounded-full border shrink-0 z-10 ${i === 0 ? 'bg-[var(--color-wardian-accent)] border-[var(--color-wardian-accent)]' : 'bg-transparent border-[var(--color-wardian-text-muted)]'}`} />
-                        {i < history.length - 1 && <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px bg-wardian-border/50" style={{ height: '50%' }} />}
-                      </div>
-                      <span className="text-[11px] text-primary truncate flex-1 leading-snug">{entry.message}</span>
-                      <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">{entry.hash.slice(0, 7)}</span>
-                    </div>
-                  ))
+                  <GitHistoryGraph entries={history} branch={status.branch} rootPath={rootPath ?? ""} upstream={status.upstream} />
                 )}
               </div>
             )}
@@ -925,6 +2353,46 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           diff={diffContent}
           filePath={diffFilePath}
           onClose={() => setDiffContent(null)}
+        />
+      )}
+      {groupContextMenu && (
+        <ContextMenu
+          x={groupContextMenu.x}
+          y={groupContextMenu.y}
+          items={groupContextMenu.items}
+          onClose={() => setGroupContextMenu(null)}
+        />
+      )}
+      {commitActionMenu && (
+        <ContextMenu
+          x={commitActionMenu.x}
+          y={commitActionMenu.y}
+          items={commitActionMenu.items}
+          onClose={() => setCommitActionMenu(null)}
+        />
+      )}
+      {sourceControlActionMenu && (
+        <ContextMenu
+          x={sourceControlActionMenu.x}
+          y={sourceControlActionMenu.y}
+          items={sourceControlActionMenu.items}
+          onClose={() => setSourceControlActionMenu(null)}
+        />
+      )}
+      {stashMenu && (
+        <ContextMenu
+          x={stashMenu.x}
+          y={stashMenu.y}
+          items={stashMenu.items}
+          onClose={() => setStashMenu(null)}
+        />
+      )}
+      {branchMenu && (
+        <ContextMenu
+          x={branchMenu.x}
+          y={branchMenu.y}
+          items={branchMenu.items}
+          onClose={() => setBranchMenu(null)}
         />
       )}
     </div>

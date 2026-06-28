@@ -1863,6 +1863,34 @@ describe("Sidebar Navigation", () => {
 
     expect(await screen.findByTestId("selected-terminal-workspace")).toHaveTextContent("C:/project");
   });
+
+  it("shows the selected agent source-control change count on the activity rail", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((cmd, args) => {
+      if (cmd === "get_explorer_root") return Promise.resolve("C:/project");
+      if (cmd === "git_status") {
+        return Promise.resolve({
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/app.tsx", status: "M", is_staged: false },
+            { path: "README.md", status: "A", is_staged: true },
+          ],
+        });
+      }
+      return defaultInvoke?.(cmd, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+
+    expect(await screen.findByTestId("sidebar-tab-git-badge")).toHaveTextContent("2");
+  });
 });
 
 // ── Agent Off State Tests ──────────────────────────────────────────────

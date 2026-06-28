@@ -10,6 +10,7 @@ import { CommandPanel } from "../features/commands/CommandPanel";
 import { WorkflowMonitorGlance } from "../features/workflows/monitor/WorkflowMonitorGlance";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
 import { GitPanel } from "../features/git/GitPanel";
+import type { SelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { useRunStore } from "../features/workflows/run/useRunStore";
 import { useSchedulesStore } from "../store/useSchedulesStore";
 import { useWorkflowsView } from "../store/useWorkflowsView";
@@ -22,6 +23,7 @@ interface SidebarContentPaneProps {
   agents: AgentConfig[];
   agentClasses: AgentClassDefinition[];
   telemetry: Record<string, AgentTelemetry>;
+  sourceControlStatus: SelectedAgentGitStatus;
   onAgentsUpdated: (agent?: AgentConfig) => void;
   onClassesUpdated: () => void;
   broadcastMessage: string;
@@ -38,6 +40,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   agents,
   agentClasses,
   telemetry,
+  sourceControlStatus,
   onAgentsUpdated,
   onClassesUpdated,
   broadcastMessage,
@@ -58,6 +61,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             agents={agents}
             onAgentsUpdated={onAgentsUpdated}
             telemetry={telemetry}
+            sourceControlStatus={sourceControlStatus}
           />
         )}
 
