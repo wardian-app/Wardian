@@ -1818,6 +1818,11 @@ bare
         )
         .unwrap();
         run_git(
+            remote.to_str().unwrap(),
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+        )
+        .unwrap();
+        run_git(
             temp.path().to_str().unwrap(),
             &["clone", remote.to_str().unwrap(), repo.to_str().unwrap()],
         )
@@ -1838,6 +1843,7 @@ bare
         )
         .unwrap();
         let peer_cwd = peer.to_str().unwrap();
+        run_git(peer_cwd, &["checkout", "main"]).unwrap();
         run_git(peer_cwd, &["config", "user.email", "test@example.com"]).unwrap();
         run_git(peer_cwd, &["config", "user.name", "Wardian Test"]).unwrap();
         std::fs::write(peer.join("remote.txt"), "remote\n").unwrap();
@@ -2962,6 +2968,7 @@ bare
         let source = tempfile::tempdir().unwrap();
         let source_path = source.path().to_str().unwrap();
         run_git(source_path, &["init", "--bare"]).unwrap();
+        run_git(source_path, &["symbolic-ref", "HEAD", "refs/heads/main"]).unwrap();
 
         let seed = tempfile::tempdir().unwrap();
         let seed_path = seed.path().to_str().unwrap();
