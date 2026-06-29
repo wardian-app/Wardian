@@ -1187,6 +1187,159 @@ fn claude_read_edit_and_write_tools_populate_turn_file_attribution() {
 }
 
 #[test]
+fn antigravity_file_tools_populate_turn_file_attribution() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-antigravity-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Run the vault heartbeat."),
+    );
+    let mut read = chat_event(
+        "event-antigravity-read",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    read.provider = "antigravity".to_string();
+    read.title = Some("View file".to_string());
+    read.metadata = serde_json::json!({
+        "raw_type": "view_file",
+        "file_path": "C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md",
+        "files_read": ["C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md"]
+    });
+    let mut write = chat_event(
+        "event-antigravity-write",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    write.provider = "antigravity".to_string();
+    write.title = Some("Write file".to_string());
+    write.metadata = serde_json::json!({
+        "raw_type": "write_to_file",
+        "file_path": "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py",
+        "files_written": ["C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"]
+    });
+    let mut result_read = chat_event(
+        "event-antigravity-read-result",
+        AgentChatEventKind::ToolResult,
+        None,
+        Some(
+            "File Path: `file:///C:/Users/tgemi/Hivemind/%21Daily/2026-06-24.md`\nTotal Lines: 56",
+        ),
+    );
+    result_read.provider = "antigravity".to_string();
+    result_read.title = Some("View file".to_string());
+    let mut result_write = chat_event(
+        "event-antigravity-write-result",
+        AgentChatEventKind::ToolResult,
+        None,
+        Some("Created file file:///C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py with requested content."),
+    );
+    result_write.provider = "antigravity".to_string();
+    result_write.title = Some("Code action".to_string());
+    let assistant = chat_event(
+        "event-assistant-antigravity-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Updated the heartbeat scratch script."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, read, write, result_read, result_write, assistant],
+        )
+        .expect("append antigravity file tool turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["read"],
+        serde_json::json!(["C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md"])
+    );
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"
+        ])
+    );
+    assert_eq!(
+        turns[0]["files"]["mentioned"],
+        serde_json::json!([
+            "C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md",
+            "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"
+        ])
+    );
+    assert_eq!(
+        turns[0]["external_side_effects"],
+        serde_json::json!([
+            {
+                "kind": "file_edit",
+                "evidence_seq": 3,
+                "summary": "Write file: C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py",
+                "paths": ["C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"]
+            }
+        ])
+    );
+}
+
+#[test]
+fn duplicate_github_side_effects_are_semantically_deduped() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-github-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Create the pull request."),
+    );
+    let assistant_one = chat_event(
+        "event-assistant-github-dedupe-one",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Opened PR https://github.com/wardian-app/Wardian/pull/599"),
+    );
+    let assistant_two = chat_event(
+        "event-assistant-github-dedupe-two",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("PR is available at https://github.com/wardian-app/Wardian/pull/599"),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, assistant_one, assistant_two],
+        )
+        .expect("append duplicate github side effects");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let github_effects = turns[0]["external_side_effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|effect| effect["kind"] == "github_pr")
+        .count();
+
+    assert_eq!(github_effects, 1);
+}
+
+#[test]
 fn assistant_progress_language_does_not_create_failure_signals() {
     let records = vec![
         narrative_from_delivered_input(

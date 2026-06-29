@@ -892,34 +892,73 @@ fn file_edit_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
 
 fn provider_file_paths_from_event(event: &AgentChatEvent) -> Vec<String> {
     let mut paths = Vec::new();
-    if let Some(path) = event.path.as_deref().and_then(normalize_path) {
+    if let Some(path) = event.path.as_deref().and_then(normalize_provider_path) {
         extend_unique(&mut paths, vec![path]);
     }
-    if let Some(path) =
-        metadata_string(&event.metadata, "file_path").and_then(|path| normalize_path(&path))
+    if let Some(path) = metadata_string(&event.metadata, "file_path")
+        .and_then(|path| normalize_provider_path(&path))
     {
         extend_unique(&mut paths, vec![path]);
     }
-    if let Some(path) = event
-        .metadata
-        .get("tool_input")
-        .and_then(|input| input.get("file_path"))
-        .and_then(|value| value.as_str())
-        .and_then(normalize_path)
-    {
-        extend_unique(&mut paths, vec![path]);
+    for key in [
+        "file_path",
+        "AbsolutePath",
+        "TargetFile",
+        "FilePath",
+        "path",
+        "uri",
+        "fileUri",
+    ] {
+        if let Some(path) = event
+            .metadata
+            .get("tool_input")
+            .and_then(|input| input.get(key))
+            .and_then(|value| value.as_str())
+            .and_then(normalize_provider_path)
+        {
+            extend_unique(&mut paths, vec![path]);
+        }
+    }
+    extend_unique(
+        &mut paths,
+        metadata_string_array(&event.metadata, "files_read")
+            .into_iter()
+            .filter_map(|path| normalize_provider_path(&path))
+            .collect(),
+    );
+    extend_unique(
+        &mut paths,
+        metadata_string_array(&event.metadata, "files_written")
+            .into_iter()
+            .filter_map(|path| normalize_provider_path(&path))
+            .collect(),
+    );
+    if let Some(text) = event.text.as_deref() {
+        extend_unique(&mut paths, extract_file_uri_paths(text));
     }
     paths
 }
 
 fn provider_tool_reads_file(tool_name: &str) -> bool {
-    matches!(tool_name.to_ascii_lowercase().as_str(), "read")
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "read" | "view file" | "view_file"
+    )
 }
 
 fn provider_tool_writes_file(tool_name: &str) -> bool {
     matches!(
         tool_name.to_ascii_lowercase().as_str(),
-        "edit" | "write" | "multiedit" | "notebookedit"
+        "edit"
+            | "write"
+            | "multiedit"
+            | "notebookedit"
+            | "write file"
+            | "edit file"
+            | "code action"
+            | "write_to_file"
+            | "replace_file_content"
+            | "multi_replace_file_content"
     )
 }
 
@@ -1064,6 +1103,117 @@ fn extract_mentioned_paths(text: &str) -> Vec<String> {
     paths
 }
 
+fn extract_file_uri_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in text.split_whitespace() {
+        let Some(index) = token.find("file://") else {
+            continue;
+        };
+        if let Some(path) = normalize_provider_path(&token[index..]) {
+            extend_unique(&mut paths, vec![path]);
+        }
+    }
+    paths
+}
+
+fn normalize_provider_path(value: &str) -> Option<String> {
+    let mut trimmed = unquote_jsonish_string(value)
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | ',' | ';' | ')' | '(' | ']' | '[' | '{' | '}'
+            )
+        })
+        .trim_end_matches('.')
+        .to_string();
+    if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return None;
+    }
+    if trimmed.to_ascii_lowercase().starts_with("file://") {
+        trimmed = trimmed["file://".len()..].to_string();
+        if trimmed.starts_with('/') && trimmed.as_bytes().get(2) == Some(&b':') {
+            trimmed.remove(0);
+        }
+        trimmed = percent_decode_path(&trimmed);
+    }
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '*' | '?' | '<' | '>' | '|' | '{' | '}'))
+    {
+        return None;
+    }
+    let mut without_line = trimmed.trim();
+    while let Some((path, suffix)) = without_line.rsplit_once(':') {
+        if suffix.chars().all(|ch| ch.is_ascii_digit()) && !is_windows_drive_path(without_line) {
+            without_line = path;
+        } else {
+            break;
+        }
+    }
+    let normalized = without_line.replace('\\', "/");
+    let normalized = normalized.trim_matches('/').to_string();
+    if normalized.is_empty()
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    Some(repo_relative_path(&normalized))
+}
+
+fn unquote_jsonish_string(value: &str) -> String {
+    let mut text = value.trim().to_string();
+    for _ in 0..3 {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('"') && trimmed.ends_with('"')) {
+            break;
+        }
+        let Ok(decoded) = serde_json::from_str::<String>(trimmed) else {
+            break;
+        };
+        text = decoded;
+    }
+    text
+}
+
+fn percent_decode_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = hex_value(bytes[index + 1]);
+            let lo = hex_value(bytes[index + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                decoded.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_windows_drive_path(value: &str) -> bool {
+    value.len() >= 3
+        && value.as_bytes()[1] == b':'
+        && value.as_bytes()[0].is_ascii_alphabetic()
+        && matches!(value.as_bytes()[2], b'/' | b'\\')
+}
+
 fn normalize_path(value: &str) -> Option<String> {
     let trimmed = value
         .trim()
@@ -1203,6 +1353,12 @@ fn extend_side_effects(
 
 fn side_effect_dedupe_key(value: &ConversationTurnSideEffect) -> String {
     if value.kind == "file_edit" {
+        return format!("{}\u{1f}{}", value.kind, value.paths.join("\u{1e}"));
+    }
+    if matches!(
+        value.kind.as_str(),
+        "github_pr" | "github_issue" | "github_url"
+    ) {
         return format!(
             "{}\u{1f}{}\u{1f}{}",
             value.kind,

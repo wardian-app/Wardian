@@ -208,16 +208,26 @@ The archive writer must not infer user intent, corrections, complaints,
 causality, recovery, or task success from arbitrary prose. File evidence may
 come from structured metadata, explicit patch headers, conservative command-path
 extraction, apply-patch result output, provider file-tool input metadata, and
-exact request/assistant path mentions. Generic path extraction ignores tool
-output to avoid ANSI, search-result, and compiler-line noise; tool output still
-feeds structured file edits and failure signals. Path mention extraction is
+provider-certified `file:///` result paths. Provider normalization covers
+Claude file tools and Antigravity file tools/results, including `view_file`,
+`write_to_file`, replacement actions, and result text that names a concrete file
+URI. Generic path extraction ignores tool output to avoid ANSI, search-result,
+and compiler-line noise; tool output still feeds structured file edits and
+failure signals when it has provider-certified paths. Path mention extraction is
 intentionally conservative and rejects globs, CSV-like fragments, control
 characters, and malformed line/column suffixes. Side effects may come from
 structured metadata, structured command fields, explicit `apply_patch`
 records/results, provider file-write tools, or exact URL-pattern extraction, and
 file-edit side effects carry touched paths when the archive can recover them
-from patch input, result output, or provider tool input metadata. Duplicate
-file-edit effects with the same path summary are collapsed inside a turn.
+from patch input, result output, provider tool input metadata, or file URI
+result text. Duplicate file-edit effects with the same touched path set and
+duplicate GitHub URL/issue/PR effects with the same URL are collapsed inside a
+turn.
+
+Raw `turns.jsonl` rows intentionally retain verbose provenance refs for exact
+traceability. A lightweight projection or CLI summary can be added later for
+Evolver workflows that need token-efficient scanning without opening every
+`record_refs.event_refs` or repeated provider-native reference.
 Failure signals also include conservative assistant-reported verification
 failures when the assistant explicitly reports a verification command still
 failing. There is no
