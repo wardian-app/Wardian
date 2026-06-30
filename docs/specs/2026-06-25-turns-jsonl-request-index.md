@@ -2,7 +2,7 @@
 
 ## Decision
 
-Wardian treats `turns.jsonl` format version 2 as a cheap, deterministic index over
+Wardian treats `turns.jsonl` format version 3 as a cheap, deterministic index over
 `conversation.jsonl`. It is derived from existing structured archive records and
 contains no agentic analysis, scoring, blame assignment, or free-form notes for
 future agents.
@@ -29,7 +29,7 @@ where missing turn indexes make agent review expensive.
 
 Each row includes:
 
-- Row version: `schema: 2`, matching `manifest.format_versions.turns: 2`.
+- Row version: `schema: 3`, matching `manifest.format_versions.turns: 3`.
 - Stable ordering: `conversation_id`, `turn_index`, and `turn_key`.
 - Mechanical state: `status` and `status_source`.
 - Bounds: `seq_start`, `seq_end`, `started_at`, and `updated_at`.
@@ -57,7 +57,12 @@ Each row includes:
   input, result output, provider tool input metadata, or provider-certified file
   URIs. Duplicate file-edit effects with the same touched path set and duplicate
   GitHub URL/issue/PR effects with the same URL are collapsed inside a turn.
-- Provenance under `record_refs` and `provider_native_refs`.
+- Compact provenance under `record_refs` and `provider_refs`. `record_refs`
+  contains only `seq_start`, `seq_end`, `event_count`, `source_count`, and
+  `artifact_count`; it does not repeat full `event_refs` arrays. `provider_refs`
+  contains compact provider/session/source-kind/source-id pointers and omits
+  source paths. Full provider-native refs remain in `manifest.json`, and full
+  source path details remain in `sources.jsonl`.
 
 Allowed turn statuses are `in_progress`, `pending_response`, `responded`,
 `interrupted`, `lifecycle`, `context_only`, `superseded`, and `unknown`.
@@ -91,7 +96,8 @@ infer recovery, infer side effects from arbitrary prose, or decide task success.
 Readers that need deeper meaning should load the referenced raw records from
 `conversation.jsonl`.
 
-Verbose provenance such as `record_refs.event_refs` and `provider_native_refs`
-remains in the raw turn row for exact traceability. Token-sensitive agents
-should prefer a future compact projection or CLI summary rather than treating
-the full row as the only reader surface.
+Detailed traceability is reconstructed from `record_refs.seq_start` and
+`record_refs.seq_end` by reading the matching `conversation.jsonl` rows and then
+following their `event_refs`, `source_refs`, and `artifact_refs` into
+`events.jsonl`, `sources.jsonl`, and artifacts. `turns.jsonl` is the compact
+reader surface and does not duplicate those exhaustive refs by default.

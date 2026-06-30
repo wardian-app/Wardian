@@ -550,10 +550,9 @@ fn append_chat_events_writes_factual_turns_index() {
     assert!(turns[0].external_side_effects.is_empty());
     assert_eq!(turns[0].failure_signals[0].kind, "tool_failed");
     assert_eq!(turns[0].failure_signals[0].seq, 3);
-    assert!(turns[0]
-        .record_refs
-        .event_refs
-        .contains(&"event-user".to_string()));
+    assert_eq!(turns[0].record_refs.seq_start, 1);
+    assert_eq!(turns[0].record_refs.seq_end, 4);
+    assert_eq!(turns[0].record_refs.event_count, 4);
     assert_eq!(manifest.record_count, 4);
     assert_eq!(manifest.turn_count, 1);
     assert!(manifest.has_turns);
@@ -614,15 +613,16 @@ fn active_conversation_refresh_writes_turns_index_and_manifest_summary() {
     assert_eq!(turns[0]["status_source"], "mechanical_assistant_message");
     assert_eq!(turns[0]["request"]["kind"], "user_request");
     assert_eq!(turns[0]["request"]["seq"], 1);
-    assert_eq!(turns[0]["schema"], 2);
+    assert_eq!(turns[0]["schema"], 3);
     assert_eq!(
-        turns[0]["provider_native_refs"][0]["provider_session_id"],
+        turns[0]["provider_refs"][0]["provider_session_id"],
         "session-one"
     );
     assert_eq!(
-        turns[0]["provider_native_refs"][0]["source_kind"],
+        turns[0]["provider_refs"][0]["source_kind"],
         "provider_session"
     );
+    assert!(turns[0]["provider_refs"][0].get("source_path").is_none());
     assert_eq!(
         turns[0]["assistant_result"]["text"],
         "I am still working on it."
@@ -631,6 +631,55 @@ fn active_conversation_refresh_writes_turns_index_and_manifest_summary() {
     assert_eq!(turns[0]["counts"]["assistant_messages"], 1);
     assert_eq!(manifest.turn_count, 1);
     assert!(manifest.has_turns);
+}
+
+#[test]
+fn turns_index_uses_compact_refs_instead_of_verbose_event_and_provider_refs() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-compact-refs",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Keep turn refs compact."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-compact-refs",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Refs are compact now."),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, assistant])
+        .expect("append open events");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let turn = &turns[0];
+
+    assert_eq!(turn["schema"], 3);
+    assert!(turn["record_refs"].get("event_refs").is_none());
+    assert_eq!(turn["record_refs"]["seq_start"], 1);
+    assert_eq!(turn["record_refs"]["seq_end"], 2);
+    assert_eq!(turn["record_refs"]["event_count"], 2);
+    assert_eq!(turn["record_refs"]["source_count"], 0);
+    assert!(turn.get("provider_native_refs").is_none());
+    assert_eq!(turn["provider_refs"][0]["provider"], "codex");
+    assert_eq!(
+        turn["provider_refs"][0]["provider_session_id"],
+        "session-one"
+    );
+    assert_eq!(turn["provider_refs"][0]["source_kind"], "provider_session");
+    assert!(turn["provider_refs"][0].get("source_path").is_none());
+    assert!(turn["provider_refs"][0].get("source_id").is_none());
 }
 
 #[test]
@@ -772,7 +821,7 @@ fn apply_patch_turn_extracts_written_and_mentioned_paths() {
         read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
 
     assert_eq!(turns.len(), 1);
-    assert_eq!(turns[0]["schema"], 2);
+    assert_eq!(turns[0]["schema"], 3);
     assert_eq!(
         turns[0]["files"]["written"],
         serde_json::json!([

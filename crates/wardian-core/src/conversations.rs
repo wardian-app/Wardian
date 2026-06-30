@@ -11,7 +11,7 @@ use std::{
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 pub const CONVERSATION_SCHEMA: u8 = 1;
-pub const CONVERSATION_TURNS_SCHEMA: u8 = 2;
+pub const CONVERSATION_TURNS_SCHEMA: u8 = 3;
 pub const CONVERSATION_INLINE_TEXT_LIMIT_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,7 +88,7 @@ impl Default for ConversationFormatVersions {
             conversation: 1,
             events: 1,
             sources: 1,
-            turns: 2,
+            turns: CONVERSATION_TURNS_SCHEMA,
         }
     }
 }
@@ -117,6 +117,16 @@ pub struct ConversationProviderNativeRef {
     pub provider_session_id: Option<String>,
     pub source_kind: String,
     pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationTurnProviderRef {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    pub source_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,9 +238,16 @@ pub struct ConversationTurnSideEffect {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationTurnRecordRefs {
-    pub conversation_seq_start: u64,
-    pub conversation_seq_end: u64,
-    pub event_refs: Vec<String>,
+    #[serde(alias = "conversation_seq_start")]
+    pub seq_start: u64,
+    #[serde(alias = "conversation_seq_end")]
+    pub seq_end: u64,
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub source_count: u64,
+    #[serde(default)]
+    pub artifact_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,7 +271,8 @@ pub struct ConversationTurnRecord {
     pub external_side_effects: Vec<ConversationTurnSideEffect>,
     pub failure_signals: Vec<ConversationTurnFailureSignal>,
     pub record_refs: ConversationTurnRecordRefs,
-    pub provider_native_refs: Vec<ConversationProviderNativeRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_refs: Vec<ConversationTurnProviderRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -548,7 +566,7 @@ mod tests {
         assert_eq!(json["status"], "interrupted");
         assert_eq!(json["boundary_reason"], "provider_source_changed");
         assert_eq!(json["effective_logging"], "enabled");
-        assert_eq!(json["format_versions"]["turns"], 2);
+        assert_eq!(json["format_versions"]["turns"], CONVERSATION_TURNS_SCHEMA);
         assert_eq!(json["record_count"], 2);
         assert_eq!(json["turn_count"], 1);
         assert!(json.get("capture_quality").is_none());
@@ -670,15 +688,17 @@ mod tests {
                 summary: Some("Exit code: 1".to_string()),
             }],
             record_refs: ConversationTurnRecordRefs {
-                conversation_seq_start: 1,
-                conversation_seq_end: 4,
-                event_refs: vec!["event-1".to_string()],
+                seq_start: 1,
+                seq_end: 4,
+                event_count: 1,
+                source_count: 1,
+                artifact_count: 0,
             },
-            provider_native_refs: vec![ConversationProviderNativeRef {
+            provider_refs: vec![ConversationTurnProviderRef {
                 provider: "codex".to_string(),
                 provider_session_id: Some("session-1".to_string()),
                 source_kind: "provider_log".to_string(),
-                source_path: Some("<absolute-workspace-path>/codex.jsonl".to_string()),
+                source_id: Some("source-1".to_string()),
             }],
         };
 
@@ -697,6 +717,16 @@ mod tests {
         assert_eq!(json["files"]["written"][0], "src/lib.rs");
         assert_eq!(json["external_side_effects"][0]["kind"], "git_commit");
         assert_eq!(json["failure_signals"][0]["kind"], "command_nonzero_exit");
+        assert_eq!(json["schema"], 3);
+        assert_eq!(json["record_refs"]["seq_start"], 1);
+        assert_eq!(json["record_refs"]["seq_end"], 4);
+        assert_eq!(json["record_refs"]["event_count"], 1);
+        assert_eq!(json["record_refs"]["source_count"], 1);
+        assert_eq!(json["record_refs"]["artifact_count"], 0);
+        assert!(json["record_refs"].get("event_refs").is_none());
+        assert_eq!(json["provider_refs"][0]["source_id"], "source-1");
+        assert!(json["provider_refs"][0].get("source_path").is_none());
+        assert!(json.get("provider_native_refs").is_none());
         assert!(json.get("turn_id").is_none());
         assert!(json.get("capture_quality").is_none());
         assert!(json.get("notes_for_evolver").is_none());

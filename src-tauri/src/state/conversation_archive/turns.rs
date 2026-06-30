@@ -4,8 +4,9 @@ use wardian_core::conversations::{
     ConversationManifest, ConversationNarrativeRecord, ConversationProviderNativeRef,
     ConversationRecordKind, ConversationSourceRecord, ConversationTurnAssistantResult,
     ConversationTurnCounts, ConversationTurnFailureSignal, ConversationTurnFiles,
-    ConversationTurnRecord, ConversationTurnRecordRefs, ConversationTurnRequest,
-    ConversationTurnSideEffect, ConversationTurnStatus, CONVERSATION_TURNS_SCHEMA,
+    ConversationTurnProviderRef, ConversationTurnRecord, ConversationTurnRecordRefs,
+    ConversationTurnRequest, ConversationTurnSideEffect, ConversationTurnStatus,
+    CONVERSATION_TURNS_SCHEMA,
 };
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatStatus};
 
@@ -431,11 +432,21 @@ fn turn_record_from_accumulator(
         )
     };
     let assistant_result = assistant_message.map(assistant_result_from_record);
-    let event_refs = turn
-        .records
-        .iter()
-        .flat_map(|record| record.event_refs.iter().cloned())
-        .collect();
+    let event_count = unique_ref_count(
+        turn.records
+            .iter()
+            .flat_map(|record| record.event_refs.iter().map(String::as_str)),
+    );
+    let source_count = unique_ref_count(
+        turn.records
+            .iter()
+            .flat_map(|record| record.source_refs.iter().map(String::as_str)),
+    );
+    let artifact_count = unique_ref_count(
+        turn.records
+            .iter()
+            .flat_map(|record| record.artifact_refs.iter().map(String::as_str)),
+    );
 
     ConversationTurnRecord {
         schema: CONVERSATION_TURNS_SCHEMA,
@@ -460,16 +471,22 @@ fn turn_record_from_accumulator(
         external_side_effects,
         failure_signals,
         record_refs: ConversationTurnRecordRefs {
-            conversation_seq_start: seq_start,
-            conversation_seq_end: seq_end,
-            event_refs,
+            seq_start,
+            seq_end,
+            event_count,
+            source_count,
+            artifact_count,
         },
-        provider_native_refs: provider_native_refs_from_sources(
+        provider_refs: provider_refs_from_sources(
             &turn.sources,
             fallback_provider,
             fallback_provider_session_ids,
         ),
     }
+}
+
+fn unique_ref_count<'a>(values: impl IntoIterator<Item = &'a str>) -> u64 {
+    values.into_iter().collect::<HashSet<_>>().len() as u64
 }
 
 pub(super) fn archive_summary(
@@ -552,6 +569,66 @@ fn provider_native_refs_from_sources(
                         provider_session_id: Some(session_id.to_string()),
                         source_kind: "provider_session".to_string(),
                         source_path: None,
+                    });
+                }
+            }
+        }
+    }
+    refs
+}
+
+fn provider_refs_from_sources(
+    sources: &[ConversationSourceRecord],
+    fallback_provider: Option<&str>,
+    fallback_provider_session_ids: &[String],
+) -> Vec<ConversationTurnProviderRef> {
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    let fallback_provider = fallback_provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
+    for source in sources {
+        if source.provider == "wardian"
+            || (source.provider_session_id.is_none() && source.source_id.is_empty())
+        {
+            continue;
+        }
+        let provider_session_id = source.provider_session_id.clone().or_else(|| {
+            (Some(source.provider.as_str()) == fallback_provider
+                && fallback_provider_session_ids.len() == 1)
+                .then(|| fallback_provider_session_ids[0].clone())
+        });
+        let source_id = (!source.source_id.trim().is_empty()).then(|| source.source_id.clone());
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            source.provider,
+            provider_session_id.as_deref().unwrap_or_default(),
+            source.source_kind,
+            source_id.as_deref().unwrap_or_default()
+        );
+        if seen.insert(key) {
+            refs.push(ConversationTurnProviderRef {
+                provider: source.provider.clone(),
+                provider_session_id,
+                source_kind: source.source_kind.clone(),
+                source_id,
+            });
+        }
+    }
+    if refs.is_empty() {
+        if let Some(provider) = fallback_provider {
+            for session_id in fallback_provider_session_ids {
+                let session_id = session_id.trim();
+                if session_id.is_empty() {
+                    continue;
+                }
+                let key = format!("{provider}\u{1f}{session_id}\u{1f}provider_session\u{1f}");
+                if seen.insert(key) {
+                    refs.push(ConversationTurnProviderRef {
+                        provider: provider.to_string(),
+                        provider_session_id: Some(session_id.to_string()),
+                        source_kind: "provider_session".to_string(),
+                        source_id: None,
                     });
                 }
             }

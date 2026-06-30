@@ -176,7 +176,7 @@ tool metadata, provider-specific normalized fields, and lifecycle events.
 
 Stores a compact derived index over `conversation.jsonl`, `events.jsonl`, and
 `sources.jsonl` for open and closed conversation archives. Request-based turn
-rows use turns format version 2. The file exists to save agents joins and
+rows use turns format version 3. The file exists to save agents joins and
 bounded scans; it is not a semantic analysis file. Wardian rewrites it
 atomically whenever the normalized archive is refreshed.
 
@@ -188,10 +188,16 @@ they do not define `turns.jsonl` row boundaries because some providers use tool
 call IDs as turn IDs.
 
 Turn rows are factual aggregations only. They include stable derived ordering
-fields (`schema: 2`, `turn_index`, `turn_key`), seq and time bounds, typed
+fields (`schema: 3`, `turn_index`, `turn_key`), seq and time bounds, typed
 `request` data, the last `assistant_result` when present, nested mechanical `counts`,
 `tools_used`, `files`, `external_side_effects`, `failure_signals`, `record_refs`,
-and `provider_native_refs`.
+and `provider_refs`.
+
+`turns.jsonl` keeps provenance compact. `record_refs` stores only `seq_start`,
+`seq_end`, `event_count`, `source_count`, and `artifact_count`, not exhaustive
+`event_refs` arrays. `provider_refs` stores compact provider/session/source-kind
+and source-id pointers and omits source paths. Full provider-native refs stay in
+`manifest.json`, and full source paths/cursors stay in `sources.jsonl`.
 
 `status` is mechanically derived as `in_progress`, `pending_response`,
 `responded`, `interrupted`, `lifecycle`, `context_only`, `superseded`, or
@@ -224,10 +230,11 @@ result text. Duplicate file-edit effects with the same touched path set and
 duplicate GitHub URL/issue/PR effects with the same URL are collapsed inside a
 turn.
 
-Raw `turns.jsonl` rows intentionally retain verbose provenance refs for exact
-traceability. A lightweight projection or CLI summary can be added later for
-Evolver workflows that need token-efficient scanning without opening every
-`record_refs.event_refs` or repeated provider-native reference.
+Detailed traceability is reconstructed from a turn's `seq_start` and `seq_end`
+by reading matching `conversation.jsonl` rows and then following their
+`event_refs`, `source_refs`, and `artifact_refs` into `events.jsonl`,
+`sources.jsonl`, and artifacts. `turns.jsonl` remains the token-efficient
+scanning surface instead of duplicating the exhaustive refs in every row.
 Failure signals also include conservative assistant-reported verification
 failures when the assistant explicitly reports a verification command still
 failing. There is no
