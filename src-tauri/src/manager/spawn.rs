@@ -1601,6 +1601,9 @@ pub async fn resize_pty(
         return Ok(());
     }
 
+    let session_resize_lock = state.pty_resize_lock_for(&session_id).await;
+    let _session_resize_guard = session_resize_lock.lock().await;
+
     // Drop redundant no-op resizes. ConPTY's `ResizePseudoConsole` is
     // unconditional, and an identical-dimension resize still forces inline
     // TUIs like codex into a full clear-and-redraw whose `ESC[3J` purges the
@@ -1619,6 +1622,7 @@ pub async fn resize_pty(
         return Ok(());
     }
 
+    let native_resize_lock = state.pty_native_resize_lock.clone();
     let master_arc = {
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&session_id) {
@@ -1656,6 +1660,7 @@ pub async fn resize_pty(
         }
     };
     tokio::task::spawn_blocking(move || {
+        let _native_resize_guard = native_resize_lock.blocking_lock();
         let master = match master_arc.lock() {
             Ok(master) => master,
             Err(poisoned) => poisoned.into_inner(),
@@ -1680,7 +1685,74 @@ pub async fn resize_pty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Error;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use wardian_core::models::{CodexProviderConfig, ProviderConfig};
+
+    struct ResizeProbeMaster {
+        calls: std::sync::Arc<AtomicUsize>,
+        first_resize_entered: Option<std::sync::mpsc::Sender<()>>,
+        sleep: std::time::Duration,
+        in_flight: Option<std::sync::Arc<AtomicUsize>>,
+        overlap_detected: Option<std::sync::Arc<AtomicBool>>,
+    }
+
+    impl portable_pty::MasterPty for ResizeProbeMaster {
+        fn resize(&self, _size: portable_pty::PtySize) -> Result<(), Error> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                if let Some(sender) = &self.first_resize_entered {
+                    let _ = sender.send(());
+                }
+            }
+
+            if let Some(in_flight) = &self.in_flight {
+                if in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
+                    if let Some(overlap_detected) = &self.overlap_detected {
+                        overlap_detected.store(true, Ordering::SeqCst);
+                    }
+                }
+                std::thread::sleep(self.sleep);
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                std::thread::sleep(self.sleep);
+            }
+
+            Ok(())
+        }
+
+        fn get_size(&self) -> Result<portable_pty::PtySize, Error> {
+            Ok(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+        }
+
+        fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error> {
+            Ok(Box::new(std::io::empty()))
+        }
+
+        fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error> {
+            Ok(Box::new(std::io::sink()))
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<i32> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
 
     #[test]
     fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
@@ -1736,6 +1808,30 @@ mod tests {
         }
     }
 
+    fn agent_with_resize_probe(
+        session_id: &str,
+        calls: std::sync::Arc<AtomicUsize>,
+        first_resize_entered: Option<std::sync::mpsc::Sender<()>>,
+        in_flight: Option<std::sync::Arc<AtomicUsize>>,
+        overlap_detected: Option<std::sync::Arc<AtomicBool>>,
+    ) -> crate::state::ActiveAgent {
+        let mut agent = agent_without_pty();
+        agent.config = std::sync::Arc::new(std::sync::Mutex::new(AgentConfig {
+            session_id: session_id.to_string(),
+            ..Default::default()
+        }));
+        agent.pty_master = Some(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+            ResizeProbeMaster {
+                calls,
+                first_resize_entered,
+                sleep: std::time::Duration::from_millis(75),
+                in_flight,
+                overlap_detected,
+            },
+        ))));
+        agent
+    }
+
     // A resize that arrives while the agent is still a "Restoring" placeholder
     // (or off) has no PTY to apply to, but spawn_agent seeds new PTYs from
     // pty_sizes. Dropping the report left restored TUIs laid out for the 80x24
@@ -1787,6 +1883,89 @@ mod tests {
         // (missing) agent lookup, surfacing the not-found error.
         let changed = resize_pty("agent".to_string(), 125, 30, &state).await;
         assert!(changed.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_resize_rechecks_recorded_size_after_in_flight_resize() {
+        let state = std::sync::Arc::new(AppState::new());
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        state.agents.lock().await.insert(
+            "agent".to_string(),
+            agent_with_resize_probe("agent", calls.clone(), Some(entered_tx), None, None),
+        );
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            resize_pty("agent".to_string(), 120, 40, &first_state)
+                .await
+                .expect("first resize");
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("first resize should enter master");
+        })
+        .await
+        .expect("first resize signal wait");
+
+        resize_pty("agent".to_string(), 120, 40, &state)
+            .await
+            .expect("duplicate resize should be skipped after first completes");
+        first.await.expect("first resize task");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_resizes_across_sessions_do_not_overlap_native_resize_calls() {
+        let state = std::sync::Arc::new(AppState::new());
+        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let overlap_detected = std::sync::Arc::new(AtomicBool::new(false));
+        let calls_a = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_b = std::sync::Arc::new(AtomicUsize::new(0));
+        {
+            let mut agents = state.agents.lock().await;
+            agents.insert(
+                "agent-a".to_string(),
+                agent_with_resize_probe(
+                    "agent-a",
+                    calls_a.clone(),
+                    None,
+                    Some(in_flight.clone()),
+                    Some(overlap_detected.clone()),
+                ),
+            );
+            agents.insert(
+                "agent-b".to_string(),
+                agent_with_resize_probe(
+                    "agent-b",
+                    calls_b.clone(),
+                    None,
+                    Some(in_flight.clone()),
+                    Some(overlap_detected.clone()),
+                ),
+            );
+        }
+
+        let first_state = state.clone();
+        let second_state = state.clone();
+        let first = tokio::spawn(async move {
+            resize_pty("agent-a".to_string(), 120, 40, &first_state)
+                .await
+                .expect("agent-a resize");
+        });
+        let second = tokio::spawn(async move {
+            resize_pty("agent-b".to_string(), 121, 41, &second_state)
+                .await
+                .expect("agent-b resize");
+        });
+        first.await.expect("agent-a task");
+        second.await.expect("agent-b task");
+
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+        assert!(!overlap_detected.load(Ordering::SeqCst));
     }
 
     #[test]

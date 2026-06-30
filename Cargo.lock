@@ -6,6 +6,7 @@ version = 4
 name = "Wardian"
 version = "0.4.2"
 dependencies = [
+ "anyhow",
  "axum",
  "base64 0.22.1",
  "chrono",
