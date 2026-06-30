@@ -247,6 +247,7 @@ fn normalize_codex_payload(
         "function_call" | "custom_tool_call" => {
             let arguments = codex_tool_call_input(payload);
             let tool_name = str_field(payload, "name").unwrap_or(payload_type);
+            let raw_input_text = codex_tool_call_raw_input_text(payload);
             let command = arguments
                 .as_ref()
                 .and_then(|value| str_field(value, "command").map(str::to_string));
@@ -256,6 +257,10 @@ fn normalize_codex_payload(
             let text = arguments
                 .as_ref()
                 .and_then(|value| str_field(value, "justification").map(str::to_string));
+            let mut metadata = json!({"raw_type": payload_type, "tool_name": tool_name});
+            if let Some(input_text) = raw_input_text {
+                metadata["tool_input_text"] = json!(input_text);
+            }
             Some(event(
                 session_id,
                 provider,
@@ -273,7 +278,7 @@ fn normalize_codex_payload(
                     source: Some(source),
                     command: command.clone(),
                     language: command.as_ref().map(|_| "shell".to_string()),
-                    metadata: json!({"raw_type": payload_type, "tool_name": tool_name}),
+                    metadata,
                     ..Default::default()
                 },
             ))
@@ -448,10 +453,11 @@ fn normalize_claude_assistant(
             .iter()
             .find(|item| str_field(item, "type") == Some("tool_use"))
     }) {
+        let tool_name = str_field(tool_use, "name").unwrap_or("tool_use");
         let command = tool_use
             .get("input")
             .and_then(|input| str_field(input, "command").map(str::to_string));
-        return Some(tool_call_event(
+        let mut event = tool_call_event(
             session_id,
             provider,
             sequence,
@@ -461,9 +467,21 @@ fn normalize_claude_assistant(
                 .or_else(|| turn_id_from(message)),
             command,
             text_from_value(tool_use),
-            str_field(tool_use, "name").unwrap_or("tool_use"),
+            tool_name,
             AgentChatStatus::Running,
-        ));
+        );
+        if let Some(input) = tool_use.get("input") {
+            event.metadata["tool_input"] = input.clone();
+            if let Some(file_path) = str_field(input, "file_path") {
+                event.metadata["file_path"] = json!(file_path);
+                if claude_tool_reads_file(tool_name) {
+                    event.metadata["files_read"] = json!([file_path]);
+                } else if claude_tool_writes_file(tool_name) {
+                    event.metadata["files_written"] = json!([file_path]);
+                }
+            }
+        }
+        return Some(event);
     }
 
     if let Some(text) = text_from_value(message) {
@@ -498,6 +516,17 @@ fn normalize_claude_assistant(
         )),
         _ => None,
     }
+}
+
+fn claude_tool_reads_file(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("Read")
+}
+
+fn claude_tool_writes_file(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit"
+    )
 }
 
 fn normalize_gemini(
@@ -694,15 +723,18 @@ fn antigravity_tool_call_event(
         .and_then(|items| items.iter().find(|item| item.is_object()))?;
     let tool_name = str_field(tool_call, "name").unwrap_or("tool_call");
     let args = tool_call.get("args");
+    let file_paths = antigravity_tool_arg_paths(args);
+    let metadata = antigravity_tool_metadata(tool_name, args, &file_paths);
     let command = args
         .and_then(|value| value.get("command"))
+        .or_else(|| args.and_then(|value| value.get("CommandLine")))
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
     let text = command.clone().or_else(|| args.and_then(compact_json_text));
 
-    Some(tool_call_event(
+    Some(tool_call_event_with_metadata(
         session_id,
         provider,
         sequence,
@@ -712,7 +744,97 @@ fn antigravity_tool_call_event(
         text,
         antigravity_tool_title(tool_name),
         AgentChatStatus::Running,
+        metadata,
     ))
+}
+
+fn antigravity_tool_metadata(
+    tool_name: &str,
+    args: Option<&Value>,
+    file_paths: &[String],
+) -> Value {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("raw_type".to_string(), Value::String(tool_name.to_string()));
+    if let Some(args) = args {
+        metadata.insert("tool_input".to_string(), args.clone());
+    }
+    if let Some(first_path) = file_paths.first() {
+        metadata.insert("file_path".to_string(), Value::String(first_path.clone()));
+        let file_list_key = if antigravity_tool_reads_file(tool_name) {
+            Some("files_read")
+        } else if antigravity_tool_writes_file(tool_name) {
+            Some("files_written")
+        } else {
+            None
+        };
+        if let Some(file_list_key) = file_list_key {
+            metadata.insert(
+                file_list_key.to_string(),
+                Value::Array(
+                    file_paths
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        }
+    }
+    Value::Object(metadata)
+}
+
+fn antigravity_tool_arg_paths(args: Option<&Value>) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(args) = args.and_then(Value::as_object) else {
+        return paths;
+    };
+    for key in [
+        "AbsolutePath",
+        "TargetFile",
+        "FilePath",
+        "file_path",
+        "path",
+        "uri",
+        "fileUri",
+    ] {
+        if let Some(path) = args.get(key).and_then(tool_arg_string) {
+            push_unique(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn tool_arg_string(value: &Value) -> Option<String> {
+    let mut text = value.as_str()?.trim().to_string();
+    for _ in 0..3 {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('"') && trimmed.ends_with('"')) {
+            break;
+        }
+        let Ok(decoded) = serde_json::from_str::<String>(trimmed) else {
+            break;
+        };
+        text = decoded;
+    }
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn antigravity_tool_reads_file(tool_name: &str) -> bool {
+    matches!(tool_name.to_ascii_lowercase().as_str(), "view_file")
+}
+
+fn antigravity_tool_writes_file(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "write_to_file" | "replace_file_content" | "multi_replace_file_content"
+    )
 }
 
 fn antigravity_tool_result_event(
@@ -741,7 +863,7 @@ fn antigravity_tool_result_event(
 }
 
 fn antigravity_tool_title(tool_name: &str) -> &'static str {
-    match tool_name {
+    match tool_name.to_ascii_uppercase().as_str() {
         "ASK_QUESTION" => "Ask question",
         "CODE_ACTION" => "Code action",
         "GENERIC" => "Generic action",
@@ -751,6 +873,8 @@ fn antigravity_tool_title(tool_name: &str) -> &'static str {
         "RUN_COMMAND" => "Run command",
         "SEARCH_WEB" => "Search web",
         "VIEW_FILE" => "View file",
+        "WRITE_TO_FILE" => "Write file",
+        "REPLACE_FILE_CONTENT" | "MULTI_REPLACE_FILE_CONTENT" => "Edit file",
         _ => "Tool call",
     }
 }
@@ -1022,6 +1146,36 @@ fn tool_call_event(
     title: &str,
     status: AgentChatStatus,
 ) -> AgentChatEvent {
+    tool_call_event_with_metadata(
+        session_id,
+        provider,
+        sequence,
+        source,
+        turn_id,
+        command,
+        text,
+        title,
+        status,
+        json!({"raw_type": title}),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps provider parser call sites readable while centralizing DTO defaults"
+)]
+fn tool_call_event_with_metadata(
+    session_id: &str,
+    provider: &str,
+    sequence: u64,
+    source: String,
+    turn_id: Option<String>,
+    command: Option<String>,
+    text: Option<String>,
+    title: &str,
+    status: AgentChatStatus,
+    metadata: Value,
+) -> AgentChatEvent {
     let language = command.as_ref().map(|_| "shell".to_string());
     event(
         session_id,
@@ -1036,7 +1190,7 @@ fn tool_call_event(
             source: Some(source),
             command,
             language,
-            metadata: json!({"raw_type": title}),
+            metadata,
             ..Default::default()
         },
     )
@@ -1263,6 +1417,20 @@ fn codex_tool_call_input(payload: &Value) -> Option<Value> {
         .or_else(|| json_object_or_encoded_json(payload.get("input")))
 }
 
+fn codex_tool_call_raw_input_text(payload: &Value) -> Option<String> {
+    for key in ["input", "arguments"] {
+        let Some(Value::String(raw)) = payload.get(key) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || parse_json_string(trimmed).is_some() {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 fn json_object_or_encoded_json(value: Option<&Value>) -> Option<Value> {
     match value {
         Some(Value::Object(_)) => value.cloned(),
@@ -1376,6 +1544,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_apply_patch_tool_call_preserves_raw_patch_input() {
+        let tool = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"}}"#,
+        );
+
+        assert_eq!(tool.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(tool.title.as_deref(), Some("apply_patch"));
+        assert_eq!(tool.text, None);
+        assert_eq!(
+            tool.metadata["tool_input_text"],
+            "*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"
+        );
+    }
+
+    #[test]
     fn codex_subagent_notifications_are_hidden_and_results_are_summarized() {
         assert!(normalize_chat_line(
             "agent-1",
@@ -1431,6 +1615,36 @@ mod tests {
             8
         )
         .is_none());
+    }
+
+    #[test]
+    fn claude_file_tool_calls_preserve_input_paths() {
+        let read = one(
+            "claude",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-read","name":"Read","input":{"file_path":"D:\\Development\\Wardian\\src-tauri\\src\\state\\conversation_archive\\turns.rs"}}],"stop_reason":"tool_use"}}"#,
+        );
+        assert_eq!(read.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(read.title.as_deref(), Some("Read"));
+        assert_eq!(
+            read.metadata["file_path"],
+            r#"D:\Development\Wardian\src-tauri\src\state\conversation_archive\turns.rs"#
+        );
+        assert_eq!(
+            read.metadata["tool_input"]["file_path"],
+            r#"D:\Development\Wardian\src-tauri\src\state\conversation_archive\turns.rs"#
+        );
+
+        let edit = one(
+            "claude",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-edit","name":"Edit","input":{"file_path":"docs/specs/2026-06-25-turns-jsonl-request-index.md","old_string":"old","new_string":"new"}}],"stop_reason":"tool_use"}}"#,
+        );
+        assert_eq!(edit.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(edit.title.as_deref(), Some("Edit"));
+        assert_eq!(
+            edit.metadata["file_path"],
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        );
+        assert_eq!(edit.metadata["tool_input"]["old_string"], "old");
     }
 
     #[test]
@@ -1529,6 +1743,39 @@ mod tests {
         assert_eq!(tool.title.as_deref(), Some("Run command"));
         assert_eq!(tool.command.as_deref(), Some("npm run test -- --run"));
         assert_eq!(tool.turn_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn antigravity_file_tool_calls_preserve_path_metadata() {
+        let read = one(
+            "antigravity",
+            r#"{"step_index":5,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"view_file","args":{"AbsolutePath":"\"C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md\""}}]}"#,
+        );
+        assert_eq!(read.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(read.title.as_deref(), Some("View file"));
+        assert_eq!(
+            read.metadata["file_path"].as_str(),
+            Some("C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md")
+        );
+        assert_eq!(
+            read.metadata["files_read"][0].as_str(),
+            Some("C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md")
+        );
+
+        let write = one(
+            "antigravity",
+            r#"{"step_index":6,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"\"C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py\""}}]}"#,
+        );
+        assert_eq!(write.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(write.title.as_deref(), Some("Write file"));
+        assert_eq!(
+            write.metadata["file_path"].as_str(),
+            Some("C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py")
+        );
+        assert_eq!(
+            write.metadata["files_written"][0].as_str(),
+            Some("C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py")
+        );
     }
 
     #[test]

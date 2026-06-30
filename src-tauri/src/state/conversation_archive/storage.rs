@@ -16,7 +16,9 @@ use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir, agents_dir};
 
 use super::records::{current_rfc3339_millis, metadata_string};
-use super::turns::{apply_archive_summary_to_manifest, archive_summary, derive_turn_records};
+use super::turns::{
+    apply_archive_summary_to_manifest, archive_summary, derive_turn_records_with_context,
+};
 use super::{ActiveConversationHandle, ConversationArchiveContext, ConversationCaptureState};
 
 pub(super) fn lock_active(
@@ -354,9 +356,6 @@ pub(super) fn close_conversation_dir(
     let events: Vec<AgentChatEvent> = read_jsonl_records(&conversation_dir.join("events.jsonl"))?;
     let sources: Vec<ConversationSourceRecord> =
         read_jsonl_records(&conversation_dir.join("sources.jsonl"))?;
-    let turns = derive_turn_records(&records, &events, &sources);
-    write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
-    let summary = archive_summary(&records, &turns, &sources);
     let now = current_rfc3339_millis();
     let mut manifest =
         read_manifest(&conversation_dir.join("manifest.json"))?.unwrap_or_else(|| {
@@ -367,6 +366,17 @@ pub(super) fn close_conversation_dir(
             let context = ConversationArchiveContext::for_agent_id(agent_id, "unknown");
             open_manifest(&context, conversation_id, created_at, now.clone())
         });
+    let turns = derive_turn_records_with_context(
+        conversation_id,
+        &records,
+        &events,
+        &sources,
+        false,
+        Some(&manifest.provider),
+        &manifest.provider_session_ids,
+    );
+    write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
+    let summary = archive_summary(&records, &turns, &sources);
     manifest.updated_at = now.clone();
     manifest.closed_at = Some(now.clone());
     manifest.status = status_for_boundary_reason(reason);

@@ -175,29 +175,71 @@ tool metadata, provider-specific normalized fields, and lifecycle events.
 ### `turns.jsonl`
 
 Stores a compact derived index over `conversation.jsonl`, `events.jsonl`, and
-`sources.jsonl` for completed conversation archives. It exists to save agents
-joins and bounded scans; it is not a semantic analysis file. Wardian materializes
-it when a conversation is closed rather than rewriting it on every append.
+`sources.jsonl` for open and closed conversation archives. Request-based turn
+rows use turns format version 3. The file exists to save agents joins and
+bounded scans; it is not a semantic analysis file. Wardian rewrites it
+atomically whenever the normalized archive is refreshed.
 
-Turn rows are factual aggregations only. They may include:
+One row represents one request/response unit: a user-originated request plus
+the assistant, tool, and lifecycle records that follow it until the next
+user-originated request or conversation boundary. Provider-native `turn_id`
+values remain on `conversation.jsonl` narrative records for provenance, but
+they do not define `turns.jsonl` row boundaries because some providers use tool
+call IDs as turn IDs.
 
-- `turn_id`, when provided by a provider or Wardian structured event
-- `seq_start` and `seq_end`
-- `user_message_seq` and `assistant_message_seq`
-- `user_message_text` or `user_message_excerpt`
-- `assistant_message_text` or `assistant_message_excerpt`
-- `status` and `status_source`, only when mechanically supported
-- `tools_used`, counted by normalized structured tool name
-- `failed_tool_count`
-- `command_nonzero_count`
-- `files_read` and `files_written`, only from structured metadata
-- `external_side_effects`, only from structured metadata
-- `failure_signals` with `seq` references
-- `provider_native_refs`
+Turn rows are factual aggregations only. They include stable derived ordering
+fields (`schema: 3`, `turn_index`, `turn_key`), seq and time bounds, typed
+`request` data, the last `assistant_result` when present, nested mechanical `counts`,
+`tools_used`, `files`, `external_side_effects`, `failure_signals`, `record_refs`,
+and `provider_refs`.
+
+`turns.jsonl` keeps provenance compact. `record_refs` stores only `seq_start`,
+`seq_end`, `event_count`, `source_count`, and `artifact_count`, not exhaustive
+`event_refs` arrays. `provider_refs` stores compact provider/session/source-kind
+and source-id pointers and omits source paths. Full provider-native refs stay in
+`manifest.json`, and full source paths/cursors stay in `sources.jsonl`.
+
+`status` is mechanically derived as `in_progress`, `pending_response`,
+`responded`, `interrupted`, `lifecycle`, `context_only`, `superseded`, or
+`unknown`. Wardian does not infer task success from assistant prose. Context
+records such as AGENTS.md injections and goal continuations are typed through
+`request.kind`, and AGENTS.md-only plus tool-only rows use `context_only`, so
+readers can skip them when constructing human-level summaries. Goal
+continuation rows may include `request.objective_text_truncated` when the
+compact objective was clipped. `manifest.turn_count` is the physical
+`turns.jsonl` row count; readers that want task counts should filter context
+rows explicitly.
 
 The archive writer must not infer user intent, corrections, complaints,
-causality, recovery, task success, file access, or side effects from arbitrary
-prose or command strings. There is no `notes_for_evolver` field in v1.
+causality, recovery, or task success from arbitrary prose. File evidence may
+come from structured metadata, explicit patch headers, conservative command-path
+extraction, apply-patch result output, provider file-tool input metadata, and
+provider-certified `file:///` result paths. Provider normalization covers
+Claude file tools and Antigravity file tools/results, including `view_file`,
+`write_to_file`, replacement actions, and result text that names a concrete file
+URI. Generic path extraction ignores tool output to avoid ANSI, search-result,
+and compiler-line noise; tool output still feeds structured file edits and
+failure signals when it has provider-certified paths. Path mention extraction is
+intentionally conservative and rejects globs, CSV-like fragments, control
+characters, and malformed line/column suffixes. Side effects may come from
+structured metadata, structured command fields, explicit `apply_patch`
+records/results, provider file-write tools, or exact URL-pattern extraction, and
+file-edit side effects carry touched paths when the archive can recover them
+from patch input, result output, provider tool input metadata, or file URI
+result text. Duplicate file-edit effects with the same touched path set and
+duplicate GitHub URL/issue/PR effects with the same URL are collapsed inside a
+turn.
+
+Detailed traceability is reconstructed from a turn's `seq_start` and `seq_end`
+by reading matching `conversation.jsonl` rows and then following their
+`event_refs`, `source_refs`, and `artifact_refs` into `events.jsonl`,
+`sources.jsonl`, and artifacts. `turns.jsonl` remains the token-efficient
+scanning surface instead of duplicating the exhaustive refs in every row.
+Failure signals also include conservative assistant-reported verification
+failures when the assistant explicitly reports a verification command still
+failing. There is no
+`notes_for_evolver` field in the
+request-turn index.
 
 ### `sources.jsonl`
 

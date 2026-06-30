@@ -320,22 +320,132 @@ fn command_string_is_not_used_as_turn_tool_name() {
 }
 
 #[test]
-fn repeated_turn_id_after_another_keyed_turn_starts_new_span() {
+fn provider_turn_ids_do_not_split_without_new_user_request() {
     let records = vec![
         narrative_record_with_turn(1, "turn-1", "First A."),
         narrative_record_with_turn(2, "turn-2", "Second."),
         narrative_record_with_turn(3, "turn-1", "First B."),
     ];
 
-    let turns = derive_turn_records(&records, &[], &[]);
+    let turns = derive_turn_records("conv-test", &records, &[], &[], false);
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].conversation_id, "conv-test");
+    assert_eq!(turns[0].turn_index, 1);
+    assert_eq!(turns[0].turn_key, "conv-test:turn:000001");
+    assert_eq!(turns[0].seq_start, 1);
+    assert_eq!(turns[0].seq_end, 3);
+    assert_eq!(turns[0].status, ConversationTurnStatus::Responded);
+    assert_eq!(turns[0].request.kind, "unknown");
+}
+
+#[test]
+fn request_kind_marks_goal_continuation_and_agent_context_rows() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "/goal Fix the archive index.",
+            None,
+            1,
+        ),
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:02.000Z",
+            "<codex_internal_context source=\"goal\">\nGoal: Fix the archive index.\n\nLarge scaffold omitted.\n</codex_internal_context>",
+            None,
+            2,
+        ),
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:03.000Z",
+            "# AGENTS.md instructions for <absolute-workspace-path>\nUse project rules.",
+            None,
+            3,
+        ),
+    ];
+
+    let turns = derive_turn_records("conv-context", &records, &[], &[], true);
 
     assert_eq!(turns.len(), 3);
-    assert_eq!(turns[0].turn_id.as_deref(), Some("turn-1"));
-    assert_eq!(turns[0].seq_start, 1);
-    assert_eq!(turns[0].seq_end, 1);
-    assert_eq!(turns[2].turn_id.as_deref(), Some("turn-1"));
-    assert_eq!(turns[2].seq_start, 3);
-    assert_eq!(turns[2].seq_end, 3);
+    assert_eq!(turns[0].request.kind, "goal_start");
+    assert_eq!(turns[1].request.kind, "goal_continuation");
+    let goal_json = serde_json::to_value(&turns[1]).unwrap();
+    assert_eq!(
+        goal_json["request"]["objective_text"],
+        "Fix the archive index."
+    );
+    assert_eq!(turns[2].request.kind, "agent_context");
+    assert_eq!(turns[2].status, ConversationTurnStatus::ContextOnly);
+    assert_eq!(turns[2].status_source, "mechanical_context_only");
+}
+
+#[test]
+fn goal_continuation_objective_prefers_objective_tag() {
+    let records = vec![narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.\n<objective>Fix turn file written attribution.</objective>\n</codex_internal_context>",
+        None,
+        1,
+    )];
+
+    let turns = derive_turn_records("conv-objective", &records, &[], &[], true);
+
+    assert_eq!(turns[0].request.kind, "goal_continuation");
+    assert_eq!(
+        turns[0].request.objective_text.as_deref(),
+        Some("Fix turn file written attribution.")
+    );
+}
+
+#[test]
+fn goal_continuation_objective_reports_truncation() {
+    let long_objective = format!("{} tail", "review ".repeat(120));
+    let records = vec![narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        &format!(
+            "<codex_internal_context source=\"goal\">\n<objective>{long_objective}</objective>\n</codex_internal_context>"
+        ),
+        None,
+        1,
+    )];
+
+    let turns = derive_turn_records("conv-objective-truncated", &records, &[], &[], true);
+    let json = serde_json::to_value(&turns[0]).unwrap();
+
+    assert_eq!(turns[0].request.objective_text.as_ref().unwrap().len(), 500);
+    assert_eq!(json["request"]["objective_text_truncated"], true);
+}
+
+#[test]
+fn tool_started_only_turn_is_tool_only_context() {
+    let mut tool = chat_event(
+        "event-task-started",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    tool.title = Some("task_started".to_string());
+    let record = narrative_from_chat_event(&tool, 1).expect("narrative record");
+
+    let turns = derive_turn_records("conv-tool-only", &[record], &[tool], &[], true);
+
+    assert_eq!(turns[0].request.kind, "tool_only");
+    assert_eq!(turns[0].status, ConversationTurnStatus::ContextOnly);
+    assert_eq!(turns[0].status_source, "mechanical_tool_only");
+}
+
+#[test]
+fn closed_user_request_without_assistant_is_pending_response() {
+    let records = vec![narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        "Please inspect the archive.",
+        None,
+        1,
+    )];
+
+    let turns = derive_turn_records("conv-pending", &records, &[], &[], false);
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].status, ConversationTurnStatus::PendingResponse);
+    assert_eq!(turns[0].status_source, "mechanical_no_assistant_message");
 }
 
 #[test]
@@ -412,29 +522,37 @@ fn append_chat_events_writes_factual_turns_index() {
 
     assert_eq!(records[0].turn_id.as_deref(), Some("turn-1"));
     assert_eq!(turns.len(), 1);
-    assert_eq!(turns[0].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(turns[0].conversation_id, conversation_id);
+    assert_eq!(turns[0].turn_index, 1);
+    assert_eq!(turns[0].turn_key, format!("{conversation_id}:turn:000001"));
     assert_eq!(turns[0].seq_start, 1);
     assert_eq!(turns[0].seq_end, 4);
-    assert_eq!(turns[0].user_message_seq, Some(1));
-    assert_eq!(turns[0].assistant_message_seq, Some(4));
-    assert_eq!(
-        turns[0].user_message_text.as_deref(),
-        Some("Run the tests.")
-    );
-    assert_eq!(
-        turns[0].assistant_message_text.as_deref(),
-        Some("The test failed.")
-    );
-    assert_eq!(turns[0].status, ConversationTurnStatus::Failed);
-    assert_eq!(turns[0].status_source.as_deref(), Some("tool_failure"));
+    assert_eq!(turns[0].request.seq, 1);
+    assert_eq!(turns[0].request.kind, "user_request");
+    assert_eq!(turns[0].request.text.as_deref(), Some("Run the tests."));
+    let assistant_result = turns[0]
+        .assistant_result
+        .as_ref()
+        .expect("assistant result");
+    assert_eq!(assistant_result.seq, 4);
+    assert_eq!(assistant_result.text.as_deref(), Some("The test failed."));
+    assert_eq!(turns[0].status, ConversationTurnStatus::Responded);
+    assert_eq!(turns[0].status_source, "mechanical_assistant_message");
+    assert_eq!(turns[0].counts.records, 4);
+    assert_eq!(turns[0].counts.assistant_messages, 1);
+    assert_eq!(turns[0].counts.tool_calls, 1);
+    assert_eq!(turns[0].counts.tool_results, 1);
+    assert_eq!(turns[0].counts.failed_tool_results, 1);
+    assert_eq!(turns[0].counts.nonzero_tool_results, 1);
     assert_eq!(turns[0].tools_used.get("shell_command"), Some(&1));
-    assert_eq!(turns[0].failed_tool_count, 1);
-    assert_eq!(turns[0].command_nonzero_count, 1);
-    assert!(turns[0].files_read.is_empty());
-    assert!(turns[0].files_written.is_empty());
+    assert!(turns[0].files.read.is_empty());
+    assert!(turns[0].files.written.is_empty());
     assert!(turns[0].external_side_effects.is_empty());
-    assert_eq!(turns[0].failure_signals[0].signal, "tool_failed");
+    assert_eq!(turns[0].failure_signals[0].kind, "tool_failed");
     assert_eq!(turns[0].failure_signals[0].seq, 3);
+    assert_eq!(turns[0].record_refs.seq_start, 1);
+    assert_eq!(turns[0].record_refs.seq_end, 4);
+    assert_eq!(turns[0].record_refs.event_count, 4);
     assert_eq!(manifest.record_count, 4);
     assert_eq!(manifest.turn_count, 1);
     assert!(manifest.has_turns);
@@ -446,6 +564,924 @@ fn append_chat_events_writes_factual_turns_index() {
     assert!(json.get("user_correction").is_none());
     let manifest_json = serde_json::to_value(&manifest).unwrap();
     assert!(manifest_json.get("capture_quality").is_none());
+}
+
+#[test]
+fn active_conversation_refresh_writes_turns_index_and_manifest_summary() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-open",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Keep the archive useful while this task is still open."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-open",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("I am still working on it."),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, assistant])
+        .expect("append open events");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns_path = conversation_path.join("turns.jsonl");
+    let turns: Vec<serde_json::Value> = read_jsonl_records(&turns_path).expect("read turns");
+    let manifest: ConversationManifest = serde_json::from_str(
+        &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+    )
+    .expect("read manifest");
+
+    assert!(turns_path.exists());
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["conversation_id"], conversation_id);
+    assert_eq!(turns[0]["turn_index"], 1);
+    assert_eq!(
+        turns[0]["turn_key"],
+        format!("{conversation_id}:turn:000001")
+    );
+    assert_eq!(turns[0]["status"], "responded");
+    assert_eq!(turns[0]["status_source"], "mechanical_assistant_message");
+    assert_eq!(turns[0]["request"]["kind"], "user_request");
+    assert_eq!(turns[0]["request"]["seq"], 1);
+    assert_eq!(turns[0]["schema"], 3);
+    assert_eq!(
+        turns[0]["provider_refs"][0]["provider_session_id"],
+        "session-one"
+    );
+    assert_eq!(
+        turns[0]["provider_refs"][0]["source_kind"],
+        "provider_session"
+    );
+    assert!(turns[0]["provider_refs"][0].get("source_path").is_none());
+    assert_eq!(
+        turns[0]["assistant_result"]["text"],
+        "I am still working on it."
+    );
+    assert_eq!(turns[0]["counts"]["records"], 2);
+    assert_eq!(turns[0]["counts"]["assistant_messages"], 1);
+    assert_eq!(manifest.turn_count, 1);
+    assert!(manifest.has_turns);
+}
+
+#[test]
+fn turns_index_uses_compact_refs_instead_of_verbose_event_and_provider_refs() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-compact-refs",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Keep turn refs compact."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-compact-refs",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Refs are compact now."),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, assistant])
+        .expect("append open events");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let turn = &turns[0];
+
+    assert_eq!(turn["schema"], 3);
+    assert!(turn["record_refs"].get("event_refs").is_none());
+    assert_eq!(turn["record_refs"]["seq_start"], 1);
+    assert_eq!(turn["record_refs"]["seq_end"], 2);
+    assert_eq!(turn["record_refs"]["event_count"], 2);
+    assert_eq!(turn["record_refs"]["source_count"], 0);
+    assert!(turn.get("provider_native_refs").is_none());
+    assert_eq!(turn["provider_refs"][0]["provider"], "codex");
+    assert_eq!(
+        turn["provider_refs"][0]["provider_session_id"],
+        "session-one"
+    );
+    assert_eq!(turn["provider_refs"][0]["source_kind"], "provider_session");
+    assert!(turn["provider_refs"][0].get("source_path").is_none());
+    assert!(turn["provider_refs"][0].get("source_id").is_none());
+}
+
+#[test]
+fn provider_tool_call_turn_ids_stay_inside_surrounding_user_request_turn() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-tool-heavy",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Inspect the project and fix the bug."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut first_tool = chat_event(
+        "event-tool-a",
+        AgentChatEventKind::ToolCall,
+        None,
+        Some("Read a file."),
+    );
+    first_tool.turn_id = Some("tool-call-a".to_string());
+    first_tool.title = Some("shell_command".to_string());
+    let mut first_result = chat_event(
+        "event-result-a",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some("file contents"),
+    );
+    first_result.turn_id = Some("tool-call-a".to_string());
+    first_result.title = Some("shell_command".to_string());
+    let mut second_tool = chat_event(
+        "event-tool-b",
+        AgentChatEventKind::ToolCall,
+        None,
+        Some("Patch a file."),
+    );
+    second_tool.turn_id = Some("tool-call-b".to_string());
+    second_tool.title = Some("apply_patch".to_string());
+    let mut second_result = chat_event(
+        "event-result-b",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some("patch applied"),
+    );
+    second_result.turn_id = Some("tool-call-b".to_string());
+    second_result.title = Some("apply_patch".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-tool-heavy",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Implemented the fix."),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[
+                user,
+                first_tool,
+                first_result,
+                second_tool,
+                second_result,
+                assistant,
+            ],
+        )
+        .expect("append tool-heavy request");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["seq_start"], 1);
+    assert_eq!(turns[0]["seq_end"], 6);
+    assert_eq!(
+        turns[0]["request"]["text"],
+        "Inspect the project and fix the bug."
+    );
+    assert_eq!(turns[0]["assistant_result"]["text"], "Implemented the fix.");
+    assert_eq!(turns[0]["counts"]["records"], 6);
+    assert_eq!(turns[0]["counts"]["tool_calls"], 2);
+    assert_eq!(turns[0]["counts"]["tool_results"], 2);
+    assert_eq!(turns[0]["tools_used"]["shell_command"], 1);
+    assert_eq!(turns[0]["tools_used"]["apply_patch"], 1);
+}
+
+#[test]
+fn apply_patch_turn_extracts_written_and_mentioned_paths() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut user = chat_event(
+        "event-user-paths",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Fix the turns index."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    let mut patch = chat_event(
+        "event-tool-patch",
+        AgentChatEventKind::ToolCall,
+        None,
+        Some(
+            "*** Begin Patch\n\
+             *** Update File: src-tauri/src/state/conversation_archive/turns.rs\n\
+             @@\n\
+             -old\n\
+             +new\n\
+             *** Add File: docs/specs/2026-06-25-turns-jsonl-request-index.md\n\
+             +# Turns index\n\
+             *** End Patch",
+        ),
+    );
+    patch.turn_id = Some("tool-call-patch".to_string());
+    patch.title = Some("apply_patch".to_string());
+    let mut assistant = chat_event(
+        "event-assistant-paths",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some(
+            "Updated src-tauri/src/state/conversation_archive/turns.rs and docs/specs/2026-06-25-turns-jsonl-request-index.md.",
+        ),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, patch, assistant])
+        .expect("append patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["schema"], 3);
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert_eq!(
+        turns[0]["files"]["mentioned"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert_eq!(turns[0]["external_side_effects"][0]["kind"], "file_edit");
+    assert_eq!(
+        turns[0]["external_side_effects"][0]["paths"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert!(turns[0]["external_side_effects"][0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("src-tauri/src/state/conversation_archive/turns.rs"));
+}
+
+#[test]
+fn apply_patch_turn_extracts_paths_from_tool_input_metadata() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-patch-metadata",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Patch the turns archive."),
+    );
+    let mut patch = chat_event(
+        "event-tool-patch-metadata",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    patch.title = Some("apply_patch".to_string());
+    patch.metadata = serde_json::json!({
+        "raw_type": "custom_tool_call",
+        "tool_name": "apply_patch",
+        "tool_input_text": "*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** Add File: docs/specs/2026-06-25-turns-jsonl-request-index.md\n+# Turns\n*** End Patch"
+    });
+    let assistant = chat_event(
+        "event-assistant-patch-metadata",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Patched the archive."),
+    );
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &[user, patch, assistant])
+        .expect("append metadata patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert_eq!(
+        turns[0]["external_side_effects"][0]["paths"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+}
+
+#[test]
+fn apply_patch_result_output_populates_written_paths_when_call_text_is_missing() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-patch-output",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Patch the docs."),
+    );
+    let mut patch = chat_event(
+        "event-tool-patch-output",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    patch.title = Some("apply_patch".to_string());
+    patch.turn_id = Some("call-patch".to_string());
+    let mut result = chat_event(
+        "event-result-patch-output",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some(
+            "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM src-tauri/src/state/conversation_archive/turns.rs\nA docs/specs/2026-06-25-turns-jsonl-request-index.md",
+        ),
+    );
+    result.turn_id = Some("call-patch".to_string());
+    let assistant = chat_event(
+        "event-assistant-patch-output",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Patched the docs."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, patch, result, assistant],
+        )
+        .expect("append output patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "src-tauri/src/state/conversation_archive/turns.rs",
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md"
+        ])
+    );
+    assert!(turns[0]["external_side_effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|effect| effect["kind"] == "file_edit"
+            && effect["paths"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty())));
+}
+
+#[test]
+fn apply_patch_call_and_result_do_not_duplicate_same_file_edit_side_effect() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-patch-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Patch the turns archive."),
+    );
+    let mut patch = chat_event(
+        "event-tool-patch-dedupe",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    patch.title = Some("apply_patch".to_string());
+    patch.turn_id = Some("call-patch-dedupe".to_string());
+    patch.metadata = serde_json::json!({
+        "raw_type": "custom_tool_call",
+        "tool_name": "apply_patch",
+        "tool_input_text": "*** Begin Patch\n*** Update File: src-tauri/src/state/conversation_archive/turns.rs\n@@\n-old\n+new\n*** End Patch"
+    });
+    let mut result = chat_event(
+        "event-result-patch-dedupe",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some(
+            "Exit code: 0\nOutput:\nSuccess. Updated the following files:\nM src-tauri/src/state/conversation_archive/turns.rs",
+        ),
+    );
+    result.turn_id = Some("call-patch-dedupe".to_string());
+    let assistant = chat_event(
+        "event-assistant-patch-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Patched the archive."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, patch, result, assistant],
+        )
+        .expect("append dedupe patch turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let file_edits = turns[0]["external_side_effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|effect| effect["kind"] == "file_edit")
+        .count();
+
+    assert_eq!(file_edits, 1);
+}
+
+#[test]
+fn mentioned_paths_filter_globs_fragments_and_csv_noise() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Review src/**/*.rs, docs/specs/foo.md,bar and src-tauri/src/lib.rs:12:34 but keep package.json.",
+            None,
+            1,
+        ),
+        narrative_record_with_turn(2, "turn-1", "Mention src-tauri/src/main.rs:9."),
+    ];
+
+    let turns = derive_turn_records("conv-noisy-paths", &records, &[], &[], false);
+
+    assert_eq!(
+        turns[0].files.mentioned,
+        vec![
+            "src-tauri/src/lib.rs".to_string(),
+            "package.json".to_string(),
+            "src-tauri/src/main.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn mentioned_paths_ignore_tool_output_ansi_and_line_fragments() {
+    let user = narrative_from_delivered_input(
+        "2026-06-15T00:00:01.000Z",
+        "Please inspect the check failure.",
+        None,
+        1,
+    );
+    let mut tool = chat_event(
+        "event-tool-output-noise",
+        AgentChatEventKind::ToolResult,
+        Some(AgentChatRole::Tool),
+        Some("src/features/git/GitPanel.tsx:14:import\nsrc/changed.ts\"\u{1b}[39m\nsrc/**/*.rs\n"),
+    );
+    tool.title = Some("shell_command".to_string());
+    let tool_record = narrative_from_chat_event(&tool, 2).expect("tool record");
+    let assistant = narrative_record_with_turn(
+        3,
+        "turn-1",
+        "I updated src-tauri/src/state/conversation_archive/turns.rs.",
+    );
+
+    let turns = derive_turn_records(
+        "conv-tool-output-noise",
+        &[user, tool_record, assistant],
+        &[tool],
+        &[],
+        false,
+    );
+
+    assert_eq!(
+        turns[0].files.mentioned,
+        vec!["src-tauri/src/state/conversation_archive/turns.rs".to_string()]
+    );
+}
+
+#[test]
+fn assistant_reported_verification_failure_adds_failure_signal() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Please finish the edit.",
+            None,
+            1,
+        ),
+        narrative_record_with_turn(
+            2,
+            "turn-1",
+            "Verification: `npm test` passes. `npm run check` still fails on a pre-existing issue.",
+        ),
+    ];
+
+    let turns = derive_turn_records("conv-reported-failure", &records, &[], &[], false);
+
+    assert_eq!(turns[0].failure_signals.len(), 1);
+    assert_eq!(
+        turns[0].failure_signals[0].kind,
+        "reported_verification_failure"
+    );
+    assert_eq!(
+        turns[0].failure_signals[0].tool.as_deref(),
+        Some("npm run check")
+    );
+}
+
+#[test]
+fn claude_read_edit_and_write_tools_populate_turn_file_attribution() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-claude-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Update the conversation archive docs."),
+    );
+    let mut read = chat_event(
+        "event-claude-read",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    read.provider = "claude".to_string();
+    read.title = Some("Read".to_string());
+    read.metadata = serde_json::json!({
+        "raw_type": "Read",
+        "file_path": "src-tauri/src/state/conversation_archive/turns.rs",
+        "tool_input": {
+            "file_path": "src-tauri/src/state/conversation_archive/turns.rs"
+        }
+    });
+    let mut edit = chat_event(
+        "event-claude-edit",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    edit.provider = "claude".to_string();
+    edit.title = Some("Edit".to_string());
+    edit.metadata = serde_json::json!({
+        "raw_type": "Edit",
+        "file_path": "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+        "tool_input": {
+            "file_path": "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+            "old_string": "old",
+            "new_string": "new"
+        }
+    });
+    let mut write = chat_event(
+        "event-claude-write",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    write.provider = "claude".to_string();
+    write.title = Some("Write".to_string());
+    write.metadata = serde_json::json!({
+        "raw_type": "Write",
+        "file_path": "src/summary.ts",
+        "tool_input": {
+            "file_path": "src/summary.ts",
+            "content": "export const summary = 'ok';"
+        }
+    });
+    let assistant = chat_event(
+        "event-assistant-claude-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Updated the archive docs."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, read, edit, write, assistant],
+        )
+        .expect("append claude file tool turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["read"],
+        serde_json::json!(["src-tauri/src/state/conversation_archive/turns.rs"])
+    );
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "docs/specs/2026-06-25-turns-jsonl-request-index.md",
+            "src/summary.ts"
+        ])
+    );
+    assert_eq!(
+        turns[0]["external_side_effects"],
+        serde_json::json!([
+            {
+                "kind": "file_edit",
+                "evidence_seq": 3,
+                "summary": "Edit: docs/specs/2026-06-25-turns-jsonl-request-index.md",
+                "paths": ["docs/specs/2026-06-25-turns-jsonl-request-index.md"]
+            },
+            {
+                "kind": "file_edit",
+                "evidence_seq": 4,
+                "summary": "Write: src/summary.ts",
+                "paths": ["src/summary.ts"]
+            }
+        ])
+    );
+}
+
+#[test]
+fn antigravity_file_tools_populate_turn_file_attribution() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-antigravity-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Run the vault heartbeat."),
+    );
+    let mut read = chat_event(
+        "event-antigravity-read",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    read.provider = "antigravity".to_string();
+    read.title = Some("View file".to_string());
+    read.metadata = serde_json::json!({
+        "raw_type": "view_file",
+        "file_path": "C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md",
+        "files_read": ["C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md"]
+    });
+    let mut write = chat_event(
+        "event-antigravity-write",
+        AgentChatEventKind::ToolCall,
+        None,
+        None,
+    );
+    write.provider = "antigravity".to_string();
+    write.title = Some("Write file".to_string());
+    write.metadata = serde_json::json!({
+        "raw_type": "write_to_file",
+        "file_path": "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py",
+        "files_written": ["C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"]
+    });
+    let mut result_read = chat_event(
+        "event-antigravity-read-result",
+        AgentChatEventKind::ToolResult,
+        None,
+        Some(
+            "File Path: `file:///C:/Users/tgemi/Hivemind/%21Daily/2026-06-24.md`\nTotal Lines: 56",
+        ),
+    );
+    result_read.provider = "antigravity".to_string();
+    result_read.title = Some("View file".to_string());
+    let mut result_write = chat_event(
+        "event-antigravity-write-result",
+        AgentChatEventKind::ToolResult,
+        None,
+        Some("Created file file:///C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py with requested content."),
+    );
+    result_write.provider = "antigravity".to_string();
+    result_write.title = Some("Code action".to_string());
+    let assistant = chat_event(
+        "event-assistant-antigravity-files",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Updated the heartbeat scratch script."),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, read, write, result_read, result_write, assistant],
+        )
+        .expect("append antigravity file tool turn");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+
+    assert_eq!(
+        turns[0]["files"]["read"],
+        serde_json::json!(["C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md"])
+    );
+    assert_eq!(
+        turns[0]["files"]["written"],
+        serde_json::json!([
+            "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"
+        ])
+    );
+    assert_eq!(
+        turns[0]["files"]["mentioned"],
+        serde_json::json!([
+            "C:/Users/tgemi/Hivemind/!Daily/2026-06-24.md",
+            "C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"
+        ])
+    );
+    assert_eq!(
+        turns[0]["external_side_effects"],
+        serde_json::json!([
+            {
+                "kind": "file_edit",
+                "evidence_seq": 3,
+                "summary": "Write file: C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py",
+                "paths": ["C:/Users/tgemi/.gemini/antigravity-cli/brain/session/scratch/find_modified.py"]
+            }
+        ])
+    );
+}
+
+#[test]
+fn duplicate_github_side_effects_are_semantically_deduped() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let user = chat_event(
+        "event-user-github-dedupe",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Create the pull request."),
+    );
+    let assistant_one = chat_event(
+        "event-assistant-github-dedupe-one",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Opened PR https://github.com/wardian-app/Wardian/pull/599"),
+    );
+    let assistant_two = chat_event(
+        "event-assistant-github-dedupe-two",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("PR is available at https://github.com/wardian-app/Wardian/pull/599"),
+    );
+
+    archive
+        .append_chat_events_with_context(
+            archive_context("session-one"),
+            &[user, assistant_one, assistant_two],
+        )
+        .expect("append duplicate github side effects");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let github_effects = turns[0]["external_side_effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|effect| effect["kind"] == "github_pr")
+        .count();
+
+    assert_eq!(github_effects, 1);
+}
+
+#[test]
+fn assistant_progress_language_does_not_create_failure_signals() {
+    let records = vec![
+        narrative_from_delivered_input(
+            "2026-06-15T00:00:01.000Z",
+            "Please continue TDD.",
+            None,
+            1,
+        ),
+        narrative_record_with_turn(
+            2,
+            "turn-1",
+            "Verification is in progress: I am rerunning red tests after adding coverage. Compile failures found in the first pass are expected before the implementation.",
+        ),
+    ];
+
+    let turns = derive_turn_records("conv-progress-not-failure", &records, &[], &[], false);
+
+    assert!(turns[0].failure_signals.is_empty());
+}
+
+#[test]
+fn active_open_task_with_one_hundred_tool_calls_writes_one_request_turn() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut events = Vec::new();
+    let mut user = chat_event(
+        "event-user-hundred-tools",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::User),
+        Some("Run the large investigation."),
+    );
+    user.turn_id = Some("provider-user-turn".to_string());
+    events.push(user);
+    for index in 0..100 {
+        let tool_name = if index % 2 == 0 {
+            "shell_command"
+        } else {
+            "apply_patch"
+        };
+        let mut tool = chat_event(
+            &format!("event-tool-{index}"),
+            AgentChatEventKind::ToolCall,
+            None,
+            Some("tool call"),
+        );
+        tool.turn_id = Some(format!("tool-call-{index}"));
+        tool.title = Some(tool_name.to_string());
+        events.push(tool);
+        let mut result = chat_event(
+            &format!("event-result-{index}"),
+            AgentChatEventKind::ToolResult,
+            Some(AgentChatRole::Tool),
+            Some("tool result"),
+        );
+        result.turn_id = Some(format!("tool-call-{index}"));
+        result.title = Some(tool_name.to_string());
+        events.push(result);
+    }
+    let mut assistant = chat_event(
+        "event-assistant-hundred-tools",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Large investigation complete."),
+    );
+    assistant.turn_id = Some("provider-assistant-turn".to_string());
+    events.push(assistant);
+
+    archive
+        .append_chat_events_with_context(archive_context("session-one"), &events)
+        .expect("append tool-heavy open task");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let turns: Vec<serde_json::Value> =
+        read_jsonl_records(&conversation_path.join("turns.jsonl")).expect("read turns");
+    let manifest: ConversationManifest = serde_json::from_str(
+        &std::fs::read_to_string(conversation_path.join("manifest.json")).unwrap(),
+    )
+    .expect("read manifest");
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["seq_start"], 1);
+    assert_eq!(turns[0]["seq_end"], 202);
+    assert_eq!(turns[0]["counts"]["records"], 202);
+    assert_eq!(turns[0]["counts"]["tool_calls"], 100);
+    assert_eq!(turns[0]["counts"]["tool_results"], 100);
+    assert_eq!(turns[0]["tools_used"]["shell_command"], 50);
+    assert_eq!(turns[0]["tools_used"]["apply_patch"], 50);
+    assert_eq!(manifest.turn_count, 1);
+    assert!(manifest.has_turns);
 }
 
 #[test]
@@ -1076,14 +2112,16 @@ fn lifecycle_boundary_with_context_does_not_create_unknown_stub() {
         Some("codex:session:session-one")
     );
     assert_eq!(manifest.record_count, 1);
-    assert_eq!(manifest.turn_count, 0);
-    assert!(!manifest.has_turns);
+    assert_eq!(manifest.turn_count, 1);
+    assert!(manifest.has_turns);
     assert!(manifest.lifecycle_only);
     let manifest_json = serde_json::to_value(&manifest).unwrap();
     assert!(manifest_json.get("capture_quality").is_none());
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, ConversationRecordKind::Lifecycle);
-    assert!(turns.is_empty());
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].status, ConversationTurnStatus::Lifecycle);
+    assert_eq!(turns[0].request.kind, "lifecycle");
 }
 
 #[test]

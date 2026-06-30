@@ -37,7 +37,7 @@ use storage::{
 };
 #[cfg(test)]
 use turns::derive_turn_records;
-use turns::{apply_archive_summary_to_manifest, archive_summary};
+use turns::{apply_archive_summary_to_manifest, archive_summary, derive_turn_records_with_context};
 
 #[derive(Debug, Default)]
 pub struct ConversationArchiveState {
@@ -350,8 +350,19 @@ impl ConversationArchiveState {
             .chain(appended.iter())
             .cloned()
             .collect::<Vec<_>>();
+        let all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
         let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
-        let summary = archive_summary(&all_records, &[], &all_sources);
+        let turns = derive_turn_records_with_context(
+            &handle.conversation_id,
+            &all_records,
+            &all_events,
+            &all_sources,
+            true,
+            Some(&effective_context.provider),
+            &effective_context.provider_session_ids,
+        );
+        write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
+        let summary = archive_summary(&all_records, &turns, &all_sources);
         let record_count = all_records.len() as u64;
         let mut manifest = open_manifest(
             &effective_context,
@@ -471,8 +482,19 @@ impl ConversationArchiveState {
             .chain(std::iter::once(&record))
             .cloned()
             .collect::<Vec<_>>();
+        let all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
         let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
-        let summary = archive_summary(&all_records, &[], &all_sources);
+        let turns = derive_turn_records_with_context(
+            &handle.conversation_id,
+            &all_records,
+            &all_events,
+            &all_sources,
+            true,
+            Some(&effective_context.provider),
+            &effective_context.provider_session_ids,
+        );
+        write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
+        let summary = archive_summary(&all_records, &turns, &all_sources);
         let record_count = all_records.len() as u64;
         let mut manifest = open_manifest(
             &effective_context,
