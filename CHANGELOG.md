@@ -4,6 +4,17 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.3](https://github.com/wardian-app/Wardian/compare/v0.4.2...v0.4.3) (2026-07-01)
+
+
+### Bug Fixes
+
+* **conversations:** derive request-indexed turns ([#599](https://github.com/wardian-app/Wardian/issues/599)) ([beb0ceb](https://github.com/wardian-app/Wardian/commit/beb0ceb0614e765c0a4d77c7e38acddfc0261b62))
+* **remote:** handle mobile PWA back swipe ([#608](https://github.com/wardian-app/Wardian/issues/608)) ([d788845](https://github.com/wardian-app/Wardian/commit/d7888457385d3b724a5057a913114f1346f6d117))
+* **terminal:** open wrapped links reliably ([#600](https://github.com/wardian-app/Wardian/issues/600)) ([916bc4b](https://github.com/wardian-app/Wardian/commit/916bc4b76ed635557caa31ecec0b7363ac7770d3))
+* **terminal:** serialize native PTY resizes ([#604](https://github.com/wardian-app/Wardian/issues/604)) ([456fcb3](https://github.com/wardian-app/Wardian/commit/456fcb31ac368d8d2609f29f2bae50948c362427))
+* **tests:** wait for custom clone modal readiness ([#595](https://github.com/wardian-app/Wardian/issues/595)) ([14dc477](https://github.com/wardian-app/Wardian/commit/14dc477b24ed2b1ef2d881fd1fb21944d26befd6))
+
 ## [0.4.2](https://github.com/wardian-app/Wardian/compare/v0.4.1...v0.4.2) (2026-06-25)
 
 
