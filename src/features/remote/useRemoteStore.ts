@@ -69,7 +69,7 @@ interface RemoteState {
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
   toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
-  closeAgent: () => void;
+  closeAgent: (options?: { syncHistory?: boolean }) => void;
   setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
@@ -89,6 +89,7 @@ const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
 const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
+const REMOTE_HISTORY_DETAIL_VIEW = "agent_detail";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -445,6 +446,40 @@ const clearPairingUrl = () => {
   window.history.replaceState({}, "", `${window.location.pathname}${window.location.hash}`);
 };
 
+const currentHistoryStateObject = () =>
+  typeof window.history.state === "object" && window.history.state !== null && !Array.isArray(window.history.state)
+    ? window.history.state
+    : {};
+
+const isRemoteAgentDetailHistoryState = (state = window.history.state) =>
+  typeof state === "object" &&
+  state !== null &&
+  !Array.isArray(state) &&
+  (state as { wardian_remote_view?: unknown }).wardian_remote_view === REMOTE_HISTORY_DETAIL_VIEW;
+
+const pushRemoteAgentDetailHistory = (agentId: string) => {
+  try {
+    const currentState = currentHistoryStateObject();
+    if (
+      isRemoteAgentDetailHistoryState(currentState) &&
+      (currentState as { wardian_remote_agent_id?: unknown }).wardian_remote_agent_id === agentId
+    ) {
+      return;
+    }
+    window.history.pushState(
+      {
+        ...currentState,
+        wardian_remote_view: REMOTE_HISTORY_DETAIL_VIEW,
+        wardian_remote_agent_id: agentId,
+      },
+      "",
+      `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    );
+  } catch {
+    // Some embedded browsers restrict history writes; explicit in-app back remains available.
+  }
+};
+
 const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 const authenticateDevice = async (identity: StoredRemoteDeviceIdentity) => {
@@ -693,6 +728,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     clearBackgroundChatRefresh();
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
+    pushRemoteAgentDetailHistory(id);
     set({
       activeAgentId: id,
       activeAgentViewMode: "terminal",
@@ -704,7 +740,14 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       chatError: "",
     });
   },
-  closeAgent() {
+  closeAgent(options) {
+    if (options?.syncHistory !== false && isRemoteAgentDetailHistoryState()) {
+      try {
+        window.history.back();
+      } catch {
+        // If browser history cannot move, still close the in-app detail view.
+      }
+    }
     clearBackgroundChatRefresh();
     lastActiveAgentRefreshKey = null;
     set({

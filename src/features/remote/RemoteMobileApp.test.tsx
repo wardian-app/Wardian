@@ -367,6 +367,43 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
   });
 
+  it("returns from agent detail to the watchlist when browser history goes back", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      mobileCollapsedTeamIds: [],
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
+    expect(screen.getByTestId("remote-agent-detail")).toBeVisible();
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+    });
+
+    expect(useRemoteStore.getState().activeAgentId).toBeNull();
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+  });
+
   it("updates the active remote tab from the compact mobile bottom nav", async () => {
     useRemoteStore.setState({
       activeRemoteTab: "watchlist",
