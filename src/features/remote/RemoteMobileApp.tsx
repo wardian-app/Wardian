@@ -27,6 +27,18 @@ export const RemoteMobileApp: React.FC = () => {
   }, [disconnectStatusStream]);
 
   useEffect(() => {
+    const closeDetailOnHistoryBack = () => {
+      const state = useRemoteStore.getState();
+      if (state.activeAgentId) state.closeAgent({ syncHistory: false });
+    };
+
+    window.addEventListener("popstate", closeDetailOnHistoryBack);
+    return () => {
+      window.removeEventListener("popstate", closeDetailOnHistoryBack);
+    };
+  }, []);
+
+  useEffect(() => {
     const refreshOnResume = () => {
       if (document.visibilityState === "hidden") return;
       if (useRemoteStore.getState().status !== "ready") return;

@@ -243,7 +243,8 @@ is focused on:
 
 The watchlist itself does not expose inline actions. Tap an agent row to open
 the detail view before sending prompts, pausing, resuming, clearing, or killing
-an agent.
+an agent. Use the back button or the phone/browser back gesture to return from
+agent detail to the watchlist without leaving the installed PWA.
 
 Use the send icon in the watchlist header to open the broadcast prompt. Mobile
 broadcasts require confirmation before Wardian sends the prompt to every
