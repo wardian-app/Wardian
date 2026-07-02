@@ -4,7 +4,7 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**A local-first desktop habitat for real AI CLI agents, workflows, and reusable context.**
+**A modular, local-first desktop habitat for agents, workflows, and reusable context.**
 
 [![tests](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg)](https://codecov.io/gh/wardian-app/Wardian)
@@ -20,7 +20,7 @@
 
 > 🚧 **Early development.** Wardian is under active construction. Expect rough edges: APIs, on-disk formats, and UI layouts can change between releases without notice. Pin a version if you depend on it, and please [file an issue](https://github.com/wardian-app/Wardian/issues) when something breaks.
 
-Wardian gives real AI CLI agents durable identity, live terminals, scoped skills, workflow runs, queue evidence, and workspace context in one GUI-first habitat.
+Wardian gives the agent tools you already run durable identity, live terminals, scoped skills, workflow runs, queue evidence, and workspace context in one GUI-first habitat.
 
 Use it to spawn specialized agents, monitor their progress, hand work between them, collect completed output, and automate repeatable flows across providers such as Antigravity, Claude, Codex, and OpenCode. The bundled `wardian` CLI gives agents and scripts a textual control surface for discovering identity, coordinating peers, and controlling Wardian without driving the graphical app.
 

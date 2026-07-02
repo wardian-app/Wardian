@@ -21,7 +21,7 @@ claiming every HabitatLayout feature already exists.
 Use **local-first desktop habitat** as the default public one-line framing for
 Wardian. Public copy should emphasize:
 
-- real local AI CLI agents;
+- bring-your-own agent tools that run locally;
 - durable identity, terminals, provider runtime state, Queue evidence, and
   workflows;
 - reusable local artifacts such as prompts, classes, skills, and workflows;

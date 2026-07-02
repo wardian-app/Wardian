@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.4.2",
   "type": "module",
-  "description": "A local-first desktop habitat for real AI CLI agents, workflows, and reusable context.",
+  "description": "A modular, local-first desktop habitat for agents, workflows, and reusable context.",
   "license": "MIT",
   "repository": {
     "type": "git",

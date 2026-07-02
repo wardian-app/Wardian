@@ -1,6 +1,6 @@
 # User Interface Overview
 
-Wardian features a dense local-first interface for watching, directing, and reorganizing real AI CLI agents. The current shell keeps live terminals, reusable context, workflow state, Queue evidence, and the agent roster visible while Wardian moves toward the HabitatLayout model of Sites, Cohorts, and movable work surfaces.
+Wardian features a dense local-first interface for watching, directing, and reorganizing the agents you run locally. The current shell keeps live terminals, reusable context, workflow state, Queue evidence, and the agent roster visible while Wardian moves toward the HabitatLayout model of Sites, Cohorts, and movable work surfaces.
 
 ## 🧱 The Layout Architecture
 

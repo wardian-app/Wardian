@@ -13,7 +13,7 @@ describe("llms.txt docs contract", () => {
   });
 
   it("summarizes Wardian and points agents to canonical docs", () => {
-    expect(llmsTxt).toContain("local-first desktop habitat for real AI CLI agents");
+    expect(llmsTxt).toContain("modular, local-first desktop habitat for the agents you run locally");
     expect(llmsTxt).toContain("https://docs.wardian.org/guide/cli");
     expect(llmsTxt).toContain("https://docs.wardian.org/developer/provider-runtimes");
   });
