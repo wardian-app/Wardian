@@ -223,14 +223,16 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
         ? resolveGraphColor("var(--color-wardian-accent)", container)
         : color;
 
-      // Check if edge key is already used by a legacy edge (collision)
-      if (!graph.hasEdge(commEdge.id)) {
-        graph.addEdgeWithKey(commEdge.id, commEdge.source, commEdge.target, {
-          size,
-          color: edgeColor,
-          type: "line",
-        });
+      // Topology is the always-on base layer: a manual edge replaces any
+      // legacy lens edge occupying the same canonical key.
+      if (graph.hasEdge(commEdge.id)) {
+        graph.dropEdge(commEdge.id);
       }
+      graph.addEdgeWithKey(commEdge.id, commEdge.source, commEdge.target, {
+        size,
+        color: edgeColor,
+        type: "line",
+      });
     }
 
     renderer.refresh();
