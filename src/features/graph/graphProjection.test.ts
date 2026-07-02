@@ -295,6 +295,30 @@ describe("communication edges", () => {
     expect(rule?.state).toBe("dormant");
   });
 
+  it("treats malformed timestamps as dormant with finite recency", () => {
+    const projection = buildTestGraph({
+      topology: {
+        edges: [{ a: "agent-1", b: "agent-2", origin: "manual" }],
+        ignored_pairs: [],
+        fallback_groups: [],
+      },
+      pairActivity: [
+        {
+          a: "agent-1",
+          b: "agent-2",
+          last_message_at: "not-a-date",
+          active_ask: false,
+          awaiting_reply_from: null,
+        },
+      ],
+      now: NOW,
+    });
+
+    const edge = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+    expect(edge?.state).toBe("dormant");
+    expect(edge?.recency).toBe(0);
+  });
+
   it("derives ghosts from unmapped recent traffic, honoring ignored pairs", () => {
     const projection = buildTestGraph({
       topology: { edges: [], ignored_pairs: [["agent-2", "agent-3"]], fallback_groups: [] },

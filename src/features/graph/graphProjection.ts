@@ -255,12 +255,17 @@ function activityFields(activity: PairActivityEntry | undefined, now: number) {
       : "dormant";
   return {
     state,
-    recency: Math.max(0, Math.min(1, 1 - age / COMM_RECENT_WINDOW_MS)),
+    recency: Number.isFinite(age)
+      ? Math.max(0, Math.min(1, 1 - age / COMM_RECENT_WINDOW_MS))
+      : 0,
     lastMessageAt: activity.last_message_at,
     awaitingReplyFrom: activity.awaiting_reply_from ?? undefined,
   };
 }
 
+// Byte-wise `<` ordering deliberately mirrors the backend's canonical_pair,
+// so comm-edge keys match topology.json exactly. The legacy lens edges in
+// addReason use localeCompare and are a separate key space.
 function pairKey(a: string, b: string): string | null {
   if (!a || !b || a === b) return null;
   return a < b ? `${a}--${b}` : `${b}--${a}`;
