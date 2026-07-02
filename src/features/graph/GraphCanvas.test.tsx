@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
       addEdge: vi.fn(),
       updateEdgeAttributes: vi.fn(),
       hasEdge: vi.fn((id: string) => edgeIds.has(id)),
+      dropEdge: vi.fn((id: string) => edgeIds.delete(id)),
     },
   };
 });
@@ -117,6 +118,10 @@ describe("GraphCanvas", () => {
       mocks.edgeIds.add(id);
     }) as any);
     mocks.graphology.updateEdgeAttributes.mockClear();
+    mocks.graphology.dropEdge.mockClear();
+    mocks.graphology.dropEdge.mockImplementation(((id: string) => {
+      mocks.edgeIds.delete(id);
+    }) as any);
     vi.mocked(Sigma).mockClear();
   });
 
@@ -499,6 +504,43 @@ describe("GraphCanvas", () => {
       size: 2,
       type: "line",
     }));
+  });
+
+  it("replaces a colliding legacy lens edge with the manual comm edge", () => {
+    render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          commEdges: [
+            {
+              id: "a--b",
+              source: "a",
+              target: "b",
+              origin: "manual",
+              state: "ongoing",
+              recency: 1,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    // The legacy "a--b" lens edge renders first, then the manual comm edge
+    // drops it and takes over the canonical key.
+    expect(mocks.graphology.dropEdge).toHaveBeenCalledWith("a--b");
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenLastCalledWith(
+      "a--b",
+      "a",
+      "b",
+      expect.objectContaining({
+        size: 2.5,
+        color: "var(--color-wardian-processing)",
+        type: "line",
+      }),
+    );
   });
 
   it("does not render rule or ghost communication edges", () => {
