@@ -685,29 +685,15 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByText("Garden is not available in the mobile PWA yet.")).toBeVisible();
   });
 
-  it("broadcasts a prompt from an explicit mobile watchlist action", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("does not expose a broadcast prompt from the mobile watchlist", async () => {
     mockRemoteAgentDetailFetch("codex");
 
     render(<RemoteMobileApp />);
 
     expect(await screen.findByRole("button", { name: /Open Coder details/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open broadcast prompt" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Open broadcast prompt" }));
-    await userEvent.type(screen.getByLabelText("Broadcast prompt"), "status please");
-    await userEvent.click(screen.getByRole("button", { name: "Broadcast" }));
-
-    await waitFor(() => {
-      expect(window.confirm).toHaveBeenCalledWith("Broadcast to 1 agent?");
-      const actionCalls = fetchMock.mock.calls.filter(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
-      expect(actionCalls).toHaveLength(1);
-      expect(JSON.parse(actionCalls[0][1]?.body as string)).toEqual({
-        action: "send_prompt",
-        target: "agent-1",
-        prompt: "status please",
-      });
-    });
+    expect(screen.queryByLabelText("Broadcast prompt")).not.toBeInTheDocument();
   });
 
   it("pairs from a QR URL, waits for desktop approval, then authenticates the phone", async () => {

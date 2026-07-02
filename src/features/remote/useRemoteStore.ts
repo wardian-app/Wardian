@@ -84,7 +84,6 @@ interface RemoteState {
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
   appendRemoteTerminalQueueOutput: (sessionId: string, data: string, provider?: string) => void;
   sendPromptToActiveAgent: (prompt: string, inputMode?: RemoteAgentInputMode) => Promise<void>;
-  broadcastPrompt: (prompt: string) => Promise<void>;
   runAgentAction: (action: string, target: string) => Promise<void>;
   runWorkflow: (workflowId: string) => Promise<void>;
 }
@@ -241,17 +240,6 @@ class RemotePairingRejectedError extends Error {
     super(reason);
   }
 }
-
-const sendPromptToTargets = async (prompt: string, agentIds: string[]) => {
-  const results = await Promise.allSettled(agentIds.map((target) => remoteClient.sendPrompt(target, prompt)));
-  const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-  if (!rejected) return;
-  if (rejected.reason instanceof RemoteRequestError && rejected.reason.status === 401) {
-    throw rejected.reason;
-  }
-  const acceptedCount = results.filter((result) => result.status === "fulfilled").length;
-  throw new Error(`${acceptedCount}/${agentIds.length} prompts accepted.`);
-};
 
 let statusStreamSocket: WebSocket | null = null;
 let backgroundChatRefreshTimer: number | null = null;
@@ -894,26 +882,6 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         await get().refreshActiveAgentChat();
       } else {
         await get().refreshActiveAgentTerminal();
-      }
-    } catch (error) {
-      set({ status: statusFromError(error) });
-      throw error;
-    } finally {
-      set({ sending: false });
-    }
-  },
-  async broadcastPrompt(prompt) {
-    const trimmed = prompt.trim();
-    if (!trimmed) return;
-    const agentIds = get().agents.map((agent) => agent.session_id);
-    if (agentIds.length === 0) return;
-    set({ sending: true });
-    try {
-      await sendPromptToTargets(trimmed, agentIds);
-      if (get().activeAgentViewMode === "chat") {
-        await get().refreshActiveAgentChat({ background: true });
-      } else {
-        await get().refreshActiveAgentTerminal({ background: true });
       }
     } catch (error) {
       set({ status: statusFromError(error) });

@@ -149,26 +149,8 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await captureFeatureScreenshot("settings-view.png", page.locator("main"));
   await page.getByRole("button", { name: "Back to remote watchlist" }).click();
   await expect(page.locator('[data-testid="remote-watchlist-view"]')).toBeVisible();
-
-  await page.getByRole("button", { name: "Open broadcast prompt" }).click();
-  await expect(page.getByRole("textbox", { name: "Broadcast prompt" })).toBeVisible();
-  await captureFeatureScreenshot("broadcast-prompt.png", page.locator('[data-testid="remote-watchlist-view"]'));
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toBe("Broadcast to 2 agents?");
-    await dialog.accept();
-  });
-  await page.getByRole("textbox", { name: "Broadcast prompt" }).fill("broadcast status");
-  await page.getByRole("button", { name: "Broadcast", exact: true }).click();
-  await expect
-    .poll(() => actionRequests.filter(({ body }) => remoteActionBody(body).prompt === "broadcast status").length)
-    .toBe(2);
-  expect(
-    actionRequests
-      .map(({ body }) => remoteActionBody(body))
-      .filter((body) => body.prompt === "broadcast status")
-      .map((body) => body.target)
-      .sort(),
-  ).toEqual(["agent-1", "agent-2"]);
+  await expect(page.getByRole("button", { name: "Open broadcast prompt" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Broadcast prompt" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Open Remote Coder details" }).click();
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();

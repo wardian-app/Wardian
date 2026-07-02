@@ -13,8 +13,8 @@ the bottom navigation or changing desktop runtime behavior from a phone.
 
 ## Decisions
 
-- Add Settings as a gear button in the remote watchlist header, beside
-  broadcast and refresh. Do not add Settings to the bottom navigation.
+- Add Settings as a gear button in the remote watchlist header, beside refresh.
+  Do not add Settings to the bottom navigation.
 - Render Settings as a full-screen mobile view with its own Back button.
 - Push a browser history state when Settings opens so the phone or browser back
   gesture closes Settings instead of leaving the installed PWA.
