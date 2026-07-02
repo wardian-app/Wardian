@@ -67,3 +67,37 @@ export function seededHome(scenario: string = "basic"): SeededHome {
     cleanup: () => fs.rmSync(wardianHome, { recursive: true, force: true }),
   };
 }
+
+/**
+ * Seeds a topology.json file in the given WARDIAN_HOME directory.
+ * Ensures canonical pair ordering (lexicographic) as required by the Rust model.
+ *
+ * @param home The WARDIAN_HOME directory path
+ * @param edges Array of [agentId1, agentId2] pairs to create manual edges
+ * @param ignoredPairs Array of [agentId1, agentId2] pairs to ignore (optional)
+ */
+export function seedTopology(
+  home: string,
+  edges: Array<[string, string]>,
+  ignoredPairs: Array<[string, string]> = [],
+) {
+  const canonicalizeEdges = (pairs: Array<[string, string]>) =>
+    pairs.map(([a, b]) => {
+      const [x, y] = a < b ? [a, b] : [b, a];
+      return { a: x, b: y };
+    });
+
+  const topology = {
+    version: 1,
+    edges: canonicalizeEdges(edges).map((pair) => ({
+      ...pair,
+      created_at: new Date().toISOString(),
+    })),
+    ignored_pairs: canonicalizeEdges(ignoredPairs),
+  };
+
+  fs.writeFileSync(
+    path.join(home, "topology.json"),
+    JSON.stringify(topology, null, 2)
+  );
+}
