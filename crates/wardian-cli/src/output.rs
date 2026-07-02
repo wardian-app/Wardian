@@ -15,6 +15,7 @@ const ALL_FIELDS: &[&str] = &[
     "pid",
     "started_at",
     "last_status_at",
+    "visibility",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -154,6 +155,9 @@ fn agent_to_map(agent: &AgentIdentity) -> Map<String, Value> {
             "last_status_at".to_string(),
             Value::String(last_status_at.clone()),
         );
+    }
+    if let Some(visibility) = &agent.visibility {
+        values.insert("visibility".to_string(), Value::String(visibility.clone()));
     }
     values
 }
