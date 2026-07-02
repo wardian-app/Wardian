@@ -809,7 +809,9 @@ async fn resolve_send_targets_scoped(
     }
 
     let Some(home) = crate::utils::fs::get_wardian_home() else {
-        eprintln!("[resolve_send_targets_scoped] wardian home unavailable; send target resolution falling back to global scope");
+        crate::utils::logging::log_debug(
+            "[Wardian] wardian home unavailable; send target resolution falling back to global scope",
+        );
         return global;
     };
     let topology = wardian_core::topology::load_topology(&home);
