@@ -1120,6 +1120,7 @@ mod tests {
                 workspace: Some("D:/repo/worktrees/review".to_string()),
                 last_status_at: None,
                 status_source: crate::identity::StatusSource::Live,
+                visibility: None,
             })
             .agent,
             worktree: Some(AgentWorktreeSummary {

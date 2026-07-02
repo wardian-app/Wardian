@@ -353,7 +353,9 @@ pub enum AgentCommand {
         target: Option<String>,
     },
     List {
-        #[arg(long, default_value = "workspace")]
+        /// auto (community when WARDIAN_SESSION_ID is set, else workspace),
+        /// community, workspace, or all
+        #[arg(long, default_value = "auto")]
         scope: String,
         #[arg(long)]
         status: Option<String>,
@@ -796,6 +798,21 @@ mod tests {
                 && status.as_deref() == Some("idle")
                 && class_name.as_deref() == Some("Coder")
                 && workspace.as_deref() == Some("D:/Development/Wardian")
+        ));
+    }
+
+    #[test]
+    fn parses_agent_list_scope_defaults_to_auto() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "list"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::List {
+                scope,
+                ..
+            }) if scope == "auto"
         ));
     }
 

@@ -200,6 +200,7 @@ mod tests {
             workspace: Some("D:/Development/Wardian".to_string()),
             last_status_at: Some("2026-05-03T20:01:00.000Z".to_string()),
             status_source: StatusSource::Persisted,
+            visibility: None,
         }
     }
 

@@ -3046,6 +3046,7 @@ async fn agent_config_to_identity(
             workspace: (!config.folder.trim().is_empty()).then_some(config.folder.clone()),
             last_status_at: None,
             status_source: StatusSource::Live,
+            visibility: None,
         }
     }
 }
@@ -3218,6 +3219,7 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
         workspace: (!config.folder.trim().is_empty()).then_some(config.folder),
         last_status_at,
         status_source: StatusSource::Live,
+        visibility: None,
     }
 }
 

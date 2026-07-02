@@ -1258,6 +1258,7 @@ mod tests {
             workspace: Some("D:/Development/Wardian".to_string()),
             last_status_at: last_status_at.map(str::to_string),
             status_source: wardian_core::identity::StatusSource::Live,
+            visibility: None,
         }
     }
 
