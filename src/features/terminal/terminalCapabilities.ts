@@ -21,6 +21,8 @@ const TERMINAL_DEVICE_ATTRIBUTES_REPLY = /\u001b\[\?\d+(?:;\d+)*c/g;
 // fragmentation: xterm emits each reply as one complete onData string.
 const TERMINAL_COLOR_REPORT_REPLY =
   /\u001b\[\?997;\d+n|\u001b\[\?\d+(?:;\d+)*c|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
+const LEGACY_MOUSE_REPORT_PREFIX = "\u001b[M";
+const SGR_MOUSE_REPORT = /\u001b\[<(\d+);\d+;\d+[mM]/g;
 // The full set of terminal color / light-dark STATUS sequences in codex's OUTPUT:
 // the OSC 10/11/4 + CSI ?996n probes codex emits, plus the OSC 10/11/4 "rgb:..."
 // reports and the CSI ?997;<n>n light-dark report that the modern ConPTY answers
@@ -123,6 +125,69 @@ export function stripProviderTerminalReportInputs(provider: string | undefined, 
   }
 
   return stripTerminalColorReportInputs(data);
+}
+
+function isPassiveMouseMotionButtonCode(buttonCode: number) {
+  return Number.isFinite(buttonCode) && (buttonCode & 32) === 32;
+}
+
+function isLegacyMousePayloadByte(value: number) {
+  return Number.isFinite(value) && value >= 32 && value <= 255;
+}
+
+// Legacy xterm mouse reports encode button, column, and row as printable bytes
+// offset by 32; xterm's binary callback may emit only that three-byte payload.
+function stripLegacyMouseMotionReports(data: string, options?: { binary?: boolean }) {
+  let output = "";
+  for (let index = 0; index < data.length;) {
+    if (data.startsWith(LEGACY_MOUSE_REPORT_PREFIX, index) && index + 5 < data.length) {
+      const buttonCode = data.charCodeAt(index + 3) - 32;
+      if (isPassiveMouseMotionButtonCode(buttonCode)) {
+        index += 6;
+        continue;
+      }
+    }
+
+    if (options?.binary && index + 2 < data.length) {
+      const button = data.charCodeAt(index);
+      const column = data.charCodeAt(index + 1);
+      const row = data.charCodeAt(index + 2);
+      const buttonCode = button - 32;
+      if (
+        isLegacyMousePayloadByte(button) &&
+        isLegacyMousePayloadByte(column) &&
+        isLegacyMousePayloadByte(row) &&
+        isPassiveMouseMotionButtonCode(buttonCode)
+      ) {
+        index += 3;
+        continue;
+      }
+    }
+
+    output += data[index];
+    index += 1;
+  }
+  return output;
+}
+
+function stripSgrMouseMotionReports(data: string) {
+  return data.replace(SGR_MOUSE_REPORT, (match: string, rawButtonCode: string) => {
+    const buttonCode = Number.parseInt(rawButtonCode, 10);
+    return isPassiveMouseMotionButtonCode(buttonCode) ? "" : match;
+  });
+}
+
+export function filterProviderTerminalInput(
+  provider: string | undefined,
+  data: string,
+  options?: { binary?: boolean },
+) {
+  const reportStripped = stripProviderTerminalReportInputs(provider, data);
+  if (provider !== "opencode" || !reportStripped) {
+    return reportStripped;
+  }
+
+  return stripSgrMouseMotionReports(stripLegacyMouseMotionReports(reportStripped, options));
 }
 
 function codexLightUserMessageBackground(backgroundRgb: string) {

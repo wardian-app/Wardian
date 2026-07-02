@@ -872,6 +872,25 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("does not forward OpenCode passive mouse-motion bytes into the provider composer", async () => {
+    render(<AgentTerminal sessionId="opencode-mouse-motion" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    const onBinary = instance.onBinary.mock.calls[0]?.[0] as ((data: string) => void);
+    mockInvoke.mockClear();
+
+    onBinary(String.fromCharCode(67, 70, 69));
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_binary_input_to_agent", {
+      sessionId: "opencode-mouse-motion",
+      input: [67, 70, 69],
+    });
+  });
+
   it("forwards xterm text input directly through send_input_to_agent", async () => {
     render(<AgentTerminal sessionId="codex-text" theme="dark" />);
 
