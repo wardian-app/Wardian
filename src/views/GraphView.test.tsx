@@ -130,7 +130,7 @@ describe("GraphView", () => {
 
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByText("All Agents")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect mode" })).toBeInTheDocument();
+    expect(screen.getByText("Shift-drag to connect")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toHaveClass("graph-lens--same-team");
     expect(screen.getByRole("button", { name: "shared workspace" })).toHaveClass("graph-lens--shared-workspace");
@@ -266,15 +266,6 @@ describe("GraphView", () => {
     expect(workspaceLens).not.toHaveClass("active");
     fireEvent.click(workspaceLens);
     expect(workspaceLens).toHaveClass("active");
-  });
-
-  it("toggles connect mode", () => {
-    render(<GraphView {...defaultProps} />);
-    const connectBtn = screen.getByRole("button", { name: "Connect mode" });
-
-    expect(connectBtn).not.toHaveClass("active");
-    fireEvent.click(connectBtn);
-    expect(connectBtn).toHaveClass("active");
   });
 
   it("signals the graph canvas to reset its camera", () => {
@@ -449,7 +440,7 @@ describe("GraphView", () => {
       });
     });
 
-    it("delete key with selected rule edge → NOT invoke remove_topology_edge", async () => {
+    it("delete key with selected rule edge → invoke ignore_topology_pair", async () => {
       const { invoke } = await import("@tauri-apps/api/core");
       const mockInvoke = vi.mocked(invoke);
 
@@ -480,10 +471,10 @@ describe("GraphView", () => {
 
       fireEvent.keyDown(window, { key: "Delete" });
 
-      // Should not call remove_topology_edge for rule edges
-      expect(mockInvoke).not.toHaveBeenCalledWith(
-        "remove_topology_edge",
-        expect.objectContaining({ a: "a" })
+      // Should call ignore_topology_pair for rule edges (override behavior)
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "ignore_topology_pair",
+        { a: "a", b: "b" }
       );
     });
 

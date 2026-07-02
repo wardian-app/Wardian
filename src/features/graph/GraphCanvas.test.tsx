@@ -623,14 +623,13 @@ describe("GraphCanvas", () => {
     }));
   });
 
-  it("initiates drag-to-connect on downNode when connectMode is enabled", () => {
+  it("initiates drag-to-connect on downNode when shift key is pressed", () => {
     render(
       <GraphCanvas
         projection={projection}
         onSelectAgent={vi.fn()}
         onOpenAgent={vi.fn()}
         onContextMenu={vi.fn()}
-        connectMode={true}
       />,
     );
 
@@ -640,12 +639,15 @@ describe("GraphCanvas", () => {
     };
     (vi.mocked(Sigma) as any).mock.results[0].value.getCamera = () => mockCamera;
 
-    // Simulate starting a drag from node "a"
-    mocks.handlers.get("downNode")?.({ node: "a" });
+    // Simulate starting a shift-drag from node "a"
+    mocks.handlers.get("downNode")?.({
+      node: "a",
+      event: { original: { shiftKey: true } as MouseEvent },
+    });
     expect(mockCamera.disable).toHaveBeenCalled();
   });
 
-  it("calls onConnect when dragging from one node to another in connectMode", () => {
+  it("calls onConnect when shift-dragging from one node to another", () => {
     const onConnect = vi.fn();
 
     render(
@@ -654,19 +656,21 @@ describe("GraphCanvas", () => {
         onSelectAgent={vi.fn()}
         onOpenAgent={vi.fn()}
         onContextMenu={vi.fn()}
-        connectMode={true}
         onConnect={onConnect}
       />,
     );
 
-    // Simulate drag: down on A, up on B
-    mocks.handlers.get("downNode")?.({ node: "a" });
+    // Simulate shift-drag: down on A with shift key, up on B
+    mocks.handlers.get("downNode")?.({
+      node: "a",
+      event: { original: { shiftKey: true } as MouseEvent },
+    });
     mocks.handlers.get("upNode")?.({ node: "b" });
 
     expect(onConnect).toHaveBeenCalledWith("a", "b");
   });
 
-  it("does not call onConnect when dragging a node back to itself", () => {
+  it("does not call onConnect when shift-dragging a node back to itself", () => {
     const onConnect = vi.fn();
 
     render(
@@ -675,19 +679,21 @@ describe("GraphCanvas", () => {
         onSelectAgent={vi.fn()}
         onOpenAgent={vi.fn()}
         onContextMenu={vi.fn()}
-        connectMode={true}
         onConnect={onConnect}
       />,
     );
 
-    // Simulate drag: down on A, up on A (same node)
-    mocks.handlers.get("downNode")?.({ node: "a" });
+    // Simulate shift-drag: down on A with shift key, up on A (same node)
+    mocks.handlers.get("downNode")?.({
+      node: "a",
+      event: { original: { shiftKey: true } as MouseEvent },
+    });
     mocks.handlers.get("upNode")?.({ node: "a" });
 
     expect(onConnect).not.toHaveBeenCalled();
   });
 
-  it("does not initiate connect when connectMode is disabled", () => {
+  it("does not initiate connect when shift key is not pressed", () => {
     const onConnect = vi.fn();
     render(
       <GraphCanvas
@@ -695,16 +701,18 @@ describe("GraphCanvas", () => {
         onSelectAgent={vi.fn()}
         onOpenAgent={vi.fn()}
         onContextMenu={vi.fn()}
-        connectMode={false}
         onConnect={onConnect}
       />,
     );
 
-    // Simulate trying to drag when connectMode is false
-    mocks.handlers.get("downNode")?.({ node: "a" });
+    // Simulate plain drag (without shift key)
+    mocks.handlers.get("downNode")?.({
+      node: "a",
+      event: { original: { shiftKey: false } as MouseEvent },
+    });
     mocks.handlers.get("upNode")?.({ node: "b" });
 
-    // Should not call onConnect when connectMode is disabled
+    // Should not call onConnect when shift key is not pressed
     expect(onConnect).not.toHaveBeenCalled();
   });
 });

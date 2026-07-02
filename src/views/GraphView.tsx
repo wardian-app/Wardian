@@ -69,7 +69,6 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   );
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [resetSignal, setResetSignal] = useState(0);
-  const [connectMode, setConnectMode] = useState(false);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -167,9 +166,14 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
         }
 
         const edge = projection.commEdges.find((e) => e.id === selectedEdgeId);
-        if (edge && edge.origin === "manual") {
+        if (edge) {
           try {
-            await invoke("remove_topology_edge", { a: edge.source, b: edge.target });
+            if (edge.origin === "manual") {
+              await invoke("remove_topology_edge", { a: edge.source, b: edge.target });
+            } else if (edge.origin === "rule") {
+              // Override a rule-derived edge by ignoring the pair
+              await invoke("ignore_topology_pair", { a: edge.source, b: edge.target });
+            }
             setSelectedEdgeId(null);
           } catch {
             // Silently ignore errors
@@ -232,15 +236,10 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           <div className="graph-scope-count">{filteredCount} agents visible</div>
         </div>
         <div className="graph-lenses" aria-label="Graph relationship lenses">
-          <button
-            type="button"
-            className={`graph-connect-toggle ${connectMode ? "active" : ""}`}
-            aria-label="Connect mode"
-            title="Connect mode (drag to create edges)"
-            onClick={() => setConnectMode(!connectMode)}
-          >
+          <div className="graph-shift-drag-hint" title="Shift-drag between agents to create connections">
             <Plus size={14} strokeWidth={2.2} />
-          </button>
+            <span className="text-muted">Shift-drag to connect</span>
+          </div>
           <div className="graph-lens-separator" />
           {ALL_REASONS.map((reason) => (
             <button
@@ -290,7 +289,6 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               onContextMenu={openContextMenu}
               selectedEdgeId={selectedEdgeId}
               onSelectEdge={setSelectedEdgeId}
-              connectMode={connectMode}
               onConnect={(a, b) => {
                 invoke("add_topology_edge", { a, b }).catch(() => {});
               }}
@@ -350,6 +348,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                 {renderNeighborsPanel(
                   inspectedAgent.id,
                   projection,
+                  topology,
                   props.teams,
                   props.allAgents,
                   (a, b) => {
@@ -360,6 +359,9 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                   },
                   (a, b) => {
                     invoke("ignore_topology_pair", { a, b }).catch(() => {});
+                  },
+                  (a, b) => {
+                    invoke("unignore_topology_pair", { a, b }).catch(() => {});
                   },
                   openContextMenu,
                   pickerOpen,
@@ -427,11 +429,13 @@ function getOriginLabel(edge: CommunicationEdge, teams: AgentTeam[]): string {
 function renderNeighborsPanel(
   agentId: string,
   projection: ReturnType<typeof buildAgentGraph>,
+  topology: TopologySnapshot | null,
   teams: AgentTeam[],
   allAgents: AgentConfig[],
   onAdd: (a: string, b: string) => void,
   onRemove: (a: string, b: string) => void,
   onIgnore: (a: string, b: string) => void,
+  onUnignore: (a: string, b: string) => void,
   onContextMenu: (agentId: string, x: number, y: number) => void,
   pickerOpen: boolean,
   setPickerOpen: (open: boolean) => void,
@@ -480,6 +484,16 @@ function renderNeighborsPanel(
                 ×
               </button>
             )}
+            {edge.origin === "rule" && (
+              <button
+                type="button"
+                className="graph-neighbors-action-btn"
+                onClick={() => onIgnore(edge.source, edge.target)}
+                title="Override (hide this connection)"
+              >
+                ×
+              </button>
+            )}
             {edge.origin === "ghost" && (
               <div className="graph-neighbors-ghost-actions">
                 <button
@@ -504,6 +518,13 @@ function renderNeighborsPanel(
         );
           })}
         </ul>
+      )}
+      {renderOverriddenConnections(
+        agentId,
+        topology,
+        projection,
+        onUnignore,
+        onContextMenu,
       )}
       <div className={edges.length === 0 ? "graph-neighbors-add-standalone" : "graph-neighbors-row graph-neighbors-add-row"}>
         {pickerOpen ? (
@@ -545,6 +566,66 @@ function renderNeighborsPanel(
         )}
       </div>
     </>
+  );
+}
+
+function renderOverriddenConnections(
+  agentId: string,
+  topology: TopologySnapshot | null,
+  projection: ReturnType<typeof buildAgentGraph>,
+  onUnignore: (a: string, b: string) => void,
+  onContextMenu: (agentId: string, x: number, y: number) => void,
+): React.ReactNode {
+  if (!topology || topology.ignored_pairs.length === 0) {
+    return null;
+  }
+
+  // Filter ignored pairs involving the selected agent
+  const relevantPairs = topology.ignored_pairs.filter(
+    ([a, b]) => a === agentId || b === agentId
+  );
+
+  if (relevantPairs.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="graph-overridden-connections">
+      <div className="label-small">Overridden Connections</div>
+      <ul className="graph-neighbors-list">
+        {relevantPairs.map(([a, b]) => {
+          const neighborId = a === agentId ? b : a;
+          const neighbor = projection.nodes.find((node) => node.id === neighborId);
+          const label = neighbor?.label ?? neighborId;
+
+          return (
+            <li key={`${a}--${b}`} className="graph-neighbors-row">
+              <div
+                className="graph-neighbors-row-info"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onContextMenu(neighborId, event.clientX, event.clientY);
+                }}
+              >
+                <span className="graph-neighbors-name">{label}</span>
+                <small className="graph-neighbors-origin graph-origin--overridden">
+                  overridden
+                </small>
+              </div>
+              <button
+                type="button"
+                className="graph-neighbors-action-btn"
+                onClick={() => onUnignore(a, b)}
+                title="Restore this connection"
+              >
+                Restore
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

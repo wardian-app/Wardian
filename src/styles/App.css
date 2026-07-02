@@ -1062,24 +1062,16 @@ select option {
   font-weight: 700;
 }
 
-.graph-connect-toggle {
-  --graph-lens-color: var(--color-wardian-success);
+.graph-shift-drag-hint {
   height: 26px;
   padding: 0 6px;
-  border: 1px solid var(--color-wardian-border);
-  border-radius: 6px;
   color: var(--color-wardian-text-muted);
-  background: var(--color-wardian-input-bg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  pointer-events: auto;
-}
-
-.graph-connect-toggle.active {
-  color: var(--graph-lens-color);
-  border-color: var(--graph-lens-color);
-  background: color-mix(in srgb, var(--graph-lens-color), transparent 90%);
+  gap: 4px;
+  pointer-events: none;
+  font-size: 12px;
 }
 
 .graph-lens-separator {
@@ -1282,6 +1274,21 @@ select option {
   color: var(--color-wardian-text-muted);
   font-size: 11px;
   text-align: center;
+}
+
+.graph-overridden-connections {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-wardian-border);
+}
+
+.graph-overridden-connections > .label-small {
+  margin-bottom: 6px;
+}
+
+.graph-origin--overridden {
+  background: color-mix(in srgb, var(--color-wardian-text-muted), transparent 70%);
+  color: var(--color-wardian-text-muted);
 }
 
 @media (max-width: 760px) {

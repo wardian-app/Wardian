@@ -19,7 +19,6 @@ interface GraphCanvasProps {
   onContextMenu: (agentId: string, x: number, y: number) => void;
   selectedEdgeId?: string | null;
   onSelectEdge?: (edgeId: string) => void;
-  connectMode?: boolean;
   onConnect?: (a: string, b: string) => void;
 }
 
@@ -52,22 +51,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   onContextMenu,
   selectedEdgeId,
   onSelectEdge,
-  connectMode = false,
   onConnect,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
   const rendererRef = useRef<Sigma | null>(null);
   const projectionRef = useRef(projection);
-  const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode });
+  const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect });
   const dragSourceRef = useRef<string | null>(null);
   const renderSignature = useMemo(() => graphRenderSignature(projection), [projection]);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
   const [sigmaInstance, setSigmaInstance] = useState<Sigma | null>(null);
 
   useEffect(() => {
-    handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode };
-  }, [onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode]);
+    handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect };
+  }, [onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect]);
 
   useEffect(() => {
     projectionRef.current = projection;
@@ -95,8 +93,10 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     rendererRef.current = renderer;
     setSigmaInstance(renderer);
 
-    renderer.on("downNode", ({ node }: SigmaNodePayload) => {
-      if (!handlersRef.current.connectMode) return;
+    renderer.on("downNode", ({ node, event }: SigmaPointerPayload) => {
+      const original = event?.original ?? event?.originalEvent;
+      const isShiftKey = original && "shiftKey" in original && original.shiftKey;
+      if (!isShiftKey) return;
       dragSourceRef.current = node;
       renderer.getCamera().disable();
     });
