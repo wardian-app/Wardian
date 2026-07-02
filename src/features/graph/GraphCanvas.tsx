@@ -224,6 +224,10 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
+    // Re-resolve label color for theme changes (matches edge color re-resolution above)
+    const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
+    renderer.setSetting("labelColor", { color: labelColor });
+
     renderer.refresh();
   }, [renderSignature, selectedEdgeId]);
 

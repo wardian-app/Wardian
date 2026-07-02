@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
     animatedReset: vi.fn(),
     kill: vi.fn(),
     refresh: vi.fn(),
+    setSetting: vi.fn(),
     loseContext: vi.fn(),
     webglCanvasCount: 3,
     edgeIds,
@@ -50,6 +51,7 @@ vi.mock("sigma", () => ({
       }),
       kill: mocks.kill,
       refresh: mocks.refresh,
+      setSetting: mocks.setSetting,
     };
   }),
 }));
@@ -103,6 +105,7 @@ describe("GraphCanvas", () => {
     mocks.animatedReset.mockClear();
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
+    mocks.setSetting.mockClear();
     mocks.loseContext.mockClear();
     mocks.graphology.clear.mockClear();
     mocks.graphology.clear.mockImplementation(() => mocks.edgeIds.clear());
