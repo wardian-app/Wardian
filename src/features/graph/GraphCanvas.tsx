@@ -16,6 +16,10 @@ interface GraphCanvasProps {
   onSelectAgent: (agentId: string) => void;
   onOpenAgent: (agentId: string) => void;
   onContextMenu: (agentId: string, x: number, y: number) => void;
+  selectedEdgeId?: string | null;
+  onSelectEdge?: (edgeId: string) => void;
+  connectMode?: boolean;
+  onConnect?: (a: string, b: string) => void;
 }
 
 interface SigmaNodePayload {
@@ -45,18 +49,23 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   onSelectAgent,
   onOpenAgent,
   onContextMenu,
+  selectedEdgeId,
+  onSelectEdge,
+  connectMode = false,
+  onConnect,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
   const rendererRef = useRef<Sigma | null>(null);
   const projectionRef = useRef(projection);
-  const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu });
+  const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode });
+  const dragSourceRef = useRef<string | null>(null);
   const renderSignature = useMemo(() => graphRenderSignature(projection), [projection]);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
 
   useEffect(() => {
-    handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu };
-  }, [onSelectAgent, onOpenAgent, onContextMenu]);
+    handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode };
+  }, [onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode]);
 
   useEffect(() => {
     projectionRef.current = projection;
@@ -76,6 +85,19 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     graphRef.current = graph;
     rendererRef.current = renderer;
 
+    renderer.on("downNode", ({ node }: SigmaNodePayload) => {
+      if (!handlersRef.current.connectMode) return;
+      dragSourceRef.current = node;
+      renderer.getCamera().disable();
+    });
+    renderer.on("upNode", ({ node }: SigmaNodePayload) => {
+      const source = dragSourceRef.current;
+      dragSourceRef.current = null;
+      renderer.getCamera().enable();
+      if (source && node !== source) {
+        handlersRef.current.onConnect?.(source, node);
+      }
+    });
     renderer.on("clickNode", ({ node }: SigmaNodePayload) => {
       const agentId = graphNodeToAgentId(node);
       if (agentId) handlersRef.current.onSelectAgent(agentId);
@@ -91,6 +113,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       original?.preventDefault();
       const point = pointerPosition(original);
       handlersRef.current.onContextMenu(agentId, point.x, point.y);
+    });
+    renderer.on("clickEdge", ({ edge }: SigmaEdgePayload) => {
+      handlersRef.current.onSelectEdge?.(edge);
+    });
+    renderer.getMouseCaptor().on("mouseup", () => {
+      renderer.getCamera().enable();
+      dragSourceRef.current = null;
     });
     renderer.on("enterNode", ({ node, event }: SigmaPointerPayload) => {
       const agentId = graphNodeToAgentId(node);
@@ -184,8 +213,28 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       });
     }
 
+    // Render manual communication edges
+    for (const commEdge of currentProjection.commEdges) {
+      if (commEdge.origin !== "manual") continue;
+      const color = getCommEdgeColor(commEdge, container);
+      const baseSize = commEdge.state === "ongoing" ? 2.5 : 2;
+      const size = selectedEdgeId === commEdge.id ? baseSize + 1 : baseSize;
+      const edgeColor = selectedEdgeId === commEdge.id
+        ? resolveGraphColor("var(--color-wardian-accent)", container)
+        : color;
+
+      // Check if edge key is already used by a legacy edge (collision)
+      if (!graph.hasEdge(commEdge.id)) {
+        graph.addEdgeWithKey(commEdge.id, commEdge.source, commEdge.target, {
+          size,
+          color: edgeColor,
+          type: "line",
+        });
+      }
+    }
+
     renderer.refresh();
-  }, [renderSignature]);
+  }, [renderSignature, selectedEdgeId]);
 
   const previousResetSignalRef = useRef(resetSignal);
   useEffect(() => {
@@ -246,6 +295,13 @@ function graphRenderSignature(projection: AgentGraphProjection) {
       target: edge.target,
       reasons: edge.reasons,
     })),
+    commEdges: projection.commEdges.filter((e) => e.origin === "manual").map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      state: edge.state,
+      recency: edge.recency,
+    })),
   });
 }
 
@@ -279,4 +335,19 @@ function withAlpha(color: string, alpha: number) {
   if (rgb) return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})`;
 
   return color;
+}
+
+function getCommEdgeColor(edge: { state: string; recency: number }, container: HTMLElement) {
+  // ongoing/recent → processing (cyan), dormant → muted
+  const baseColorVar = edge.state === "dormant" ? "var(--color-wardian-text-muted)" : "var(--color-wardian-processing)";
+  const baseColor = resolveGraphColor(baseColorVar, container);
+
+  // Fade by recency: dormant has alpha 0.35, ongoing is full opacity
+  // recent fades based on recency (0 = oldest, 1 = newest)
+  if (edge.state === "ongoing") {
+    return baseColor;
+  }
+
+  const alpha = 0.35 + 0.5 * edge.recency;
+  return withAlpha(baseColor, alpha);
 }

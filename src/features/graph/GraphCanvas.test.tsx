@@ -4,19 +4,26 @@ import Sigma from "sigma";
 import type { AgentGraphProjection } from "./graphProjection";
 import { GraphCanvas } from "./GraphCanvas";
 
-const mocks = vi.hoisted(() => ({
-  handlers: new Map<string, (payload: unknown) => void>(),
-  animatedReset: vi.fn(),
-  kill: vi.fn(),
-  refresh: vi.fn(),
-  loseContext: vi.fn(),
-  webglCanvasCount: 3,
-  graphology: {
-    clear: vi.fn(),
-    addNode: vi.fn(),
-    addEdgeWithKey: vi.fn(),
-  },
-}));
+const mocks = vi.hoisted(() => {
+  const edgeIds = new Set<string>();
+  return {
+    handlers: new Map<string, (payload: unknown) => void>(),
+    animatedReset: vi.fn(),
+    kill: vi.fn(),
+    refresh: vi.fn(),
+    loseContext: vi.fn(),
+    webglCanvasCount: 3,
+    edgeIds,
+    graphology: {
+      clear: vi.fn(() => edgeIds.clear()),
+      addNode: vi.fn(),
+      addEdgeWithKey: vi.fn((id: string) => edgeIds.add(id)),
+      addEdge: vi.fn(),
+      updateEdgeAttributes: vi.fn(),
+      hasEdge: vi.fn((id: string) => edgeIds.has(id)),
+    },
+  };
+});
 
 vi.mock("sigma", () => ({
   default: vi.fn().mockImplementation(function MockSigma() {
@@ -29,7 +36,10 @@ vi.mock("sigma", () => ({
       }) as unknown as HTMLCanvasElement;
     return {
       on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
-      getCamera: () => ({ animatedReset: mocks.animatedReset }),
+      getCamera: () => ({ animatedReset: mocks.animatedReset, disable: vi.fn(), enable: vi.fn() }),
+      getMouseCaptor: () => ({
+        on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
+      }),
       getCanvases: () => ({
         edges: makeCanvas(true),
         nodes: makeCanvas(true),
@@ -94,13 +104,19 @@ const recentProjection: AgentGraphProjection = {
 describe("GraphCanvas", () => {
   beforeEach(() => {
     mocks.handlers.clear();
+    mocks.edgeIds.clear();
     mocks.animatedReset.mockClear();
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
     mocks.loseContext.mockClear();
     mocks.graphology.clear.mockClear();
+    mocks.graphology.clear.mockImplementation(() => mocks.edgeIds.clear());
     mocks.graphology.addNode.mockClear();
     mocks.graphology.addEdgeWithKey.mockClear();
+    mocks.graphology.addEdgeWithKey.mockImplementation(((id: string) => {
+      mocks.edgeIds.add(id);
+    }) as any);
+    mocks.graphology.updateEdgeAttributes.mockClear();
     vi.mocked(Sigma).mockClear();
   });
 
@@ -439,5 +455,250 @@ describe("GraphCanvas", () => {
 
     // Three WebGL layers (edges, nodes, hoverNodes); 2d layers are skipped.
     expect(mocks.loseContext).toHaveBeenCalledTimes(3);
+  });
+
+  it("renders manual communication edges with state-based styling", () => {
+    render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          commEdges: [
+            {
+              id: "a--c",
+              source: "a",
+              target: "c",
+              origin: "manual",
+              state: "ongoing",
+              recency: 1,
+            },
+            {
+              id: "a--d",
+              source: "a",
+              target: "d",
+              origin: "manual",
+              state: "dormant",
+              recency: 0,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    // Ongoing edge: size 2.5, processing color
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--c", "a", "c", expect.objectContaining({
+      size: 2.5,
+      color: "var(--color-wardian-processing)",
+      type: "line",
+    }));
+
+    // Dormant edge: size 2, muted color
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--d", "a", "d", expect.objectContaining({
+      size: 2,
+      type: "line",
+    }));
+  });
+
+  it("does not render rule or ghost communication edges", () => {
+    render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          commEdges: [
+            {
+              id: "a--c",
+              source: "a",
+              target: "c",
+              origin: "rule",
+              ruleId: "team-clique:t1",
+              state: "ongoing",
+              recency: 1,
+            },
+            {
+              id: "a--d",
+              source: "a",
+              target: "d",
+              origin: "ghost",
+              state: "recent",
+              recency: 0.5,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    // Only legacy edges should be added, not comm edges
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.anything());
+    expect(mocks.graphology.addEdgeWithKey).not.toHaveBeenCalledWith("a--c", expect.anything(), expect.anything(), expect.anything());
+    expect(mocks.graphology.addEdgeWithKey).not.toHaveBeenCalledWith("a--d", expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it("calls onSelectEdge when an edge is clicked", () => {
+    const onSelectEdge = vi.fn();
+
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        onSelectEdge={onSelectEdge}
+      />,
+    );
+
+    mocks.handlers.get("clickEdge")?.({ edge: "a--b" });
+
+    expect(onSelectEdge).toHaveBeenCalledWith("a--b");
+  });
+
+  it("highlights selected edges by increasing size and using accent color", () => {
+    const { rerender } = render(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          commEdges: [
+            {
+              id: "a--c",
+              source: "a",
+              target: "c",
+              origin: "manual",
+              state: "ongoing",
+              recency: 1,
+            },
+          ],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    // Initially not selected
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--c", "a", "c", expect.objectContaining({
+      size: 2.5,
+      color: "var(--color-wardian-processing)",
+    }));
+
+    // Now select the edge
+    mocks.graphology.addEdgeWithKey.mockClear();
+    act(() => {
+      rerender(
+        <GraphCanvas
+          projection={{
+            ...projection,
+            commEdges: [
+              {
+                id: "a--c",
+                source: "a",
+                target: "c",
+                origin: "manual",
+                state: "ongoing",
+                recency: 1,
+              },
+            ],
+          }}
+          onSelectAgent={vi.fn()}
+          onOpenAgent={vi.fn()}
+          onContextMenu={vi.fn()}
+          selectedEdgeId="a--c"
+        />,
+      );
+    });
+
+    // Should add edge with larger size and accent color when selected
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--c", "a", "c", expect.objectContaining({
+      size: 3.5,
+      color: "var(--color-wardian-accent)",
+    }));
+  });
+
+  it("initiates drag-to-connect on downNode when connectMode is enabled", () => {
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        connectMode={true}
+      />,
+    );
+
+    const mockCamera = {
+      disable: vi.fn(),
+      enable: vi.fn(),
+    };
+    (vi.mocked(Sigma) as any).mock.results[0].value.getCamera = () => mockCamera;
+
+    // Simulate starting a drag from node "a"
+    mocks.handlers.get("downNode")?.({ node: "a" });
+    expect(mockCamera.disable).toHaveBeenCalled();
+  });
+
+  it("calls onConnect when dragging from one node to another in connectMode", () => {
+    const onConnect = vi.fn();
+
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        connectMode={true}
+        onConnect={onConnect}
+      />,
+    );
+
+    // Simulate drag: down on A, up on B
+    mocks.handlers.get("downNode")?.({ node: "a" });
+    mocks.handlers.get("upNode")?.({ node: "b" });
+
+    expect(onConnect).toHaveBeenCalledWith("a", "b");
+  });
+
+  it("does not call onConnect when dragging a node back to itself", () => {
+    const onConnect = vi.fn();
+
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        connectMode={true}
+        onConnect={onConnect}
+      />,
+    );
+
+    // Simulate drag: down on A, up on A (same node)
+    mocks.handlers.get("downNode")?.({ node: "a" });
+    mocks.handlers.get("upNode")?.({ node: "a" });
+
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("does not initiate connect when connectMode is disabled", () => {
+    const onConnect = vi.fn();
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        connectMode={false}
+        onConnect={onConnect}
+      />,
+    );
+
+    // Simulate trying to drag when connectMode is false
+    mocks.handlers.get("downNode")?.({ node: "a" });
+    mocks.handlers.get("upNode")?.({ node: "b" });
+
+    // Should not call onConnect when connectMode is disabled
+    expect(onConnect).not.toHaveBeenCalled();
   });
 });
