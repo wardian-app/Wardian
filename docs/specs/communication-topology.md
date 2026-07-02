@@ -34,7 +34,7 @@ The topology shapes **default visibility and target resolution, never permission
 - Written atomically (temp file + rename), like the watchlist state file.
 - Only **manual** edges are stored. Rule-derived edges are computed at read time — nothing to sync when team membership changes.
 - Edges reference agent UUIDs. Edges naming deleted agents are ignored at read time and garbage-collected on the next save.
-- `ignored_pairs` holds ghost-edge dismissals (see UI section) so they are durable and inspectable on disk.
+- `ignored_pairs` holds ghost-edge dismissals **and rule-edge overrides** (see UI section) so they are durable and inspectable on disk. An ignored pair suppresses both the ghost suggestion and any rule-derived edge for that pair.
 - A missing or corrupt file resolves to an empty topology — it must never block agent listing.
 
 ### Community resolution (in `wardian-core`)
@@ -100,8 +100,8 @@ New commands, thin wrappers over `wardian-core::topology`:
 
 - `get_topology()` → manual edges + resolved rule-derived edges + ignored pairs, each edge tagged with origin (`manual` | `rule:<id>`).
 - `add_topology_edge(a, b)` / `remove_topology_edge(a, b)` — canonicalize, save atomically, emit `topology_changed`.
-- `ignore_pair(a, b)` / `unignore_pair(a, b)` — ghost dismissal.
-- `get_pair_activity()` → `[{ pair, last_message_at, active_ask, direction }]`, derived from the conversation store; updated incrementally over the existing conversation event stream (no polling).
+- `ignore_pair(a, b)` / `unignore_pair(a, b)` — ghost dismissal and rule-edge override. `resolve_community` skips rule-derived reasons (team-clique, workspace-fallback) for ignored pairs; manual edges are unaffected (creating one implies intent).
+- `get_pair_activity()` → `[{ pair, last_message_at, active_ask, direction }]`, derived from the conversation store; updated incrementally over the existing conversation event stream (no polling). `active_ask` is **time-bounded**: an unresolved ask older than the recency window (1 hour) no longer counts as ongoing — stale asks must not animate forever.
 
 State sovereignty: the frontend never computes or caches topology truth. It renders what the resolver returns over IPC; all mutations round-trip through the backend. The UI remains a passive observer/editor.
 
@@ -109,8 +109,8 @@ State sovereignty: the frontend never computes or caches topology truth. It rend
 
 ### Editing
 
-- **Create edge**: drag from node A to node B (or select A, shift-click B) → `add_topology_edge` → save + `topology_changed` → re-project. Optimistic update is safe since projection is pure.
-- **Delete edge**: select edge, Delete key or context menu → `remove_topology_edge`. Only manual edges are deletable; rule-derived edges show a "managed by <rule>" affordance deep-linking to the rule's editor (v1: team editing).
+- **Create edge**: linking is always available — no modal "connect mode". Shift-drag from node A to node B (plain drag still repositions), or use the inspector's "Add connection…" picker → `add_topology_edge` → save + `topology_changed` → re-project. Optimistic update is safe since projection is pure. A persistent hint in the graph toolbar states the gesture.
+- **Delete edge**: select edge, Delete key or inspector × → manual edges call `remove_topology_edge`; rule-derived edges call `ignore_pair` (an **override**: the team stays intact, the pair is suppressed from graph and CLI community). The inspector lists overridden pairs with a restore action (`unignore_pair`).
 - **Inspector**: the Relationships panel mirrors the community textually — each member with its reason tag, per-row disconnect for manual edges, and an "Add connection…" searchable picker.
 
 ### Two-channel edge encoding
@@ -122,8 +122,9 @@ No channel carries two meanings. Validated via interactive mockups during the de
 | **Texture** (static) | Origin | solid = manual · dotted = rule-derived (rule named in inspector) · sparse dash = unmapped traffic (ghost) |
 | **Color + motion** (dynamic) | Communication state | ongoing = cyan + directed particles · recent = light cyan fading with age (1-hour default window) · dormant = dim gray |
 
-- Nodes keep the existing status system unchanged (color by status via theme variables, selection ring, recency).
+- Nodes keep the existing status color system (theme variables) and selection ring. The recent-activity **halo node is removed** — recency lives on edges now, and the phantom halo read as a larger node and degraded hit-testing. Node labels must resolve color/size from theme variables for readability in both themes.
 - Particles flow in message direction; during a pending ask, the stream drifts toward the agent that owes the reply — direction *is* the pending-ask indicator.
+- **Idle cost is zero**: the animation loop runs only while at least one edge is genuinely ongoing (time-bounded `active_ask`), as a single rAF chain; camera moves redraw within it, never spawn parallel loops. With nothing ongoing, the overlay renders statically on data/camera changes only.
 - The three legacy lenses (`same_team`, `shared_workspace`, `same_worktree`) remain as read-only overlay lenses, off by default; the communication topology is the always-on base layer, separated in the lens toolbar.
 - Cut from v1: edge thickness scaled by message volume (thickness would compete with brightness for the "activity" reading).
 
@@ -171,3 +172,7 @@ Per the E2E layer boundary rules, lowest layer that proves each behavior:
 | Source of truth | `topology.json` in `WARDIAN_HOME` + shared resolver in `wardian-core` | SQLite table; app-as-truth via control API |
 | Team edge visuals | Generic "rule-derived" texture, rule named in inspector | Team-specific styling (rejected: blocks future rule-based relations) |
 | Ghost attention cue | Texture + inspector badge, standard state palette | Amber color (rejected: violated two-channel encoding) |
+| Team edges (rev. 2026-07-02) | Connected by default, deletable via `ignored_pairs` override | Managed/undeletable with deep-link to team editor (rejected after use: users expect direct edge control) |
+| Activity animation (rev. 2026-07-02) | Time-bounded `active_ask`; single rAF only while ongoing | Unbounded asks + always-on loop (rejected: stale asks animated forever, parallel rAF chains lagged the view) |
+| Recent-node halo (rev. 2026-07-02) | Removed (recency encoded on edges) | Keep phantom halo node (rejected: read as larger node, clunky hit-testing) |
+| Edge creation (rev. 2026-07-02) | Always-on Shift-drag + inspector picker, no mode toggle | Modal connect mode (rejected: unclear state) |
