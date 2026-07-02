@@ -77,9 +77,9 @@ export const EdgeActivityOverlay: React.FC<EdgeActivityOverlayProps> = ({
     const renderFrame = () => {
       const now = Date.now();
       renderOverlay(ctx, canvas, sigma, commEdges, now);
-      if (hasOngoing) {
-        rAFRef.current = requestAnimationFrame(renderFrame);
-      }
+      // Clear the pending id when not looping, or scheduleRender stays
+      // permanently coalesced and later camera updates draw nothing.
+      rAFRef.current = hasOngoing ? requestAnimationFrame(renderFrame) : null;
     };
 
     // Schedule a render, coalescing multiple calls into a single pending rAF.

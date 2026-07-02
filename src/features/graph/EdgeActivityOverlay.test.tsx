@@ -273,6 +273,81 @@ describe("EdgeActivityOverlay", () => {
     expect(mocks.cameraHandlers.has("updated")).toBe(true);
   });
 
+  it("schedules a fresh frame for every camera update on an idle graph", () => {
+    // Capture rAF callbacks so we can actually run frames; the default mock
+    // never invokes them, which is exactly how the stale-pending-id bug
+    // (scheduleRender permanently coalesced after a one-shot frame) escaped.
+    const frames: FrameRequestCallback[] = [];
+    let nextId = 1;
+    mocks.requestAnimationFrame.mockImplementation((cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return nextId++;
+    });
+    const sigma = mocks.createSigmaInstance();
+
+    render(
+      <EdgeActivityOverlay
+        sigma={sigma}
+        commEdges={[
+          {
+            id: "a--b",
+            source: "a",
+            target: "b",
+            origin: "rule",
+            state: "dormant",
+            recency: 0,
+          },
+        ]}
+      />
+    );
+
+    const onCameraUpdate = mocks.cameraHandlers.get("updated");
+    expect(onCameraUpdate).toBeDefined();
+
+    onCameraUpdate!({});
+    expect(frames).toHaveLength(1);
+
+    // Run the pending frame; with no ongoing edge it must not reschedule,
+    // and it must clear the pending id so the next camera update draws.
+    frames[0](0);
+    expect(frames).toHaveLength(1);
+
+    onCameraUpdate!({});
+    expect(frames).toHaveLength(2);
+  });
+
+  it("coalesces rapid camera updates into a single pending frame", () => {
+    const frames: FrameRequestCallback[] = [];
+    let nextId = 1;
+    mocks.requestAnimationFrame.mockImplementation((cb: FrameRequestCallback) => {
+      frames.push(cb);
+      return nextId++;
+    });
+    const sigma = mocks.createSigmaInstance();
+
+    render(
+      <EdgeActivityOverlay
+        sigma={sigma}
+        commEdges={[
+          {
+            id: "a--b",
+            source: "a",
+            target: "b",
+            origin: "rule",
+            state: "dormant",
+            recency: 0,
+          },
+        ]}
+      />
+    );
+
+    const onCameraUpdate = mocks.cameraHandlers.get("updated");
+    onCameraUpdate!({});
+    onCameraUpdate!({});
+    onCameraUpdate!({});
+    expect(frames).toHaveLength(1);
+  });
+
   it("handles null canvas context gracefully", () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValueOnce(null);
     const sigma = mocks.createSigmaInstance();
