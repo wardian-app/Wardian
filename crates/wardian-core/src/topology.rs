@@ -161,6 +161,111 @@ impl Topology {
     }
 }
 
+/// Minimal team input, decoupled from CLI/app team representations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMembership {
+    pub id: String,
+    pub agent_ids: Vec<String>,
+}
+
+/// Minimal agent input for the resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRef {
+    pub uuid: String,
+    pub workspace: Option<String>,
+}
+
+pub const REASON_MANUAL: &str = "manual";
+pub const RULE_TEAM_CLIQUE: &str = "team-clique";
+pub const RULE_WORKSPACE_FALLBACK: &str = "workspace-fallback";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommunityMember {
+    pub uuid: String,
+    /// "manual", "rule:team-clique:<team-id>", "rule:workspace-fallback"
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommunityView {
+    pub agent_uuid: String,
+    pub members: Vec<CommunityMember>,
+}
+
+impl CommunityView {
+    pub fn member_uuids(&self) -> BTreeSet<String> {
+        self.members.iter().map(|member| member.uuid.clone()).collect()
+    }
+}
+
+pub fn resolve_community(
+    agent_uuid: &str,
+    topology: &Topology,
+    teams: &[TeamMembership],
+    agents: &[AgentRef],
+) -> CommunityView {
+    use std::collections::BTreeMap;
+
+    let known: BTreeMap<&str, &AgentRef> =
+        agents.iter().map(|agent| (agent.uuid.as_str(), agent)).collect();
+    let mut reasons_by_member: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let push_reason = |uuid: &str, reason: String, map: &mut BTreeMap<String, Vec<String>>| {
+        if uuid == agent_uuid || !known.contains_key(uuid) {
+            return;
+        }
+        let entry = map.entry(uuid.to_string()).or_default();
+        if !entry.contains(&reason) {
+            entry.push(reason);
+        }
+    };
+
+    let manual_neighbors = topology.neighbors(agent_uuid);
+    for neighbor in &manual_neighbors {
+        push_reason(neighbor, REASON_MANUAL.to_string(), &mut reasons_by_member);
+    }
+
+    let my_teams: Vec<&TeamMembership> = teams
+        .iter()
+        .filter(|team| team.agent_ids.iter().any(|id| id == agent_uuid))
+        .collect();
+    for team in &my_teams {
+        for member in &team.agent_ids {
+            push_reason(
+                member,
+                format!("rule:{RULE_TEAM_CLIQUE}:{}", team.id),
+                &mut reasons_by_member,
+            );
+        }
+    }
+
+    let fallback_engaged = manual_neighbors.is_empty() && my_teams.is_empty();
+    if fallback_engaged {
+        if let Some(workspace) = known
+            .get(agent_uuid)
+            .and_then(|me| me.workspace.as_deref())
+            .filter(|workspace| !workspace.is_empty())
+        {
+            for other in agents {
+                if other.workspace.as_deref() == Some(workspace) {
+                    push_reason(
+                        &other.uuid,
+                        format!("rule:{RULE_WORKSPACE_FALLBACK}"),
+                        &mut reasons_by_member,
+                    );
+                }
+            }
+        }
+    }
+
+    CommunityView {
+        agent_uuid: agent_uuid.to_string(),
+        members: reasons_by_member
+            .into_iter()
+            .map(|(uuid, reasons)| CommunityMember { uuid, reasons })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +345,82 @@ mod tests {
         assert_eq!(loaded.edges[0].a, "a");
         assert_eq!(loaded.edges[0].b, "z");
         assert!(!temp.path().join("topology.json.tmp").exists());
+    }
+
+    fn agent(uuid: &str, workspace: Option<&str>) -> AgentRef {
+        AgentRef { uuid: uuid.to_string(), workspace: workspace.map(str::to_string) }
+    }
+
+    #[test]
+    fn community_unions_manual_and_team_clique_with_reasons() {
+        let mut topology = Topology::default();
+        topology.add_edge("me", "friend", "t");
+        let teams = vec![TeamMembership {
+            id: "team-1".into(),
+            agent_ids: vec!["me".into(), "mate".into(), "friend".into()],
+        }];
+        let agents = vec![agent("me", None), agent("friend", None), agent("mate", None)];
+
+        let view = resolve_community("me", &topology, &teams, &agents);
+
+        let friend = view.members.iter().find(|m| m.uuid == "friend").unwrap();
+        assert_eq!(friend.reasons, vec!["manual", "rule:team-clique:team-1"]);
+        let mate = view.members.iter().find(|m| m.uuid == "mate").unwrap();
+        assert_eq!(mate.reasons, vec!["rule:team-clique:team-1"]);
+        assert_eq!(view.members.len(), 2);
+    }
+
+    #[test]
+    fn workspace_fallback_engages_only_when_edgeless_and_teamless() {
+        let topology = Topology::default();
+        let agents = vec![
+            agent("me", Some("D:/ws")),
+            agent("mate", Some("D:/ws")),
+            agent("other", Some("D:/elsewhere")),
+            agent("floating", None),
+        ];
+
+        let view = resolve_community("me", &topology, &[], &agents);
+
+        assert_eq!(view.members.len(), 1);
+        assert_eq!(view.members[0].uuid, "mate");
+        assert_eq!(view.members[0].reasons, vec!["rule:workspace-fallback"]);
+    }
+
+    #[test]
+    fn first_manual_edge_disengages_workspace_fallback() {
+        let mut topology = Topology::default();
+        topology.add_edge("me", "remote", "t");
+        let agents = vec![
+            agent("me", Some("D:/ws")),
+            agent("mate", Some("D:/ws")),
+            agent("remote", Some("D:/elsewhere")),
+        ];
+
+        let view = resolve_community("me", &topology, &[], &agents);
+
+        assert_eq!(view.member_uuids(), ["remote".to_string()].into());
+    }
+
+    #[test]
+    fn team_membership_disengages_workspace_fallback_even_with_no_teammates_visible() {
+        let topology = Topology::default();
+        let teams = vec![TeamMembership { id: "t1".into(), agent_ids: vec!["me".into()] }];
+        let agents = vec![agent("me", Some("D:/ws")), agent("mate", Some("D:/ws"))];
+
+        let view = resolve_community("me", &topology, &teams, &agents);
+
+        assert!(view.members.is_empty());
+    }
+
+    #[test]
+    fn community_excludes_self_and_unknown_agents() {
+        let mut topology = Topology::default();
+        topology.add_edge("me", "me-too-deleted", "t");
+        let agents = vec![agent("me", None)];
+
+        let view = resolve_community("me", &topology, &[], &agents);
+
+        assert!(view.members.is_empty());
     }
 }
