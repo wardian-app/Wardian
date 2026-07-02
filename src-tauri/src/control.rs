@@ -808,7 +808,10 @@ async fn resolve_send_targets_scoped(
         return global;
     }
 
-    let Some(home) = crate::utils::fs::get_wardian_home() else { return global };
+    let Some(home) = crate::utils::fs::get_wardian_home() else {
+        eprintln!("[resolve_send_targets_scoped] wardian home unavailable; send target resolution falling back to global scope");
+        return global;
+    };
     let topology = wardian_core::topology::load_topology(&home);
     let teams = wardian_core::topology::load_team_memberships(&home);
     let agents_map = state.agents.lock().await;
@@ -3316,6 +3319,10 @@ mod tests {
                 _temp: temp,
             }
         }
+
+        fn path(&self) -> &std::path::Path {
+            self._temp.path()
+        }
     }
 
     impl Drop for TestWardianHome {
@@ -4107,12 +4114,10 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_targets_scope_to_sender_community() {
-        let _home = TestWardianHome::new();
-        let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let home = TestWardianHome::new();
         let mut topology = wardian_core::topology::Topology::default();
         topology.add_edge("sender-1", "peer-1", "2026-07-02T00:00:00Z");
-        wardian_core::topology::save_topology(temp.path(), &topology).unwrap();
+        wardian_core::topology::save_topology(home.path(), &topology).unwrap();
 
         let state = AppState::new();
         insert_test_agent(&state, "sender-1", "SenderOne", "Coder").await;
@@ -4140,8 +4145,6 @@ mod tests {
         // Exact UUID targeting always works (soft boundary)
         let exact_uuid = resolve_send_targets_scoped(&state, "stranger-1", Some("sender-1"), false).await;
         assert_eq!(exact_uuid, vec!["stranger-1".to_string()]);
-
-        std::env::remove_var("WARDIAN_HOME");
     }
 
     #[tokio::test]

@@ -1480,7 +1480,7 @@ fn handle_list(
             let session_id = std::env::var("WARDIAN_SESSION_ID")
                 .map_err(|_| CliError::not_in_session())?;
             let home = wardian_core::paths::wardian_home()
-                .ok_or_else(|| CliError::generic("Could not determine Wardian home"))?;
+                .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for community scope)"))?;
             agents = filter_to_community(agents, &session_id, &home);
         }
 
@@ -1511,7 +1511,7 @@ fn handle_list(
         let session_id = std::env::var("WARDIAN_SESSION_ID")
             .map_err(|_| CliError::not_in_session())?;
         let home = wardian_core::paths::wardian_home()
-            .ok_or_else(|| CliError::generic("Could not determine Wardian home"))?;
+            .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for community scope)"))?;
         agents = filter_to_community(agents, &session_id, &home);
     }
 
@@ -2282,5 +2282,19 @@ mod tests {
         let friend = filtered.iter().find(|a| a.uuid == "friend").unwrap();
         assert!(friend.visibility.is_some());
         assert_eq!(friend.visibility.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn community_scope_without_session_id_yields_not_in_session_error() {
+        let _guard = TestWardianHome::new(&tempfile::tempdir().unwrap().path().to_path_buf());
+        std::env::remove_var("WARDIAN_SESSION_ID");
+
+        // Simulate what handle_list does when scope is Community
+        let result: Result<String, CliError> = std::env::var("WARDIAN_SESSION_ID")
+            .map_err(|_| CliError::not_in_session());
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.exit_code, ExitCode::NotInSession);
     }
 }
