@@ -38,7 +38,7 @@ import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
-  stripProviderTerminalReportInputs,
+  filterProviderTerminalInput,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -631,13 +631,15 @@ function TerminalPane({
     };
 
     terminal.onData?.((data) => {
-      const strippedInput = stripProviderTerminalReportInputs(agent.provider ?? undefined, data);
+      const strippedInput = filterProviderTerminalInput(agent.provider ?? undefined, data);
       const input = normalizeRemoteTerminalCompositionInput(strippedInput, compositionInputState);
       if (input.length === 0) return;
       sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
     });
     terminal.onBinary?.((data) => {
-      sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(data) });
+      const input = filterProviderTerminalInput(agent.provider ?? undefined, data, { binary: true });
+      if (input.length === 0) return;
+      sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(input) });
     });
 
     const themeObserver =

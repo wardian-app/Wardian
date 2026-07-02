@@ -12,7 +12,7 @@ import {
   normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
-  stripProviderTerminalReportInputs,
+  filterProviderTerminalInput,
 } from "./terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "./terminalShortcuts";
 import {
@@ -1943,7 +1943,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     // xterm's duplicate auto-reply must not be forwarded -- ConPTY echoes it back
     // into codex's output as visible ]11;rgb / ?997;1n garbage (worst on
     // maximize/resize). Drop the reply; if nothing else remains, skip the send.
-    const input = stripProviderTerminalReportInputs(entry.provider, data);
+    const input = filterProviderTerminalInput(entry.provider, data);
     if (input.length === 0) {
       return;
     }
@@ -1957,7 +1957,11 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   });
 
   term.onBinary((data) => {
-    const input = Array.from(data, (char) => char.charCodeAt(0));
+    const filtered = filterProviderTerminalInput(entry.provider, data, { binary: true });
+    if (filtered.length === 0) {
+      return;
+    }
+    const input = Array.from(filtered, (char) => char.charCodeAt(0));
     invoke("send_binary_input_to_agent", { sessionId, input }).catch(() => {});
   });
 
