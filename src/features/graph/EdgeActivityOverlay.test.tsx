@@ -8,6 +8,7 @@ import type { CommunicationEdge } from "./graphProjection";
 const mockCanvasContext = {
   clearRect: vi.fn(),
   scale: vi.fn(),
+  setTransform: vi.fn(),
   strokeStyle: "",
   lineWidth: 0,
   setLineDash: vi.fn(),
@@ -81,6 +82,10 @@ beforeEach(() => {
     writable: true,
   });
   Object.defineProperty(mockCanvasContext, "scale", {
+    value: vi.fn(),
+    writable: true,
+  });
+  Object.defineProperty(mockCanvasContext, "setTransform", {
     value: vi.fn(),
     writable: true,
   });
@@ -244,7 +249,7 @@ describe("EdgeActivityOverlay", () => {
     expect(mocks.cancelAnimationFrame).toHaveBeenCalled();
   });
 
-  it("does not set up camera listener when there are no ongoing edges", () => {
+  it("sets up camera listener even when there are no ongoing edges", () => {
     mocks.cameraHandlers.clear();
     const sigma = mocks.createSigmaInstance();
 
@@ -264,8 +269,8 @@ describe("EdgeActivityOverlay", () => {
       />
     );
 
-    // Should not register a camera listener for dormant edges
-    expect(mocks.cameraHandlers.has("updated")).toBe(false);
+    // Camera listener should be registered for all edges (including dormant) to track pan/zoom
+    expect(mocks.cameraHandlers.has("updated")).toBe(true);
   });
 
   it("handles null canvas context gracefully", () => {

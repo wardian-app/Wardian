@@ -248,7 +248,8 @@ function buildCommEdges(
 function activityFields(activity: PairActivityEntry | undefined, now: number) {
   if (!activity) return { state: "dormant" as const, recency: 0 };
   const age = now - new Date(activity.last_message_at).getTime();
-  const state: CommEdgeState = activity.active_ask
+  // Time-bound active_ask: only "ongoing" when age is finite, >= 0, and <= window
+  const state: CommEdgeState = activity.active_ask && Number.isFinite(age) && age >= 0 && age <= COMM_RECENT_WINDOW_MS
     ? "ongoing"
     : Number.isFinite(age) && age >= 0 && age <= COMM_RECENT_WINDOW_MS
       ? "recent"

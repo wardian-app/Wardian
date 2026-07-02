@@ -344,4 +344,102 @@ describe("communication edges", () => {
     expect(projection.commEdges.filter((e) => e.origin === "ghost")).toHaveLength(1);
     expect(projection.commEdges[0].id).toBe("agent-1--agent-2");
   });
+
+  describe("active_ask time-bounding (Bug 3 fix)", () => {
+    it("marks rule edge as 'ongoing' when active_ask is true and age is within window", () => {
+      const recentTime = new Date(NOW - 30 * 60 * 1000).toISOString(); // 30 min ago
+      const projection = buildTestGraph({
+        topology: {
+          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          ignored_pairs: [],
+          fallback_groups: [],
+        },
+        pairActivity: [
+          {
+            a: "agent-1",
+            b: "agent-2",
+            last_message_at: recentTime,
+            active_ask: true,
+            awaiting_reply_from: null,
+          },
+        ],
+        now: NOW,
+      });
+
+      const edge = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+      expect(edge).toBeDefined();
+      expect(edge?.state).toBe("ongoing");
+    });
+
+    it("marks rule edge as 'dormant' when active_ask is true but age exceeds window", () => {
+      const oldTime = new Date(NOW - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
+      const projection = buildTestGraph({
+        topology: {
+          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          ignored_pairs: [],
+          fallback_groups: [],
+        },
+        pairActivity: [
+          {
+            a: "agent-1",
+            b: "agent-2",
+            last_message_at: oldTime,
+            active_ask: true,
+            awaiting_reply_from: null,
+          },
+        ],
+        now: NOW,
+      });
+
+      const edge = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+      expect(edge).toBeDefined();
+      expect(edge?.state).toBe("dormant");
+    });
+
+    it("marks rule edge as 'dormant' when active_ask is true but age is negative (future date)", () => {
+      const futureTime = new Date(NOW + 10 * 60 * 1000).toISOString(); // 10 min in future
+      const projection = buildTestGraph({
+        topology: {
+          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          ignored_pairs: [],
+          fallback_groups: [],
+        },
+        pairActivity: [
+          {
+            a: "agent-1",
+            b: "agent-2",
+            last_message_at: futureTime,
+            active_ask: true,
+            awaiting_reply_from: null,
+          },
+        ],
+        now: NOW,
+      });
+
+      const edge = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+      expect(edge).toBeDefined();
+      expect(edge?.state).toBe("dormant");
+    });
+
+    it("marks ghost edge as 'recent' when within window and active_ask is false", () => {
+      const recentTime = new Date(NOW - 30 * 60 * 1000).toISOString();
+      const projection = buildTestGraph({
+        topology: { edges: [], ignored_pairs: [], fallback_groups: [] },
+        pairActivity: [
+          {
+            a: "agent-1",
+            b: "agent-2",
+            last_message_at: recentTime,
+            active_ask: false,
+            awaiting_reply_from: null,
+          },
+        ],
+        now: NOW,
+      });
+
+      const edge = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+      expect(edge).toBeDefined();
+      expect(edge?.state).toBe("recent");
+    });
+  });
 });

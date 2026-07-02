@@ -82,14 +82,22 @@ export const EdgeActivityOverlay: React.FC<EdgeActivityOverlayProps> = ({
       }
     };
 
+    // Schedule a render, coalescing multiple calls into a single pending rAF.
+    // This prevents parallel rAF chains when camera events fire rapidly.
+    const scheduleRender = () => {
+      if (rAFRef.current !== null) return; // Already pending
+      rAFRef.current = requestAnimationFrame(renderFrame);
+    };
+
     // Draw once immediately
     renderFrame();
 
-    // Set up camera listener to redraw on camera updates
-    if (sigma && hasOngoing) {
+    // Set up camera listener to redraw on camera updates (regardless of hasOngoing).
+    // Static rule/ghost dashes must track pan/zoom between data refreshes.
+    if (sigma) {
       const camera = sigma.getCamera();
       const onCameraUpdate = () => {
-        renderFrame();
+        scheduleRender();
       };
       cameraListenerRef.current = onCameraUpdate;
       camera.on("updated", onCameraUpdate);
@@ -144,8 +152,10 @@ function renderOverlay(
   now: number,
 ) {
   const pixelRatio = window.devicePixelRatio || 1;
+  // Reset transform to prevent accumulation on HiDPI displays
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.scale(pixelRatio, pixelRatio);
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
 
   // Get container for color resolution
   const container = sigma.getContainer();
