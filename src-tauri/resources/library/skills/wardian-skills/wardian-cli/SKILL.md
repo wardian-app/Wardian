@@ -14,7 +14,9 @@ or filesystem inspection.
 When a task involves Wardian or another agent:
 
 1. Inspect yourself if you are inside a Wardian-managed terminal.
-2. Inspect the live roster with `--scope all`.
+2. Inspect the live roster with `wardian agent list` (shows your local community by default).
+   Use `--scope all` only when your task genuinely spans communities (e.g., you are an
+   orchestrator wiring up new agents).
 3. Pick an idle, suitable peer by class, provider, workspace, and status.
 4. Spawn an explicit class/provider peer when no suitable peer exists.
 5. Send bounded instructions, wait or poll for completion, collect the response,
@@ -48,9 +50,20 @@ wardian agent list --workspace <absolute-workspace-path>
 wardian agent worktree list
 ```
 
-Default list scope is `workspace` when the caller is a Wardian agent with a
-known workspace; otherwise it falls back to all agents. Use `--scope all` for
-coordination, review routing, or any cross-agent task.
+By default, `wardian agent list` shows your **local community** — the agents you're
+connected to through the communication topology (manual edges, your teams, or your
+workspace if you're not yet wired into the graph). This shapes your default attention
+without restricting capability. Bare-name agent sends resolve within your community
+first, then fall back to global exact match.
+
+**Scope modes:**
+- `--scope auto` (default): community when inside a Wardian-managed session, else workspace.
+- `--scope community`: self + direct topology neighbors (manual edges, team cliques, workspace fallback).
+- `--scope workspace`: all agents in your workspace.
+- `--scope all`: all known agents (use only for orchestration tasks that span communities).
+
+Use `--scope all` only when your task genuinely spans multiple communities or you're
+coordinating across workspaces.
 
 Default output is indented JSON with `schema: 1`. Use `--field` for
 shell-friendly bare values:
@@ -172,9 +185,15 @@ wardian send "stand down" --to all
 wardian send "review this patch" --to reviewer-a1 --wait-until idle --timeout 10m
 ```
 
-Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. Use
-`--wait-until` only with a single-agent target; broadcasts are for messages that
-should not block the current command.
+Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. By default:
+- `--to all` broadcasts to your **local community** (not global).
+- `--to class:Coder` resolves within your community.
+- Bare names resolve community-first; if no community member matches, fall back to global.
+- Explicit UUIDs and exact names always work regardless of topology (soft boundary).
+
+Use `--scope all` on `send` only when you need global broadcast/class resolution for
+orchestration across communities. Use `--wait-until` only with a single-agent target;
+broadcasts are for messages that should not block the current command.
 
 Normal sends preserve inter-agent attribution when Wardian knows the sender.
 Use `--as-command` when delivering provider slash commands that must be the
@@ -259,7 +278,8 @@ is implemented.
 ## Orchestration Pattern
 
 For multi-agent work, route through Wardian instead of handling every subtask in
-one terminal:
+one terminal. Orchestrators typically use `--scope all` to discover and coordinate
+across communities:
 
 ```bash
 wardian agent list --scope all --fields name,class,provider,workspace,status
