@@ -72,6 +72,11 @@ export function seededHome(scenario: string = "basic"): SeededHome {
  * Seeds a topology.json file in the given WARDIAN_HOME directory.
  * Ensures canonical pair ordering (lexicographic) as required by the Rust model.
  *
+ * Like seededHome, this is most useful for native E2E tests where the backend
+ * actually reads WARDIAN_HOME from disk. Browser E2E specs mock the Tauri IPC
+ * layer instead, so they exercise this helper only via its on-disk output
+ * (see the serialization test in e2e/tests/graph-topology.spec.ts).
+ *
  * @param home The WARDIAN_HOME directory path
  * @param edges Array of [agentId1, agentId2] pairs to create manual edges
  * @param ignoredPairs Array of [agentId1, agentId2] pairs to ignore (optional)

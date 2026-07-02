@@ -1,4 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { seedTopology } from "../fixtures/mockAgent";
 
 /**
@@ -20,7 +23,11 @@ interface MockAgent {
 
 async function installGraphTopologyIpcMock(
   page: Page,
-  topology: { edges: Array<{ a: string; b: string; origin: string }>; ignored_pairs: [string, string][] },
+  topology: {
+    edges: Array<{ a: string; b: string; origin: string }>;
+    ignored_pairs: [string, string][];
+    fallback_groups: string[][];
+  },
   agents: MockAgent[],
 ) {
   await page.addInitScript(({ topologyFixture, agentsFixture }) => {
@@ -314,5 +321,30 @@ test.describe("Graph Topology", () => {
       true,
       "@native-only: Delete button click invokes remove_topology_edge, which requires real Tauri IPC to persist state changes. Browser mock cannot verify the backend effect."
     );
+  });
+});
+
+test.describe("seedTopology fixture", () => {
+  test("writes canonically ordered topology.json the Rust loader can parse", () => {
+    // Runs in the Playwright Node context: the browser layer never reads
+    // topology.json (the backend does), so the helper is verified by its
+    // on-disk output here and consumed for real by native E2E tests.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-topo-"));
+    try {
+      seedTopology(home, [["zeta", "alpha"]], [["mike", "kilo"]]);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(home, "topology.json"), "utf8"),
+      );
+      expect(written.version).toBe(1);
+      expect(written.edges).toHaveLength(1);
+      expect(written.edges[0].a).toBe("alpha");
+      expect(written.edges[0].b).toBe("zeta");
+      expect(typeof written.edges[0].created_at).toBe("string");
+      expect(Number.isNaN(Date.parse(written.edges[0].created_at))).toBe(false);
+      expect(written.ignored_pairs).toEqual([{ a: "kilo", b: "mike" }]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
