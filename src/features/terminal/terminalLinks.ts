@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Terminal, ILink, IBufferLine } from "@xterm/xterm";
 import type { ExternalEditorSetting } from "../../types/settings";
 
-type ExternalEditorLaunchSettings = {
+export type ExternalEditorLaunchSettings = {
   external_editor: ExternalEditorSetting;
   external_editor_custom_executable: string | null;
 };
@@ -103,6 +103,11 @@ function openBrowserLink(url: string, options: TerminalLinkProviderOptions) {
       options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
     }
   });
+}
+
+function exactLinkForTarget(links: TerminalDetectedLink[], target: string) {
+  const normalizedTarget = normalizeFileToken(trimTerminalToken(target));
+  return links.find((link) => link.startIndex === 0 && link.text === normalizedTarget) ?? null;
 }
 
 function trimTerminalToken(token: string) {
@@ -484,6 +489,37 @@ export async function findValidatedTerminalLinks(
   return links.sort((a, b) => a.startIndex - b.startIndex);
 }
 
+export async function resolveTerminalLinkTarget(
+  target: string,
+  options: Pick<TerminalLinkProviderOptions, "getBasePath" | "validateFile"> = {},
+): Promise<TerminalDetectedLink | null> {
+  const basePath = options.getBasePath?.();
+  const parsedLink = exactLinkForTarget(findTerminalLinks(target, basePath), target);
+  if (parsedLink) return parsedLink;
+
+  const validateFile = options.validateFile ?? defaultValidateFile;
+  const validatedLink = exactLinkForTarget(await findValidatedTerminalLinks(target, basePath, validateFile), target);
+  return validatedLink;
+}
+
+export function openTerminalDetectedLink(
+  link: Pick<TerminalDetectedLink, "kind" | "target" | "text">,
+  options: Pick<TerminalLinkProviderOptions, "getExternalEditor" | "onOpenError" | "openFile" | "openUrl">,
+) {
+  if (link.kind === "url") {
+    openBrowserLink(link.target, {
+      getExternalEditor: options.getExternalEditor,
+      onOpenError: options.onOpenError,
+      openFile: options.openFile,
+      openUrl: options.openUrl,
+    });
+    return;
+  }
+  (options.openFile ?? defaultOpenFile)(link.target, options.getExternalEditor()).catch((error) => {
+    options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
+  });
+}
+
 export function installTerminalLinkProvider(term: Terminal, options: TerminalLinkProviderOptions) {
   if (term.options) {
     term.options.linkHandler = {
@@ -503,13 +539,7 @@ export function installTerminalLinkProvider(term: Terminal, options: TerminalLin
             underline: true,
           },
           activate: () => {
-            if (link.kind === "url") {
-              openBrowserLink(link.target, options);
-              return;
-            }
-            (options.openFile ?? defaultOpenFile)(link.target, options.getExternalEditor()).catch((error) => {
-              options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
-            });
+            openTerminalDetectedLink(link, options);
           },
         })))
         .then((links) => {

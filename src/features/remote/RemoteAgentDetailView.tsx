@@ -1069,7 +1069,7 @@ function shouldShowRemoteChatEvent(event: AgentChatEvent): boolean {
     return false;
   }
   if (event.kind !== "status") return true;
-  return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+  return event.status === "failed" || event.status === "cancelled";
 }
 
 function hasMeaningfulToolIdentity(event: AgentChatEvent): boolean {
