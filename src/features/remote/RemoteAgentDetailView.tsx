@@ -456,7 +456,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     >
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="Back to remote agents" onClick={closeAgent} className={iconButtonClass}>
+          <button type="button" aria-label="Back to remote agents" onClick={() => closeAgent()} className={iconButtonClass}>
             <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <div className="min-w-0 flex-1">
