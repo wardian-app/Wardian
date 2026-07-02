@@ -266,6 +266,76 @@ pub fn resolve_community(
     }
 }
 
+/// Read team memberships from `<home>/watchlists/index.json`. Missing/corrupt → empty.
+pub fn load_team_memberships(home: &Path) -> Vec<TeamMembership> {
+    let path = home.join("watchlists").join("index.json");
+    let Ok(content) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else { return Vec::new() };
+    value
+        .get("teams")
+        .and_then(|teams| teams.as_array())
+        .map(|teams| {
+            teams
+                .iter()
+                .filter_map(|team| {
+                    let id = team.get("id")?.as_str()?.to_string();
+                    let agent_ids = team
+                        .get("agentIds")
+                        .or_else(|| team.get("agent_ids"))?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect();
+                    Some(TeamMembership { id, agent_ids })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairActivity {
+    pub a: String,
+    pub b: String,
+    pub last_message_at: String,
+    pub active_ask: bool,
+    /// UUID of the agent that owes a reply on an open ask, if any.
+    pub awaiting_reply_from: Option<String>,
+}
+
+/// Aggregate interaction records into per-pair activity.
+pub fn pair_activity_from_records(
+    records: &[crate::control::InteractionRecord],
+) -> Vec<PairActivity> {
+    use crate::control::{InteractionKind, InteractionStatus};
+    use std::collections::BTreeMap;
+
+    let mut by_pair: BTreeMap<(String, String), PairActivity> = BTreeMap::new();
+    for record in records {
+        let Some(sender) = record.sender_session_id.as_deref() else { continue };
+        for target in &record.target_session_ids {
+            let Some((a, b)) = canonical_pair(sender, target) else { continue };
+            let entry = by_pair.entry((a.clone(), b.clone())).or_insert(PairActivity {
+                a,
+                b,
+                last_message_at: record.created_at.clone(),
+                active_ask: false,
+                awaiting_reply_from: None,
+            });
+            if record.created_at > entry.last_message_at {
+                entry.last_message_at = record.created_at.clone();
+            }
+            if record.kind == InteractionKind::Task
+                && record.status == InteractionStatus::AwaitingReply
+            {
+                entry.active_ask = true;
+                entry.awaiting_reply_from = Some(target.clone());
+            }
+        }
+    }
+    by_pair.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +492,81 @@ mod tests {
         let view = resolve_community("me", &topology, &[], &agents);
 
         assert!(view.members.is_empty());
+    }
+
+    #[test]
+    fn load_team_memberships_reads_v2_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("watchlists");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.json"),
+            r#"{"version":2,"teams":[{"id":"t1","name":"Review","agentIds":["a","b"]}],"watchlists":[]}"#,
+        )
+        .unwrap();
+
+        let teams = load_team_memberships(temp.path());
+
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].id, "t1");
+        assert_eq!(teams[0].agent_ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn load_team_memberships_missing_file_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_team_memberships(temp.path()).is_empty());
+    }
+
+    fn record(
+        kind: crate::control::InteractionKind,
+        sender: &str,
+        target: &str,
+        status: crate::control::InteractionStatus,
+        created_at: &str,
+    ) -> crate::control::InteractionRecord {
+        crate::control::InteractionRecord {
+            id: format!("int_{created_at}"),
+            kind,
+            sender_session_id: Some(sender.to_string()),
+            target_session_ids: vec![target.to_string()],
+            status,
+            trigger_policy: crate::control::InteractionTriggerPolicy::NotifyOnly,
+            body_ref: crate::control::InteractionBodyRef::Inline { body: "x".into() },
+            parent_interaction_id: None,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn pair_activity_aggregates_last_message_and_open_asks() {
+        use crate::control::{InteractionKind, InteractionStatus};
+        let records = vec![
+            record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "2026-07-02T10:00:00Z"),
+            record(InteractionKind::Message, "b", "a", InteractionStatus::Completed, "2026-07-02T11:00:00Z"),
+            record(InteractionKind::Task, "a", "c", InteractionStatus::AwaitingReply, "2026-07-02T09:00:00Z"),
+        ];
+
+        let mut activity = pair_activity_from_records(&records);
+        activity.sort_by(|l, r| (&l.a, &l.b).cmp(&(&r.a, &r.b)));
+
+        assert_eq!(activity.len(), 2);
+        let ab = &activity[0];
+        assert_eq!((ab.a.as_str(), ab.b.as_str()), ("a", "b"));
+        assert_eq!(ab.last_message_at, "2026-07-02T11:00:00Z");
+        assert!(!ab.active_ask);
+        let ac = &activity[1];
+        assert!(ac.active_ask);
+        assert_eq!(ac.awaiting_reply_from.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn pair_activity_skips_senderless_records() {
+        use crate::control::{InteractionKind, InteractionStatus};
+        let mut senderless = record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "t");
+        senderless.sender_session_id = None;
+        assert!(pair_activity_from_records(&[senderless]).is_empty());
     }
 }
