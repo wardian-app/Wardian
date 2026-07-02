@@ -1006,6 +1006,7 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
                 approval_action,
                 until,
                 timeout,
+                target_scope: Some(args.scope.as_str()),
             },
         )
         .map_err(control_error)?;
@@ -1024,15 +1025,24 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
             && queue_policy == QueuePolicy::QueueIfBusy
             && approval_action.is_none()
         {
-            live::send_message(&args.to, &message, args.thread.as_deref())
-        } else {
-            live::send_message_with_delivery_options(
+            live::send_message_with_delivery_and_scope_options(
                 &args.to,
                 &message,
                 args.thread.as_deref(),
                 input_mode,
                 queue_policy,
                 approval_action,
+                Some(args.scope.as_str()),
+            )
+        } else {
+            live::send_message_with_delivery_and_scope_options(
+                &args.to,
+                &message,
+                args.thread.as_deref(),
+                input_mode,
+                queue_policy,
+                approval_action,
+                Some(args.scope.as_str()),
             )
         }
         .map_err(control_error)?;

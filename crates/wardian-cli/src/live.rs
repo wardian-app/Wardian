@@ -39,6 +39,7 @@ struct SendAndWatchRequest<'a> {
     tail_bytes: Option<usize>,
     timeout: Duration,
     output_echo_guard: Option<&'a str>,
+    target_scope: Option<&'a str>,
 }
 
 pub struct SendMessageAndWatchOptions<'a> {
@@ -48,6 +49,7 @@ pub struct SendMessageAndWatchOptions<'a> {
     pub approval_action: Option<ApprovalAction>,
     pub until: &'a str,
     pub timeout: Duration,
+    pub target_scope: Option<&'a str>,
 }
 
 pub struct SendMessageAndWatchConditionOptions<'a> {
@@ -58,6 +60,7 @@ pub struct SendMessageAndWatchConditionOptions<'a> {
     pub condition: &'a str,
     pub tail_bytes: Option<usize>,
     pub timeout: Duration,
+    pub target_scope: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,6 +453,26 @@ pub fn send_message_with_delivery_options(
     queue_policy: QueuePolicy,
     approval_action: Option<ApprovalAction>,
 ) -> io::Result<SendMessageResponse> {
+    send_message_with_delivery_and_scope_options(
+        target,
+        message,
+        thread,
+        input_mode,
+        queue_policy,
+        approval_action,
+        None,
+    )
+}
+
+pub fn send_message_with_delivery_and_scope_options(
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    input_mode: MessageInputMode,
+    queue_policy: QueuePolicy,
+    approval_action: Option<ApprovalAction>,
+    target_scope: Option<&str>,
+) -> io::Result<SendMessageResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
@@ -462,6 +485,7 @@ pub fn send_message_with_delivery_options(
             queue_policy,
             approval_action,
             origin: current_message_origin(),
+            target_scope: target_scope.map(str::to_string),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
@@ -577,6 +601,7 @@ pub fn send_message_and_watch(
             condition: &format!("status:{}", options.until),
             tail_bytes: Some(4096),
             timeout: options.timeout,
+            target_scope: options.target_scope,
         },
     )
 }
@@ -603,6 +628,7 @@ pub fn ask_agent(
         tail_bytes,
         timeout,
         output_echo_guard: ask_prompt_echo_guard(condition, message),
+        target_scope: None,
     })
 }
 
@@ -656,6 +682,7 @@ fn send_message_and_watch_condition(
         tail_bytes: options.tail_bytes,
         timeout: options.timeout,
         output_echo_guard: None,
+        target_scope: options.target_scope,
     })
 }
 
@@ -676,13 +703,14 @@ fn send_message_and_watch_condition_with_output_echo_guard(
         false,
         Duration::from_secs(5),
     )?;
-    let sent = send_message_with_delivery_options(
+    let sent = send_message_with_delivery_and_scope_options(
         request.target,
         request.message,
         request.thread,
         request.input_mode,
         request.queue_policy,
         request.approval_action,
+        request.target_scope,
     )?;
     let started_at = Instant::now();
     let queued_message_ids = queued_delivery_message_ids(&sent.delivery);

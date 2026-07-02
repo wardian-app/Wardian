@@ -243,6 +243,10 @@ pub struct SendArgs {
     /// Maximum time to wait, e.g. 30s, 10m, or 1000ms
     #[arg(long, default_value = "10m")]
     pub timeout: String,
+
+    /// Target resolution scope for broadcast/class targets: community (default) or all
+    #[arg(long, value_parser = ["community", "all"], default_value = "community")]
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -754,6 +758,33 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_send_scope_all() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "send",
+            "hi",
+            "--to",
+            "all",
+            "--scope",
+            "all",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+        assert_eq!(args.scope, "all");
+    }
+
+    #[test]
+    fn send_scope_defaults_to_community() {
+        let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "agent-1"]).unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+        assert_eq!(args.scope, "community");
     }
 
     #[test]
