@@ -142,6 +142,12 @@ describe("GraphCanvas", () => {
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.objectContaining({
       label: "same_team",
     }));
+    // Label color must be re-applied on render so labels track theme changes
+    // in lockstep with edge colors.
+    expect(mocks.setSetting).toHaveBeenCalledWith(
+      "labelColor",
+      expect.objectContaining({ color: expect.any(String) }),
+    );
   });
 
   it("styles edge relationships by reason without changing edge thickness", () => {

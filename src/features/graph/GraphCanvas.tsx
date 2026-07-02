@@ -87,6 +87,8 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       labelColor: { color: labelColor },
       labelSize: 12,
       labelFont: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      // Agent graphs stay small (tens of nodes), so every label can render
+      // at every zoom level without clutter or measurable cost.
       labelRenderedSizeThreshold: 0,
     });
     graphRef.current = graph;
