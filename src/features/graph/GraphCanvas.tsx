@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
 import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
+import { EdgeActivityOverlay } from "./EdgeActivityOverlay";
 
 const RECENT_HALO_SUFFIX = "__recent_halo";
 const EDGE_REASON_COLORS: Record<GraphRelationshipReason, string> = {
@@ -62,6 +63,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const dragSourceRef = useRef<string | null>(null);
   const renderSignature = useMemo(() => graphRenderSignature(projection), [projection]);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
+  const [sigmaInstance, setSigmaInstance] = useState<Sigma | null>(null);
 
   useEffect(() => {
     handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect, connectMode };
@@ -84,6 +86,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     });
     graphRef.current = graph;
     rendererRef.current = renderer;
+    setSigmaInstance(renderer);
 
     renderer.on("downNode", ({ node }: SigmaNodePayload) => {
       if (!handlersRef.current.connectMode) return;
@@ -162,6 +165,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       }
       rendererRef.current = null;
       graphRef.current = null;
+      setSigmaInstance(null);
     };
   }, []);
 
@@ -247,7 +251,9 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
   return (
     <div className="graph-canvas-frame">
-      <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas" />
+      <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas">
+        <EdgeActivityOverlay sigma={sigmaInstance} commEdges={projection.commEdges} />
+      </div>
       {tooltip && (
         <div
           className="graph-tooltip"
