@@ -680,6 +680,7 @@ mod tests {
             queue_policy: QueuePolicy::QueueIfBusy,
             approval_action: None,
             origin: None,
+            target_scope: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"send_message""#));
@@ -699,6 +700,7 @@ mod tests {
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -720,6 +722,7 @@ mod tests {
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -739,6 +742,7 @@ mod tests {
                 option: "allow_once".to_string(),
             }),
             origin: None,
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -766,6 +770,7 @@ mod tests {
                 queue_policy: QueuePolicy::QueueIfBusy,
                 approval_action: None,
                 origin: None,
+                target_scope: None,
             }
         );
     }
