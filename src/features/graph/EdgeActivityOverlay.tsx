@@ -7,6 +7,7 @@ import {
   particleDirection,
   type OverlayEdge,
 } from "./edgeOverlayGeometry";
+import { resolveGraphColor, withAlpha } from "./graphColorUtils";
 
 interface EdgeActivityOverlayProps {
   sigma: Sigma | null;
@@ -259,40 +260,4 @@ function getStateColor(
       : STATE_ALPHAS[state];
 
   return withAlpha(baseColor, alpha);
-}
-
-/**
- * Resolve CSS variable references to actual colors.
- * Mirrors the implementation in GraphCanvas.
- */
-function resolveGraphColor(color: string, container: HTMLElement): string {
-  const match = color.match(/^var\((--[^,\s)]+)(?:,\s*([^)]+))?\)$/);
-  if (!match) return color;
-
-  const computed = container.ownerDocument.defaultView
-    ?.getComputedStyle(container.ownerDocument.documentElement)
-    .getPropertyValue(match[1])
-    .trim();
-
-  return computed || match[2]?.trim() || color;
-}
-
-/**
- * Convert a hex or rgba color to rgba with the given alpha.
- * Mirrors the implementation in GraphCanvas.
- */
-function withAlpha(color: string, alpha: number): string {
-  const hex = color.match(/^#([0-9a-f]{6})$/i);
-  if (hex) {
-    const value = hex[1];
-    const r = Number.parseInt(value.slice(0, 2), 16);
-    const g = Number.parseInt(value.slice(2, 4), 16);
-    const b = Number.parseInt(value.slice(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-
-  const rgb = color.match(/^rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)/i);
-  if (rgb) return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})`;
-
-  return color;
 }

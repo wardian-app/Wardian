@@ -3,6 +3,7 @@ import Graph from "graphology";
 import Sigma from "sigma";
 import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
 import { EdgeActivityOverlay } from "./EdgeActivityOverlay";
+import { resolveGraphColor, withAlpha } from "./graphColorUtils";
 
 const RECENT_HALO_SUFFIX = "__recent_halo";
 const EDGE_REASON_COLORS: Record<GraphRelationshipReason, string> = {
@@ -313,36 +314,8 @@ function graphRenderSignature(projection: AgentGraphProjection) {
   });
 }
 
-function resolveGraphColor(color: string, container: HTMLElement) {
-  const match = color.match(/^var\((--[^,\s)]+)(?:,\s*([^)]+))?\)$/);
-  if (!match) return color;
-
-  const computed = container.ownerDocument.defaultView
-    ?.getComputedStyle(container.ownerDocument.documentElement)
-    .getPropertyValue(match[1])
-    .trim();
-
-  return computed || match[2]?.trim() || color;
-}
-
 function formatRelationshipReason(reason: GraphRelationshipReason) {
   return reason.replace(/_/g, " ");
-}
-
-function withAlpha(color: string, alpha: number) {
-  const hex = color.match(/^#([0-9a-f]{6})$/i);
-  if (hex) {
-    const value = hex[1];
-    const r = Number.parseInt(value.slice(0, 2), 16);
-    const g = Number.parseInt(value.slice(2, 4), 16);
-    const b = Number.parseInt(value.slice(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-
-  const rgb = color.match(/^rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)/i);
-  if (rgb) return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})`;
-
-  return color;
 }
 
 function getCommEdgeColor(edge: { state: string; recency: number }, container: HTMLElement) {
