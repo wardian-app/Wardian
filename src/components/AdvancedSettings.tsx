@@ -75,6 +75,23 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
               </select>
           </div>
 
+          <div>
+            <label htmlFor="agent-conversation-logging" className="block text-[10px] font-bold text-muted-neutral mb-1">Conversation Logging</label>
+            <select
+              id="agent-conversation-logging"
+              className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+              value={config.conversation_logging || "default"}
+              onChange={(e) => updateField("conversation_logging", e.target.value as AgentConfig["conversation_logging"])}
+            >
+              <option value="default">Use global setting</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+            <p className="mt-1 text-[10px] text-muted-neutral/80">
+              Controls persisted conversation archives for this agent.
+            </p>
+          </div>
+
           {showCopyFullCommand && config.session_id && config.folder && (
             <div>
               <button

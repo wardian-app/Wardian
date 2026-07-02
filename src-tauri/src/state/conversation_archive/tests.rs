@@ -101,21 +101,21 @@ fn effective_logging_respects_agent_override_before_global_default() {
     assert_eq!(
         effective_conversation_logging(
             ConversationLoggingSetting::Disabled,
-            AgentConversationLoggingSetting::Default,
+            AgentConversationLoggingSetting::Default
         ),
         ConversationLoggingSetting::Disabled
     );
     assert_eq!(
         effective_conversation_logging(
             ConversationLoggingSetting::Disabled,
-            AgentConversationLoggingSetting::Enabled,
+            AgentConversationLoggingSetting::Enabled
         ),
         ConversationLoggingSetting::Enabled
     );
     assert_eq!(
         effective_conversation_logging(
             ConversationLoggingSetting::Enabled,
-            AgentConversationLoggingSetting::Disabled,
+            AgentConversationLoggingSetting::Disabled
         ),
         ConversationLoggingSetting::Disabled
     );

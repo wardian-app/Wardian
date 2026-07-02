@@ -66,6 +66,12 @@ describe("requiresRestart", () => {
         expect(requiresRestart(config1, config2)).toBe(false);
     });
 
+    it("does not require restart when per-agent conversation logging changes", () => {
+        const config1: AgentConfig = { ...baseConfig, conversation_logging: "default" };
+        const config2: AgentConfig = { ...baseConfig, conversation_logging: "disabled" };
+        expect(requiresRestart(config1, config2)).toBe(false);
+    });
+
     it("returns true when nested provider_config changes", () => {
         const config1: AgentConfig = {
             ...baseConfig,

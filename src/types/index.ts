@@ -162,6 +162,7 @@ export interface AgentConfig {
     output_format?: "text" | "json" | "stream-json";
     custom_args?: string;
     session_persistence?: "default" | "fresh" | "resume";
+    conversation_logging?: "default" | "enabled" | "disabled";
 
     // Claude-specific fields
     permission_mode?: "default" | "plan" | "auto-accept";
