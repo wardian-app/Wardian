@@ -151,6 +151,7 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await expect(page.locator('[data-testid="remote-watchlist-view"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Open broadcast prompt" })).toHaveCount(0);
   await expect(page.getByRole("textbox", { name: "Broadcast prompt" })).toHaveCount(0);
+  await captureFeatureScreenshot("watchlist-no-broadcast.png", page.locator('[data-testid="remote-watchlist-view"]'));
 
   await page.getByRole("button", { name: "Open Remote Coder details" }).click();
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
