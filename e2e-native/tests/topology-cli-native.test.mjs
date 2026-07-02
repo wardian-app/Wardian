@@ -224,13 +224,14 @@ test("native CLI community scoping reads app-written topology", { timeout: 18000
   await addTopologyEdge(session.driver, ALPHA_SESSION_ID, BETA_SESSION_ID);
   await watchStep(harness, "Added topology edge between alpha and beta");
 
-  // Run CLI as alpha (using WARDIAN_SESSION_ID) with default scope
-  // Should see alpha + beta (community), but not gamma
+  // Run CLI as alpha (using WARDIAN_SESSION_ID) with default scope.
+  // Should see alpha + beta (community), but not gamma. Uses --verbose to
+  // prove the spec's "verbose output adds the visibility reason" contract;
+  // the post-removal listing covers the explicit --fields path instead.
   const listAsAlpha = runCliOkAsAgent(cliPath, harness, ALPHA_SESSION_ID, [
     "agent",
     "list",
-    "--fields",
-    "name,uuid,visibility",
+    "--verbose",
   ]);
   const parsedAsAlpha = JSON.parse(listAsAlpha.stdout);
   const agentsAsAlpha = parsedAsAlpha.agents;

@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use wardian_core::identity::{AgentIdentity, StatusSource};
 
 const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
-const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at"];
+const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at", "visibility"];
 const ALL_FIELDS: &[&str] = &[
     "name",
     "uuid",
@@ -265,6 +265,24 @@ mod tests {
         .unwrap();
         assert!(rendered.contains(r#""pid": 111"#));
         assert!(rendered.contains(r#""workspace": "D:/Development/Wardian""#));
+    }
+
+    #[test]
+    fn verbose_adds_visibility_when_set() {
+        let mut visible = agent();
+        visible.visibility = Some("manual".to_string());
+        let rendered = render_show(
+            &visible,
+            &RenderOptions {
+                verbose: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(rendered.contains(r#""visibility": "manual""#));
+
+        let default_rendered = render_show(&visible, &RenderOptions::default()).unwrap();
+        assert!(!default_rendered.contains(r#""visibility""#));
     }
 
     #[test]

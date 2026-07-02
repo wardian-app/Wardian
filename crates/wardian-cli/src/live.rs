@@ -421,49 +421,6 @@ pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<WorkflowRunRespon
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
-pub fn send_message(
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-) -> io::Result<SendMessageResponse> {
-    send_message_with_input_mode(target, message, thread, MessageInputMode::Message)
-}
-
-pub fn send_message_with_input_mode(
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-) -> io::Result<SendMessageResponse> {
-    send_message_with_delivery_options(
-        target,
-        message,
-        thread,
-        input_mode,
-        QueuePolicy::QueueIfBusy,
-        None,
-    )
-}
-
-pub fn send_message_with_delivery_options(
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    input_mode: MessageInputMode,
-    queue_policy: QueuePolicy,
-    approval_action: Option<ApprovalAction>,
-) -> io::Result<SendMessageResponse> {
-    send_message_with_delivery_and_scope_options(
-        target,
-        message,
-        thread,
-        input_mode,
-        queue_policy,
-        approval_action,
-        None,
-    )
-}
-
 pub fn send_message_with_delivery_and_scope_options(
     target: &str,
     message: &str,

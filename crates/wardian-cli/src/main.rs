@@ -1021,30 +1021,15 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
             "cursor": watch.cursor,
         })
     } else {
-        let sent = if input_mode == MessageInputMode::Message
-            && queue_policy == QueuePolicy::QueueIfBusy
-            && approval_action.is_none()
-        {
-            live::send_message_with_delivery_and_scope_options(
-                &args.to,
-                &message,
-                args.thread.as_deref(),
-                input_mode,
-                queue_policy,
-                approval_action,
-                Some(args.scope.as_str()),
-            )
-        } else {
-            live::send_message_with_delivery_and_scope_options(
-                &args.to,
-                &message,
-                args.thread.as_deref(),
-                input_mode,
-                queue_policy,
-                approval_action,
-                Some(args.scope.as_str()),
-            )
-        }
+        let sent = live::send_message_with_delivery_and_scope_options(
+            &args.to,
+            &message,
+            args.thread.as_deref(),
+            input_mode,
+            queue_policy,
+            approval_action,
+            Some(args.scope.as_str()),
+        )
         .map_err(control_error)?;
         serde_json::json!({
             "schema": 1,
