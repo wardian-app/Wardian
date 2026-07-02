@@ -244,9 +244,8 @@ test.describe("Graph Topology", () => {
     const pickerInput = picker.locator(".graph-community-picker-input");
     await expect(pickerInput).toBeFocused();
 
-    // Type to filter agents
+    // Type to filter agents; the assertion below auto-waits for the filter
     await pickerInput.fill("Candidate");
-    await page.waitForTimeout(200);
 
     // Verify "Candidate" appears in the list
     const pickerList = picker.locator(".graph-community-picker-list");
@@ -341,7 +340,7 @@ test.describe("seedTopology fixture", () => {
       expect(written.edges[0].a).toBe("alpha");
       expect(written.edges[0].b).toBe("zeta");
       expect(typeof written.edges[0].created_at).toBe("string");
-      expect(Number.isNaN(Date.parse(written.edges[0].created_at))).toBe(false);
+      expect(Date.parse(written.edges[0].created_at)).not.toBeNaN();
       expect(written.ignored_pairs).toEqual([{ a: "kilo", b: "mike" }]);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
