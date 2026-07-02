@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
@@ -363,9 +363,15 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             origin,
         } => {
             let state = app.state::<AppState>();
-            let reply =
-                submit_structured_reply(&state, &request_id, status, &body, origin.as_ref())
-                    .await?;
+            let reply = submit_structured_reply(
+                &state,
+                &request_id,
+                status,
+                &body,
+                origin.as_ref(),
+                Some(app),
+            )
+            .await?;
             ok_json(&ReplyResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
@@ -899,6 +905,9 @@ async fn deliver_message_to_target(
             )
             .await;
         let interaction_id = interaction.id.clone();
+        if let Some(app) = app {
+            let _ = app.emit("pair-activity-changed", ());
+        }
         let route = if input_mode == MessageInputMode::ApprovalAction
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
@@ -1747,6 +1756,7 @@ async fn handle_structured_ask(
             body_ref,
         )
         .await;
+    let _ = app.emit("pair-activity-changed", ());
     let mut payload = serde_json::json!({
         "request_id": task.id,
         "target_session_id": target_uuid,
@@ -2024,6 +2034,7 @@ async fn submit_structured_reply(
     status: ReplyStatus,
     body: &str,
     origin: Option<&MessageOrigin>,
+    app: Option<&AppHandle>,
 ) -> Result<StructuredReply, ControlError> {
     let source_session_id =
         origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
@@ -2051,6 +2062,10 @@ async fn submit_structured_reply(
                 ),
                 _ => ControlError::request_failed("failed to complete ask interaction"),
             })?;
+
+        if let Some(app) = app {
+            let _ = app.emit("pair-activity-changed", ());
+        }
 
         push_watch_event_for_agent(
             state,
@@ -5644,6 +5659,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "agent-1".to_string(),
             }),
+            None,
         )
         .await
         .unwrap();
@@ -5757,6 +5773,7 @@ mod tests {
             wardian_core::control::ReplyStatus::Done,
             "finished",
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -5771,6 +5788,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "agent-2".to_string(),
             }),
+            None,
         )
         .await
         .unwrap_err();
@@ -5782,6 +5800,7 @@ mod tests {
             wardian_core::control::ReplyStatus::Blocked,
             "blocked on review",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -5790,6 +5809,7 @@ mod tests {
             &request_id,
             wardian_core::control::ReplyStatus::Done,
             "finished",
+            None,
             None,
         )
         .await
@@ -5820,7 +5840,7 @@ mod tests {
             let state = AppState::new();
             insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
             let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None)
+            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None, None)
                 .await
                 .unwrap();
 

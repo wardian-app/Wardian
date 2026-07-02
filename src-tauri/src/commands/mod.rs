@@ -10,6 +10,7 @@ pub mod patch;
 pub mod remote;
 pub mod settings;
 pub mod terminal;
+pub mod topology;
 pub mod watchlist;
 pub mod workflow;
 
@@ -23,5 +24,6 @@ pub use library::*;
 pub use patch::*;
 pub use settings::*;
 pub use terminal::*;
+pub use topology::*;
 pub use watchlist::*;
 pub use workflow::*;
