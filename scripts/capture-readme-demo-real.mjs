@@ -173,7 +173,7 @@ async function seedDemoWorkspace() {
     [
       "# Demo Notes",
       "",
-      "Show the command center, a cloned provider pair, reusable capability, and workflow structure.",
+      "Show the local agent habitat, a cloned provider pair, reusable capability, and workflow structure.",
       "",
     ].join("\n"),
   );

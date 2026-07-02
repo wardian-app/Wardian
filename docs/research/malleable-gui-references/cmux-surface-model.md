@@ -1,7 +1,7 @@
 # cmux Multi-Surface GUI References
 
 This document maps cmux's multi-surface workspace model to design patterns
-relevant to Wardian's agent command center, split/tab surfaces, and
+relevant to Wardian's local agent Habitat, split/tab surfaces, and
 multi-agent coding UI.
 
 This is not an endorsement, affiliation claim, product evaluation, or

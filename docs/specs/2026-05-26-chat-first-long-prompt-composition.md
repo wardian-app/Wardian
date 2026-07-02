@@ -38,7 +38,7 @@ terminal mode a raw terminal.
   path instead of typing blindly into provider composers.
 - Make the beginner-friendly path discoverable without turning terminal mode
   into a chat UI.
-- Keep the Command panel focused on cross-agent and command-center workflows.
+- Keep the Command panel focused on cross-agent and desktop-Habitat workflows.
 
 ## Non-Goals
 
@@ -54,7 +54,7 @@ terminal mode a raw terminal.
 
 Use Chat mode as the first-class long prompt composer for single-agent desktop
 workflows. Terminal mode remains raw and focused on TUI fidelity. The Command
-panel remains the multi-agent and command-center composition surface.
+panel remains the multi-agent and desktop-Habitat composition surface.
 
 The first implementation slice should be conservative:
 

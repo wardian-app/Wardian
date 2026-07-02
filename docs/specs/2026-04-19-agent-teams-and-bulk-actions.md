@@ -5,7 +5,7 @@
 
 ## Context and Problem Statement
 
-Wardian already supports multi-select in the Watchlist through Ctrl-click and Shift-click, but the actions exposed through the agent context menu still mostly behave as single-agent actions. Users also need a way to group related agents into teams so the Roster, Dashboard, and Grid can present cooperating agents as a unified command-center unit.
+Wardian already supports multi-select in the Watchlist through Ctrl-click and Shift-click, but the actions exposed through the agent context menu still mostly behave as single-agent actions. Users also need a way to group related agents into teams so the Roster, Dashboard, and Grid can present cooperating agents as a unified working set.
 
 Issue 76 requests a global Team primitive with visual grouping, unified movement, team-level bulk actions, named teams, dynamic membership, and persistence in watchlist state. The key design constraint is that teams are global, and their member sequence should stay synchronized across watchlists rather than becoming local per watchlist.
 
@@ -145,7 +145,7 @@ The load path should accept both version 2 objects and legacy arrays.
 
 ## Consequences
 
-- **Positive**: Teams become a global command-center primitive rather than a local visual trick.
+- **Positive**: Teams become a global Habitat primitive rather than a local visual trick.
 - **Positive**: Full team inclusion avoids confusing partial-team drag and reorder rules.
 - **Positive**: Bulk execution reuses one target-resolution model for selected agents, team headers, and future group actions.
 - **Positive**: Existing backend storage can stay simple because schema normalization is handled at the frontend boundary.
