@@ -168,6 +168,11 @@ pub fn schedules_path() -> Option<PathBuf> {
     wardian_home().map(|home| home.join("library").join("schedules.json"))
 }
 
+/// `<wardian-home>/topology.json` — manual communication-topology edges.
+pub fn topology_path_for_home(home: &Path) -> PathBuf {
+    home.join("topology.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
