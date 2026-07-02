@@ -1,6 +1,6 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { safeMarkdownUrl } from "./markdownSafety";
@@ -133,6 +133,68 @@ describe("ChatMarkdown", () => {
 
     expect(click.defaultPrevented).toBe(true);
     await waitFor(() => expect(openUrlMock).toHaveBeenCalledWith("https://example.test/docs"));
+  });
+
+  it("opens markdown file path links through the configured external editor", async () => {
+    const openUrlMock = vi.mocked(openUrl);
+    openUrlMock.mockClear();
+    const openFile = vi.fn(async () => {});
+    const validateFile = vi.fn(async (path: string) => path === "C:\\repo\\src\\App.tsx");
+    render(
+      <ChatMarkdown
+        linkHandling={{
+          getBasePath: () => "C:\\repo",
+          getExternalEditor: () => ({
+            external_editor: "vscode",
+            external_editor_custom_executable: null,
+          }),
+          openFile,
+          validateFile,
+        }}
+        source="Inspect [the component](src/App.tsx:12)."
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "the component" }));
+
+    await waitFor(() =>
+      expect(openFile).toHaveBeenCalledWith("C:\\repo\\src\\App.tsx", {
+        external_editor: "vscode",
+        external_editor_custom_executable: null,
+      }),
+    );
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("opens bare markdown file path links with line suffixes through the configured external editor", async () => {
+    const openUrlMock = vi.mocked(openUrl);
+    openUrlMock.mockClear();
+    const openFile = vi.fn(async () => {});
+    const validateFile = vi.fn(async (path: string) => path === "C:\\repo\\README.md");
+    render(
+      <ChatMarkdown
+        linkHandling={{
+          getBasePath: () => "C:\\repo",
+          getExternalEditor: () => ({
+            external_editor: "vscode",
+            external_editor_custom_executable: null,
+          }),
+          openFile,
+          validateFile,
+        }}
+        source="Inspect [the readme](README.md:12)."
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "the readme" }));
+
+    await waitFor(() =>
+      expect(openFile).toHaveBeenCalledWith("C:\\repo\\README.md", {
+        external_editor: "vscode",
+        external_editor_custom_executable: null,
+      }),
+    );
+    expect(openUrlMock).not.toHaveBeenCalled();
   });
 
   it("renders image markdown as a safe placeholder instead of an img element", () => {
