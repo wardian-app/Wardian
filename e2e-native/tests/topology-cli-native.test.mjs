@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 import {
   createNativeHarness,
