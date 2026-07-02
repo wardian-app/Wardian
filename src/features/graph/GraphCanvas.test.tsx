@@ -83,6 +83,7 @@ const projection: AgentGraphProjection = {
   clusters: [],
   visibleAgents: [],
   scopeLabel: "All Agents",
+  commEdges: [],
 };
 
 const recentProjection: AgentGraphProjection = {

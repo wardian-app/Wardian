@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentConfig, AgentTelemetry } from "../../types";
+import type { AgentConfig, AgentTelemetry, TopologySnapshot, PairActivityEntry } from "../../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../../layout/watchlist/types";
 import { buildAgentGraph, normalizeGraphPath, type GraphRelationshipReason } from "./graphProjection";
 
@@ -27,6 +27,40 @@ const reasons = (...items: GraphRelationshipReason[]) => new Set<GraphRelationsh
 
 const allReasons = () =>
   reasons("same_team", "shared_workspace", "same_worktree");
+
+interface TestInputOverrides extends Partial<Parameters<typeof buildAgentGraph>[0]> {
+  agents?: AgentConfig[];
+  telemetry?: Record<string, AgentTelemetry>;
+  teams?: AgentTeam[];
+  activeList?: Watchlist | null;
+  interactions?: AgentInteractions;
+  selectedAgentIds?: Set<string>;
+  enabledReasons?: Set<GraphRelationshipReason>;
+  topology?: TopologySnapshot;
+  pairActivity?: PairActivityEntry[];
+  now?: number;
+}
+
+const buildTestGraph = (overrides: TestInputOverrides = {}) => {
+  const agents = overrides.agents ?? [
+    agent({ session_id: "agent-1" }),
+    agent({ session_id: "agent-2" }),
+    agent({ session_id: "agent-3" }),
+  ];
+  return buildAgentGraph({
+    agents,
+    telemetry: overrides.telemetry ?? {},
+    teams: overrides.teams ?? [],
+    activeList: overrides.activeList ?? null,
+    interactions: overrides.interactions ?? {},
+    selectedAgentIds: overrides.selectedAgentIds ?? new Set(),
+    enabledReasons: overrides.enabledReasons ?? allReasons(),
+    topology: overrides.topology,
+    pairActivity: overrides.pairActivity,
+    now: overrides.now,
+    ...overrides,
+  });
+};
 
 describe("normalizeGraphPath", () => {
   it("normalizes equivalent Windows-style paths without filesystem access", () => {
@@ -214,5 +248,76 @@ describe("buildAgentGraph", () => {
     });
 
     expect(graph.edges).toEqual([]);
+  });
+});
+
+describe("communication edges", () => {
+  const RECENT_WINDOW_MS = 60 * 60 * 1000;
+  const NOW = 1000000000;
+
+  it("classifies origin and state per pair", () => {
+    const projection = buildTestGraph({
+      topology: {
+        edges: [
+          { a: "agent-1", b: "agent-2", origin: "manual" },
+          { a: "agent-1", b: "agent-3", origin: "rule:team-clique:t1" },
+        ],
+        ignored_pairs: [],
+        fallback_groups: [],
+      },
+      pairActivity: [
+        {
+          a: "agent-1",
+          b: "agent-2",
+          last_message_at: new Date(NOW - 1000).toISOString(),
+          active_ask: true,
+          awaiting_reply_from: "agent-2",
+        },
+        {
+          a: "agent-1",
+          b: "agent-3",
+          last_message_at: new Date(NOW - 2 * RECENT_WINDOW_MS).toISOString(),
+          active_ask: false,
+          awaiting_reply_from: null,
+        },
+      ],
+      now: NOW,
+    });
+
+    const manual = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+    expect(manual?.origin).toBe("manual");
+    expect(manual?.state).toBe("ongoing");
+    expect(manual?.awaitingReplyFrom).toBe("agent-2");
+
+    const rule = projection.commEdges.find((e) => e.id === "agent-1--agent-3");
+    expect(rule?.origin).toBe("rule");
+    expect(rule?.ruleId).toBe("team-clique:t1");
+    expect(rule?.state).toBe("dormant");
+  });
+
+  it("derives ghosts from unmapped recent traffic, honoring ignored pairs", () => {
+    const projection = buildTestGraph({
+      topology: { edges: [], ignored_pairs: [["agent-2", "agent-3"]], fallback_groups: [] },
+      pairActivity: [
+        {
+          a: "agent-1",
+          b: "agent-2",
+          last_message_at: new Date(NOW - 1000).toISOString(),
+          active_ask: false,
+          awaiting_reply_from: null,
+        },
+        {
+          a: "agent-2",
+          b: "agent-3",
+          last_message_at: new Date(NOW - 1000).toISOString(),
+          active_ask: false,
+          awaiting_reply_from: null,
+        },
+      ],
+      now: NOW,
+    });
+
+    expect(projection.commEdges.filter((e) => e.origin === "ghost")).toHaveLength(1);
+    expect(projection.commEdges[0].id).toBe("agent-1--agent-2");
   });
 });

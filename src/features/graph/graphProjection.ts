@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentTelemetry } from "../../types";
+import type { AgentConfig, AgentTelemetry, TopologySnapshot, PairActivityEntry } from "../../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../../layout/watchlist/types";
 import { getAgentsForList } from "../../layout/watchlist/watchlistUtils";
 
@@ -6,6 +6,21 @@ export type GraphRelationshipReason =
   | "same_team"
   | "shared_workspace"
   | "same_worktree";
+
+export type CommEdgeOrigin = "manual" | "rule" | "ghost";
+export type CommEdgeState = "ongoing" | "recent" | "dormant";
+
+export interface CommunicationEdge {
+  id: string;               // canonical "a--b"
+  source: string;
+  target: string;
+  origin: CommEdgeOrigin;
+  ruleId?: string;          // "team-clique:t1"
+  state: CommEdgeState;
+  lastMessageAt?: string;
+  recency: number;          // 0..1, 1 = just now (drives fade)
+  awaitingReplyFrom?: string;
+}
 
 export interface AgentGraphNode {
   id: string;
@@ -42,6 +57,7 @@ export interface AgentGraphProjection {
   clusters: AgentGraphCluster[];
   visibleAgents: AgentConfig[];
   scopeLabel: string;
+  commEdges: CommunicationEdge[];
 }
 
 export interface BuildAgentGraphInput {
@@ -53,6 +69,9 @@ export interface BuildAgentGraphInput {
   selectedAgentIds: Set<string>;
   enabledReasons: Set<GraphRelationshipReason>;
   offAgentIds?: Set<string>;
+  topology?: TopologySnapshot;
+  pairActivity?: PairActivityEntry[];
+  now?: number;
 }
 
 const REASON_ORDER: GraphRelationshipReason[] = [
@@ -62,6 +81,7 @@ const REASON_ORDER: GraphRelationshipReason[] = [
 ];
 
 const RECENT_MS = 1000 * 60 * 60 * 24;
+const COMM_RECENT_WINDOW_MS = 60 * 60 * 1000;
 
 export function normalizeGraphPath(value: string | undefined | null): string | null {
   const trimmed = value?.trim();
@@ -124,6 +144,7 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
     clusters,
     visibleAgents,
     scopeLabel: input.activeList?.name ?? "All Agents",
+    commEdges: buildCommEdges(input.topology, input.pairActivity, visibleIds, input.now ?? Date.now()),
   };
 }
 
@@ -178,6 +199,71 @@ function buildEdges(
     })
     .filter((edge) => agentsById.has(edge.source) && agentsById.has(edge.target))
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function buildCommEdges(
+  topology: TopologySnapshot | undefined,
+  pairActivity: PairActivityEntry[] | undefined,
+  visibleIds: Set<string>,
+  now: number,
+): CommunicationEdge[] {
+  const activityByPair = new Map<string, PairActivityEntry>();
+  for (const entry of pairActivity ?? []) {
+    const key = pairKey(entry.a, entry.b);
+    if (key) activityByPair.set(key, entry);
+  }
+  const ignored = new Set(
+    (topology?.ignored_pairs ?? []).map(([a, b]) => pairKey(a, b)).filter(Boolean) as string[],
+  );
+
+  const edges: CommunicationEdge[] = [];
+  const mapped = new Set<string>();
+  for (const edge of topology?.edges ?? []) {
+    const key = pairKey(edge.a, edge.b);
+    if (!key || !visibleIds.has(edge.a) || !visibleIds.has(edge.b)) continue;
+    mapped.add(key);
+    const activity = activityByPair.get(key);
+    edges.push({
+      id: key,
+      source: key.split("--")[0],
+      target: key.split("--")[1],
+      origin: edge.origin === "manual" ? "manual" : "rule",
+      ruleId: edge.origin.startsWith("rule:") ? edge.origin.slice("rule:".length) : undefined,
+      ...activityFields(activity, now),
+    });
+  }
+
+  for (const [key, activity] of activityByPair) {
+    if (mapped.has(key) || ignored.has(key)) continue;
+    const [a, b] = key.split("--");
+    if (!visibleIds.has(a) || !visibleIds.has(b)) continue;
+    const fields = activityFields(activity, now);
+    if (fields.state === "dormant") continue; // ghosts fade out with recency
+    edges.push({ id: key, source: a, target: b, origin: "ghost", ...fields });
+  }
+
+  return edges.sort((l, r) => l.id.localeCompare(r.id));
+}
+
+function activityFields(activity: PairActivityEntry | undefined, now: number) {
+  if (!activity) return { state: "dormant" as const, recency: 0 };
+  const age = now - new Date(activity.last_message_at).getTime();
+  const state: CommEdgeState = activity.active_ask
+    ? "ongoing"
+    : Number.isFinite(age) && age >= 0 && age <= COMM_RECENT_WINDOW_MS
+      ? "recent"
+      : "dormant";
+  return {
+    state,
+    recency: Math.max(0, Math.min(1, 1 - age / COMM_RECENT_WINDOW_MS)),
+    lastMessageAt: activity.last_message_at,
+    awaitingReplyFrom: activity.awaiting_reply_from ?? undefined,
+  };
+}
+
+function pairKey(a: string, b: string): string | null {
+  if (!a || !b || a === b) return null;
+  return a < b ? `${a}--${b}` : `${b}--${a}`;
 }
 
 function addPathEdges(
