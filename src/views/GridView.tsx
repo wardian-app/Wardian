@@ -204,13 +204,15 @@ export const GridView: React.FC<GridViewProps> = ({
   const cardModeForAgent = (agentId: string): GridCardMode => cardModeOverrides[agentId] ?? gridCardDisplayMode;
   const visibleCardModes = visibleAgents.map((agent) => cardModeForAgent(agent.session_id.toString()));
   const visibleAgentIdKey = visibleAgents.map((agent) => agent.session_id.toString()).join('\0');
+  const renderableAgentIdKey = renderableAgents.map((agent) => agent.session_id.toString()).join('\0');
 
   useEffect(() => {
     const visibleIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
-    setCardModeOverrides((current) => pruneRecordToIds(current, visibleIds));
-    setChatDrafts((current) => pruneRecordToIds(current, visibleIds));
+    const renderableIds = new Set(renderableAgentIdKey ? renderableAgentIdKey.split('\0') : []);
+    setCardModeOverrides((current) => pruneRecordToIds(current, renderableIds));
+    setChatDrafts((current) => pruneRecordToIds(current, renderableIds));
     setComposerFocusAgentId((current) => current && visibleIds.has(current) ? current : null);
-  }, [visibleAgentIdKey]);
+  }, [renderableAgentIdKey, visibleAgentIdKey]);
 
   const clearLocalCardState = (agentId: string) => {
     setCardModeOverrides((current) => {
@@ -291,6 +293,10 @@ export const GridView: React.FC<GridViewProps> = ({
         const modeLabel = cardMode === 'chat' ? 'Chat' : 'Terminal';
         const nextMode: GridCardMode = cardMode === 'chat' ? 'terminal' : 'chat';
         const nextModeLabel = nextMode === 'chat' ? 'Chat' : 'Terminal';
+        const visibleWorkspacePath =
+          agent.git_worktree && agent.git_worktree_folder?.trim()
+            ? agent.git_worktree_folder
+            : agent.folder;
         const switchCardMode = (event: React.MouseEvent<HTMLButtonElement>) => {
           event.stopPropagation();
           setCardModeOverrides((current) => {
@@ -390,6 +396,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     status={effectiveStatus}
                     telemetry={metrics}
                     theme={theme}
+                    workspacePath={visibleWorkspacePath}
                     onComposerAutoFocused={() => {
                       setComposerFocusAgentId((current) => current === agentId ? null : current);
                     }}
@@ -404,11 +411,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     isMaximized={isAgentMaximized}
                     isSelected={isSelected}
                     theme={theme}
-                    workspacePath={
-                      agent.git_worktree && agent.git_worktree_folder?.trim()
-                        ? agent.git_worktree_folder
-                        : agent.folder
-                    }
+                    workspacePath={visibleWorkspacePath}
                     onTerminalFocus={onTerminalFocus}
                     onTitleChange={handleTitleChange}
                   />

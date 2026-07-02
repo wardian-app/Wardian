@@ -1006,6 +1006,7 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
                 approval_action,
                 until,
                 timeout,
+                target_scope: Some(args.scope.as_str()),
             },
         )
         .map_err(control_error)?;
@@ -1024,15 +1025,24 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
             && queue_policy == QueuePolicy::QueueIfBusy
             && approval_action.is_none()
         {
-            live::send_message(&args.to, &message, args.thread.as_deref())
-        } else {
-            live::send_message_with_delivery_options(
+            live::send_message_with_delivery_and_scope_options(
                 &args.to,
                 &message,
                 args.thread.as_deref(),
                 input_mode,
                 queue_policy,
                 approval_action,
+                Some(args.scope.as_str()),
+            )
+        } else {
+            live::send_message_with_delivery_and_scope_options(
+                &args.to,
+                &message,
+                args.thread.as_deref(),
+                input_mode,
+                queue_policy,
+                approval_action,
+                Some(args.scope.as_str()),
             )
         }
         .map_err(control_error)?;
@@ -1353,6 +1363,54 @@ fn is_control_endpoint_unavailable(error: &std::io::Error) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeChoice {
+    Community,
+    Workspace,
+    All,
+}
+
+fn decide_scope(scope: &str, in_session: bool) -> Result<ScopeChoice, CliError> {
+    match scope {
+        "auto" => Ok(if in_session { ScopeChoice::Community } else { ScopeChoice::Workspace }),
+        "community" => Ok(ScopeChoice::Community),
+        "workspace" => Ok(ScopeChoice::Workspace),
+        "all" => Ok(ScopeChoice::All),
+        other => Err(CliError::generic(format!("unknown scope: {other}"))),
+    }
+}
+
+/// Keep self + community members; annotate members with their visibility reasons.
+fn filter_to_community(
+    agents: Vec<wardian_core::identity::AgentIdentity>,
+    self_uuid: &str,
+    home: &std::path::Path,
+) -> Vec<wardian_core::identity::AgentIdentity> {
+    use wardian_core::topology::{load_topology, load_team_memberships, resolve_community, AgentRef};
+
+    let topology = load_topology(home);
+    let teams = load_team_memberships(home);
+    let refs: Vec<AgentRef> = agents
+        .iter()
+        .map(|agent| AgentRef { uuid: agent.uuid.clone(), workspace: agent.workspace.clone() })
+        .collect();
+    let view = resolve_community(self_uuid, &topology, &teams, &refs);
+    let reasons: std::collections::HashMap<String, String> = view
+        .members
+        .iter()
+        .map(|member| (member.uuid.clone(), member.reasons.join(",")))
+        .collect();
+
+    agents
+        .into_iter()
+        .filter(|agent| agent.uuid == self_uuid || reasons.contains_key(&agent.uuid))
+        .map(|mut agent| {
+            agent.visibility = reasons.get(&agent.uuid).cloned();
+            agent
+        })
+        .collect()
+}
+
 fn handle_show(target: Option<&str>, args: &AgentArgs) -> Result<String, CliError> {
     if let Ok(agents) = live::list_agents() {
         let agent = match target {
@@ -1380,50 +1438,63 @@ fn handle_list(
     workspace: Option<String>,
     args: &AgentArgs,
 ) -> Result<String, CliError> {
+    let in_session = std::env::var("WARDIAN_SESSION_ID").is_ok();
+    let scope_choice = decide_scope(scope, in_session)?;
+
     let requested_scope = if workspace.is_some() {
         Scope::All
     } else {
-        match scope {
-            "workspace" => Scope::Workspace,
-            "all" => Scope::All,
-            other => return Err(CliError::generic(format!("unknown scope: {other}"))),
+        match scope_choice {
+            ScopeChoice::Community => Scope::All, // Fetch all first, then filter
+            ScopeChoice::Workspace => Scope::Workspace,
+            ScopeChoice::All => Scope::All,
         }
     };
 
     if let Ok(live_agents) = live::list_agents() {
-        let caller_workspace = if requested_scope == Scope::Workspace {
+        let caller_workspace = if scope_choice == ScopeChoice::Workspace {
             resolve_live_self(&live_agents)
                 .and_then(|agent| agent.workspace.clone())
                 .filter(|workspace| !workspace.is_empty())
         } else {
             None
         };
-        let effective_scope = if requested_scope == Scope::Workspace && caller_workspace.is_none() {
+        let effective_scope = if scope_choice == ScopeChoice::Workspace && caller_workspace.is_none() {
             Scope::All
         } else {
             requested_scope
         };
-        let agents = identity::filter_agents(
+        let mut agents = identity::filter_agents(
             live_agents,
             &ListFilters {
                 scope: effective_scope,
                 caller_workspace,
-                status,
-                class: class_name,
-                workspace,
+                status: status.clone(),
+                class: class_name.clone(),
+                workspace: workspace.clone(),
             },
         );
+
+        // Apply community filter if requested
+        if scope_choice == ScopeChoice::Community {
+            let session_id = std::env::var("WARDIAN_SESSION_ID")
+                .map_err(|_| CliError::not_in_session())?;
+            let home = wardian_core::paths::wardian_home()
+                .ok_or_else(|| CliError::generic("Could not determine Wardian home"))?;
+            agents = filter_to_community(agents, &session_id, &home);
+        }
+
         return render_list(&agents, &render_options(args));
     }
 
     let conn = open_db()?;
     let caller_workspace = caller_workspace_from_db(&conn, requested_scope);
-    let effective_scope = if requested_scope == Scope::Workspace && caller_workspace.is_none() {
+    let effective_scope = if scope_choice == ScopeChoice::Workspace && caller_workspace.is_none() {
         Scope::All
     } else {
         requested_scope
     };
-    let agents = identity::list_agents(
+    let mut agents = identity::list_agents(
         &conn,
         &ListFilters {
             scope: effective_scope,
@@ -1434,6 +1505,16 @@ fn handle_list(
         },
     )
     .map_err(identity_error)?;
+
+    // Apply community filter if requested
+    if scope_choice == ScopeChoice::Community {
+        let session_id = std::env::var("WARDIAN_SESSION_ID")
+            .map_err(|_| CliError::not_in_session())?;
+        let home = wardian_core::paths::wardian_home()
+            .ok_or_else(|| CliError::generic("Could not determine Wardian home"))?;
+        agents = filter_to_community(agents, &session_id, &home);
+    }
+
     render_list(&agents, &render_options(args))
 }
 
@@ -2048,6 +2129,7 @@ mod tests {
                 workspace: Some("D:/repo/worktrees/review".to_string()),
                 last_status_at: None,
                 status_source: wardian_core::identity::StatusSource::Live,
+                visibility: None,
             },
             worktree: Some(wardian_core::control::AgentWorktreeSummary {
                 id: "D:/repo/worktrees/review".to_string(),
@@ -2131,5 +2213,74 @@ mod tests {
             parse_timeout("10m").unwrap(),
             std::time::Duration::from_secs(600)
         );
+    }
+
+    #[test]
+    fn effective_default_scope_prefers_community_in_session() {
+        assert_eq!(decide_scope("auto", true).unwrap(), ScopeChoice::Community);
+        assert_eq!(decide_scope("auto", false).unwrap(), ScopeChoice::Workspace);
+        assert_eq!(decide_scope("community", false).unwrap(), ScopeChoice::Community);
+        assert_eq!(decide_scope("workspace", true).unwrap(), ScopeChoice::Workspace);
+        assert_eq!(decide_scope("all", true).unwrap(), ScopeChoice::All);
+        assert!(decide_scope("bogus", true).is_err());
+    }
+
+    #[test]
+    fn community_filter_returns_neighbors_plus_self() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut topology = wardian_core::topology::Topology::default();
+        topology.add_edge("me", "friend", "2026-07-02T00:00:00Z");
+        wardian_core::topology::save_topology(temp.path(), &topology).unwrap();
+
+        let agents = vec![
+            wardian_core::identity::AgentIdentity {
+                name: "me-agent".to_string(),
+                uuid: "me".to_string(),
+                class: "Coder".to_string(),
+                provider: "claude".to_string(),
+                status: "idle".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: None,
+                last_status_at: None,
+                status_source: wardian_core::identity::StatusSource::Persisted,
+                visibility: None,
+            },
+            wardian_core::identity::AgentIdentity {
+                name: "friend-agent".to_string(),
+                uuid: "friend".to_string(),
+                class: "Architect".to_string(),
+                provider: "claude".to_string(),
+                status: "idle".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: None,
+                last_status_at: None,
+                status_source: wardian_core::identity::StatusSource::Persisted,
+                visibility: None,
+            },
+            wardian_core::identity::AgentIdentity {
+                name: "stranger-agent".to_string(),
+                uuid: "stranger".to_string(),
+                class: "Reviewer".to_string(),
+                provider: "claude".to_string(),
+                status: "idle".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: None,
+                last_status_at: None,
+                status_source: wardian_core::identity::StatusSource::Persisted,
+                visibility: None,
+            },
+        ];
+
+        let filtered = filter_to_community(agents, "me", temp.path());
+
+        assert_eq!(filtered.len(), 2);
+        let me = filtered.iter().find(|a| a.uuid == "me").unwrap();
+        assert_eq!(me.visibility, None);
+        let friend = filtered.iter().find(|a| a.uuid == "friend").unwrap();
+        assert!(friend.visibility.is_some());
+        assert_eq!(friend.visibility.as_deref(), Some("manual"));
     }
 }

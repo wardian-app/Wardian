@@ -38,6 +38,7 @@ type RemoteStatus =
   | "device_revoked";
 
 type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
+type ActiveAgentViewMode = "terminal" | "chat";
 
 interface RemoteState {
   agents: RemoteAgentSummary[];
@@ -54,7 +55,8 @@ interface RemoteState {
   mobileCollapsedTeamIdsByList: Record<string, string[]>;
   status: RemoteStatus;
   activeAgentId: string | null;
-  activeAgentViewMode: "terminal" | "chat";
+  activeAgentViewMode: ActiveAgentViewMode;
+  activeAgentViewModesById: Record<string, ActiveAgentViewMode>;
   terminalSnapshot: RemoteTerminalSnapshot | null;
   terminalLoading: boolean;
   terminalError: string;
@@ -70,7 +72,7 @@ interface RemoteState {
   toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
   closeAgent: (options?: { syncHistory?: boolean }) => void;
-  setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
+  setActiveAgentViewMode: (mode: ActiveAgentViewMode) => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
   appendRemoteTerminalQueueOutput: (sessionId: string, data: string, provider?: string) => void;
@@ -319,6 +321,11 @@ const newRemoteQueueItemId = () => {
 const remoteAgentStatusMap = (agents: RemoteAgentSummary[]) =>
   Object.fromEntries(agents.map((agent) => [agent.session_id, agent.status]));
 
+const pruneActiveAgentViewModes = (
+  modesById: Record<string, ActiveAgentViewMode>,
+  liveAgentIds: Set<string>,
+) => Object.fromEntries(Object.entries(modesById).filter(([agentId]) => liveAgentIds.has(agentId)));
+
 const remoteQueuePatchForAgents = (state: RemoteState, agents: RemoteAgentSummary[]): Partial<RemoteState> => {
   let items = state.remoteQueueItems;
   let buffers = state.remoteQueueBuffers;
@@ -375,15 +382,18 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
   statusStreamSocket = await remoteClient.openStatusStream({
     onAgents: (agents) => {
       const activeAgentId = get().activeAgentId;
+      const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
       const activeAgent = activeAgentId ? agents.find((agent) => agent.session_id === activeAgentId) : null;
       set((state) => ({
         agents,
         status: "ready",
+        activeAgentViewModesById: pruneActiveAgentViewModes(state.activeAgentViewModesById, liveAgentIds),
         ...remoteQueuePatchForAgents(state, agents),
         ...(activeAgent
           ? {}
           : {
               activeAgentId: null,
+              activeAgentViewMode: "terminal",
               terminalSnapshot: null,
               terminalLoading: false,
               terminalError: "",
@@ -610,6 +620,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       agents,
       workflows,
       remoteAgentStatuses: remoteAgentStatusMap(agents),
+      activeAgentViewModesById: pruneActiveAgentViewModes(state.activeAgentViewModesById, liveAgentIds),
       watchlists: watchlistState.watchlists,
       teams: watchlistState.teams,
       watchlistPrefs,
@@ -621,6 +632,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       ...(activeAgentId
         ? {}
         : {
+            activeAgentViewMode: "terminal",
             terminalSnapshot: null,
             terminalLoading: false,
             terminalError: "",
@@ -649,6 +661,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   status: "loading",
   activeAgentId: null,
   activeAgentViewMode: "terminal",
+  activeAgentViewModesById: {},
   terminalSnapshot: null,
   terminalLoading: false,
   terminalError: "",
@@ -728,10 +741,11 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     clearBackgroundChatRefresh();
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
+    const activeAgentViewMode = get().activeAgentViewModesById[id] ?? "terminal";
     pushRemoteAgentDetailHistory(id);
     set({
       activeAgentId: id,
-      activeAgentViewMode: "terminal",
+      activeAgentViewMode,
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",
@@ -739,6 +753,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       chatLoading: false,
       chatError: "",
     });
+    if (activeAgentViewMode === "chat") {
+      await get().refreshActiveAgentChat();
+    }
   },
   closeAgent(options) {
     if (options?.syncHistory !== false && isRemoteAgentDetailHistoryState()) {
@@ -762,7 +779,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     });
   },
   async setActiveAgentViewMode(mode) {
-    set({ activeAgentViewMode: mode });
+    set((state) => ({
+      activeAgentViewMode: mode,
+      activeAgentViewModesById: state.activeAgentId
+        ? { ...state.activeAgentViewModesById, [state.activeAgentId]: mode }
+        : state.activeAgentViewModesById,
+    }));
     if (mode === "chat" && get().chatEvents.length === 0) {
       await get().refreshActiveAgentChat();
       return;

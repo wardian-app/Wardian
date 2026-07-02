@@ -199,6 +199,7 @@ describe("RemoteMobileApp", () => {
       status: "loading",
       activeAgentId: null,
       activeAgentViewMode: "terminal",
+      activeAgentViewModesById: {},
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",
@@ -1228,6 +1229,63 @@ describe("RemoteMobileApp", () => {
         prompt: "1",
       });
     });
+  });
+
+  it("hides remote action-required status cue rows while keeping approval choices actionable", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      status: "Action Required",
+      chatEvents: [
+        {
+          id: "status-action-required",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "status",
+          role: null,
+          text: "Status: action required",
+          title: null,
+          status: "action_required",
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+        {
+          id: "approval-required",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "approval",
+          role: null,
+          text: "Proceed?\n\n1. Yes\n2. No",
+          title: "Approval required",
+          status: "action_required",
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:01.000Z",
+          sequence: 2,
+          metadata: {},
+        },
+      ],
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    expect(screen.queryByText("Status: action required")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("remote-activity-row-approval")).toHaveTextContent(
+      "Action required. Choose a response or type below.",
+    );
+    expect(screen.getByRole("button", { name: "Send approval response 1: Yes" })).toBeVisible();
   });
 
   it("disables the remote chat composer when the selected agent cannot accept chat input", async () => {

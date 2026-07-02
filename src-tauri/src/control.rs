@@ -311,6 +311,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             queue_policy,
             approval_action,
             origin,
+            target_scope: _,
         } => {
             let state = app.state::<AppState>();
             let delivery = deliver_message_to_target(
@@ -3046,6 +3047,7 @@ async fn agent_config_to_identity(
             workspace: (!config.folder.trim().is_empty()).then_some(config.folder.clone()),
             last_status_at: None,
             status_source: StatusSource::Live,
+            visibility: None,
         }
     }
 }
@@ -3218,6 +3220,7 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
         workspace: (!config.folder.trim().is_empty()).then_some(config.folder),
         last_status_at,
         status_source: StatusSource::Live,
+        visibility: None,
     }
 }
 
