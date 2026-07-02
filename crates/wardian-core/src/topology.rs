@@ -198,6 +198,11 @@ impl CommunityView {
     }
 }
 
+/// Resolve an agent's local community: manual neighbors ∪ team cliques,
+/// with workspace-fallback engaging only when the agent has no manual edges
+/// and no team memberships. Excludes the agent itself and any UUID not
+/// present in `agents`. Each member carries the reasons it is visible
+/// ("manual", "rule:team-clique:<team-id>", "rule:workspace-fallback").
 pub fn resolve_community(
     agent_uuid: &str,
     topology: &Topology,
@@ -304,6 +309,11 @@ pub struct PairActivity {
 }
 
 /// Aggregate interaction records into per-pair activity.
+///
+/// `last_message_at` is selected by lexicographic comparison of `created_at`,
+/// which is correct only because interaction timestamps are written by a
+/// single source in UTC RFC3339 with a fixed format. Mixed offsets would
+/// compare incorrectly.
 pub fn pair_activity_from_records(
     records: &[crate::control::InteractionRecord],
 ) -> Vec<PairActivity> {
