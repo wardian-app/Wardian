@@ -22,15 +22,15 @@ Particles flow in message direction; during a pending ask, the stream drifts tow
 
 ## Topology & Workspace Fallback
 
-An agent with **no manual edges and no team membership** automatically sees its workspace-mates (workspace-fallback rule). This ensures fresh agents aren't isolated. The moment you draw an agent's first manual edge or add it to a team, workspace-fallback disengages — its community becomes exactly what the graph shows.
+An agent with **no manual edges and no team membership** automatically sees its workspace-mates (workspace-fallback rule). This ensures fresh agents aren't isolated. The moment you draw an agent's first manual edge or add it to a team, workspace-fallback disengages — its neighbors become exactly what the graph shows.
 
-Each community member is labeled with its origin: `manual`, `rule:team-clique`, or (in the inspector) `rule:workspace-fallback` / `ghost`.
+Each neighbor is labeled with its origin: `manual`, `rule:team-clique`, or (in the inspector) `rule:workspace-fallback` / `ghost`.
 
 ## Editing: Create and Delete Edges
 
 **Create a connection:**
 - Enable **Connect mode** in the toolbar, then drag from agent A to agent B to draw a manual edge.
-- Or use **Add connection…** in the inspector's community panel to pick an agent from a searchable list.
+- Or use **Add connection…** in the inspector's neighbors panel to pick an agent from a searchable list.
 - The edge appears immediately and is saved to `<WARDIAN_HOME>/topology.json`.
 
 **Delete a connection:**
@@ -38,7 +38,7 @@ Each community member is labeled with its origin: `manual`, `rule:team-clique`, 
 - Only manual edges are deletable; rule-derived edges are labeled "managed by team …" and are edited through their source (e.g., team membership).
 
 **Ghost edges (unmapped traffic):**
-- Recent communication between agents with no topology connection appears as a faint sparse-dashed edge, and the inspector's community panel lists the pair with an **Unmapped** badge.
+- Recent communication between agents with no topology connection appears as a faint sparse-dashed edge, and the inspector's neighbors panel lists the pair with an **Unmapped** badge.
 - **Formalize**: write a manual edge to connect them.
 - **Ignore**: add the pair to `ignored_pairs` so the suggestion stops appearing.
 
@@ -46,7 +46,7 @@ Each community member is labeled with its origin: `manual`, `rule:team-clique`, 
 
 Select any node to open the inspector with:
 - Agent identity, current status, workspace, and telemetry.
-- **Community panel**: all agents you see through the topology (manual, team, workspace fallback), each tagged with its origin reason.
+- **Neighbors panel**: all agents you see through the topology (manual, team, workspace fallback), each tagged with its origin reason.
 - **Add connection…**: searchable picker to create new manual edges.
 - Right-click to access the same context menu as the roster and other views.
 

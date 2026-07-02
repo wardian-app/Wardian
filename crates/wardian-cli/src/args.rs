@@ -244,8 +244,8 @@ pub struct SendArgs {
     #[arg(long, default_value = "10m")]
     pub timeout: String,
 
-    /// Target resolution scope for broadcast/class targets: community (default) or all
-    #[arg(long, value_parser = ["community", "all"], default_value = "community")]
+    /// Target resolution scope for broadcast/class targets: neighbors (default) or all
+    #[arg(long, value_parser = ["neighbors", "all"], default_value = "neighbors")]
     pub scope: String,
 }
 
@@ -357,8 +357,8 @@ pub enum AgentCommand {
         target: Option<String>,
     },
     List {
-        /// auto (community when WARDIAN_SESSION_ID is set, else workspace),
-        /// community, workspace, or all
+        /// auto (neighbors when WARDIAN_SESSION_ID is set, else workspace),
+        /// neighbors, workspace, or all
         #[arg(long, default_value = "auto")]
         scope: String,
         #[arg(long)]
@@ -779,12 +779,12 @@ mod tests {
     }
 
     #[test]
-    fn send_scope_defaults_to_community() {
+    fn send_scope_defaults_to_neighbors() {
         let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "agent-1"]).unwrap();
         let Command::Send(args) = cli.command else {
             panic!("expected Send command")
         };
-        assert_eq!(args.scope, "community");
+        assert_eq!(args.scope, "neighbors");
     }
 
     #[test]

@@ -347,7 +347,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               </dl>
               <div className="graph-relationships">
                 <div className="label-small">Relationships</div>
-                {renderCommunityPanel(
+                {renderNeighborsPanel(
                   inspectedAgent.id,
                   projection,
                   props.teams,
@@ -424,7 +424,7 @@ function getOriginLabel(edge: CommunicationEdge, teams: AgentTeam[]): string {
   return "unmapped";
 }
 
-function renderCommunityPanel(
+function renderNeighborsPanel(
   agentId: string,
   projection: ReturnType<typeof buildAgentGraph>,
   teams: AgentTeam[],
@@ -445,7 +445,7 @@ function renderCommunityPanel(
       {edges.length === 0 ? (
         <p>No visible connections.</p>
       ) : (
-        <ul className="graph-community-list">
+        <ul className="graph-neighbors-list">
           {edges.map((edge) => {
         const neighborId = edge.source === agentId ? edge.target : edge.source;
         const neighbor = projection.nodes.find((node) => node.id === neighborId);
@@ -453,17 +453,17 @@ function renderCommunityPanel(
         const originLabel = getOriginLabel(edge, teams);
 
         return (
-          <li key={edge.id} className="graph-community-row">
+          <li key={edge.id} className="graph-neighbors-row">
             <div
-              className="graph-community-row-info"
+              className="graph-neighbors-row-info"
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 onContextMenu(neighborId, event.clientX, event.clientY);
               }}
             >
-              <span className="graph-community-name">{label}</span>
-              <small className={`graph-community-origin graph-origin--${edge.origin}`}>
+              <span className="graph-neighbors-name">{label}</span>
+              <small className={`graph-neighbors-origin graph-origin--${edge.origin}`}>
                 {originLabel}
               </small>
               {edge.origin === "ghost" && (
@@ -473,7 +473,7 @@ function renderCommunityPanel(
             {edge.origin === "manual" && (
               <button
                 type="button"
-                className="graph-community-action-btn"
+                className="graph-neighbors-action-btn"
                 onClick={() => onRemove(edge.source, edge.target)}
                 title="Disconnect"
               >
@@ -481,10 +481,10 @@ function renderCommunityPanel(
               </button>
             )}
             {edge.origin === "ghost" && (
-              <div className="graph-community-ghost-actions">
+              <div className="graph-neighbors-ghost-actions">
                 <button
                   type="button"
-                  className="graph-community-action-btn graph-community-action-formalize"
+                  className="graph-neighbors-action-btn graph-neighbors-action-formalize"
                   onClick={() => onAdd(edge.source, edge.target)}
                   title="Formalize edge"
                 >
@@ -492,7 +492,7 @@ function renderCommunityPanel(
                 </button>
                 <button
                   type="button"
-                  className="graph-community-action-btn graph-community-action-ignore"
+                  className="graph-neighbors-action-btn graph-neighbors-action-ignore"
                   onClick={() => onIgnore(edge.source, edge.target)}
                   title="Ignore this pair"
                 >
@@ -505,12 +505,12 @@ function renderCommunityPanel(
           })}
         </ul>
       )}
-      <div className={edges.length === 0 ? "graph-community-add-standalone" : "graph-community-row graph-community-add-row"}>
+      <div className={edges.length === 0 ? "graph-neighbors-add-standalone" : "graph-neighbors-row graph-neighbors-add-row"}>
         {pickerOpen ? (
-          <div className="graph-community-picker">
+          <div className="graph-neighbors-picker">
             <input
               type="text"
-              className="graph-community-picker-input"
+              className="graph-neighbors-picker-input"
               placeholder="Filter agents…"
               value={pickerSearch}
               onChange={(e) => setPickerSearch(e.currentTarget.value)}
@@ -537,7 +537,7 @@ function renderCommunityPanel(
         ) : (
           <button
             type="button"
-            className="graph-community-add-btn"
+            className="graph-neighbors-add-btn"
             onClick={() => setPickerOpen(true)}
           >
             Add connection…
@@ -575,18 +575,18 @@ function renderPickerList(
   });
 
   if (filtered.length === 0) {
-    return <p className="graph-community-picker-empty">No available agents</p>;
+    return <p className="graph-neighbors-picker-empty">No available agents</p>;
   }
 
   return (
-    <ul className="graph-community-picker-list">
+    <ul className="graph-neighbors-picker-list">
       {filtered.map((id) => {
         const agent = allAgents.find((a) => a.session_id === id);
         return (
           <li key={id}>
             <button
               type="button"
-              className="graph-community-picker-item"
+              className="graph-neighbors-picker-item"
               onClick={() => onSelect(id)}
             >
               {agent?.session_name}

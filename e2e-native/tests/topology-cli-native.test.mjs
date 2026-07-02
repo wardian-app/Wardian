@@ -163,7 +163,7 @@ async function removeTopologyEdge(driver, aUuid, bUuid) {
   return result.result;
 }
 
-test("native CLI community scoping reads app-written topology", { timeout: 180000 }, async (t) => {
+test("native CLI neighbors scoping reads app-written topology", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
   assert.ok(harness.appPath);
 
@@ -225,7 +225,7 @@ test("native CLI community scoping reads app-written topology", { timeout: 18000
   await watchStep(harness, "Added topology edge between alpha and beta");
 
   // Run CLI as alpha (using WARDIAN_SESSION_ID) with default scope.
-  // Should see alpha + beta (community), but not gamma. Uses --verbose to
+  // Should see alpha + beta (neighbors), but not gamma. Uses --verbose to
   // prove the spec's "verbose output adds the visibility reason" contract;
   // the post-removal listing covers the explicit --fields path instead.
   const listAsAlpha = runCliOkAsAgent(cliPath, harness, ALPHA_SESSION_ID, [

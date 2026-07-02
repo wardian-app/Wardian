@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter};
 use wardian_core::topology::{
-    load_team_memberships, load_topology, pair_activity_from_records, resolve_community,
+    load_team_memberships, load_topology, pair_activity_from_records, resolve_neighbors,
     save_topology, PairActivity, Topology,
 };
 
@@ -38,10 +38,10 @@ pub async fn get_topology(
 
     let edges = snapshot_edges(&topology, &teams, &refs);
 
-    // Fallback groups: agents whose community comes only from workspace-fallback.
+    // Fallback groups: agents whose neighbors come only from workspace-fallback.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for agent in &refs {
-        let view = resolve_community(&agent.uuid, &topology, &teams, &refs);
+        let view = resolve_neighbors(&agent.uuid, &topology, &teams, &refs);
         let only_fallback = !view.members.is_empty()
             && view.members.iter().all(|m| {
                 m.reasons

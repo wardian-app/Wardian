@@ -8,7 +8,7 @@ import { seedTopology } from "../fixtures/mockAgent";
  * Graph topology browser E2E tests.
  *
  * These tests verify the browser-layer rendering and interaction of the graph view's
- * communication topology feature: manual edges, community panels, and the add-connection picker.
+ * communication topology feature: manual edges, neighbors panels, and the add-connection picker.
  * Tests that require real Tauri IPC or filesystem operations are marked @native-only.
  */
 
@@ -131,7 +131,7 @@ test.describe("Graph Topology", () => {
     await page.close();
   });
 
-  test("renders seeded manual edge in community panel", async () => {
+  test("renders seeded manual edge in neighbors panel", async () => {
     const agent1: MockAgent = {
       session_id: "test-agent-1",
       session_name: "Alpha",
@@ -174,13 +174,13 @@ test.describe("Graph Topology", () => {
     const inspectorHeader = page.locator(".graph-inspector h2");
     await expect(inspectorHeader).toContainText("Alpha");
 
-    // Wait for and verify the community panel is visible
-    await expect(page.locator(".graph-community-list")).toBeVisible();
+    // Wait for and verify the neighbors panel is visible
+    await expect(page.locator(".graph-neighbors-list")).toBeVisible();
 
     // Verify the neighbor (Beta) is listed with "manual" origin tag
-    const communityRow = page.locator(".graph-community-row").first();
-    await expect(communityRow).toContainText("Beta");
-    await expect(communityRow.locator(".graph-community-origin")).toContainText("manual");
+    const neighborsRow = page.locator(".graph-neighbors-row").first();
+    await expect(neighborsRow).toContainText("Beta");
+    await expect(neighborsRow.locator(".graph-neighbors-origin")).toContainText("manual");
   });
 
   test("add-connection picker opens and filters agents", async () => {
@@ -231,24 +231,24 @@ test.describe("Graph Topology", () => {
     const inspectorHeader = page.locator(".graph-inspector h2");
     await expect(inspectorHeader).toContainText("Creator");
 
-    // The "Add connection…" button should be visible after the community list
-    const addBtn = page.locator(".graph-community-add-btn").first();
+    // The "Add connection…" button should be visible after the neighbors list
+    const addBtn = page.locator(".graph-neighbors-add-btn").first();
     await expect(addBtn).toBeVisible();
     await addBtn.click();
 
     // Verify picker opens
-    const picker = page.locator(".graph-community-picker");
+    const picker = page.locator(".graph-neighbors-picker");
     await expect(picker).toBeVisible();
 
     // Verify input field is focused and ready
-    const pickerInput = picker.locator(".graph-community-picker-input");
+    const pickerInput = picker.locator(".graph-neighbors-picker-input");
     await expect(pickerInput).toBeFocused();
 
     // Type to filter agents; the assertion below auto-waits for the filter
     await pickerInput.fill("Candidate");
 
     // Verify "Candidate" appears in the list
-    const pickerList = picker.locator(".graph-community-picker-list");
+    const pickerList = picker.locator(".graph-neighbors-picker-list");
     await expect(pickerList).toContainText("Candidate");
 
     // Close the picker without selection
@@ -256,7 +256,7 @@ test.describe("Graph Topology", () => {
     await expect(picker).toBeHidden();
   });
 
-  test("community panel shows unmapped badge for ghost edges", async () => {
+  test("neighbors panel shows unmapped badge for ghost edges", async () => {
     test.skip(
       true,
       "@native-only: Ghost edges require pair activity data from backend, which is not available in browser mock layer. Test in native E2E with real IPC."
@@ -304,14 +304,14 @@ test.describe("Graph Topology", () => {
     await installGraphTopologyIpcMock(page, topology, [agent1, agent2]);
     await openGraphView(page);
 
-    // Wait for inspector and community panel
+    // Wait for inspector and neighbors panel
     await expect(page.locator(".graph-inspector")).toBeVisible();
-    await expect(page.locator(".graph-community-list")).toBeVisible();
+    await expect(page.locator(".graph-neighbors-list")).toBeVisible();
 
     // Verify edge is shown with delete button (× symbol)
-    const communityRow = page.locator(".graph-community-row").first();
-    await expect(communityRow).toContainText("Target");
-    const deleteBtn = communityRow.locator(".graph-community-action-btn");
+    const neighborsRow = page.locator(".graph-neighbors-row").first();
+    await expect(neighborsRow).toContainText("Target");
+    const deleteBtn = neighborsRow.locator(".graph-neighbors-action-btn");
     await expect(deleteBtn).toContainText("×");
   });
 

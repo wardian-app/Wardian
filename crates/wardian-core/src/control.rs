@@ -63,7 +63,7 @@ pub enum ControlRequest {
         approval_action: Option<ApprovalAction>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
-        /// Target resolution scope: "community" (default) or "all" — for agent senders only
+        /// Target resolution scope: "neighbors" (default) or "all" — for agent senders only
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_scope: Option<String>,
     },

@@ -13,7 +13,7 @@ pub struct AgentIdentity {
     pub workspace: Option<String>,
     pub last_status_at: Option<String>,
     pub status_source: StatusSource,
-    /// Community-visibility reason ("manual", "rule:...") — set only by community-scoped listings.
+    /// Neighbors-visibility reason ("manual", "rule:...") — set only by neighbors-scoped listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
 }

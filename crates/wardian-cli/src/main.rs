@@ -1350,28 +1350,28 @@ fn is_control_endpoint_unavailable(error: &std::io::Error) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopeChoice {
-    Community,
+    Neighbors,
     Workspace,
     All,
 }
 
 fn decide_scope(scope: &str, in_session: bool) -> Result<ScopeChoice, CliError> {
     match scope {
-        "auto" => Ok(if in_session { ScopeChoice::Community } else { ScopeChoice::Workspace }),
-        "community" => Ok(ScopeChoice::Community),
+        "auto" => Ok(if in_session { ScopeChoice::Neighbors } else { ScopeChoice::Workspace }),
+        "neighbors" => Ok(ScopeChoice::Neighbors),
         "workspace" => Ok(ScopeChoice::Workspace),
         "all" => Ok(ScopeChoice::All),
         other => Err(CliError::generic(format!("unknown scope: {other}"))),
     }
 }
 
-/// Keep self + community members; annotate members with their visibility reasons.
-fn filter_to_community(
+/// Keep self + neighbors; annotate members with their visibility reasons.
+fn filter_to_neighbors(
     agents: Vec<wardian_core::identity::AgentIdentity>,
     self_uuid: &str,
     home: &std::path::Path,
 ) -> Vec<wardian_core::identity::AgentIdentity> {
-    use wardian_core::topology::{load_topology, load_team_memberships, resolve_community, AgentRef};
+    use wardian_core::topology::{load_topology, load_team_memberships, resolve_neighbors, AgentRef};
 
     let topology = load_topology(home);
     let teams = load_team_memberships(home);
@@ -1379,7 +1379,7 @@ fn filter_to_community(
         .iter()
         .map(|agent| AgentRef { uuid: agent.uuid.clone(), workspace: agent.workspace.clone() })
         .collect();
-    let view = resolve_community(self_uuid, &topology, &teams, &refs);
+    let view = resolve_neighbors(self_uuid, &topology, &teams, &refs);
     let reasons: std::collections::HashMap<String, String> = view
         .members
         .iter()
@@ -1430,7 +1430,7 @@ fn handle_list(
         Scope::All
     } else {
         match scope_choice {
-            ScopeChoice::Community => Scope::All, // Fetch all first, then filter
+            ScopeChoice::Neighbors => Scope::All, // Fetch all first, then filter
             ScopeChoice::Workspace => Scope::Workspace,
             ScopeChoice::All => Scope::All,
         }
@@ -1460,13 +1460,13 @@ fn handle_list(
             },
         );
 
-        // Apply community filter if requested
-        if scope_choice == ScopeChoice::Community {
+        // Apply neighbors filter if requested
+        if scope_choice == ScopeChoice::Neighbors {
             let session_id = std::env::var("WARDIAN_SESSION_ID")
                 .map_err(|_| CliError::not_in_session())?;
             let home = wardian_core::paths::wardian_home()
-                .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for community scope)"))?;
-            agents = filter_to_community(agents, &session_id, &home);
+                .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for neighbors scope)"))?;
+            agents = filter_to_neighbors(agents, &session_id, &home);
         }
 
         return render_list(&agents, &render_options(args));
@@ -1491,13 +1491,13 @@ fn handle_list(
     )
     .map_err(identity_error)?;
 
-    // Apply community filter if requested
-    if scope_choice == ScopeChoice::Community {
+    // Apply neighbors filter if requested
+    if scope_choice == ScopeChoice::Neighbors {
         let session_id = std::env::var("WARDIAN_SESSION_ID")
             .map_err(|_| CliError::not_in_session())?;
         let home = wardian_core::paths::wardian_home()
-            .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for community scope)"))?;
-        agents = filter_to_community(agents, &session_id, &home);
+            .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for neighbors scope)"))?;
+        agents = filter_to_neighbors(agents, &session_id, &home);
     }
 
     render_list(&agents, &render_options(args))
@@ -2201,17 +2201,17 @@ mod tests {
     }
 
     #[test]
-    fn effective_default_scope_prefers_community_in_session() {
-        assert_eq!(decide_scope("auto", true).unwrap(), ScopeChoice::Community);
+    fn effective_default_scope_prefers_neighbors_in_session() {
+        assert_eq!(decide_scope("auto", true).unwrap(), ScopeChoice::Neighbors);
         assert_eq!(decide_scope("auto", false).unwrap(), ScopeChoice::Workspace);
-        assert_eq!(decide_scope("community", false).unwrap(), ScopeChoice::Community);
+        assert_eq!(decide_scope("neighbors", false).unwrap(), ScopeChoice::Neighbors);
         assert_eq!(decide_scope("workspace", true).unwrap(), ScopeChoice::Workspace);
         assert_eq!(decide_scope("all", true).unwrap(), ScopeChoice::All);
         assert!(decide_scope("bogus", true).is_err());
     }
 
     #[test]
-    fn community_filter_returns_neighbors_plus_self() {
+    fn neighbors_filter_returns_neighbors_plus_self() {
         let temp = tempfile::tempdir().unwrap();
         let mut topology = wardian_core::topology::Topology::default();
         topology.add_edge("me", "friend", "2026-07-02T00:00:00Z");
@@ -2259,7 +2259,7 @@ mod tests {
             },
         ];
 
-        let filtered = filter_to_community(agents, "me", temp.path());
+        let filtered = filter_to_neighbors(agents, "me", temp.path());
 
         assert_eq!(filtered.len(), 2);
         let me = filtered.iter().find(|a| a.uuid == "me").unwrap();
@@ -2270,11 +2270,11 @@ mod tests {
     }
 
     #[test]
-    fn community_scope_without_session_id_yields_not_in_session_error() {
+    fn neighbors_scope_without_session_id_yields_not_in_session_error() {
         let _guard = TestWardianHome::new(&tempfile::tempdir().unwrap().path().to_path_buf());
         std::env::remove_var("WARDIAN_SESSION_ID");
 
-        // Simulate what handle_list does when scope is Community
+        // Simulate what handle_list does when scope is Neighbors
         let result: Result<String, CliError> = std::env::var("WARDIAN_SESSION_ID")
             .map_err(|_| CliError::not_in_session());
 

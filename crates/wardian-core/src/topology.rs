@@ -185,25 +185,25 @@ pub const RULE_WORKSPACE_FALLBACK: &str = "workspace-fallback";
 pub const ACTIVE_ASK_WINDOW_MS: i64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CommunityMember {
+pub struct Neighbor {
     pub uuid: String,
     /// "manual", "rule:team-clique:<team-id>", "rule:workspace-fallback"
     pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CommunityView {
+pub struct NeighborsView {
     pub agent_uuid: String,
-    pub members: Vec<CommunityMember>,
+    pub members: Vec<Neighbor>,
 }
 
-impl CommunityView {
+impl NeighborsView {
     pub fn member_uuids(&self) -> BTreeSet<String> {
         self.members.iter().map(|member| member.uuid.clone()).collect()
     }
 }
 
-/// Resolve an agent's local community: manual neighbors ∪ team cliques,
+/// Resolve an agent's neighbor set: manual neighbors ∪ team cliques,
 /// with workspace-fallback engaging only when the agent has no manual edges
 /// and no team memberships. Excludes the agent itself and any UUID not
 /// present in `agents`. Each member carries the reasons it is visible
@@ -212,12 +212,12 @@ impl CommunityView {
 /// Ignored pairs suppress rule-derived reasons (team-clique and workspace-fallback)
 /// for those pairs. Manual edges are NOT affected by ignores; creating a manual
 /// edge implies intent.
-pub fn resolve_community(
+pub fn resolve_neighbors(
     agent_uuid: &str,
     topology: &Topology,
     teams: &[TeamMembership],
     agents: &[AgentRef],
-) -> CommunityView {
+) -> NeighborsView {
     use std::collections::BTreeMap;
 
     let known: BTreeMap<&str, &AgentRef> =
@@ -277,11 +277,11 @@ pub fn resolve_community(
         }
     }
 
-    CommunityView {
+    NeighborsView {
         agent_uuid: agent_uuid.to_string(),
         members: reasons_by_member
             .into_iter()
-            .map(|(uuid, reasons)| CommunityMember { uuid, reasons })
+            .map(|(uuid, reasons)| Neighbor { uuid, reasons })
             .collect(),
     }
 }
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn community_unions_manual_and_team_clique_with_reasons() {
+    fn neighbors_unions_manual_and_team_clique_with_reasons() {
         let mut topology = Topology::default();
         topology.add_edge("me", "friend", "t");
         let teams = vec![TeamMembership {
@@ -474,7 +474,7 @@ mod tests {
         }];
         let agents = vec![agent("me", None), agent("friend", None), agent("mate", None)];
 
-        let view = resolve_community("me", &topology, &teams, &agents);
+        let view = resolve_neighbors("me", &topology, &teams, &agents);
 
         let friend = view.members.iter().find(|m| m.uuid == "friend").unwrap();
         assert_eq!(friend.reasons, vec!["manual", "rule:team-clique:team-1"]);
@@ -493,7 +493,7 @@ mod tests {
             agent("floating", None),
         ];
 
-        let view = resolve_community("me", &topology, &[], &agents);
+        let view = resolve_neighbors("me", &topology, &[], &agents);
 
         assert_eq!(view.members.len(), 1);
         assert_eq!(view.members[0].uuid, "mate");
@@ -510,7 +510,7 @@ mod tests {
             agent("remote", Some("D:/elsewhere")),
         ];
 
-        let view = resolve_community("me", &topology, &[], &agents);
+        let view = resolve_neighbors("me", &topology, &[], &agents);
 
         assert_eq!(view.member_uuids(), ["remote".to_string()].into());
     }
@@ -521,18 +521,18 @@ mod tests {
         let teams = vec![TeamMembership { id: "t1".into(), agent_ids: vec!["me".into()] }];
         let agents = vec![agent("me", Some("D:/ws")), agent("mate", Some("D:/ws"))];
 
-        let view = resolve_community("me", &topology, &teams, &agents);
+        let view = resolve_neighbors("me", &topology, &teams, &agents);
 
         assert!(view.members.is_empty());
     }
 
     #[test]
-    fn community_excludes_self_and_unknown_agents() {
+    fn neighbors_excludes_self_and_unknown_agents() {
         let mut topology = Topology::default();
         topology.add_edge("me", "me-too-deleted", "t");
         let agents = vec![agent("me", None)];
 
-        let view = resolve_community("me", &topology, &[], &agents);
+        let view = resolve_neighbors("me", &topology, &[], &agents);
 
         assert!(view.members.is_empty());
     }
@@ -625,7 +625,7 @@ mod tests {
         }];
         let agents = vec![agent("me", None), agent("mate", None)];
 
-        let view = resolve_community("me", &topology, &teams, &agents);
+        let view = resolve_neighbors("me", &topology, &teams, &agents);
 
         assert!(view.members.is_empty(), "ignored pair should suppress team-clique reason");
     }
@@ -641,7 +641,7 @@ mod tests {
         }];
         let agents = vec![agent("me", None), agent("mate", None)];
 
-        let view = resolve_community("me", &topology, &teams, &agents);
+        let view = resolve_neighbors("me", &topology, &teams, &agents);
 
         assert_eq!(view.members.len(), 1);
         let mate = view.members.iter().find(|m| m.uuid == "mate").unwrap();
@@ -658,7 +658,7 @@ mod tests {
             agent("other", Some("D:/ws")),
         ];
 
-        let view = resolve_community("me", &topology, &[], &agents);
+        let view = resolve_neighbors("me", &topology, &[], &agents);
 
         // Should include "other" but not "mate" (ignored)
         assert_eq!(view.members.len(), 1);
@@ -675,7 +675,7 @@ mod tests {
             agent("mate", Some("D:/ws")),
         ];
 
-        let view = resolve_community("me", &topology, &[], &agents);
+        let view = resolve_neighbors("me", &topology, &[], &agents);
 
         // Since mate is the only workspace-fallback candidate and is ignored,
         // the agent is still considered "fallback engaged" (no manual edges, no teams).

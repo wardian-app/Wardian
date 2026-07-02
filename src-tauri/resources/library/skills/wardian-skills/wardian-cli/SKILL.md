@@ -14,8 +14,8 @@ or filesystem inspection.
 When a task involves Wardian or another agent:
 
 1. Inspect yourself if you are inside a Wardian-managed terminal.
-2. Inspect the live roster with `wardian agent list` (shows your local community by default).
-   Use `--scope all` only when your task genuinely spans communities (e.g., you are an
+2. Inspect the live roster with `wardian agent list` (shows your neighbors by default).
+   Use `--scope all` only when your task genuinely spans multiple neighbor sets (e.g., you are an
    orchestrator wiring up new agents).
 3. Pick an idle, suitable peer by class, provider, workspace, and status.
 4. Spawn an explicit class/provider peer when no suitable peer exists.
@@ -50,19 +50,19 @@ wardian agent list --workspace <absolute-workspace-path>
 wardian agent worktree list
 ```
 
-By default, `wardian agent list` shows your **local community** — the agents you're
+By default, `wardian agent list` shows your **neighbors** — the agents you're
 connected to through the communication topology (manual edges, your teams, or your
 workspace if you're not yet wired into the graph). This shapes your default attention
-without restricting capability. Bare-name agent sends resolve within your community
+without restricting capability. Bare-name agent sends resolve within your neighbors
 first, then fall back to global exact match.
 
 **Scope modes:**
-- `--scope auto` (default): community when inside a Wardian-managed session, else workspace.
-- `--scope community`: self + direct topology neighbors (manual edges, team cliques, workspace fallback).
+- `--scope auto` (default): neighbors when inside a Wardian-managed session, else workspace.
+- `--scope neighbors`: self + direct topology neighbors (manual edges, team cliques, workspace fallback).
 - `--scope workspace`: all agents in your workspace.
-- `--scope all`: all known agents (use only for orchestration tasks that span communities).
+- `--scope all`: all known agents (use only for orchestration tasks that span multiple neighbor sets).
 
-Use `--scope all` only when your task genuinely spans multiple communities or you're
+Use `--scope all` only when your task genuinely spans multiple neighbor sets or you're
 coordinating across workspaces.
 
 Default output is indented JSON with `schema: 1`. Use `--field` for
@@ -186,13 +186,13 @@ wardian send "review this patch" --to reviewer-a1 --wait-until idle --timeout 10
 ```
 
 Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. By default:
-- `--to all` broadcasts to your **local community** (not global).
-- `--to class:Coder` resolves within your community.
-- Bare names resolve community-first; if no community member matches, fall back to global.
+- `--to all` broadcasts to your **neighbors** (not global).
+- `--to class:Coder` resolves within your neighbors.
+- Bare names resolve neighbors-first; if no neighbor matches, fall back to global.
 - Explicit UUIDs and exact names always work regardless of topology (soft boundary).
 
 Use `--scope all` on `send` only when you need global broadcast/class resolution for
-orchestration across communities. Use `--wait-until` only with a single-agent target;
+orchestration across multiple neighbor sets. Use `--wait-until` only with a single-agent target;
 broadcasts are for messages that should not block the current command.
 
 Normal sends preserve inter-agent attribution when Wardian knows the sender.

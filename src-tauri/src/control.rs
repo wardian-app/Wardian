@@ -795,7 +795,7 @@ async fn resolve_send_targets_in_state(state: &AppState, target: &str) -> Vec<St
         .unwrap_or_default()
 }
 
-/// Community-scoped broadcast/class/name resolution when the sender is an agent.
+/// Neighbors-scoped broadcast/class/name resolution when the sender is an agent.
 /// UUID and exact-name misses fall back to global (soft boundary: explicit
 /// targeting always works). scope_all=true disables scoping (e.g. orchestrator broadcast).
 async fn resolve_send_targets_scoped(
@@ -824,17 +824,17 @@ async fn resolve_send_targets_scoped(
     let teams = wardian_core::topology::load_team_memberships(&home);
     let refs = state.topology_agent_refs().await;
 
-    let community = wardian_core::topology::resolve_community(sender, &topology, &teams, &refs);
-    let allowed = community.member_uuids();
+    let neighbors = wardian_core::topology::resolve_neighbors(sender, &topology, &teams, &refs);
+    let allowed = neighbors.member_uuids();
 
     if target == "all" || target.starts_with("class:") {
         return global.into_iter().filter(|id| allowed.contains(id)).collect();
     }
 
-    // Bare name: prefer community match; fall back to global exact match.
-    let community_matches: Vec<String> =
+    // Bare name: prefer neighbors match; fall back to global exact match.
+    let neighbors_matches: Vec<String> =
         global.iter().filter(|id| allowed.contains(*id)).cloned().collect();
-    if community_matches.is_empty() { global } else { community_matches }
+    if neighbors_matches.is_empty() { global } else { neighbors_matches }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4112,7 +4112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_targets_scope_to_sender_community() {
+    async fn broadcast_targets_scope_to_sender_neighbors() {
         let home = TestWardianHome::new();
         let mut topology = wardian_core::topology::Topology::default();
         topology.add_edge("sender-1", "peer-1", "2026-07-02T00:00:00Z");
@@ -4123,11 +4123,11 @@ mod tests {
         insert_test_agent(&state, "peer-1", "PeerOne", "Reviewer").await;
         insert_test_agent(&state, "stranger-1", "StrangerOne", "Coder").await;
 
-        // Community-scoped send to "all": only peer-1 (in community)
-        let community = resolve_send_targets_scoped(&state, "all", Some("sender-1"), false).await;
-        let mut community = community;
-        community.sort();
-        assert_eq!(community, vec!["peer-1".to_string()]);
+        // Neighbors-scoped send to "all": only peer-1 (in neighbors)
+        let neighbors = resolve_send_targets_scoped(&state, "all", Some("sender-1"), false).await;
+        let mut neighbors = neighbors;
+        neighbors.sort();
+        assert_eq!(neighbors, vec!["peer-1".to_string()]);
 
         // Globally-scoped send to "all": all agents (including sender)
         let global = resolve_send_targets_scoped(&state, "all", Some("sender-1"), true).await;

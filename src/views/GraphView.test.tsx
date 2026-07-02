@@ -432,7 +432,7 @@ describe("GraphView", () => {
 
       render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
-      // Wait for the manual edge to reach the community panel before selecting it
+      // Wait for the manual edge to reach the neighbors panel before selecting it
       await waitFor(() => {
         expect(screen.getByTitle("Disconnect")).toBeInTheDocument();
       });
@@ -468,7 +468,7 @@ describe("GraphView", () => {
 
       render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
-      // Wait for the rule-derived row to reach the community panel before selecting the edge
+      // Wait for the rule-derived row to reach the neighbors panel before selecting the edge
       await waitFor(() => {
         expect(screen.getByText("managed by team Team")).toBeInTheDocument();
       });
