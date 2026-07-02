@@ -1,6 +1,6 @@
 # Dashboard Observability References
 
-This document maps public complex-system dashboards, Kubernetes/operator UIs, monitoring tools, and trace dashboards to design patterns relevant to Wardian's dashboard view, command-center telemetry, agent roster, watchlists, and drill-down monitoring paths.
+This document maps public complex-system dashboards, Kubernetes/operator UIs, monitoring tools, and trace dashboards to design patterns relevant to Wardian's dashboard view, Habitat telemetry, agent roster, watchlists, and drill-down monitoring paths.
 
 This is not an endorsement, affiliation claim, product evaluation, or competitive teardown. The notes below describe public architecture and design pressure only.
 
@@ -47,7 +47,7 @@ Source basis: entries were selected through public research and checked against 
 - Cluster/operator dashboard posture.
 - Debugging and monitoring orientation.
 
-**Wardian relevance:** Headlamp is a command-center reference. Wardian has a similar problem shape: many live objects, nested resource kinds, status badges, logs, actions, plugins, and operator workflows. The dashboard should make the object graph navigable without hiding raw state.
+**Wardian relevance:** Headlamp is an operator-UI reference. Wardian has a similar problem shape: many live objects, nested resource kinds, status badges, logs, actions, plugins, and operator workflows. The dashboard should make the object graph navigable without hiding raw state.
 
 ### Octant
 

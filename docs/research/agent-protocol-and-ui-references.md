@@ -1,6 +1,6 @@
 # Agent Protocol and UI References
 
-This document maps public agent interoperability and agent-generated UI systems to design patterns relevant to Wardian's workflow builder, command center, agent-facing APIs, and human-observable control surfaces.
+This document maps public agent interoperability and agent-generated UI systems to design patterns relevant to Wardian's workflow builder, local agent Habitat, agent-facing APIs, and human-observable control surfaces.
 
 This is not an endorsement, affiliation claim, product evaluation, or competitive teardown. The notes below describe public architecture and design pressure only.
 
@@ -45,7 +45,7 @@ Source basis: entries were selected through public research and checked against 
 - Stdio and remote transport patterns.
 - Growing ecosystem of MCP servers and clients.
 
-**Wardian relevance:** Wardian should treat MCP as a first-class interoperability boundary. Skills, workspace files, workflow operations, agent roster state, and command-center actions should be exposed through stable structured interfaces where useful, not only through UI clicks or terminal text.
+**Wardian relevance:** Wardian should treat MCP as a first-class interoperability boundary. Skills, workspace files, workflow operations, agent roster state, and Habitat actions should be exposed through stable structured interfaces where useful, not only through UI clicks or terminal text.
 
 ### Agent2Agent / A2A
 
@@ -91,7 +91,7 @@ Source basis: entries were selected through public research and checked against 
 - Examples for focused protocol building blocks.
 - Terminal-and-agent client support.
 
-**Wardian relevance:** AG-UI is relevant because Wardian is a command center, not just an agent launcher. Workflow nodes, action-needed prompts, approvals, agent messages, tool calls, and generated controls could all be represented as structured UI events instead of bespoke ad hoc IPC messages.
+**Wardian relevance:** AG-UI is relevant because Wardian is a visible local agent Habitat, not just an agent launcher. Workflow nodes, action-needed prompts, approvals, agent messages, tool calls, and generated controls could all be represented as structured UI events instead of bespoke ad hoc IPC messages.
 
 ### A2UI
 

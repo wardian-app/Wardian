@@ -8,7 +8,7 @@ The desktop remains the authoritative runtime for PTY state, provider lifecycle,
 
 ## Decisions
 
-- The mobile watchlist keeps its first screen focused on agent status. Multi-agent broadcast is intentionally not exposed on the phone watchlist; use the desktop command center for broadcast workflows.
+- The mobile watchlist keeps its first screen focused on agent status. Multi-agent broadcast is intentionally not exposed on the phone watchlist; use the desktop app for broadcast workflows.
 - Mobile agent detail uses the same approval-choice parser and markdown copy behavior as desktop chat where the browser environment permits it.
 - Provider slash-command style input is inferred from prompts that start with `/` and sent through the remote action endpoint as `input_mode: "command"`.
 - Selected-agent clone remains desktop-only. The mobile action strip keeps lifecycle controls, but remote clone is not exposed or accepted by the gateway.

@@ -16,7 +16,7 @@ docs/assets/screenshots/<feature-or-window>/<state>.png
 
 | Priority | Feature or window | Owning guide | Asset path | Capture layer | State to show |
 | --- | --- | --- | --- | --- | --- |
-| P0 | App shell and Grid | `docs/guide/ui-overview.md` | `docs/assets/screenshots/grid/app-shell.png` | Browser E2E | Main command center with left rail, grid, and roster visible |
+| P0 | App shell and Grid | `docs/guide/ui-overview.md` | `docs/assets/screenshots/grid/app-shell.png` | Browser E2E | Main Habitat shell with left rail, grid, and roster visible |
 | P0 | Dashboard | `docs/guide/ui-overview.md` | `docs/assets/screenshots/dashboard/system-summary.png` | Browser E2E | Dashboard cards and telemetry summary |
 | P0 | Agent roster / Watchlists | `docs/guide/watchlists.md` | `docs/assets/screenshots/watchlists/agent-roster.png` | Browser E2E | Searchable right roster with agent rows and status indicators |
 | P0 | Spawn Agent | `docs/guide/getting-started.md` | `docs/assets/screenshots/spawn-agent/spawn-form.png` | Browser E2E | Agent configuration form with name, class, workspace, and provider controls |

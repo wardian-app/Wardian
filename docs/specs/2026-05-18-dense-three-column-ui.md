@@ -1,6 +1,6 @@
 # Dense Three-Column UI
 
-Wardian's primary desktop layout target is a dense three-column command-center view that remains comfortable at 1920x1080 across operating systems. Smaller windows should degrade through existing collapse and stacked-grid behavior, but the baseline density is desktop-first rather than mobile-first.
+Wardian's primary desktop layout target is a dense three-column Habitat view that remains comfortable at 1920x1080 across operating systems. Smaller windows should degrade through existing collapse and stacked-grid behavior, but the baseline density is desktop-first rather than mobile-first.
 
 ## Standards
 
