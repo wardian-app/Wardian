@@ -642,7 +642,7 @@ describe("RemoteMobileApp", () => {
 
     render(<RemoteBottomNav />);
 
-    expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Agents" })).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("button", { name: "Graph" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Garden" }));
     expect(useRemoteStore.getState().activeRemoteTab).toBe("garden");
@@ -675,7 +675,7 @@ describe("RemoteMobileApp", () => {
     render(<RemoteMobileApp />);
 
     expect(screen.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Watchlist" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Agents" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
     expect(screen.getByRole("button", { name: "Open Alpha details" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Broadcast" })).not.toBeInTheDocument();
