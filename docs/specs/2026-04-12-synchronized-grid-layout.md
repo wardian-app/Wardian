@@ -4,7 +4,7 @@
 * **Date:** 2026-04-12
 
 ## Context and Problem Statement
-Current grid management in Wardian is limited to a simple `flex-wrap` layout with heavy whitespace gaps. To create a high-fidelity "Command Center" experience, we need a system that allows for **Direct Visual Manipulation** of a flush, zero-gap grid where terminals share edges.
+Current grid management in Wardian is limited to a simple `flex-wrap` layout with heavy whitespace gaps. To create a high-fidelity live agent workspace, we need a system that allows for **Direct Visual Manipulation** of a flush, zero-gap grid where terminals share edges.
 
 ## Proposed Decision
 We will implement a **Track-Based Flush Grid** where agents sit flush against each other, allowing for synchronized track resizing via shared edges.

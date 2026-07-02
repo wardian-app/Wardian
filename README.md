@@ -4,7 +4,7 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**A local desktop command center for supervising and shaping AI agent teams.**
+**A local-first desktop habitat for real AI CLI agents, workflows, and reusable context.**
 
 [![tests](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg)](https://codecov.io/gh/wardian-app/Wardian)
@@ -24,7 +24,7 @@ Wardian gives real AI CLI agents durable identity, live terminals, scoped skills
 
 Use it to spawn specialized agents, monitor their progress, hand work between them, collect completed output, and automate repeatable flows across providers such as Antigravity, Claude, Codex, and OpenCode. The bundled `wardian` CLI gives agents and scripts a textual control surface for discovering identity, coordinating peers, and controlling Wardian without driving the graphical app.
 
-Wardian is built for malleable agent work. Prompts, classes, skills, workflows, queues, and memory-ready evidence are treated as visible, reusable artifacts rather than opaque app state. You can start by supervising live agents, then gradually turn repeated instructions into prompts, reusable roles, deployable skills, workflow templates, and durable project context.
+Wardian is built for malleable agent work. Prompts, classes, skills, workflows, queues, and memory-ready evidence are treated as visible, reusable artifacts rather than opaque app state. The product direction is a Habitat of Sites, Cohorts, and movable surfaces where agent work can be inspected, rearranged, and extended over time. You can start by watching live agents, then gradually turn repeated instructions into prompts, reusable roles, deployable skills, workflow templates, and durable project context.
 
 ---
 
@@ -128,10 +128,10 @@ Wardian supports five provider CLIs today and adapts each runtime into the same 
 
 ## Why Wardian?
 
-Most agent orchestrators still live primarily in terminals, config files, or
-headless framework code. Wardian is built around a different center of gravity:
-a desktop command center where humans can see, steer, and reshape many real
-local CLI agents without losing the terminal truth underneath.
+Most agent tools still live primarily in terminals, config files, or headless
+framework code. Wardian is built around a different center of gravity: a
+local-first Habitat where humans can see, steer, and reshape many real local
+CLI agents without losing the terminal truth underneath.
 
 - **GUI-first, terminal-real.** Wardian gives each managed provider a real PTY
   while projecting status, telemetry, output, queue evidence, workflows, and

@@ -17,12 +17,13 @@ Related docs:
 - [Wardian CLI](./guide/cli.md)
 - [Architecture](./developer/architecture.md)
 
-## Multi-Agent Command Center
+## Live Agent Habitat
 
-- High-density Grid and Dashboard views for active session monitoring
-- Left control rail for spawning, commands, workflows, explorer, and settings
-- Right roster with status lights, thought snippets, and watchlists
+- High-density Grid and Dashboard views for live local agent sessions
+- Left control rail for spawning, commands, workflows, Explorer, and settings
+- Right roster with status lights, thought snippets, and agent working sets
 - Queue tab for unread agent completions and workflow outcomes
+- Roadmap direction: Sites, Cohorts, movable surfaces, Garden spatial organization, and Graph communication topology
 
 Related docs:
 
@@ -114,9 +115,9 @@ Related docs:
 
 - [Settings](./guide/settings.md)
 
-## Provider-Aware Orchestration
+## Provider-Aware Runtime
 
-- Unified orchestration over Antigravity, Claude, Codex, and OpenCode (Gemini is unmaintained — use Antigravity for Google-model access)
+- Unified runtime model over Antigravity, Claude, Codex, and OpenCode (Gemini is unmaintained — use Antigravity for Google-model access)
 - Provider-specific lifecycle handling for resume/session identity and skill discovery
 
 Related docs:

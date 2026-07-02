@@ -1,6 +1,6 @@
 # Multi-Agent Orchestrator References
 
-This document maps public multi-agent orchestration systems to design patterns relevant to Wardian's command center, workflow runtime, local agent roster, and agent-team management surfaces.
+This document maps public multi-agent orchestration systems to design patterns relevant to Wardian's local agent Habitat, workflow runtime, local agent roster, and agent-team management surfaces.
 
 This is not an endorsement, affiliation claim, product evaluation, or competitive teardown. The notes below describe public architecture and design pressure only.
 
@@ -12,13 +12,13 @@ Source basis: the local-agent, worktree-manager, organization-management, and SD
 
 Wardian should distinguish interaction surface from orchestration model:
 
-- **GUI/web command centers**: emphasize dashboards, visual configuration, run history, and team-level visibility.
+- **GUI/web agent workspaces**: emphasize dashboards, visual configuration, run history, and team-level visibility.
 - **CLI/TUI/local-terminal systems**: emphasize fast keyboard control, local worktrees, terminal multiplexing, and developer-loop ergonomics.
 - **Organization and SDLC control planes**: emphasize goals, org charts, budgets, issue/task ownership, approval gates, CI, PRs, and management/accountability workflows above individual agent sessions.
 - **Libraries/frameworks**: emphasize programmable agent composition, state models, message routing, tools, memory, and runtime APIs.
 - **Hybrid systems**: expose more than one surface, often pairing a code or YAML source of truth with a GUI or CLI execution surface.
 
-This distinction matters because Wardian is not only an agent framework. It is a local command center for visible, long-running agent sessions. Systems that look similar at the orchestration layer can feel very different when the primary control surface is a browser, a terminal, a Python API, an organization chart, or a workspace-local YAML file.
+This distinction matters because Wardian is not only an agent framework. It is a local-first Habitat for visible, long-running agent sessions. Systems that look similar at the orchestration layer can feel very different when the primary control surface is a browser, a terminal, a Python API, an organization chart, or a workspace-local YAML file.
 
 ## Summary Map
 
@@ -28,13 +28,13 @@ This distinction matters because Wardian is not only an agent framework. It is a
 | [Gas City](https://github.com/gastownhall/gascity) | SDK/CLI infrastructure | Orchestration-builder SDK with runtime providers, config packs, controller/supervisor loops, and health patrol. | Treat construction APIs and visual observability as separate layers; Gas City is source-level orchestration infrastructure, not a GUI reference. |
 | [Beehive](https://github.com/storozhenko98/beehive) | Desktop GUI + TUI | One-window repo/workspace manager for isolated clones, persistent PTYs, agent panes, and shared GUI/TUI config. | The "agent colony" metaphor aligns with Wardian's habitat framing when it exposes concrete repos, branches, panes, and persisted layout. |
 | [Agent of Empires](https://github.com/njbrake/agent-of-empires) | TUI + web dashboard | tmux-backed session manager for many CLI coding agents, worktrees, optional Docker sandboxes, and remote browser access. | Dense, low-latency agent supervision is its own UX class. |
-| [Hive](https://github.com/cristicretu/hive) | CLI/TUI | Small Ink-based worktree manager for creating, listing, merging, and dropping parallel agent workspaces. | Some adjacent tools are intentionally narrow; Wardian should keep the fast worktree loop simple even as the command center grows. |
+| [Hive](https://github.com/cristicretu/hive) | CLI/TUI | Small Ink-based worktree manager for creating, listing, merging, and dropping parallel agent workspaces. | Some adjacent tools are intentionally narrow; Wardian should keep the fast worktree loop simple even as the Habitat grows. |
 | [Apiari](https://github.com/ApiariTools/apiari) | Coordinator daemon + TUI/web surfaces | Rust workspace chat hub plus Swarm worker multiplexer for bots, signal watching, schedules, and worktree workers. | Wardian workflows should distinguish agent execution from coordination, review, notification, and merge ownership. |
-| [Orca](https://github.com/stablyai/orca) | Desktop IDE + CLI | Agent development environment with worktrees, terminal panes, source control, inline review, browser/design mode, and agent-driving CLI. | Terminal panes, diffs, unread markers, status, and notifications belong in one command center. |
+| [Orca](https://github.com/stablyai/orca) | Desktop IDE + CLI | Agent development environment with worktrees, terminal panes, source control, inline review, browser/design mode, and agent-driving CLI. | Terminal panes, diffs, unread markers, status, and notifications belong in one local agent workspace. |
 | [Daintree](https://github.com/daintreehq/daintree) | Desktop agent console | Electron local control plane for panels, worktrees, CLI agents, state detection, context injection, recipes, MCP, and review workflows. | Wardian's habitat metaphor should stay grounded in concrete worktrees, diffs, resource pressure, and action-needed states. |
 | [Biomelab](https://github.com/mdelapenya/biomelab) | Desktop GUI | Fyne desktop dashboard for Git worktrees, process-detected agents, PR/CI state, terminal/IDE detection, and Docker sandboxes. | Visual dashboards can make worktree ownership, branch health, and agent isolation inspectable without owning the agent runtime. |
 | [Agor](https://github.com/preset-io/agor) | GUI/Web | Multiplayer spatial canvas for coordinating coding assistants, worktrees, and sessions. | Spatial dashboards are useful when they expose ownership, environment, and live conversation state. |
-| [webmux](https://github.com/windmill-labs/webmux) | Web dashboard + CLI | Parallel AI agent dashboard with YAML-defined layouts, tmux terminals, worktrees, service ports, PR/CI, Linear, and Docker sandboxes. | A web command center can remain reproducible if its layout and runtime assumptions are text-defined. |
+| [webmux](https://github.com/windmill-labs/webmux) | Web dashboard + CLI | Parallel AI agent dashboard with YAML-defined layouts, tmux terminals, worktrees, service ports, PR/CI, Linear, and Docker sandboxes. | A web agent workspace can remain reproducible if its layout and runtime assumptions are text-defined. |
 | [OctoAlly](https://github.com/ai-genius-automations/octoally) | Web dashboard + Electron | Local-first Claude Code/Codex dashboard with tmux persistence, sessions grid, specialist agents, source control, and voice input. | Agent dashboards should treat live output, task lifecycle, terminals, and source control as one surface. |
 | [Overstory](https://github.com/jayminwest/overstory) | CLI + web UI + TUI dashboard | Multi-agent coding orchestration with worktrees, runtime adapters, SQLite mail, watchdogs, web UI, TUI dashboard, and conflict resolution. | Agent-agent messaging, health monitoring, and merge coordination are key pieces beyond simply spawning workers. |
 | [Paperclip](https://github.com/paperclipai/paperclip) | Org/company control plane | Node.js server and React UI for managing teams of agents through companies, org charts, goals, issues, budgets, approvals, heartbeats, and audit trails. | Wardian should distinguish agent execution from management primitives such as goals, reporting lines, budgets, governance, and accountability. |
@@ -126,7 +126,7 @@ Several newer systems focus less on agent-framework abstractions and more on the
 - Web dashboard, telemetry, health patrol/watchdog concepts, and a refinery-style merge queue.
 - Session discovery/continuation from agent event logs.
 
-**Wardian relevance:** Gas Town reinforces that a useful command center is not just many terminals. Wardian should model durable agent identity, work ownership, event feeds, stuck-agent handling, merge readiness, and escalation state alongside the PTY.
+**Wardian relevance:** Gas Town reinforces that a useful local agent Habitat is not just many terminals. Wardian should model durable agent identity, work ownership, event feeds, stuck-agent handling, merge readiness, and escalation state alongside the PTY.
 
 ### Gas City
 
@@ -157,9 +157,9 @@ Several newer systems focus less on agent-framework abstractions and more on the
 - Built-in source control, diff comments that can be sent back to agents, and PR/CI review surfaces.
 - Per-worktree browser/design mode and remote worktree support.
 - First-class CLI so agents can create worktrees, snapshot, click, and fill.
-- Cross-agent/provider support within one local command center.
+- Cross-agent/provider support within one local Habitat.
 
-**Wardian relevance:** Orca is close to Wardian's desired command-center feel. It treats terminals as live work surfaces while adding just enough surrounding UI to make agent state, unread work, and code diffs legible.
+**Wardian relevance:** Orca is close to Wardian's desired local agent workspace feel. It treats terminals as live work surfaces while adding just enough surrounding UI to make agent state, unread work, and code diffs legible.
 
 ### Apiari
 
@@ -208,7 +208,7 @@ Several newer systems focus less on agent-framework abstractions and more on the
 - Status detection for running, waiting, and idle states.
 - Remote access patterns for phone/tablet use; Linux/macOS focus with WSL2 for Windows.
 
-**Wardian relevance:** Agent of Empires is useful as a UX pressure reference. Wardian needs comparable speed for agent switching and task inspection even though it exposes a richer desktop command center.
+**Wardian relevance:** Agent of Empires is useful as a UX pressure reference. Wardian needs comparable speed for agent switching and task inspection even though it exposes a richer desktop Habitat.
 
 ### Hive
 
@@ -310,13 +310,13 @@ Several newer systems focus less on agent-framework abstractions and more on the
 
 **Wardian relevance:** Archon is both a workflow-system reference and a multi-agent orchestrator reference. For Wardian, the most important lesson is that agents need a construction surface that can be reviewed as text, while humans need a visible run surface with node state, logs, approvals, and artifacts.
 
-## GUI and Web Command Centers
+## GUI and Web Agent Workspaces
 
 ### Agor
 
 **Source basis:** Public repo checked.
 
-**What it includes:** Agor is a web command center and shared spatial canvas for coding agents and long-lived assistants. Worktrees are the anchor entity: sessions, environments, prompts, PRs, comments, and boards converge around each worktree.
+**What it includes:** Agor is a web workspace and shared spatial canvas for coding agents and long-lived assistants. Worktrees are the anchor entity: sessions, environments, prompts, PRs, comments, and boards converge around each worktree.
 
 **Distinctive components:**
 
@@ -389,7 +389,7 @@ Several newer systems focus less on agent-framework abstractions and more on the
 - Visibility into agent actions, files, and task progress.
 - Developer-oriented loop rather than generic chat only.
 
-**Wardian relevance:** OpenHands shows the value of combining terminal output, file changes, browser state, and task progress in one observable surface. Wardian's differentiator is the persistent multi-agent habitat: many named agents, long-running sessions, local provider terminals, and workflow telemetry in the same command center.
+**Wardian relevance:** OpenHands shows the value of combining terminal output, file changes, browser state, and task progress in one observable surface. Wardian's differentiator is the persistent multi-agent Habitat: many named agents, long-running sessions, local provider terminals, and workflow telemetry in the same desktop app.
 
 ### SuperAGI
 
@@ -519,7 +519,7 @@ Some systems are not primarily multi-agent orchestrators, but they still inform 
 - [Goose](https://github.com/block/goose): local agent experience with CLI and desktop surfaces.
 - [Aider](https://github.com/Aider-AI/aider): terminal-first pair programming agent with strong Git workflow integration.
 
-These are useful references for single-agent ergonomics, provider interaction, and developer trust. They should not be treated as direct multi-agent command center references unless they add explicit orchestration or roster semantics.
+These are useful references for single-agent ergonomics, provider interaction, and developer trust. They should not be treated as direct multi-agent Habitat references unless they add explicit orchestration or roster semantics.
 
 ## Wardian Positioning
 

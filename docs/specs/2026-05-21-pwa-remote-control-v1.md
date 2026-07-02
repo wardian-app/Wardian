@@ -7,7 +7,7 @@ Filename: `2026-05-21-pwa-remote-control-v1.md`
 
 ## Context and Problem Statement
 
-Wardian is currently a local desktop command center. The Rust/Tauri backend owns
+Wardian is currently a local-first desktop habitat. The Rust/Tauri backend owns
 agent lifecycle, PTY state, telemetry, workflows, filesystem operations, and the
 local CLI control endpoint. The existing live control endpoint is intentionally
 local: it is exposed through a Windows named pipe or Unix socket derived from
@@ -36,7 +36,7 @@ capabilities used by the desktop UI and CLI.
 The PWA will live in the existing repository as a web/mobile platform variant.
 It should reuse shared TypeScript types, status utilities, theme tokens, queue
 logic, and API DTOs where appropriate, but it should use a dedicated mobile shell
-instead of trying to make the full desktop command center responsive.
+instead of trying to make the full desktop shell responsive.
 
 ## Host and Deployment Model
 
@@ -320,7 +320,7 @@ conversation view:
 - The conversation view reads the same normalized chat transcript model used by
   desktop grid chat mode and sends prompts through the same backend action path.
 - Multi-agent broadcast is intentionally not exposed from the mobile roster;
-  use the desktop command center for broadcast workflows.
+  use the desktop app for broadcast workflows.
 - Pause/resume, clear, kill/delete, and clone where backend support is already
   straightforward.
 - Queue/completion triage as a tab or filter.

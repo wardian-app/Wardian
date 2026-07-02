@@ -74,7 +74,7 @@ Wardian is a high-performance "Integrated Agent Environment" designed for develo
 
 ### Brand Personality
 - **Tactile**: Physical-first organization using drag-and-drop grids and visible telemetry.
-- **High-Tech / Omniscient**: A command-center view of multiple agent minds in real-time.
+- **High-Tech / Situational**: A live, inspectable view of multiple agent sessions, surfaces, and signals.
 - **Ecological / Transparent**: "Markdown-as-Truth" ensuring the system's state is always inspectable.
 
 ## Colors

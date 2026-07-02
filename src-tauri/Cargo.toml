@@ -1,7 +1,7 @@
 [package]
 name = "Wardian"
 version = "0.4.2"
-description = "A local desktop command center for supervising and shaping AI agent teams."
+description = "A local-first desktop habitat for real AI CLI agents, workflows, and reusable context."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
 build = "build.rs"

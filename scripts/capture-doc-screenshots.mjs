@@ -87,7 +87,7 @@ const terminalOutput = {
   "docs-codex":
     "\x1b]0;Working\x07$ Summarize this workspace in five bullets. Do not edit files.\n" +
     "- docs/ contains the public guide and developer documentation.\n" +
-    "- src/ contains the React command-center UI.\n" +
+    "- src/ contains the React desktop Habitat UI.\n" +
     "- src-tauri/ contains the native runtime and provider orchestration.\n" +
     "- scripts/ contains automation for repeatable docs screenshots.\n" +
     "- Queue will keep this completed summary available for triage.\n",

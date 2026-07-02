@@ -253,8 +253,8 @@ such as shell selection, external editors, provider approval policy, or remote
 access setup.
 
 The mobile watchlist does not expose broadcast. Use agent detail for
-single-agent prompts from the phone, and use the desktop command center for
-multi-agent broadcast workflows.
+single-agent prompts from the phone, and use the desktop app for multi-agent
+broadcast workflows.
 
 When you tap an agent, Wardian opens a read-only terminal transcript by
 default. This transcript is a sanitized snapshot from the desktop-owned agent

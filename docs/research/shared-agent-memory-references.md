@@ -72,7 +72,7 @@ Useful Wardian patterns:
 - separate agent-facing MCP-like operations from UI/admin operations
 - local embedder option for privacy-sensitive deployments
 
-Wardian should adapt these ideas to a local-first backend. For a desktop command center, the first-class control point should be the Rust backend and `wardian` CLI, with provider agents calling narrow commands rather than writing memory files directly.
+Wardian should adapt these ideas to a local-first backend. For the desktop Habitat, the first-class control point should be the Rust backend and `wardian` CLI, with provider agents calling narrow commands rather than writing memory files directly.
 
 ### Dolt And Versioned Data
 
@@ -454,4 +454,4 @@ For Wardian, the recommended architecture is SQL-first local memory with Markdow
 6. Build hybrid retrieval over structured filters, FTS, optional vectors, graph links, chunk reranking, and low-confidence misses.
 7. Export Markdown for transparency and Git review, but do not require Git for live memory operation.
 
-This keeps Wardian aligned with its local command-center identity: inspectable on disk, governed by the Rust backend, efficient for many agents, and honest about the difference between what happened and what the system believes is worth remembering.
+This keeps Wardian aligned with its local-first Habitat identity: inspectable on disk, governed by the Rust backend, efficient for many agents, and honest about the difference between what happened and what the system believes is worth remembering.

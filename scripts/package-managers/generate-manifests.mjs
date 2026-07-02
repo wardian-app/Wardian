@@ -7,7 +7,7 @@ import { join } from "node:path";
 const packageIdentifier = "WardianApp.Wardian";
 const homepageUrl = "https://wardian.org";
 const publisher = "Wardian App";
-const description = "Local command center for multi-agent CLI workflows.";
+const description = "Local-first desktop habitat for real AI CLI agents.";
 
 function parseArgs(argv) {
   const args = new Map();
@@ -129,7 +129,7 @@ function writeWingetManifests(outDir, release, assets) {
       `PackageUrl: ${homepageUrl}`,
       "License: MIT",
       `Description: ${description}`,
-      "ShortDescription: Local command center for multi-agent CLI workflows.",
+      "ShortDescription: Local-first desktop habitat for real AI CLI agents.",
       "Tags:",
       "- ai",
       "- agents",

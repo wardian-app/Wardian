@@ -1,6 +1,6 @@
 # Wardian Docs
 
-Wardian is a local command center for multi-agent CLI workflows: run provider-backed agents, monitor live terminal sessions, manage reusable skills and prompts, and chain agents into deterministic workflows.
+Wardian is a local-first desktop habitat for real AI CLI agents: run provider-backed agents, monitor live terminal sessions, manage reusable skills and prompts, review Queue evidence, and chain agents into deterministic workflows.
 
 This file is an agent-readable index for the public Wardian documentation. Use the linked pages as the canonical docs source.
 

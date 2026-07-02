@@ -1,6 +1,6 @@
 # User Interface Overview
 
-Wardian features a high-fidelity, professional interface designed for dense information monitoring and rapid multi-agent orchestration. The layout is optimized as a GUI-first command center for supervising real local AI CLI agents, inspired by productivity tools like Obsidian and VS Code.
+Wardian features a dense local-first interface for watching, directing, and reorganizing real AI CLI agents. The current shell keeps live terminals, reusable context, workflow state, Queue evidence, and the agent roster visible while Wardian moves toward the HabitatLayout model of Sites, Cohorts, and movable work surfaces.
 
 ## 🧱 The Layout Architecture
 
@@ -16,7 +16,7 @@ The fixed header at the top of the application acts as the global navigation and
   - **DASHBOARD**: A summary view of system health and active agent status.
   - **LIBRARY**: Management center for prompts and skills.
   - **WORKFLOWS**: Visual canvas for building automated agent sequences.
-  - **QUEUE / GRAPH / GARDEN**: Specialized visualizations for high-fidelity orchestration.
+  - **QUEUE / GRAPH / GARDEN**: Specialized views for completion triage, communication topology, and spatial agent organization.
 - **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
 
 ![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
