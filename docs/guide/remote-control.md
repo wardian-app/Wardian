@@ -251,6 +251,12 @@ broadcasts require confirmation before Wardian sends the prompt to every
 visible target. The prompt stays collapsed until you open it, so the first
 screen remains focused on triage.
 
+Use the gear icon in the watchlist header to open mobile Settings. This panel
+keeps phone-local preferences such as theme, the default agent detail view, and
+remote terminal text size. It does not expose desktop-only runtime settings
+such as shell selection, external editors, provider approval policy, or remote
+access setup.
+
 When you tap an agent, Wardian opens a read-only terminal transcript by
 default. This transcript is a sanitized snapshot from the desktop-owned agent
 watch state; it does not drain the desktop PTY renderer. Use the Terminal and

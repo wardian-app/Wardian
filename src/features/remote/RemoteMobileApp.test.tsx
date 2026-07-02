@@ -16,6 +16,7 @@ import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemoteMobileApp } from "./RemoteMobileApp";
 import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 vi.mock("./remoteIdentity", () => ({
   createRemoteDeviceKeyPair: vi.fn(),
@@ -174,7 +175,14 @@ describe("RemoteMobileApp", () => {
     MockWebSocket.instances = [];
     vi.stubGlobal("WebSocket", MockWebSocket);
     document.documentElement.removeAttribute("style");
+    document.documentElement.removeAttribute("data-theme");
+    window.localStorage.clear();
     window.history.pushState({}, "", "/remote");
+    useSettingsStore.setState({
+      theme: "system",
+      terminalFontSize: 14,
+      terminalFontFamily: "",
+    });
     vi.mocked(createRemoteDeviceKeyPair).mockResolvedValue({
       privateKey: { type: "private" } as CryptoKey,
       publicKeySpkiDerBase64: "phone-spki",
@@ -199,6 +207,7 @@ describe("RemoteMobileApp", () => {
       status: "loading",
       activeAgentId: null,
       activeAgentViewMode: "terminal",
+      remoteAgentDefaultViewMode: "terminal",
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",
@@ -402,6 +411,126 @@ describe("RemoteMobileApp", () => {
 
     expect(useRemoteStore.getState().activeAgentId).toBeNull();
     expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+  });
+
+  it("opens remote settings from the watchlist header and closes it from browser history", async () => {
+    useRemoteStore.setState({
+      agents: [],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open remote settings" }));
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
+    expect(screen.queryByTestId("remote-watchlist-view")).not.toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+    });
+
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("remote-watchlist-view")).toBeVisible();
+  });
+
+  it("applies the selected remote theme without calling desktop settings commands", async () => {
+    useRemoteStore.setState({
+      agents: [],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open remote settings" }));
+    await userEvent.selectOptions(screen.getByLabelText("Theme"), "dark");
+
+    expect(useSettingsStore.getState().theme).toBe("dark");
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+  });
+
+  it("uses the remote default agent detail view selected in settings", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open remote settings" }));
+    await userEvent.selectOptions(screen.getByLabelText("Agent detail default"), "chat");
+    await userEvent.click(screen.getByRole("button", { name: "Back to remote watchlist" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
+
+    expect(useRemoteStore.getState().activeAgentViewMode).toBe("chat");
+    expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("applies the selected terminal text size to remote terminal sessions", async () => {
+    useSettingsStore.setState({ terminalFontSize: 16 });
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: "agent-1",
+      activeAgentViewMode: "terminal",
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+    vi.mocked(Terminal).mockClear();
+
+    render(<RemoteMobileApp />);
+
+    await waitFor(() => expect(Terminal).toHaveBeenCalled());
+    expect(vi.mocked(Terminal).mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        fontSize: 16,
+      }),
+    );
   });
 
   it("updates the active remote tab from the compact mobile bottom nav", async () => {

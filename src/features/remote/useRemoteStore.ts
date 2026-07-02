@@ -38,6 +38,7 @@ type RemoteStatus =
   | "device_revoked";
 
 type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
+type RemoteAgentViewMode = "terminal" | "chat";
 
 interface RemoteState {
   agents: RemoteAgentSummary[];
@@ -54,7 +55,8 @@ interface RemoteState {
   mobileCollapsedTeamIdsByList: Record<string, string[]>;
   status: RemoteStatus;
   activeAgentId: string | null;
-  activeAgentViewMode: "terminal" | "chat";
+  activeAgentViewMode: RemoteAgentViewMode;
+  remoteAgentDefaultViewMode: RemoteAgentViewMode;
   terminalSnapshot: RemoteTerminalSnapshot | null;
   terminalLoading: boolean;
   terminalError: string;
@@ -67,10 +69,11 @@ interface RemoteState {
   disconnectStatusStream: () => void;
   setActiveWatchlistId: (id: string) => void;
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
+  setRemoteAgentDefaultViewMode: (mode: RemoteAgentViewMode) => void;
   toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
   closeAgent: (options?: { syncHistory?: boolean }) => void;
-  setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
+  setActiveAgentViewMode: (mode: RemoteAgentViewMode) => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
   appendRemoteTerminalQueueOutput: (sessionId: string, data: string, provider?: string) => void;
@@ -89,6 +92,7 @@ const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
 const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
+const REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY = "wardian.remote.agentDefaultViewMode";
 const REMOTE_HISTORY_DETAIL_VIEW = "agent_detail";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
@@ -101,6 +105,17 @@ const storedActiveWatchlistId = () => {
     return window.localStorage.getItem(REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY) || "all";
   } catch {
     return "all";
+  }
+};
+
+const normalizeRemoteAgentViewMode = (value: string | null | undefined): RemoteAgentViewMode =>
+  value === "chat" ? "chat" : "terminal";
+
+const storedRemoteAgentDefaultViewMode = () => {
+  try {
+    return normalizeRemoteAgentViewMode(window.localStorage.getItem(REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY));
+  } catch {
+    return "terminal";
   }
 };
 
@@ -649,6 +664,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   status: "loading",
   activeAgentId: null,
   activeAgentViewMode: "terminal",
+  remoteAgentDefaultViewMode: storedRemoteAgentDefaultViewMode(),
   terminalSnapshot: null,
   terminalLoading: false,
   terminalError: "",
@@ -706,6 +722,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   setActiveRemoteTab(tab) {
     set({ activeRemoteTab: tab });
   },
+  setRemoteAgentDefaultViewMode(mode) {
+    const normalized = normalizeRemoteAgentViewMode(mode);
+    set({ remoteAgentDefaultViewMode: normalized });
+    try {
+      window.localStorage.setItem(REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY, normalized);
+    } catch {
+      // Browser storage may be unavailable in locked-down contexts.
+    }
+  },
   toggleMobileTeamCollapsed(teamId) {
     set((state) => ({
       ...(() => {
@@ -729,9 +754,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
     pushRemoteAgentDetailHistory(id);
+    const activeAgentViewMode = get().remoteAgentDefaultViewMode;
     set({
       activeAgentId: id,
-      activeAgentViewMode: "terminal",
+      activeAgentViewMode,
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",

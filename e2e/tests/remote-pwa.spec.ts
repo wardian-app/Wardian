@@ -142,6 +142,14 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   ]);
   await expect(page.getByRole("navigation", { name: "Remote sections" })).toBeVisible();
 
+  await page.getByRole("button", { name: "Open remote settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await page.getByLabel("Theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await captureFeatureScreenshot("settings-view.png", page.locator("main"));
+  await page.getByRole("button", { name: "Back to remote watchlist" }).click();
+  await expect(page.locator('[data-testid="remote-watchlist-view"]')).toBeVisible();
+
   await page.getByRole("button", { name: "Open broadcast prompt" }).click();
   await expect(page.getByRole("textbox", { name: "Broadcast prompt" })).toBeVisible();
   await captureFeatureScreenshot("broadcast-prompt.png", page.locator('[data-testid="remote-watchlist-view"]'));
