@@ -319,7 +319,8 @@ conversation view:
 - Tap an agent card to open a mobile conversation view.
 - The conversation view reads the same normalized chat transcript model used by
   desktop grid chat mode and sends prompts through the same backend action path.
-- Broadcast from the roster remains available for multi-agent dispatch.
+- Multi-agent broadcast is intentionally not exposed from the mobile roster;
+  use the desktop command center for broadcast workflows.
 - Pause/resume, clear, kill/delete, and clone where backend support is already
   straightforward.
 - Queue/completion triage as a tab or filter.
