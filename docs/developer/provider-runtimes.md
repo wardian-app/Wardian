@@ -77,6 +77,7 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - Claude reads `CLAUDE.md`.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
+- Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
 ### Approval handling
 
@@ -88,6 +89,7 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude depends heavily on the permission-hook path being writable and stable.
 - Bugs here are usually about hook setup, `CLAUDE.md` discovery, or resume/session flags.
+- If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes the alternate-screen opt-out before changing terminal gesture handling.
 - On Windows, Claude may invoke both PowerShell and bash-family tool shells during one Wardian-managed session. Wardian therefore installs both `%USERPROFILE%\.wardian\bin\wardian.cmd` and `%USERPROFILE%\.wardian\bin\wardian`, then prepends the active Wardian `bin` directory to the managed provider process PATH. Verify shell parity from inside the managed runtime, not only from the parent Wardian process.
 - If `%USERPROFILE%\bin\wardian` or `%USERPROFILE%\bin\wardian.cmd` is a Wardian-owned legacy launcher, the Windows installer rewrites it to forward to the active `%USERPROFILE%\.wardian\bin\wardian-cli.exe`. This protects Claude bash tool shells that prepend `~/bin` ahead of the inherited provider PATH.
 - Windows manual smoke:

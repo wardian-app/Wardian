@@ -3113,10 +3113,11 @@ fn external_terminal_env(
     let mut envs = vec![("WARDIAN_SESSION_ID".to_string(), config.session_id.clone())];
     envs.extend(crate::manager::worktree_build_env(config));
     match config.provider.as_str() {
-        "claude" => envs.push((
-            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(),
-            "1".to_string(),
-        )),
+        "claude" => envs.extend(
+            crate::manager::claude_terminal_runtime_env()
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        ),
         "codex" => {
             if let Some(root) = habitat_root {
                 envs.push((
@@ -3622,7 +3623,8 @@ $lines = @(
   "session=$env:WARDIAN_SESSION_ID",
   "args=$($args -join ' ')",
   "codex_home=$env:CODEX_HOME",
-  "claude_additional=$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+  "claude_additional=$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+  "claude_disable_alt=$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
 )
 Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 "#
@@ -3649,6 +3651,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
   echo "args=$*"
   echo "codex_home=$CODEX_HOME"
   echo "claude_additional=$CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+  echo "claude_disable_alt=$CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
 }} >> "$WARDIAN_COMMAND_SMOKE_LOG"
 "#
         );
@@ -4160,6 +4163,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(
             claude_log.contains("claude_additional=1"),
             "Claude command should set additional-directory env before invoking provider: {log}"
+        );
+        assert!(
+            claude_log.contains("claude_disable_alt=1"),
+            "Claude command should disable alternate-screen rendering before invoking provider: {log}"
         );
     }
 

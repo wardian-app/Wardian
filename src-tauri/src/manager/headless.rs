@@ -319,8 +319,6 @@ pub async fn run_headless_with_options(
         if let Some(root) = provider_context.habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
-    } else if provider_name == "claude" {
-        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
     } else if provider_name == "opencode" {
         let opencode_scope_session = if resume_session.is_some() {
             resume_session
@@ -651,9 +649,6 @@ pub async fn obtain_session_id(
         for (key, value) in opencode_env(cwd, class_name, bootstrap_session_id, config)? {
             cmd.env(key, value);
         }
-        cmd.stdin(std::process::Stdio::null());
-    } else if provider_name == "claude" {
-        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
         cmd.stdin(std::process::Stdio::null());
     } else {
         cmd.stdin(std::process::Stdio::null());

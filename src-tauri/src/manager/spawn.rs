@@ -498,11 +498,7 @@ pub async fn spawn_agent(
         cmd.env(key, value);
     }
 
-    // Enable CLAUDE.md discovery from --add-dir directories so that
-    // class/common/agent instruction files are loaded natively.
-    if config.provider == "claude" {
-        cmd.env("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1");
-    } else if config.provider == "codex" {
+    if config.provider == "codex" {
         if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
         }
