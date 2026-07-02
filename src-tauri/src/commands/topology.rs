@@ -154,30 +154,7 @@ fn mutate(app: &AppHandle, apply: impl FnOnce(&mut Topology) -> bool) -> Result<
 async fn agent_refs(
     state: &tauri::State<'_, crate::state::AppState>,
 ) -> Vec<wardian_core::topology::AgentRef> {
-    let agents_map = state.agents.lock().await;
-    let refs: Vec<wardian_core::topology::AgentRef> = agents_map
-        .iter()
-        .map(|(uuid, agent)| {
-            let workspace = agent
-                .config
-                .lock()
-                .ok()
-                .and_then(|c| {
-                    let folder = c.folder.trim();
-                    if folder.is_empty() {
-                        None
-                    } else {
-                        Some(folder.to_string())
-                    }
-                });
-            wardian_core::topology::AgentRef {
-                uuid: uuid.clone(),
-                workspace,
-            }
-        })
-        .collect();
-    drop(agents_map);
-    refs
+    state.topology_agent_refs().await
 }
 
 #[cfg(test)]

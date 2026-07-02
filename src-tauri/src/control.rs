@@ -822,25 +822,7 @@ async fn resolve_send_targets_scoped(
     };
     let topology = wardian_core::topology::load_topology(&home);
     let teams = wardian_core::topology::load_team_memberships(&home);
-    let agents_map = state.agents.lock().await;
-    let refs: Vec<wardian_core::topology::AgentRef> = agents_map
-        .iter()
-        .map(|(uuid, agent)| {
-            let workspace = agent
-                .config
-                .lock()
-                .ok()
-                .and_then(|c| {
-                    let folder = c.folder.trim();
-                    if folder.is_empty() { None } else { Some(folder.to_string()) }
-                });
-            wardian_core::topology::AgentRef {
-                uuid: uuid.clone(),
-                workspace,
-            }
-        })
-        .collect();
-    drop(agents_map);
+    let refs = state.topology_agent_refs().await;
 
     let community = wardian_core::topology::resolve_community(sender, &topology, &teams, &refs);
     let allowed = community.member_uuids();

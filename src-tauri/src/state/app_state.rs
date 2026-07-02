@@ -87,6 +87,29 @@ impl AppState {
         Self::default()
     }
 
+    /// Snapshot the active agents as topology resolver inputs
+    /// (uuid + configured workspace folder, empty folder → None).
+    pub async fn topology_agent_refs(&self) -> Vec<wardian_core::topology::AgentRef> {
+        let agents_map = self.agents.lock().await;
+        agents_map
+            .iter()
+            .map(|(uuid, agent)| {
+                let workspace = agent.config.lock().ok().and_then(|c| {
+                    let folder = c.folder.trim();
+                    if folder.is_empty() {
+                        None
+                    } else {
+                        Some(folder.to_string())
+                    }
+                });
+                wardian_core::topology::AgentRef {
+                    uuid: uuid.clone(),
+                    workspace,
+                }
+            })
+            .collect()
+    }
+
     pub async fn delivery_lock_for(&self, target_session_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.delivery_locks.lock().await;
         locks
