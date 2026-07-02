@@ -29,19 +29,18 @@ Each community member is labeled with its origin: `manual`, `rule:team-clique`, 
 ## Editing: Create and Delete Edges
 
 **Create a connection:**
-- Drag from agent A to agent B to draw a manual edge.
-- Or select agent A, then shift-click agent B.
+- Enable **Connect mode** in the toolbar, then drag from agent A to agent B to draw a manual edge.
+- Or use **Add connection…** in the inspector's community panel to pick an agent from a searchable list.
 - The edge appears immediately and is saved to `<WARDIAN_HOME>/topology.json`.
 
 **Delete a connection:**
-- Select an edge, then press Delete or use the context menu.
-- Only manual edges are deletable; rule-derived edges show a "managed by rule" affordance deep-linking to the rule's editor (e.g., team editing).
+- Click a manual edge to select it, then press Delete — or use the disconnect (×) button on the edge's row in the inspector.
+- Only manual edges are deletable; rule-derived edges are labeled "managed by team …" and are edited through their source (e.g., team membership).
 
 **Ghost edges (unmapped traffic):**
-- Click a sparse-dashed ghost edge to inspect recent communication between agents with no topology connection.
-- Inspector shows "Unmapped communication: A ↔ B, last message Nm ago."
+- Recent communication between agents with no topology connection appears as a faint sparse-dashed edge, and the inspector's community panel lists the pair with an **Unmapped** badge.
 - **Formalize**: write a manual edge to connect them.
-- **Ignore**: dismiss it from `ignored_pairs` so it doesn't reappear unless traffic resumes.
+- **Ignore**: add the pair to `ignored_pairs` so the suggestion stops appearing.
 
 ## Inspector and Actions
 
