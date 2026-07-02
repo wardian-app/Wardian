@@ -79,7 +79,6 @@ const projection: AgentGraphProjection = {
       },
       clusterId: null,
       selected: false,
-      recent: false,
     },
   ],
   edges: [
@@ -95,11 +94,6 @@ const projection: AgentGraphProjection = {
   visibleAgents: [],
   scopeLabel: "All Agents",
   commEdges: [],
-};
-
-const recentProjection: AgentGraphProjection = {
-  ...projection,
-  nodes: [{ ...projection.nodes[0], recent: true, color: "#10b981" }],
 };
 
 describe("GraphCanvas", () => {
@@ -243,28 +237,6 @@ describe("GraphCanvas", () => {
     }));
   });
 
-  it("renders recent activity as a halo node without changing the agent node size", () => {
-    render(
-      <GraphCanvas
-        projection={recentProjection}
-        onSelectAgent={vi.fn()}
-        onOpenAgent={vi.fn()}
-        onContextMenu={vi.fn()}
-      />,
-    );
-
-    expect(mocks.graphology.addNode).toHaveBeenCalledWith("a__recent_halo", expect.objectContaining({
-      label: "",
-      size: 13,
-      color: "rgba(16, 185, 129, 0.26)",
-      zIndex: 0,
-    }));
-    expect(mocks.graphology.addNode).toHaveBeenCalledWith("a", expect.objectContaining({
-      size: 6,
-      zIndex: 1,
-    }));
-  });
-
   it("forwards sigma node interactions", () => {
     const onSelectAgent = vi.fn();
     const onOpenAgent = vi.fn();
@@ -291,23 +263,6 @@ describe("GraphCanvas", () => {
     expect(onOpenAgent).toHaveBeenCalledWith("a");
     expect(preventDefault).toHaveBeenCalled();
     expect(onContextMenu).toHaveBeenCalledWith("a", 10, 20);
-  });
-
-  it("routes recent halo interactions to the owning agent", () => {
-    const onSelectAgent = vi.fn();
-
-    render(
-      <GraphCanvas
-        projection={recentProjection}
-        onSelectAgent={onSelectAgent}
-        onOpenAgent={vi.fn()}
-        onContextMenu={vi.fn()}
-      />,
-    );
-
-    mocks.handlers.get("clickNode")?.({ node: "a__recent_halo" });
-
-    expect(onSelectAgent).toHaveBeenCalledWith("a");
   });
 
   it("shows node and edge tooltips on hover", () => {

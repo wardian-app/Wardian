@@ -34,7 +34,6 @@ export interface AgentGraphNode {
   telemetry?: AgentTelemetry;
   clusterId: string | null;
   selected: boolean;
-  recent: boolean;
 }
 
 export interface AgentGraphEdge {
@@ -80,7 +79,6 @@ const REASON_ORDER: GraphRelationshipReason[] = [
   "same_worktree",
 ];
 
-const RECENT_MS = 1000 * 60 * 60 * 24;
 const COMM_RECENT_WINDOW_MS = 60 * 60 * 1000;
 
 export function normalizeGraphPath(value: string | undefined | null): string | null {
@@ -119,7 +117,6 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
     const status = agent.is_off || input.offAgentIds?.has(agent.session_id)
       ? "Off"
       : telemetry?.current_status ?? "Idle";
-    const recent = isRecent(input.interactions[agent.session_id]);
     const position = positions.get(agent.session_id) ?? { x: 0, y: 0 };
 
     return {
@@ -134,7 +131,6 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
       telemetry,
       clusterId: teamByAgent.get(agent.session_id)?.id ?? null,
       selected: input.selectedAgentIds.has(agent.session_id),
-      recent,
     };
   });
 
@@ -348,12 +344,6 @@ function computePositions(
   });
 
   return positions;
-}
-
-function isRecent(iso: string | undefined) {
-  if (!iso) return false;
-  const timestamp = new Date(iso).getTime();
-  return Number.isFinite(timestamp) && Date.now() - timestamp <= RECENT_MS;
 }
 
 function statusToColor(status: string) {

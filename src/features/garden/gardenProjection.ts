@@ -46,7 +46,6 @@ export function buildGardenAgentUnits(
       label: node.label,
       status: node.status,
       color: node.color,
-      recent: node.recent,
       position: overrides[unitKey(ref)] ?? spiralPosition(index, AGENT_LAYOUT_CENTER, AGENT_LAYOUT_SPACING),
     };
   });

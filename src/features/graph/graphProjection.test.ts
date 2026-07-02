@@ -231,7 +231,6 @@ describe("buildAgentGraph", () => {
       enabledReasons: allReasons(),
     });
 
-    expect(graph.nodes.find((node) => node.id === "a")?.recent).toBe(true);
     expect(new Set(graph.nodes.map((node) => node.size))).toEqual(new Set([9]));
     expect(graph.edges).toEqual([]);
   });

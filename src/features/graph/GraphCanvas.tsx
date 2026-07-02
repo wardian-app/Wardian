@@ -5,7 +5,6 @@ import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProje
 import { EdgeActivityOverlay } from "./EdgeActivityOverlay";
 import { resolveGraphColor, withAlpha } from "./graphColorUtils";
 
-const RECENT_HALO_SUFFIX = "__recent_halo";
 const EDGE_REASON_COLORS: Record<GraphRelationshipReason, string> = {
   same_team: "var(--color-wardian-accent)",
   shared_workspace: "var(--color-wardian-processing)",
@@ -79,11 +78,16 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
     const graph = new Graph();
     const container = containerRef.current;
+    const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
     const renderer = new Sigma(graph, container, {
       allowInvalidContainer: true,
       enableEdgeEvents: true,
       renderEdgeLabels: false,
       zIndex: true,
+      labelColor: { color: labelColor },
+      labelSize: 12,
+      labelFont: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      labelRenderedSizeThreshold: 0,
     });
     graphRef.current = graph;
     rendererRef.current = renderer;
@@ -103,20 +107,16 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       }
     });
     renderer.on("clickNode", ({ node }: SigmaNodePayload) => {
-      const agentId = graphNodeToAgentId(node);
-      if (agentId) handlersRef.current.onSelectAgent(agentId);
+      handlersRef.current.onSelectAgent(node);
     });
     renderer.on("doubleClickNode", ({ node }: SigmaNodePayload) => {
-      const agentId = graphNodeToAgentId(node);
-      if (agentId) handlersRef.current.onOpenAgent(agentId);
+      handlersRef.current.onOpenAgent(node);
     });
     renderer.on("rightClickNode", ({ node, event }: SigmaPointerPayload) => {
-      const agentId = graphNodeToAgentId(node);
-      if (!agentId) return;
       const original = event?.original ?? event?.originalEvent;
       original?.preventDefault();
       const point = pointerPosition(original);
-      handlersRef.current.onContextMenu(agentId, point.x, point.y);
+      handlersRef.current.onContextMenu(node, point.x, point.y);
     });
     renderer.on("clickEdge", ({ edge }: SigmaEdgePayload) => {
       handlersRef.current.onSelectEdge?.(edge);
@@ -126,8 +126,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       dragSourceRef.current = null;
     });
     renderer.on("enterNode", ({ node, event }: SigmaPointerPayload) => {
-      const agentId = graphNodeToAgentId(node);
-      const graphNode = projectionRef.current.nodes.find((candidate) => candidate.id === agentId);
+      const graphNode = projectionRef.current.nodes.find((candidate) => candidate.id === node);
       if (!graphNode) return;
       const point = sigmaPointerPosition(event);
       setTooltip({ x: point.x, y: point.y, title: graphNode.label, detail: graphNode.status });
@@ -179,21 +178,6 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
     graph.clear();
     const hasSelectedNode = currentProjection.nodes.some((node) => node.selected);
-
-    for (const node of currentProjection.nodes) {
-      if (!node.recent) continue;
-      const color = resolveGraphColor(node.color, container);
-      graph.addNode(`${node.id}${RECENT_HALO_SUFFIX}`, {
-        label: "",
-        x: node.x,
-        y: node.y,
-        size: node.size + 7,
-        color: withAlpha(color, 0.26),
-        highlighted: false,
-        forceLabel: false,
-        zIndex: 0,
-      });
-    }
 
     for (const node of currentProjection.nodes) {
       graph.addNode(node.id, {
@@ -279,12 +263,6 @@ function sigmaPointerPosition(event: { x?: number; y?: number } | undefined) {
   return { x: event?.x ?? 0, y: event?.y ?? 0 };
 }
 
-function graphNodeToAgentId(node: string) {
-  return node.endsWith(RECENT_HALO_SUFFIX)
-    ? node.slice(0, -RECENT_HALO_SUFFIX.length)
-    : node;
-}
-
 function graphRenderSignature(projection: AgentGraphProjection) {
   return JSON.stringify({
     nodes: projection.nodes.map((node) => ({
@@ -296,7 +274,6 @@ function graphRenderSignature(projection: AgentGraphProjection) {
       y: node.y,
       size: node.size,
       selected: node.selected,
-      recent: node.recent,
     })),
     edges: projection.edges.map((edge) => ({
       id: edge.id,
