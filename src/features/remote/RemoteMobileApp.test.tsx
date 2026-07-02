@@ -208,6 +208,7 @@ describe("RemoteMobileApp", () => {
       activeAgentId: null,
       activeAgentViewMode: "terminal",
       remoteAgentDefaultViewMode: "terminal",
+      remoteTerminalFontSize: 11,
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",
@@ -463,6 +464,7 @@ describe("RemoteMobileApp", () => {
   });
 
   it("uses the remote default agent detail view selected in settings", async () => {
+    mockRemoteAgentDetailFetch("codex");
     useRemoteStore.setState({
       agents: [
         {
@@ -497,7 +499,67 @@ describe("RemoteMobileApp", () => {
     expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("applies the selected terminal text size to remote terminal sessions", async () => {
+  it("loads the chat transcript when chat is the remote default agent detail view", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "default-chat-message",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "message",
+          role: "assistant",
+          text: "Loaded default chat.",
+          title: null,
+          status: null,
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+      ],
+    });
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open remote settings" }));
+    await userEvent.selectOptions(screen.getByLabelText("Agent detail default"), "chat");
+    await userEvent.click(screen.getByRole("button", { name: "Back to remote watchlist" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
+
+    expect(await screen.findByText("Loaded default chat.")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/remote/api/agents/agent-1/chat",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("keeps the remote terminal default size independent from desktop settings", async () => {
     useSettingsStore.setState({ terminalFontSize: 16 });
     useRemoteStore.setState({
       agents: [
@@ -524,6 +586,45 @@ describe("RemoteMobileApp", () => {
     vi.mocked(Terminal).mockClear();
 
     render(<RemoteMobileApp />);
+
+    await waitFor(() => expect(Terminal).toHaveBeenCalled());
+    expect(vi.mocked(Terminal).mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        fontSize: 11,
+      }),
+    );
+  });
+
+  it("applies the selected remote terminal text size to remote terminal sessions", async () => {
+    useRemoteStore.setState({
+      agents: [
+        {
+          session_id: "agent-1",
+          session_name: "Alpha",
+          agent_class: "Coder",
+          provider: "codex",
+          workspace: "<absolute-workspace-path>",
+          status: "Idle",
+          latest_text: null,
+        },
+      ],
+      teams: [],
+      watchlists: [],
+      watchlistPrefs: { columns: [], sort: null, preserve_team_grouping_when_sorted: false, collapsed_team_ids: [] },
+      activeWatchlistId: "all",
+      activeRemoteTab: "watchlist",
+      activeAgentId: null,
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+    vi.mocked(Terminal).mockClear();
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open remote settings" }));
+    await userEvent.selectOptions(screen.getByLabelText("Terminal text size"), "16");
+    await userEvent.click(screen.getByRole("button", { name: "Back to remote watchlist" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
 
     await waitFor(() => expect(Terminal).toHaveBeenCalled());
     expect(vi.mocked(Terminal).mock.calls[0]?.[0]).toEqual(

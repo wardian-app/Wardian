@@ -26,9 +26,9 @@ the bottom navigation or changing desktop runtime behavior from a phone.
 
 ## Data Flow
 
-Theme and terminal text size reuse the existing frontend settings store, but
-the remote PWA applies the theme locally instead of calling Tauri settings
-commands. The agent-detail default view is remote-specific and stored in the
+Theme reuses the existing frontend settings store, but the remote PWA applies
+the theme locally instead of calling Tauri settings commands. Agent-detail
+default view and terminal text size are remote-specific settings stored in the
 remote Zustand store with browser `localStorage` persistence.
 
 ## Testing

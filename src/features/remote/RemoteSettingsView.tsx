@@ -1,13 +1,13 @@
 import React from "react";
 import { ArrowLeft } from "lucide-react";
-import {
-  MAX_TERMINAL_FONT_SIZE,
-  MIN_TERMINAL_FONT_SIZE,
-  normalizeTerminalFontSize,
-  useSettingsStore,
-} from "../../store/useSettingsStore";
+import { useSettingsStore } from "../../store/useSettingsStore";
 import type { AppThemeSetting } from "../../types/settings";
-import { useRemoteStore } from "./useRemoteStore";
+import {
+  MAX_REMOTE_TERMINAL_FONT_SIZE,
+  MIN_REMOTE_TERMINAL_FONT_SIZE,
+  normalizeRemoteTerminalFontSize,
+  useRemoteStore,
+} from "./useRemoteStore";
 
 const iconButtonClass =
   "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-wardian-border text-muted-neutral transition-colors hover:border-[var(--color-wardian-accent)] hover:text-primary";
@@ -19,13 +19,13 @@ const selectClass =
 export const RemoteSettingsView: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const theme = useSettingsStore((state) => state.theme);
   const setTheme = useSettingsStore((state) => state.setTheme);
-  const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
-  const setTerminalFontSize = useSettingsStore((state) => state.setTerminalFontSize);
   const remoteAgentDefaultViewMode = useRemoteStore((state) => state.remoteAgentDefaultViewMode);
   const setRemoteAgentDefaultViewMode = useRemoteStore((state) => state.setRemoteAgentDefaultViewMode);
+  const remoteTerminalFontSize = useRemoteStore((state) => state.remoteTerminalFontSize);
+  const setRemoteTerminalFontSize = useRemoteStore((state) => state.setRemoteTerminalFontSize);
 
   const updateTerminalTextSize = (value: string) => {
-    setTerminalFontSize(normalizeTerminalFontSize(Number(value)));
+    setRemoteTerminalFontSize(normalizeRemoteTerminalFontSize(Number(value)));
   };
 
   return (
@@ -84,13 +84,13 @@ export const RemoteSettingsView: React.FC<{ onClose: () => void }> = ({ onClose 
             </span>
             <select
               aria-label="Terminal text size"
-              value={terminalFontSize}
+              value={remoteTerminalFontSize}
               onChange={(event) => updateTerminalTextSize(event.target.value)}
               className={selectClass}
             >
               {Array.from(
-                { length: MAX_TERMINAL_FONT_SIZE - MIN_TERMINAL_FONT_SIZE + 1 },
-                (_, index) => MIN_TERMINAL_FONT_SIZE + index,
+                { length: MAX_REMOTE_TERMINAL_FONT_SIZE - MIN_REMOTE_TERMINAL_FONT_SIZE + 1 },
+                (_, index) => MIN_REMOTE_TERMINAL_FONT_SIZE + index,
               ).map((size) => (
                 <option key={size} value={size}>
                   {size}px

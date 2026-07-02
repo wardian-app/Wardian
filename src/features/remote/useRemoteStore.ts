@@ -40,6 +40,10 @@ type RemoteStatus =
 type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
 type RemoteAgentViewMode = "terminal" | "chat";
 
+export const MIN_REMOTE_TERMINAL_FONT_SIZE = 10;
+export const MAX_REMOTE_TERMINAL_FONT_SIZE = 20;
+export const DEFAULT_REMOTE_TERMINAL_FONT_SIZE = 11;
+
 interface RemoteState {
   agents: RemoteAgentSummary[];
   workflows: RemoteWorkflowSummary[];
@@ -57,6 +61,7 @@ interface RemoteState {
   activeAgentId: string | null;
   activeAgentViewMode: RemoteAgentViewMode;
   remoteAgentDefaultViewMode: RemoteAgentViewMode;
+  remoteTerminalFontSize: number;
   terminalSnapshot: RemoteTerminalSnapshot | null;
   terminalLoading: boolean;
   terminalError: string;
@@ -70,6 +75,7 @@ interface RemoteState {
   setActiveWatchlistId: (id: string) => void;
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
   setRemoteAgentDefaultViewMode: (mode: RemoteAgentViewMode) => void;
+  setRemoteTerminalFontSize: (value: number) => void;
   toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
   closeAgent: (options?: { syncHistory?: boolean }) => void;
@@ -93,6 +99,7 @@ const statusFromError = (error: unknown): RemoteStatus =>
 
 const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
 const REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY = "wardian.remote.agentDefaultViewMode";
+const REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY = "wardian.remote.terminalFontSize";
 const REMOTE_HISTORY_DETAIL_VIEW = "agent_detail";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
@@ -116,6 +123,20 @@ const storedRemoteAgentDefaultViewMode = () => {
     return normalizeRemoteAgentViewMode(window.localStorage.getItem(REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY));
   } catch {
     return "terminal";
+  }
+};
+
+export const normalizeRemoteTerminalFontSize = (value: number) => {
+  if (!Number.isFinite(value)) return DEFAULT_REMOTE_TERMINAL_FONT_SIZE;
+  return Math.min(MAX_REMOTE_TERMINAL_FONT_SIZE, Math.max(MIN_REMOTE_TERMINAL_FONT_SIZE, Math.round(value)));
+};
+
+const storedRemoteTerminalFontSize = () => {
+  try {
+    const stored = window.localStorage.getItem(REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY);
+    return stored === null ? DEFAULT_REMOTE_TERMINAL_FONT_SIZE : normalizeRemoteTerminalFontSize(Number(stored));
+  } catch {
+    return DEFAULT_REMOTE_TERMINAL_FONT_SIZE;
   }
 };
 
@@ -665,6 +686,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   activeAgentId: null,
   activeAgentViewMode: "terminal",
   remoteAgentDefaultViewMode: storedRemoteAgentDefaultViewMode(),
+  remoteTerminalFontSize: storedRemoteTerminalFontSize(),
   terminalSnapshot: null,
   terminalLoading: false,
   terminalError: "",
@@ -731,6 +753,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       // Browser storage may be unavailable in locked-down contexts.
     }
   },
+  setRemoteTerminalFontSize(value) {
+    const normalized = normalizeRemoteTerminalFontSize(value);
+    set({ remoteTerminalFontSize: normalized });
+    try {
+      window.localStorage.setItem(REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY, String(normalized));
+    } catch {
+      // Browser storage may be unavailable in locked-down contexts.
+    }
+  },
   toggleMobileTeamCollapsed(teamId) {
     set((state) => ({
       ...(() => {
@@ -765,6 +796,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       chatLoading: false,
       chatError: "",
     });
+    if (activeAgentViewMode === "chat") {
+      await get().refreshActiveAgentChat();
+    }
   },
   closeAgent(options) {
     if (options?.syncHistory !== false && isRemoteAgentDetailHistoryState()) {
