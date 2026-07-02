@@ -566,6 +566,7 @@ function TerminalPane({
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
   const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
+  const remoteTerminalFontSize = useRemoteStore((state) => state.remoteTerminalFontSize);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -583,7 +584,7 @@ function TerminalPane({
       cursorInactiveStyle: "bar",
       cursorStyle: "bar",
       disableStdin: true,
-      fontSize: 11,
+      fontSize: remoteTerminalFontSize,
       rows: 24,
       scrollback: 1_000,
       theme: remoteTerminalTheme(),
@@ -767,7 +768,7 @@ function TerminalPane({
       terminal.dispose?.();
       host.replaceChildren();
     };
-  }, [agent.provider, agent.session_id]);
+  }, [agent.provider, agent.session_id, remoteTerminalFontSize]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-3" aria-label={`${agent.session_name} terminal`}>

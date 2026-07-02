@@ -19,7 +19,14 @@ jobs:
         with:
           tool: cargo-audit
       - name: Rust Audit
-        run: cargo audit
+        run: |
+          # RUSTSEC-2026-0194 and RUSTSEC-2026-0195 require quick-xml >=0.41.0.
+          # Current transitive users are pinned below that range:
+          # - tauri-winrt-notification 0.7.2 -> quick-xml ^0.37
+          # - plist 1.9.0 -> quick-xml ^0.39.2
+          cargo audit \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
       - name: NPM Audit
         run: npm audit --audit-level=high
 
