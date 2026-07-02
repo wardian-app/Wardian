@@ -2770,8 +2770,10 @@ async fn record_conversation_delivery(
     };
 
     for (context, agent_conversation_logging) in target_settings {
-        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
-            != ConversationLoggingSetting::Enabled
+        if effective_conversation_logging(
+            global_conversation_logging,
+            agent_conversation_logging,
+        ) != ConversationLoggingSetting::Enabled
         {
             continue;
         }
@@ -3650,6 +3652,46 @@ mod tests {
             Some(wardian_core::conversations::ConversationSpeakerType::Agent)
         );
         assert_eq!(records[0].text.as_deref(), Some("Review this change."));
+    }
+
+    #[tokio::test]
+    async fn message_delivery_does_not_archive_agent_with_disabled_logging() {
+        let _home = TestWardianHome::new();
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save shell settings");
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        {
+            let agents = state.agents.lock().await;
+            let agent = agents.get("agent-1").unwrap();
+            agent.config.lock().unwrap().conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+        }
+        let delivery = vec![DeliveryDetail {
+            uuid: "agent-1".to_string(),
+            name: "CoderOne".to_string(),
+            provider: "mock".to_string(),
+            runtime_state: "live_pty_available".to_string(),
+            delivery_state: "submit_sent_unconfirmed".to_string(),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            message_id: None,
+            delivery_phase: Some("payload_sent".to_string()),
+            observed_state: Some("bytes_sent".to_string()),
+            reason: None,
+            profile: None,
+            error: None,
+        }];
+
+        record_conversation_delivery(&state, &delivery, "Sensitive input.", None).await;
+
+        assert!(state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-1")
+            .is_none());
     }
 
     #[tokio::test]

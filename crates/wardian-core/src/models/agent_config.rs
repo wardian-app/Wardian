@@ -932,6 +932,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_config_ignores_legacy_private_flag() {
+        let config: AgentConfig =
+            serde_json::from_str(r#"{"session_id":"abc-123","private":true}"#).unwrap();
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("private").is_none());
+
+        let deserialized: AgentConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            deserialized.conversation_logging,
+            AgentConversationLoggingSetting::Default
+        );
+    }
+
+    #[test]
     fn agent_config_roundtrips_explicit_conversation_logging() {
         let config: AgentConfig =
             serde_json::from_str(r#"{"session_id":"abc-123","conversation_logging":"enabled"}"#)
