@@ -15,6 +15,7 @@ function formatProviderName(provider: string | null | undefined): string {
 import {
   buildAgentGraph,
   type GraphRelationshipReason,
+  type CommunicationEdge,
 } from "../features/graph/graphProjection";
 
 type MaybePromise = void | Promise<void>;
@@ -71,6 +72,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   const [connectMode, setConnectMode] = useState(false);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -156,11 +159,17 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   useEffect(() => {
     const handleKeyDown = async (event: KeyboardEvent) => {
       if (event.key === "Delete" && selectedEdgeId) {
+        // Skip if typing in an input or contentEditable element
+        if (event.target instanceof HTMLInputElement ||
+            event.target instanceof HTMLTextAreaElement ||
+            (event.target instanceof HTMLElement && event.target.contentEditable === "true")) {
+          return;
+        }
+
         const edge = projection.commEdges.find((e) => e.id === selectedEdgeId);
         if (edge && edge.origin === "manual") {
-          const [a, b] = selectedEdgeId.split("--");
           try {
-            await invoke("remove_topology_edge", { a, b });
+            await invoke("remove_topology_edge", { a: edge.source, b: edge.target });
             setSelectedEdgeId(null);
           } catch {
             // Silently ignore errors
@@ -342,6 +351,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                   inspectedAgent.id,
                   projection,
                   props.teams,
+                  props.allAgents,
                   (a, b) => {
                     invoke("add_topology_edge", { a, b }).catch(() => {});
                   },
@@ -352,6 +362,10 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                     invoke("ignore_topology_pair", { a, b }).catch(() => {});
                   },
                   openContextMenu,
+                  pickerOpen,
+                  setPickerOpen,
+                  pickerSearch,
+                  setPickerSearch,
                 )}
               </div>
               <button type="button" className="graph-open-grid" onClick={() => props.onOpenAgentInGrid(inspectedAgent.id)}>
@@ -397,7 +411,7 @@ function isInsideContextMenu(target: EventTarget | null) {
   return target instanceof Element && Boolean(target.closest('[data-testid="agent-context-menu"]'));
 }
 
-function getOriginLabel(edge: any, teams: AgentTeam[]): string {
+function getOriginLabel(edge: CommunicationEdge, teams: AgentTeam[]): string {
   if (edge.origin === "manual") return "manual";
   if (edge.origin === "rule" && edge.ruleId) {
     const [rule, instance] = edge.ruleId.split(":");
@@ -414,20 +428,25 @@ function renderCommunityPanel(
   agentId: string,
   projection: ReturnType<typeof buildAgentGraph>,
   teams: AgentTeam[],
+  allAgents: AgentConfig[],
   onAdd: (a: string, b: string) => void,
   onRemove: (a: string, b: string) => void,
   onIgnore: (a: string, b: string) => void,
   onContextMenu: (agentId: string, x: number, y: number) => void,
+  pickerOpen: boolean,
+  setPickerOpen: (open: boolean) => void,
+  pickerSearch: string,
+  setPickerSearch: (search: string) => void,
 ): React.ReactNode {
   const edges = projection.commEdges.filter((e) => e.source === agentId || e.target === agentId);
 
-  if (edges.length === 0) {
-    return <p>No visible connections.</p>;
-  }
-
   return (
-    <ul className="graph-community-list">
-      {edges.map((edge) => {
+    <>
+      {edges.length === 0 ? (
+        <p>No visible connections.</p>
+      ) : (
+        <ul className="graph-community-list">
+          {edges.map((edge) => {
         const neighborId = edge.source === agentId ? edge.target : edge.source;
         const neighbor = projection.nodes.find((node) => node.id === neighborId);
         const label = neighbor?.label ?? neighborId;
@@ -483,15 +502,98 @@ function renderCommunityPanel(
             )}
           </li>
         );
+          })}
+        </ul>
+      )}
+      <div className={edges.length === 0 ? "graph-community-add-standalone" : "graph-community-row graph-community-add-row"}>
+        {pickerOpen ? (
+          <div className="graph-community-picker">
+            <input
+              type="text"
+              className="graph-community-picker-input"
+              placeholder="Filter agents…"
+              value={pickerSearch}
+              onChange={(e) => setPickerSearch(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setPickerOpen(false);
+                  setPickerSearch("");
+                }
+              }}
+              autoFocus
+            />
+            {renderPickerList(
+              agentId,
+              allAgents,
+              projection,
+              pickerSearch,
+              (selectedId) => {
+                onAdd(agentId, selectedId);
+                setPickerOpen(false);
+                setPickerSearch("");
+              },
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="graph-community-add-btn"
+            onClick={() => setPickerOpen(true)}
+          >
+            Add connection…
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+function renderPickerList(
+  agentId: string,
+  allAgents: AgentConfig[],
+  projection: ReturnType<typeof buildAgentGraph>,
+  search: string,
+  onSelect: (agentId: string) => void,
+): React.ReactNode {
+  // Get IDs of agents already connected via manual edges
+  const connectedIds = new Set(
+    projection.commEdges
+      .filter((e) => e.origin === "manual" && (e.source === agentId || e.target === agentId))
+      .map((e) => (e.source === agentId ? e.target : e.source)),
+  );
+
+  // Filter agents: visible in projection, not the inspected agent, not already connected
+  const available = projection.nodes
+    .filter((node) => node.id !== agentId && !connectedIds.has(node.id))
+    .map((node) => node.id);
+
+  // Apply search filter
+  const searchLower = search.toLowerCase();
+  const filtered = available.filter((id) => {
+    const agent = allAgents.find((a) => a.session_id === id);
+    return agent && agent.session_name.toLowerCase().includes(searchLower);
+  });
+
+  if (filtered.length === 0) {
+    return <p className="graph-community-picker-empty">No available agents</p>;
+  }
+
+  return (
+    <ul className="graph-community-picker-list">
+      {filtered.map((id) => {
+        const agent = allAgents.find((a) => a.session_id === id);
+        return (
+          <li key={id}>
+            <button
+              type="button"
+              className="graph-community-picker-item"
+              onClick={() => onSelect(id)}
+            >
+              {agent?.session_name}
+            </button>
+          </li>
+        );
       })}
-      <li key="add-connection" className="graph-community-row graph-community-add-row">
-        <button
-          type="button"
-          className="graph-community-add-btn"
-        >
-          Add connection…
-        </button>
-      </li>
     </ul>
   );
 }

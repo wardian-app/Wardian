@@ -1201,7 +1201,8 @@ select option {
   background: color-mix(in srgb, var(--color-wardian-error), transparent 92%);
 }
 
-.graph-community-add-row {
+.graph-community-add-row,
+.graph-community-add-standalone {
   margin-top: 6px;
   padding: 6px;
 }
@@ -1223,6 +1224,64 @@ select option {
   color: var(--color-wardian-accent);
   border-color: var(--color-wardian-accent);
   background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
+}
+
+.graph-community-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.graph-community-picker-input {
+  width: 100%;
+  height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  color: var(--color-wardian-text);
+  background: var(--color-wardian-surface);
+  font-size: 11px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.graph-community-picker-input:focus {
+  border-color: var(--color-wardian-accent);
+}
+
+.graph-community-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  background: var(--color-wardian-surface);
+}
+
+.graph-community-picker-item {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-wardian-text);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.graph-community-picker-item:hover {
+  background-color: color-mix(in srgb, var(--color-wardian-accent), transparent 88%);
+}
+
+.graph-community-picker-empty {
+  padding: 8px;
+  margin: 0;
+  color: var(--color-wardian-text-muted);
+  font-size: 11px;
+  text-align: center;
 }
 
 @media (max-width: 760px) {
