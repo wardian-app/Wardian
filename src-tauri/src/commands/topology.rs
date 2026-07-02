@@ -137,7 +137,8 @@ pub async fn unignore_topology_pair(app: AppHandle, a: String, b: String) -> Res
 #[tauri::command]
 pub async fn get_pair_activity() -> Result<Vec<PairActivity>, String> {
     let records = wardian_core::db::list_interaction_records().map_err(|e| e.to_string())?;
-    Ok(pair_activity_from_records(&records))
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    Ok(pair_activity_from_records(&records, now_ms))
 }
 
 fn mutate(app: &AppHandle, apply: impl FnOnce(&mut Topology) -> bool) -> Result<bool, String> {

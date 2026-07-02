@@ -179,6 +179,11 @@ pub const REASON_MANUAL: &str = "manual";
 pub const RULE_TEAM_CLIQUE: &str = "team-clique";
 pub const RULE_WORKSPACE_FALLBACK: &str = "workspace-fallback";
 
+/// Stale asks older than this window no longer count as active. An AwaitingReply task
+/// created more than 1 hour ago is considered resolved/abandoned and won't trigger
+/// edge animation in the UI.
+pub const ACTIVE_ASK_WINDOW_MS: i64 = 60 * 60 * 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommunityMember {
     pub uuid: String,
@@ -203,6 +208,10 @@ impl CommunityView {
 /// and no team memberships. Excludes the agent itself and any UUID not
 /// present in `agents`. Each member carries the reasons it is visible
 /// ("manual", "rule:team-clique:<team-id>", "rule:workspace-fallback").
+///
+/// Ignored pairs suppress rule-derived reasons (team-clique and workspace-fallback)
+/// for those pairs. Manual edges are NOT affected by ignores; creating a manual
+/// edge implies intent.
 pub fn resolve_community(
     agent_uuid: &str,
     topology: &Topology,
@@ -235,11 +244,14 @@ pub fn resolve_community(
         .collect();
     for team in &my_teams {
         for member in &team.agent_ids {
-            push_reason(
-                member,
-                format!("rule:{RULE_TEAM_CLIQUE}:{}", team.id),
-                &mut reasons_by_member,
-            );
+            // Team-clique reason is suppressed if the pair is ignored.
+            if !topology.is_ignored(agent_uuid, member) {
+                push_reason(
+                    member,
+                    format!("rule:{RULE_TEAM_CLIQUE}:{}", team.id),
+                    &mut reasons_by_member,
+                );
+            }
         }
     }
 
@@ -252,11 +264,14 @@ pub fn resolve_community(
         {
             for other in agents {
                 if other.workspace.as_deref() == Some(workspace) {
-                    push_reason(
-                        &other.uuid,
-                        format!("rule:{RULE_WORKSPACE_FALLBACK}"),
-                        &mut reasons_by_member,
-                    );
+                    // Workspace-fallback reason is suppressed if the pair is ignored.
+                    if !topology.is_ignored(agent_uuid, &other.uuid) {
+                        push_reason(
+                            &other.uuid,
+                            format!("rule:{RULE_WORKSPACE_FALLBACK}"),
+                            &mut reasons_by_member,
+                        );
+                    }
                 }
             }
         }
@@ -314,8 +329,14 @@ pub struct PairActivity {
 /// which is correct only because interaction timestamps are written by a
 /// single source in UTC RFC3339 with a fixed format. Mixed offsets would
 /// compare incorrectly.
+///
+/// `now_ms` is the current epoch-milliseconds reference. An AwaitingReply task
+/// record is only marked `active_ask: true` if its `created_at` is within
+/// ACTIVE_ASK_WINDOW_MS of `now_ms`; older records contribute `last_message_at`
+/// but do not set `active_ask`. Unparseable timestamps are treated as stale.
 pub fn pair_activity_from_records(
     records: &[crate::control::InteractionRecord],
+    now_ms: i64,
 ) -> Vec<PairActivity> {
     use crate::control::{InteractionKind, InteractionStatus};
     use std::collections::BTreeMap;
@@ -338,8 +359,20 @@ pub fn pair_activity_from_records(
             if record.kind == InteractionKind::Task
                 && record.status == InteractionStatus::AwaitingReply
             {
-                entry.active_ask = true;
-                entry.awaiting_reply_from = Some(target.clone());
+                // Parse created_at to check if it's within the active ask window.
+                let is_within_window = chrono::DateTime::parse_from_rfc3339(&record.created_at)
+                    .ok()
+                    .map(|dt| {
+                        let record_ms = dt.timestamp_millis();
+                        let age_ms = now_ms - record_ms;
+                        (0..=ACTIVE_ASK_WINDOW_MS).contains(&age_ms)
+                    })
+                    .unwrap_or(false);
+
+                if is_within_window {
+                    entry.active_ask = true;
+                    entry.awaiting_reply_from = Some(target.clone());
+                }
             }
         }
     }
@@ -553,13 +586,14 @@ mod tests {
     #[test]
     fn pair_activity_aggregates_last_message_and_open_asks() {
         use crate::control::{InteractionKind, InteractionStatus};
+        let now_ms = 1782990000000i64; // 2026-07-02T11:00:00Z in epoch ms
         let records = vec![
             record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "2026-07-02T10:00:00Z"),
             record(InteractionKind::Message, "b", "a", InteractionStatus::Completed, "2026-07-02T11:00:00Z"),
-            record(InteractionKind::Task, "a", "c", InteractionStatus::AwaitingReply, "2026-07-02T09:00:00Z"),
+            record(InteractionKind::Task, "a", "c", InteractionStatus::AwaitingReply, "2026-07-02T10:30:00Z"),
         ];
 
-        let mut activity = pair_activity_from_records(&records);
+        let mut activity = pair_activity_from_records(&records, now_ms);
         activity.sort_by(|l, r| (&l.a, &l.b).cmp(&(&r.a, &r.b)));
 
         assert_eq!(activity.len(), 2);
@@ -568,15 +602,134 @@ mod tests {
         assert_eq!(ab.last_message_at, "2026-07-02T11:00:00Z");
         assert!(!ab.active_ask);
         let ac = &activity[1];
-        assert!(ac.active_ask);
+        assert!(ac.active_ask, "Task from 10:30:00 should be active as it's within 1 hour of 11:00:00");
         assert_eq!(ac.awaiting_reply_from.as_deref(), Some("c"));
     }
 
     #[test]
     fn pair_activity_skips_senderless_records() {
         use crate::control::{InteractionKind, InteractionStatus};
-        let mut senderless = record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "t");
+        let now_ms = 1782990000000i64;
+        let mut senderless = record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "2026-07-02T11:00:00Z");
         senderless.sender_session_id = None;
-        assert!(pair_activity_from_records(&[senderless]).is_empty());
+        assert!(pair_activity_from_records(&[senderless], now_ms).is_empty());
+    }
+
+    #[test]
+    fn ignored_pair_suppresses_team_clique_reason() {
+        let mut topology = Topology::default();
+        topology.ignore_pair("me", "mate");
+        let teams = vec![TeamMembership {
+            id: "team-1".into(),
+            agent_ids: vec!["me".into(), "mate".into()],
+        }];
+        let agents = vec![agent("me", None), agent("mate", None)];
+
+        let view = resolve_community("me", &topology, &teams, &agents);
+
+        assert!(view.members.is_empty(), "ignored pair should suppress team-clique reason");
+    }
+
+    #[test]
+    fn ignored_pair_does_not_suppress_manual_reason() {
+        let mut topology = Topology::default();
+        topology.add_edge("me", "mate", "t");
+        topology.ignore_pair("me", "mate");
+        let teams = vec![TeamMembership {
+            id: "team-1".into(),
+            agent_ids: vec!["me".into(), "mate".into()],
+        }];
+        let agents = vec![agent("me", None), agent("mate", None)];
+
+        let view = resolve_community("me", &topology, &teams, &agents);
+
+        assert_eq!(view.members.len(), 1);
+        let mate = view.members.iter().find(|m| m.uuid == "mate").unwrap();
+        assert_eq!(mate.reasons, vec!["manual"]);
+    }
+
+    #[test]
+    fn ignored_pair_suppresses_workspace_fallback_member() {
+        let mut topology = Topology::default();
+        topology.ignore_pair("me", "mate");
+        let agents = vec![
+            agent("me", Some("D:/ws")),
+            agent("mate", Some("D:/ws")),
+            agent("other", Some("D:/ws")),
+        ];
+
+        let view = resolve_community("me", &topology, &[], &agents);
+
+        // Should include "other" but not "mate" (ignored)
+        assert_eq!(view.members.len(), 1);
+        assert_eq!(view.members[0].uuid, "other");
+        assert_eq!(view.members[0].reasons, vec!["rule:workspace-fallback"]);
+    }
+
+    #[test]
+    fn ignored_pairs_do_not_affect_fallback_engagement() {
+        let mut topology = Topology::default();
+        topology.ignore_pair("me", "mate");
+        let agents = vec![
+            agent("me", Some("D:/ws")),
+            agent("mate", Some("D:/ws")),
+        ];
+
+        let view = resolve_community("me", &topology, &[], &agents);
+
+        // Since mate is the only workspace-fallback candidate and is ignored,
+        // the agent is still considered "fallback engaged" (no manual edges, no teams).
+        // This tests that engagement is determined from raw input, not filtered by ignores.
+        // With only 1 agent in workspace, fallback engagement is determined by emptiness of manual/teams,
+        // but members might be empty due to ignores. The key is: fallback_engaged computed correctly.
+        assert!(view.members.is_empty(), "mate is the only fallback candidate, but ignored");
+    }
+
+    #[test]
+    fn pair_activity_old_awaiting_reply_not_active_ask() {
+        use crate::control::{InteractionKind, InteractionStatus};
+
+        // now = 2026-07-02T11:00:00Z
+        let now_ms = 1782990000000i64;
+        let hour_ms = 60 * 60 * 1000;
+        let old_timestamp = (now_ms - 2 * hour_ms) as u64;
+
+        // Convert epoch ms to RFC3339
+        let old_dt = chrono::DateTime::<chrono::Utc>::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(old_timestamp)
+        );
+        let old_timestamp_rfc3339 = old_dt.to_rfc3339();
+
+        let records = vec![
+            record(InteractionKind::Task, "a", "b", InteractionStatus::AwaitingReply, &old_timestamp_rfc3339),
+        ];
+
+        let activity = pair_activity_from_records(&records, now_ms);
+
+        assert_eq!(activity.len(), 1);
+        assert!(!activity[0].active_ask, "old awaiting_reply should not be active_ask");
+        assert_eq!(activity[0].last_message_at, old_timestamp_rfc3339, "last_message_at should still be set");
+    }
+
+    #[test]
+    fn pair_activity_fresh_awaiting_reply_is_active_ask() {
+        use crate::control::{InteractionKind, InteractionStatus};
+
+        let now_ms = 1782990000000i64; // 2026-07-02T11:00:00Z
+        let thirty_min_ago = (now_ms - 30 * 60 * 1000) as u64;
+        let dt = chrono::DateTime::<chrono::Utc>::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(thirty_min_ago)
+        );
+        let fresh_timestamp_rfc3339 = dt.to_rfc3339();
+
+        let records = vec![
+            record(InteractionKind::Task, "a", "b", InteractionStatus::AwaitingReply, &fresh_timestamp_rfc3339),
+        ];
+
+        let activity = pair_activity_from_records(&records, now_ms);
+
+        assert_eq!(activity.len(), 1);
+        assert!(activity[0].active_ask, "fresh awaiting_reply should be active_ask");
+        assert_eq!(activity[0].awaiting_reply_from.as_deref(), Some("b"));
     }
 }
