@@ -311,6 +311,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             queue_policy,
             approval_action,
             origin,
+            target_scope: _,
         } => {
             let state = app.state::<AppState>();
             let delivery = deliver_message_to_target(

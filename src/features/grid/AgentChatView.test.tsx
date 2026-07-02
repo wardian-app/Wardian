@@ -212,6 +212,36 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("failed")).toBeInTheDocument();
   });
 
+  it("hides action-required status cue rows while keeping approval activity actionable", async () => {
+    invokeMock.mockResolvedValue([
+      event({
+        id: "status-action-required",
+        kind: "status",
+        role: null,
+        text: "action required",
+        title: "Status",
+        status: "action_required",
+        sequence: 1,
+      }),
+      event({
+        id: "approval-required",
+        kind: "approval",
+        role: null,
+        title: "Approval required",
+        text: "Do you want to proceed?",
+        status: "action_required",
+        sequence: 2,
+      }),
+    ]);
+
+    render(<AgentChatView sessionId="agent-1" />);
+
+    expect(await screen.findByText("Approval required")).toBeInTheDocument();
+    expect(screen.getByText("Action required. Choose a response or type below.")).toBeInTheDocument();
+    expect(screen.queryByText("Status:")).not.toBeInTheDocument();
+    expect(screen.queryByText("action required")).not.toBeInTheDocument();
+  });
+
   it("shows a subtle working indicator while processing before visible work starts", async () => {
     invokeMock.mockResolvedValue([
       event({
@@ -1083,6 +1113,7 @@ describe("AgentChatView", () => {
     });
 
     render(<AgentChatView sessionId="agent-1" agent={{ session_name: "Alpha", agent_class: "Coder", provider: "codex" }} status="Idle" />);
+    expect(await screen.findByText("No chat transcript yet")).toBeInTheDocument();
 
     const input = await screen.findByLabelText("Message agent");
     fireEvent.change(input, { target: { value: "Run the focused tests." } });
@@ -1092,7 +1123,7 @@ describe("AgentChatView", () => {
       sessionId: "agent-1",
       prompt: "Run the focused tests.",
     }));
-    expect(await screen.findByText("Run the focused tests.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("user message")).toHaveTextContent("Run the focused tests."));
     expect(input).toHaveValue("");
   });
 

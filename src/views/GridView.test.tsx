@@ -94,6 +94,52 @@ const agents: AgentConfig[] = [
 
 const telemetry: Record<string, AgentTelemetry> = {};
 
+function gridProps(
+  maximizedAgentId: string | null,
+  filteredAgents: AgentConfig[] = agents,
+  onTerminalFocus = vi.fn(),
+  options: {
+    selectedAgentIds?: Set<string>;
+    offAgentIds?: Set<string>;
+    onDelete?: (agentId: string) => void;
+  } = {},
+): React.ComponentProps<typeof GridView> {
+  return {
+    filteredAgents,
+    telemetry,
+    terminalTitles: {},
+    currentThoughts: {},
+    selectedAgentIds: options.selectedAgentIds ?? new Set(),
+    offAgentIds: options.offAgentIds ?? new Set(),
+    maximizedAgentId,
+    draggedAgentId: null,
+    dragOverAgentId: null,
+    editingAgentId: null,
+    tempName: "",
+    theme: "dark",
+    onMouseEnterCard: () => {},
+    onMouseUp: () => {},
+    onMouseDown: () => {},
+    onCardClick: () => {},
+    onMaximize: () => {},
+    onDelete: options.onDelete ?? (() => {}),
+    onRename: () => {},
+    setEditingAgentId: () => {},
+    setTempName: () => {},
+    handleTitleChange: () => {},
+    deriveCurrentThought: () => ({ thought: '', status: 'Idle' }),
+    getStatusColorClass: () => 'bg-wardian-success',
+    watchlists: [],
+    onAddToList: vi.fn(),
+    onRemoveFromList: vi.fn(),
+    onQuery: vi.fn(),
+    onPause: vi.fn(),
+    onRestart: vi.fn(),
+    onClear: vi.fn(),
+    onTerminalFocus,
+  };
+}
+
 function renderGrid(
   maximizedAgentId: string | null,
   filteredAgents: AgentConfig[] = agents,
@@ -104,42 +150,7 @@ function renderGrid(
     onDelete?: (agentId: string) => void;
   } = {},
 ) {
-  return render(
-    <GridView
-      filteredAgents={filteredAgents}
-      telemetry={telemetry}
-      terminalTitles={{}}
-      currentThoughts={{}}
-      selectedAgentIds={options.selectedAgentIds ?? new Set()}
-      offAgentIds={options.offAgentIds ?? new Set()}
-      maximizedAgentId={maximizedAgentId}
-      draggedAgentId={null}
-      dragOverAgentId={null}
-      editingAgentId={null}
-      tempName=""
-      theme="dark"
-      onMouseEnterCard={() => {}}
-      onMouseUp={() => {}}
-      onMouseDown={() => {}}
-      onCardClick={() => {}}
-      onMaximize={() => {}}
-      onDelete={options.onDelete ?? (() => {})}
-      onRename={() => {}}
-      setEditingAgentId={() => {}}
-      setTempName={() => {}}
-      handleTitleChange={() => {}}
-      deriveCurrentThought={() => ({ thought: '', status: 'Idle' })}
-      getStatusColorClass={() => 'bg-wardian-success'}
-      watchlists={[]}
-      onAddToList={vi.fn()}
-      onRemoveFromList={vi.fn()}
-      onQuery={vi.fn()}
-      onPause={vi.fn()}
-      onRestart={vi.fn()}
-      onClear={vi.fn()}
-      onTerminalFocus={onTerminalFocus}
-    />
-  );
+  return render(<GridView {...gridProps(maximizedAgentId, filteredAgents, onTerminalFocus, options)} />);
 }
 
 beforeEach(() => {
@@ -347,6 +358,25 @@ describe('GridView maximize behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
 
     expect(screen.getByTestId('chat-agent-1')).toHaveValue('Long prompt draft');
+  });
+
+  it('preserves a hidden agent chat mode override while another agent is maximized', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('terminal');
+
+    const { rerender } = renderGrid(null, agents);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+    expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
+
+    rerender(<GridView {...gridProps('agent-2', agents)} />);
+
+    expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+
+    rerender(<GridView {...gridProps(null, agents)} />);
+
+    expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
   });
 
   it('clears per-agent chat mode and draft state when deleting a card', () => {

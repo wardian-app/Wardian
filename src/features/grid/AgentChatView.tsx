@@ -5,12 +5,13 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { AgentChatEvent, AgentChatRole, AgentConfig, AgentTelemetry } from "../../types";
+import { useSettingsStore } from "../../store/useSettingsStore";
 import { submitInputToAgent } from "../../utils/terminalInput";
 import { isGenericActivityTitle, toActivityBlock, type ActivityBlockModel, type ActivityTone } from "./activityBlocks";
 import { parseApprovalChoices } from "./approvalChoices";
 import { CodePanel, renderHighlightedCode } from "./chatCode";
 import { CopyIconButton } from "./chatCopy";
-import { ChatMarkdown } from "./markdown/ChatMarkdown";
+import { ChatMarkdown, type ChatMarkdownLinkHandling } from "./markdown/ChatMarkdown";
 import {
   changedPathsFromEvents,
   derivePresentedChatRows,
@@ -30,6 +31,7 @@ interface AgentChatViewBaseProps {
   status?: string | null;
   telemetry?: Pick<AgentTelemetry, "current_status"> | null;
   className?: string;
+  workspacePath?: string | null;
   refreshIntervalMs?: number;
   autoFocusComposer?: boolean;
   onComposerAutoFocused?: () => void;
@@ -84,6 +86,7 @@ export function AgentChatView({
   status,
   telemetry,
   className = "",
+  workspacePath,
   refreshIntervalMs = CHAT_REFRESH_INTERVAL_MS,
   autoFocusComposer = false,
   draft,
@@ -100,6 +103,8 @@ export function AgentChatView({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [visibleRowLimit, setVisibleRowLimit] = useState(CHAT_INITIAL_ROW_LIMIT);
+  const externalEditor = useSettingsStore((state) => state.externalEditor);
+  const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const transcriptRequestRef = useRef(0);
   const stickToLatestRef = useRef(true);
@@ -202,6 +207,14 @@ export function AgentChatView({
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const disabledReason = inputDisabledReason(activeStatus, isSubmitting);
+  const markdownLinkHandling = useMemo<ChatMarkdownLinkHandling>(() => ({
+    getBasePath: () => workspacePath?.trim() || null,
+    getExternalEditor: () => ({
+      external_editor: externalEditor,
+      external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
+    }),
+    onOpenError: (message) => console.warn(message),
+  }), [externalEditor, externalEditorCustomExecutable, workspacePath]);
 
   useEffect(() => {
     stickToLatestRef.current = true;
@@ -324,6 +337,7 @@ export function AgentChatView({
                     entry={row.entry}
                     event={row.event}
                     isSubmitting={isSubmitting}
+                    linkHandling={markdownLinkHandling}
                     onApprovalSubmit={handleApprovalSubmit}
                   />
                 )}
@@ -359,21 +373,23 @@ function TranscriptEvent({
   event,
   entry,
   isSubmitting,
+  linkHandling,
   onApprovalSubmit,
 }: {
   event: AgentChatEvent;
   entry?: PresentedWorkEntry;
   isSubmitting: boolean;
+  linkHandling: ChatMarkdownLinkHandling;
   onApprovalSubmit: (response: string) => void;
 }) {
   return event.kind === "message" ? (
-    <MessageEvent event={event} />
+    <MessageEvent event={event} linkHandling={linkHandling} />
   ) : (
     <ActivityEvent event={event} entry={entry} isSubmitting={isSubmitting} onApprovalSubmit={onApprovalSubmit} />
   );
 }
 
-function MessageEvent({ event }: { event: AgentChatEvent }) {
+function MessageEvent({ event, linkHandling }: { event: AgentChatEvent; linkHandling: ChatMarkdownLinkHandling }) {
   const role = event.role ?? "assistant";
   const text = event.text?.trimEnd() || event.title || "";
   const isUser = role === "user";
@@ -389,7 +405,7 @@ function MessageEvent({ event }: { event: AgentChatEvent }) {
           </div>
         ) : null}
         {text ? (
-          <ChatMarkdown source={text} />
+          <ChatMarkdown linkHandling={linkHandling} source={text} />
         ) : (
           <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
         )}
