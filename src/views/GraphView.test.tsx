@@ -20,25 +20,35 @@ vi.mock("../features/graph/GraphCanvas", () => ({
     onContextMenu,
     connectMode,
     selectedEdgeId,
+    onSelectEdge,
   }: {
     resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
     connectMode?: boolean;
     selectedEdgeId?: string | null;
+    onSelectEdge?: (edgeId: string) => void;
   }) => (
-    <button
-      data-testid="mock-graph-node"
-      data-connect-mode={connectMode ? "true" : "false"}
-      data-selected-edge={selectedEdgeId ?? "none"}
-      onClick={() => onSelectAgent("a")}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        onContextMenu("a", 12, 24);
-      }}
-    >
-      node-a reset-{resetSignal ?? 0}
-    </button>
+    <>
+      <button
+        data-testid="mock-graph-node"
+        data-connect-mode={connectMode ? "true" : "false"}
+        data-selected-edge={selectedEdgeId ?? "none"}
+        onClick={() => onSelectAgent("a")}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onContextMenu("a", 12, 24);
+        }}
+      >
+        node-a reset-{resetSignal ?? 0}
+      </button>
+      <button
+        data-testid="mock-graph-edge"
+        onClick={() => onSelectEdge?.("a--b")}
+      >
+        edge-a--b
+      </button>
+    </>
   ),
 }));
 
@@ -108,8 +118,11 @@ const defaultProps = {
 };
 
 describe("GraphView", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     Object.values(handlers).forEach((handler) => handler.mockClear());
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined);
   });
 
   it("renders scope, relationship lenses (off by default), and graph canvas", () => {
@@ -191,13 +204,28 @@ describe("GraphView", () => {
     expect(screen.getByText("Query")).toBeInTheDocument();
   });
 
-  it("opens the context menu for a relationship row's neighbor agent", () => {
-    render(<GraphView {...defaultProps} />);
-
-    waitFor(() => {
-      const betaRow = screen.getByText("Beta");
-      expect(betaRow).toBeInTheDocument();
+  it("opens the context menu for a relationship row's neighbor agent", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "get_topology") {
+        return {
+          edges: [{ a: "a", b: "b", origin: "manual" }],
+          ignored_pairs: [],
+        };
+      }
+      if (command === "get_pair_activity") {
+        return [];
+      }
+      return undefined;
     });
+
+    render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+    const betaRow = await screen.findByText("Beta");
+    fireEvent.contextMenu(betaRow);
+
+    expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
   });
 
   it("preserves multi-selection actions when right-clicking a selected graph node", async () => {
@@ -404,20 +432,21 @@ describe("GraphView", () => {
 
       render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
+      // Wait for the manual edge to reach the community panel before selecting it
       await waitFor(() => {
-        expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+        expect(screen.getByTitle("Disconnect")).toBeInTheDocument();
       });
 
-      // Reset mock calls
+      fireEvent.click(screen.getByTestId("mock-graph-edge"));
+
       mockInvoke.mockClear();
       mockInvoke.mockResolvedValue(undefined);
 
-      // Try delete with edge selected
       fireEvent.keyDown(window, { key: "Delete" });
 
-      // The edge should be selected via GraphCanvas mock or similar
-      // For this test, we're verifying the keydown handler is wired
-      expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("remove_topology_edge", { a: "a", b: "b" });
+      });
     });
 
     it("delete key with selected rule edge → NOT invoke remove_topology_edge", async () => {
@@ -427,7 +456,7 @@ describe("GraphView", () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === "get_topology") {
           return {
-            edges: [{ a: "a", b: "c", origin: "rule:team-clique:team" }],
+            edges: [{ a: "a", b: "b", origin: "rule:team-clique:team" }],
             ignored_pairs: [],
           };
         }
@@ -439,9 +468,12 @@ describe("GraphView", () => {
 
       render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
+      // Wait for the rule-derived row to reach the community panel before selecting the edge
       await waitFor(() => {
-        expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+        expect(screen.getByText("managed by team Team")).toBeInTheDocument();
       });
+
+      fireEvent.click(screen.getByTestId("mock-graph-edge"));
 
       mockInvoke.mockClear();
       mockInvoke.mockResolvedValue(undefined);

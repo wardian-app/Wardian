@@ -1239,7 +1239,7 @@ select option {
   border: 1px solid var(--color-wardian-border);
   border-radius: 4px;
   color: var(--color-wardian-text);
-  background: var(--color-wardian-surface);
+  background: var(--color-wardian-input-bg);
   font-size: 11px;
   outline: none;
   transition: border-color 120ms ease;
@@ -1257,7 +1257,7 @@ select option {
   overflow-y: auto;
   border: 1px solid var(--color-wardian-border);
   border-radius: 4px;
-  background: var(--color-wardian-surface);
+  background: var(--color-wardian-card);
 }
 
 .graph-community-picker-item {

@@ -97,13 +97,13 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     void refreshTopology();
     void refreshActivity();
 
-    const unlistenPromises: Promise<() => void>[] = [];
-    void listen("topology-changed", refreshTopology).then((un) => {
-      unlistenPromises.push(Promise.resolve(un));
-    }).catch(() => {});
-    void listen("pair-activity-changed", refreshActivity).then((un) => {
-      unlistenPromises.push(Promise.resolve(un));
-    }).catch(() => {});
+    // Capture the listen() promises synchronously so cleanup can always
+    // reach the unsubscribe functions, even if unmount happens before the
+    // registrations resolve.
+    const unlistenPromises: Promise<() => void>[] = [
+      listen("topology-changed", refreshTopology),
+      listen("pair-activity-changed", refreshActivity),
+    ];
 
     return () => {
       cancelled = true;
