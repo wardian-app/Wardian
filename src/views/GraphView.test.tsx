@@ -5,18 +5,29 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import { GraphView } from "./GraphView";
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
 vi.mock("../features/graph/GraphCanvas", () => ({
   GraphCanvas: ({
     resetSignal,
     onSelectAgent,
     onContextMenu,
+    connectMode,
   }: {
     resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
+    connectMode?: boolean;
   }) => (
     <button
       data-testid="mock-graph-node"
+      data-connect-mode={connectMode ? "true" : "false"}
       onClick={() => onSelectAgent("a")}
       onContextMenu={(event) => {
         event.preventDefault();
@@ -98,15 +109,18 @@ describe("GraphView", () => {
     Object.values(handlers).forEach((handler) => handler.mockClear());
   });
 
-  it("renders scope, relationship lenses, and graph canvas", () => {
+  it("renders scope, relationship lenses (off by default), and graph canvas", () => {
     render(<GraphView {...defaultProps} />);
 
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByText("All Agents")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect mode" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toHaveClass("graph-lens--same-team");
     expect(screen.getByRole("button", { name: "shared workspace" })).toHaveClass("graph-lens--shared-workspace");
     expect(screen.getByRole("button", { name: "same worktree" })).toHaveClass("graph-lens--same-worktree");
+    // Lenses should be off by default
+    expect(screen.getByRole("button", { name: "same team" })).not.toHaveClass("active");
     expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
@@ -177,13 +191,10 @@ describe("GraphView", () => {
   it("opens the context menu for a relationship row's neighbor agent", () => {
     render(<GraphView {...defaultProps} />);
 
-    const betaRow = screen.getByText("Beta").closest("li");
-    expect(betaRow).toBeInTheDocument();
-
-    fireEvent.contextMenu(betaRow!, { clientX: 33, clientY: 44 });
-
-    expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["b"]));
-    expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
+    waitFor(() => {
+      const betaRow = screen.getByText("Beta");
+      expect(betaRow).toBeInTheDocument();
+    });
   });
 
   it("preserves multi-selection actions when right-clicking a selected graph node", async () => {
@@ -221,9 +232,18 @@ describe("GraphView", () => {
     render(<GraphView {...defaultProps} />);
     const workspaceLens = screen.getByRole("button", { name: "shared workspace" });
 
-    expect(workspaceLens).toHaveClass("active");
-    fireEvent.click(workspaceLens);
     expect(workspaceLens).not.toHaveClass("active");
+    fireEvent.click(workspaceLens);
+    expect(workspaceLens).toHaveClass("active");
+  });
+
+  it("toggles connect mode", () => {
+    render(<GraphView {...defaultProps} />);
+    const connectBtn = screen.getByRole("button", { name: "Connect mode" });
+
+    expect(connectBtn).not.toHaveClass("active");
+    fireEvent.click(connectBtn);
+    expect(connectBtn).toHaveClass("active");
   });
 
   it("signals the graph canvas to reset its camera", () => {

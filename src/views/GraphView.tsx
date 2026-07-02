@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { PanelRightOpen, RotateCcw, X } from "lucide-react";
-import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { PanelRightOpen, Plus, RotateCcw, X } from "lucide-react";
+import type { AgentConfig, AgentTelemetry, CloneMode, TopologySnapshot, PairActivityEntry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
@@ -12,7 +14,6 @@ function formatProviderName(provider: string | null | undefined): string {
 }
 import {
   buildAgentGraph,
-  type AgentGraphEdge,
   type GraphRelationshipReason,
 } from "../features/graph/graphProjection";
 
@@ -59,13 +60,55 @@ const ALL_REASONS: GraphRelationshipReason[] = [
 ];
 
 export const GraphView: React.FC<GraphViewProps> = (props) => {
-  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(new Set(ALL_REASONS));
+  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(new Set());
+  const [topology, setTopology] = useState<TopologySnapshot | null>(null);
+  const [pairActivity, setPairActivity] = useState<PairActivityEntry[]>([]);
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(
     Array.from(props.selectedAgentIds)[0] ?? null,
   );
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [resetSignal, setResetSignal] = useState(0);
+  const [connectMode, setConnectMode] = useState(false);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshTopology = async () => {
+      try {
+        const t = await invoke<TopologySnapshot>("get_topology");
+        if (!cancelled) setTopology(t);
+      } catch {
+        // Silently ignore errors
+      }
+    };
+    const refreshActivity = async () => {
+      try {
+        const a = await invoke<PairActivityEntry[]>("get_pair_activity");
+        if (!cancelled) setPairActivity(a);
+      } catch {
+        // Silently ignore errors
+      }
+    };
+
+    void refreshTopology();
+    void refreshActivity();
+
+    const unlistenPromises: Promise<() => void>[] = [];
+    void listen("topology-changed", refreshTopology).then((un) => {
+      unlistenPromises.push(Promise.resolve(un));
+    }).catch(() => {});
+    void listen("pair-activity-changed", refreshActivity).then((un) => {
+      unlistenPromises.push(Promise.resolve(un));
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unlistenPromises.forEach((p) => {
+        p.then((un) => un()).catch(() => {});
+      });
+    };
+  }, []);
 
   const projection = useMemo(() => buildAgentGraph({
     agents: props.allAgents,
@@ -76,6 +119,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     selectedAgentIds: props.selectedAgentIds,
     enabledReasons,
     offAgentIds: props.offAgentIds,
+    topology: topology ?? undefined,
+    pairActivity,
   }), [
     props.allAgents,
     props.telemetry,
@@ -85,6 +130,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     props.selectedAgentIds,
     props.offAgentIds,
     enabledReasons,
+    topology,
+    pairActivity,
   ]);
   const projectionNodeIds = useMemo(
     () => new Set(projection.nodes.map((node) => node.id)),
@@ -106,8 +153,26 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     });
   }, [projection.nodes, projectionNodeIds, props.selectedAgentIds]);
 
+  useEffect(() => {
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      if (event.key === "Delete" && selectedEdgeId) {
+        const edge = projection.commEdges.find((e) => e.id === selectedEdgeId);
+        if (edge && edge.origin === "manual") {
+          const [a, b] = selectedEdgeId.split("--");
+          try {
+            await invoke("remove_topology_edge", { a, b });
+            setSelectedEdgeId(null);
+          } catch {
+            // Silently ignore errors
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedEdgeId, projection.commEdges]);
+
   const inspectedAgent = projection.nodes.find((node) => node.id === inspectedAgentId) ?? projection.nodes[0] ?? null;
-  const relationshipEdges = inspectedAgent ? relatedEdges(projection.edges, inspectedAgent.id) : [];
   const filteredCount = props.filteredAgents.length;
 
   const toggleReason = (reason: GraphRelationshipReason) => {
@@ -158,6 +223,16 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           <div className="graph-scope-count">{filteredCount} agents visible</div>
         </div>
         <div className="graph-lenses" aria-label="Graph relationship lenses">
+          <button
+            type="button"
+            className={`graph-connect-toggle ${connectMode ? "active" : ""}`}
+            aria-label="Connect mode"
+            title="Connect mode (drag to create edges)"
+            onClick={() => setConnectMode(!connectMode)}
+          >
+            <Plus size={14} strokeWidth={2.2} />
+          </button>
+          <div className="graph-lens-separator" />
           {ALL_REASONS.map((reason) => (
             <button
               key={reason}
@@ -204,6 +279,12 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               onSelectAgent={selectAgent}
               onOpenAgent={props.onOpenAgentInGrid}
               onContextMenu={openContextMenu}
+              selectedEdgeId={selectedEdgeId}
+              onSelectEdge={setSelectedEdgeId}
+              connectMode={connectMode}
+              onConnect={(a, b) => {
+                invoke("add_topology_edge", { a, b }).catch(() => {});
+              }}
             />
           )}
         </div>
@@ -257,28 +338,20 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               </dl>
               <div className="graph-relationships">
                 <div className="label-small">Relationships</div>
-                {relationshipEdges.length === 0 ? (
-                  <p>No visible relationships under the current lenses.</p>
-                ) : (
-                  <ul>
-                    {relationshipEdges.map((edge) => {
-                      const neighborId = edge.source === inspectedAgent.id ? edge.target : edge.source;
-                      const neighbor = projection.nodes.find((node) => node.id === neighborId);
-                      return (
-                        <li
-                          key={edge.id}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            openContextMenu(neighborId, event.clientX, event.clientY);
-                          }}
-                        >
-                          <span>{neighbor?.label ?? neighborId}</span>
-                          <small>{edge.reasons.join(", ").replace(/_/g, " ")}</small>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                {renderCommunityPanel(
+                  inspectedAgent.id,
+                  projection,
+                  props.teams,
+                  (a, b) => {
+                    invoke("add_topology_edge", { a, b }).catch(() => {});
+                  },
+                  (a, b) => {
+                    invoke("remove_topology_edge", { a, b }).catch(() => {});
+                  },
+                  (a, b) => {
+                    invoke("ignore_topology_pair", { a, b }).catch(() => {});
+                  },
+                  openContextMenu,
                 )}
               </div>
               <button type="button" className="graph-open-grid" onClick={() => props.onOpenAgentInGrid(inspectedAgent.id)}>
@@ -320,10 +393,105 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   );
 };
 
-function relatedEdges(edges: AgentGraphEdge[], agentId: string) {
-  return edges.filter((edge) => edge.source === agentId || edge.target === agentId);
-}
-
 function isInsideContextMenu(target: EventTarget | null) {
   return target instanceof Element && Boolean(target.closest('[data-testid="agent-context-menu"]'));
+}
+
+function getOriginLabel(edge: any, teams: AgentTeam[]): string {
+  if (edge.origin === "manual") return "manual";
+  if (edge.origin === "rule" && edge.ruleId) {
+    const [rule, instance] = edge.ruleId.split(":");
+    if (rule === "team-clique") {
+      const team = teams.find((t) => t.id === instance);
+      return `managed by team ${team?.name ?? instance}`;
+    }
+    return `managed by ${rule}`;
+  }
+  return "unmapped";
+}
+
+function renderCommunityPanel(
+  agentId: string,
+  projection: ReturnType<typeof buildAgentGraph>,
+  teams: AgentTeam[],
+  onAdd: (a: string, b: string) => void,
+  onRemove: (a: string, b: string) => void,
+  onIgnore: (a: string, b: string) => void,
+  onContextMenu: (agentId: string, x: number, y: number) => void,
+): React.ReactNode {
+  const edges = projection.commEdges.filter((e) => e.source === agentId || e.target === agentId);
+
+  if (edges.length === 0) {
+    return <p>No visible connections.</p>;
+  }
+
+  return (
+    <ul className="graph-community-list">
+      {edges.map((edge) => {
+        const neighborId = edge.source === agentId ? edge.target : edge.source;
+        const neighbor = projection.nodes.find((node) => node.id === neighborId);
+        const label = neighbor?.label ?? neighborId;
+        const originLabel = getOriginLabel(edge, teams);
+
+        return (
+          <li key={edge.id} className="graph-community-row">
+            <div
+              className="graph-community-row-info"
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onContextMenu(neighborId, event.clientX, event.clientY);
+              }}
+            >
+              <span className="graph-community-name">{label}</span>
+              <small className={`graph-community-origin graph-origin--${edge.origin}`}>
+                {originLabel}
+              </small>
+              {edge.origin === "ghost" && (
+                <span className="graph-inspector-unmapped">Unmapped</span>
+              )}
+            </div>
+            {edge.origin === "manual" && (
+              <button
+                type="button"
+                className="graph-community-action-btn"
+                onClick={() => onRemove(edge.source, edge.target)}
+                title="Disconnect"
+              >
+                ×
+              </button>
+            )}
+            {edge.origin === "ghost" && (
+              <div className="graph-community-ghost-actions">
+                <button
+                  type="button"
+                  className="graph-community-action-btn graph-community-action-formalize"
+                  onClick={() => onAdd(edge.source, edge.target)}
+                  title="Formalize edge"
+                >
+                  Formalize
+                </button>
+                <button
+                  type="button"
+                  className="graph-community-action-btn graph-community-action-ignore"
+                  onClick={() => onIgnore(edge.source, edge.target)}
+                  title="Ignore this pair"
+                >
+                  Ignore
+                </button>
+              </div>
+            )}
+          </li>
+        );
+      })}
+      <li key="add-connection" className="graph-community-row graph-community-add-row">
+        <button
+          type="button"
+          className="graph-community-add-btn"
+        >
+          Add connection…
+        </button>
+      </li>
+    </ul>
+  );
 }
