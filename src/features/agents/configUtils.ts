@@ -183,7 +183,7 @@ export function requiresRestart(oldConfig: AgentConfig, newConfig: AgentConfig):
   const keys = Object.keys(newConfig) as (keyof AgentConfig)[];
   
   for (const key of keys) {
-    if (key === "session_name" || key === "session_id" || key === "session_persistence") continue;
+    if (key === "session_name" || key === "session_id" || key === "session_persistence" || key === "conversation_logging") continue;
     
     const oldVal = oldConfig[key];
     const newVal = newConfig[key];

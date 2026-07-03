@@ -38,6 +38,11 @@ type RemoteStatus =
   | "device_revoked";
 
 type ActiveRemoteTab = "watchlist" | "workflows" | "queue" | "garden" | "library";
+type RemoteAgentViewMode = "terminal" | "chat";
+
+export const MIN_REMOTE_TERMINAL_FONT_SIZE = 10;
+export const MAX_REMOTE_TERMINAL_FONT_SIZE = 20;
+export const DEFAULT_REMOTE_TERMINAL_FONT_SIZE = 11;
 
 interface RemoteState {
   agents: RemoteAgentSummary[];
@@ -54,7 +59,10 @@ interface RemoteState {
   mobileCollapsedTeamIdsByList: Record<string, string[]>;
   status: RemoteStatus;
   activeAgentId: string | null;
-  activeAgentViewMode: "terminal" | "chat";
+  activeAgentViewMode: RemoteAgentViewMode;
+  remoteAgentDefaultViewMode: RemoteAgentViewMode;
+  remoteTerminalFontSize: number;
+  activeAgentViewModesById: Record<string, RemoteAgentViewMode>;
   terminalSnapshot: RemoteTerminalSnapshot | null;
   terminalLoading: boolean;
   terminalError: string;
@@ -67,15 +75,16 @@ interface RemoteState {
   disconnectStatusStream: () => void;
   setActiveWatchlistId: (id: string) => void;
   setActiveRemoteTab: (tab: ActiveRemoteTab) => void;
+  setRemoteAgentDefaultViewMode: (mode: RemoteAgentViewMode) => void;
+  setRemoteTerminalFontSize: (value: number) => void;
   toggleMobileTeamCollapsed: (teamId: string) => void;
   openAgent: (id: string) => Promise<void>;
-  closeAgent: () => void;
-  setActiveAgentViewMode: (mode: "terminal" | "chat") => Promise<void>;
+  closeAgent: (options?: { syncHistory?: boolean }) => void;
+  setActiveAgentViewMode: (mode: RemoteAgentViewMode) => Promise<void>;
   refreshActiveAgentTerminal: (options?: { background?: boolean }) => Promise<void>;
   refreshActiveAgentChat: (options?: { background?: boolean }) => Promise<void>;
   appendRemoteTerminalQueueOutput: (sessionId: string, data: string, provider?: string) => void;
   sendPromptToActiveAgent: (prompt: string, inputMode?: RemoteAgentInputMode) => Promise<void>;
-  broadcastPrompt: (prompt: string) => Promise<void>;
   runAgentAction: (action: string, target: string) => Promise<void>;
   runWorkflow: (workflowId: string) => Promise<void>;
 }
@@ -89,6 +98,9 @@ const statusFromError = (error: unknown): RemoteStatus =>
   error instanceof RemoteRequestError && error.status === 401 ? "session_expired" : "unreachable";
 
 const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
+const REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY = "wardian.remote.agentDefaultViewMode";
+const REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY = "wardian.remote.terminalFontSize";
+const REMOTE_HISTORY_DETAIL_VIEW = "agent_detail";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
@@ -100,6 +112,31 @@ const storedActiveWatchlistId = () => {
     return window.localStorage.getItem(REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY) || "all";
   } catch {
     return "all";
+  }
+};
+
+const normalizeRemoteAgentViewMode = (value: string | null | undefined): RemoteAgentViewMode =>
+  value === "chat" ? "chat" : "terminal";
+
+const storedRemoteAgentDefaultViewMode = () => {
+  try {
+    return normalizeRemoteAgentViewMode(window.localStorage.getItem(REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY));
+  } catch {
+    return "terminal";
+  }
+};
+
+export const normalizeRemoteTerminalFontSize = (value: number) => {
+  if (!Number.isFinite(value)) return DEFAULT_REMOTE_TERMINAL_FONT_SIZE;
+  return Math.min(MAX_REMOTE_TERMINAL_FONT_SIZE, Math.max(MIN_REMOTE_TERMINAL_FONT_SIZE, Math.round(value)));
+};
+
+const storedRemoteTerminalFontSize = () => {
+  try {
+    const stored = window.localStorage.getItem(REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY);
+    return stored === null ? DEFAULT_REMOTE_TERMINAL_FONT_SIZE : normalizeRemoteTerminalFontSize(Number(stored));
+  } catch {
+    return DEFAULT_REMOTE_TERMINAL_FONT_SIZE;
   }
 };
 
@@ -205,17 +242,6 @@ class RemotePairingRejectedError extends Error {
   }
 }
 
-const sendPromptToTargets = async (prompt: string, agentIds: string[]) => {
-  const results = await Promise.allSettled(agentIds.map((target) => remoteClient.sendPrompt(target, prompt)));
-  const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-  if (!rejected) return;
-  if (rejected.reason instanceof RemoteRequestError && rejected.reason.status === 401) {
-    throw rejected.reason;
-  }
-  const acceptedCount = results.filter((result) => result.status === "fulfilled").length;
-  throw new Error(`${acceptedCount}/${agentIds.length} prompts accepted.`);
-};
-
 let statusStreamSocket: WebSocket | null = null;
 let backgroundChatRefreshTimer: number | null = null;
 let backgroundChatRefreshInFlight = false;
@@ -318,6 +344,11 @@ const newRemoteQueueItemId = () => {
 const remoteAgentStatusMap = (agents: RemoteAgentSummary[]) =>
   Object.fromEntries(agents.map((agent) => [agent.session_id, agent.status]));
 
+const pruneActiveAgentViewModes = (
+  modesById: Record<string, RemoteAgentViewMode>,
+  liveAgentIds: Set<string>,
+) => Object.fromEntries(Object.entries(modesById).filter(([agentId]) => liveAgentIds.has(agentId)));
+
 const remoteQueuePatchForAgents = (state: RemoteState, agents: RemoteAgentSummary[]): Partial<RemoteState> => {
   let items = state.remoteQueueItems;
   let buffers = state.remoteQueueBuffers;
@@ -374,15 +405,18 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
   statusStreamSocket = await remoteClient.openStatusStream({
     onAgents: (agents) => {
       const activeAgentId = get().activeAgentId;
+      const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
       const activeAgent = activeAgentId ? agents.find((agent) => agent.session_id === activeAgentId) : null;
       set((state) => ({
         agents,
         status: "ready",
+        activeAgentViewModesById: pruneActiveAgentViewModes(state.activeAgentViewModesById, liveAgentIds),
         ...remoteQueuePatchForAgents(state, agents),
         ...(activeAgent
           ? {}
           : {
               activeAgentId: null,
+              activeAgentViewMode: "terminal",
               terminalSnapshot: null,
               terminalLoading: false,
               terminalError: "",
@@ -443,6 +477,40 @@ const pairingParamsFromLocation = () => {
 const clearPairingUrl = () => {
   if (!window.location.search) return;
   window.history.replaceState({}, "", `${window.location.pathname}${window.location.hash}`);
+};
+
+const currentHistoryStateObject = () =>
+  typeof window.history.state === "object" && window.history.state !== null && !Array.isArray(window.history.state)
+    ? window.history.state
+    : {};
+
+const isRemoteAgentDetailHistoryState = (state = window.history.state) =>
+  typeof state === "object" &&
+  state !== null &&
+  !Array.isArray(state) &&
+  (state as { wardian_remote_view?: unknown }).wardian_remote_view === REMOTE_HISTORY_DETAIL_VIEW;
+
+const pushRemoteAgentDetailHistory = (agentId: string) => {
+  try {
+    const currentState = currentHistoryStateObject();
+    if (
+      isRemoteAgentDetailHistoryState(currentState) &&
+      (currentState as { wardian_remote_agent_id?: unknown }).wardian_remote_agent_id === agentId
+    ) {
+      return;
+    }
+    window.history.pushState(
+      {
+        ...currentState,
+        wardian_remote_view: REMOTE_HISTORY_DETAIL_VIEW,
+        wardian_remote_agent_id: agentId,
+      },
+      "",
+      `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    );
+  } catch {
+    // Some embedded browsers restrict history writes; explicit in-app back remains available.
+  }
 };
 
 const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -575,6 +643,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       agents,
       workflows,
       remoteAgentStatuses: remoteAgentStatusMap(agents),
+      activeAgentViewModesById: pruneActiveAgentViewModes(state.activeAgentViewModesById, liveAgentIds),
       watchlists: watchlistState.watchlists,
       teams: watchlistState.teams,
       watchlistPrefs,
@@ -586,6 +655,7 @@ const loadRemoteShellData = async (set: RemoteSet, get: RemoteGet) => {
       ...(activeAgentId
         ? {}
         : {
+            activeAgentViewMode: "terminal",
             terminalSnapshot: null,
             terminalLoading: false,
             terminalError: "",
@@ -614,6 +684,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   status: "loading",
   activeAgentId: null,
   activeAgentViewMode: "terminal",
+  remoteAgentDefaultViewMode: storedRemoteAgentDefaultViewMode(),
+  remoteTerminalFontSize: storedRemoteTerminalFontSize(),
+  activeAgentViewModesById: {},
   terminalSnapshot: null,
   terminalLoading: false,
   terminalError: "",
@@ -671,6 +744,24 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   setActiveRemoteTab(tab) {
     set({ activeRemoteTab: tab });
   },
+  setRemoteAgentDefaultViewMode(mode) {
+    const normalized = normalizeRemoteAgentViewMode(mode);
+    set({ remoteAgentDefaultViewMode: normalized });
+    try {
+      window.localStorage.setItem(REMOTE_AGENT_DEFAULT_VIEW_STORAGE_KEY, normalized);
+    } catch {
+      // Browser storage may be unavailable in locked-down contexts.
+    }
+  },
+  setRemoteTerminalFontSize(value) {
+    const normalized = normalizeRemoteTerminalFontSize(value);
+    set({ remoteTerminalFontSize: normalized });
+    try {
+      window.localStorage.setItem(REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY, String(normalized));
+    } catch {
+      // Browser storage may be unavailable in locked-down contexts.
+    }
+  },
   toggleMobileTeamCollapsed(teamId) {
     set((state) => ({
       ...(() => {
@@ -693,9 +784,11 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     clearBackgroundChatRefresh();
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
+    pushRemoteAgentDetailHistory(id);
+    const activeAgentViewMode = get().activeAgentViewModesById[id] ?? get().remoteAgentDefaultViewMode;
     set({
       activeAgentId: id,
-      activeAgentViewMode: "terminal",
+      activeAgentViewMode,
       terminalSnapshot: null,
       terminalLoading: false,
       terminalError: "",
@@ -703,8 +796,18 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       chatLoading: false,
       chatError: "",
     });
+    if (activeAgentViewMode === "chat") {
+      await get().refreshActiveAgentChat();
+    }
   },
-  closeAgent() {
+  closeAgent(options) {
+    if (options?.syncHistory !== false && isRemoteAgentDetailHistoryState()) {
+      try {
+        window.history.back();
+      } catch {
+        // If browser history cannot move, still close the in-app detail view.
+      }
+    }
     clearBackgroundChatRefresh();
     lastActiveAgentRefreshKey = null;
     set({
@@ -719,7 +822,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     });
   },
   async setActiveAgentViewMode(mode) {
-    set({ activeAgentViewMode: mode });
+    set((state) => ({
+      activeAgentViewMode: mode,
+      activeAgentViewModesById: state.activeAgentId
+        ? { ...state.activeAgentViewModesById, [state.activeAgentId]: mode }
+        : state.activeAgentViewModesById,
+    }));
     if (mode === "chat" && get().chatEvents.length === 0) {
       await get().refreshActiveAgentChat();
       return;
@@ -791,26 +899,6 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         await get().refreshActiveAgentChat();
       } else {
         await get().refreshActiveAgentTerminal();
-      }
-    } catch (error) {
-      set({ status: statusFromError(error) });
-      throw error;
-    } finally {
-      set({ sending: false });
-    }
-  },
-  async broadcastPrompt(prompt) {
-    const trimmed = prompt.trim();
-    if (!trimmed) return;
-    const agentIds = get().agents.map((agent) => agent.session_id);
-    if (agentIds.length === 0) return;
-    set({ sending: true });
-    try {
-      await sendPromptToTargets(trimmed, agentIds);
-      if (get().activeAgentViewMode === "chat") {
-        await get().refreshActiveAgentChat({ background: true });
-      } else {
-        await get().refreshActiveAgentTerminal({ background: true });
       }
     } catch (error) {
       set({ status: statusFromError(error) });

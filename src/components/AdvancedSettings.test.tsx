@@ -122,6 +122,24 @@ describe("AdvancedSettings", () => {
     expect(updateField).toHaveBeenCalledWith("session_persistence", "fresh");
   });
 
+  it("edits the per-agent conversation logging override from advanced settings", () => {
+    const updateField = vi.fn();
+
+    render(
+      <AdvancedSettings
+        config={{ provider: "claude", conversation_logging: "default" }}
+        updateField={updateField}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced Settings" }));
+    fireEvent.change(screen.getByLabelText("Conversation Logging"), {
+      target: { value: "disabled" },
+    });
+
+    expect(updateField).toHaveBeenCalledWith("conversation_logging", "disabled");
+  });
+
   it("places regular session resume outside provider parameters", () => {
     const updateField = vi.fn();
     const { container } = render(

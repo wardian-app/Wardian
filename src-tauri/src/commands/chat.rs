@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -709,12 +709,26 @@ fn merge_chat_events(
 ) -> Vec<AgentChatEvent> {
     let mut seen = HashSet::new();
     let mut provider_message_text_seen = HashSet::new();
+    let mut provider_message_indexes_by_text = HashMap::new();
     let mut merged = Vec::with_capacity(watch_events.len() + provider_events.len());
 
     for event in provider_events {
         let key = chat_event_dedupe_key(&event);
         if seen.insert(key) {
             if let Some(message_key) = chat_message_text_key(&event) {
+                if let Some(existing_index) = provider_message_indexes_by_text.get(&message_key) {
+                    if should_collapse_provider_message_duplicate(&merged[*existing_index], &event)
+                    {
+                        if should_prefer_message_duplicate_candidate(
+                            &merged[*existing_index],
+                            &event,
+                        ) {
+                            merged[*existing_index] = event;
+                        }
+                        continue;
+                    }
+                }
+                provider_message_indexes_by_text.insert(message_key.clone(), merged.len());
                 provider_message_text_seen.insert(message_key);
             }
             merged.push(event);
@@ -740,6 +754,46 @@ fn merge_chat_events(
     }
 
     merged
+}
+
+fn should_collapse_provider_message_duplicate(
+    existing: &AgentChatEvent,
+    candidate: &AgentChatEvent,
+) -> bool {
+    if existing.kind != AgentChatEventKind::Message || candidate.kind != AgentChatEventKind::Message
+    {
+        return false;
+    }
+    if existing.provider != candidate.provider || existing.role != candidate.role {
+        return false;
+    }
+    if normalized_dedupe_text(existing.text.as_deref().unwrap_or(""))
+        != normalized_dedupe_text(candidate.text.as_deref().unwrap_or(""))
+    {
+        return false;
+    }
+    existing.source != candidate.source
+}
+
+fn should_prefer_message_duplicate_candidate(
+    existing: &AgentChatEvent,
+    candidate: &AgentChatEvent,
+) -> bool {
+    match (existing.turn_id.as_deref(), candidate.turn_id.as_deref()) {
+        (None, Some(_)) => return true,
+        (Some(_), None) => return false,
+        _ => {}
+    }
+
+    source_rank(candidate.source.as_deref()) > source_rank(existing.source.as_deref())
+}
+
+fn source_rank(source: Option<&str>) -> u8 {
+    match source {
+        Some("response_item" | "item.completed") => 2,
+        Some("event_msg") => 1,
+        _ => 0,
+    }
 }
 
 fn chat_event_dedupe_key(event: &AgentChatEvent) -> String {
@@ -1424,6 +1478,46 @@ Do you want to proceed?
 
         assert_eq!(chat_events.len(), 1);
         assert_eq!(chat_events[0].text.as_deref(), Some("Same answer"));
+    }
+
+    #[test]
+    fn merge_deduplicates_codex_stream_and_completed_assistant_messages() {
+        let first = AgentChatEvent {
+            id: "agent-1:provider:1".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::Assistant),
+            text: Some("Created #daily-task-list under General.".to_string()),
+            title: None,
+            status: None,
+            turn_id: None,
+            source: Some("event_msg".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({"provider_log": true}),
+        };
+        let mut completed = first.clone();
+        completed.id = "agent-1:provider:2".to_string();
+        completed.turn_id =
+            Some("msg_003d4bf15d017fea016a460ea8668481938d3c49f567fe9108".to_string());
+        completed.source = Some("response_item".to_string());
+
+        let chat_events = merge_chat_events(Vec::new(), vec![first, completed]);
+
+        assert_eq!(chat_events.len(), 1);
+        assert_eq!(
+            chat_events[0].turn_id.as_deref(),
+            Some("msg_003d4bf15d017fea016a460ea8668481938d3c49f567fe9108")
+        );
+        assert_eq!(
+            chat_events[0].text.as_deref(),
+            Some("Created #daily-task-list under General.")
+        );
     }
 
     #[test]

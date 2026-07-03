@@ -26,7 +26,7 @@ The workflow durable engine (`wardian_core::engine`) executes a validated bluepr
 
 A Task/Decision node's `agent` field resolves as:
 
-- **`role:<x>` / `class:<x>` / `ephemeral`** → spawn a fresh **headless ephemeral worker** for the step via `run_headless` (the default path; this is all of 5a's agent execution). An `AgentConfig` is built from the class/role (provider, class instructions, workspace). Workers are **headless and ephemeral per node** by default; **not** shown in the roster, so a run doesn't flood the Command Center. (A visible/grouped opt-in is a later enhancement, not 5a.)
+- **`role:<x>` / `class:<x>` / `ephemeral`** → spawn a fresh **headless ephemeral worker** for the step via `run_headless` (the default path; this is all of 5a's agent execution). An `AgentConfig` is built from the class/role (provider, class instructions, workspace). Workers are **headless and ephemeral per node** by default; **not** shown in the roster, so a run doesn't flood the live agent workspace. (A visible/grouped opt-in is a later enhancement, not 5a.)
 - **explicit live agent name** → would route to a running roster agent over its PTY. **Deferred** (§7) — that transport is the genuinely unvalidated one. In 5a, a named reference either runs headless under a derived config or returns a clear "live-agent routing not yet supported" error (decided in the plan).
 
 ## 4. `LiveStepExecutor` (the StepExecutor impl)
@@ -63,7 +63,7 @@ New module `src-tauri/src/workflow/` with `LiveStepExecutor` implementing `wardi
 ## 7. Scope boundaries (deferred to later sub-projects)
 
 - **Live named-agent routing** (PTY send/await/capture against a running roster agent) — the unvalidated transport; its own follow-up.
-- **Visible/grouped run workers** in the Command Center (5a workers are headless).
+- **Visible/grouped run workers** in the live agent workspace (5a workers are headless).
 - **Per-node git worktrees** for isolation.
 - **Scheduled / event triggers** — 5a is manual-run only (`workflow_run`); triggers are later.
 - **Per-run agent session continuity** (resume_session reuse across a run's nodes).

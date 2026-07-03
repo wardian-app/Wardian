@@ -38,7 +38,7 @@ import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
-  stripProviderTerminalReportInputs,
+  filterProviderTerminalInput,
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
@@ -456,7 +456,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
     >
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
         <div className="flex items-center gap-2">
-          <button type="button" aria-label="Back to remote agents" onClick={closeAgent} className={iconButtonClass}>
+          <button type="button" aria-label="Back to remote agents" onClick={() => closeAgent()} className={iconButtonClass}>
             <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <div className="min-w-0 flex-1">
@@ -566,6 +566,7 @@ function TerminalPane({
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
   const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
+  const remoteTerminalFontSize = useRemoteStore((state) => state.remoteTerminalFontSize);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -583,7 +584,7 @@ function TerminalPane({
       cursorInactiveStyle: "bar",
       cursorStyle: "bar",
       disableStdin: true,
-      fontSize: 11,
+      fontSize: remoteTerminalFontSize,
       rows: 24,
       scrollback: 1_000,
       theme: remoteTerminalTheme(),
@@ -630,13 +631,15 @@ function TerminalPane({
     };
 
     terminal.onData?.((data) => {
-      const strippedInput = stripProviderTerminalReportInputs(agent.provider ?? undefined, data);
+      const strippedInput = filterProviderTerminalInput(agent.provider ?? undefined, data);
       const input = normalizeRemoteTerminalCompositionInput(strippedInput, compositionInputState);
       if (input.length === 0) return;
       sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
     });
     terminal.onBinary?.((data) => {
-      sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(data) });
+      const input = filterProviderTerminalInput(agent.provider ?? undefined, data, { binary: true });
+      if (input.length === 0) return;
+      sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(input) });
     });
 
     const themeObserver =
@@ -767,7 +770,7 @@ function TerminalPane({
       terminal.dispose?.();
       host.replaceChildren();
     };
-  }, [agent.provider, agent.session_id]);
+  }, [agent.provider, agent.session_id, remoteTerminalFontSize]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-3" aria-label={`${agent.session_name} terminal`}>
@@ -1068,7 +1071,7 @@ function shouldShowRemoteChatEvent(event: AgentChatEvent): boolean {
     return false;
   }
   if (event.kind !== "status") return true;
-  return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+  return event.status === "failed" || event.status === "cancelled";
 }
 
 function hasMeaningfulToolIdentity(event: AgentChatEvent): boolean {

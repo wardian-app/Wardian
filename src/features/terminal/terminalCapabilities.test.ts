@@ -6,6 +6,7 @@ import {
   planTerminalCapabilityResponses,
   stripTerminalColorReportInputs,
   stripProviderTerminalReportInputs,
+  filterProviderTerminalInput,
   type TerminalCapabilityContext,
 } from "./terminalCapabilities";
 
@@ -172,6 +173,23 @@ describe("terminal capability broker", () => {
     expect(stripProviderTerminalReportInputs("opencode", reply + "typed")).toBe("typed");
     expect(stripProviderTerminalReportInputs("antigravity", reply + "typed")).toBe("typed");
     expect(stripProviderTerminalReportInputs("gemini", reply + "typed")).toBe(reply + "typed");
+  });
+
+  it("drops OpenCode passive mouse-motion reports while preserving typed input", () => {
+    const ESC = String.fromCharCode(27);
+    const mouseMotion = ESC + "[M" + String.fromCharCode(67, 70, 69);
+
+    expect(filterProviderTerminalInput("opencode", mouseMotion + "typed")).toBe("typed");
+    expect(filterProviderTerminalInput("codex", mouseMotion + "typed")).toBe(mouseMotion + "typed");
+  });
+
+  it("drops bare OpenCode binary mouse-motion triplets without dropping wheel packets", () => {
+    const mouseMotion = String.fromCharCode(67, 70, 69);
+    const wheelPacket = String.fromCharCode(96, 97, 98);
+
+    expect(filterProviderTerminalInput("opencode", mouseMotion, { binary: true })).toBe("");
+    expect(filterProviderTerminalInput("opencode", wheelPacket, { binary: true })).toBe(wheelPacket);
+    expect(filterProviderTerminalInput("codex", mouseMotion, { binary: true })).toBe(mouseMotion);
   });
 
   it("strips ConPTY-echoed color/light-dark replies from Codex output even when fragmented across chunks", () => {

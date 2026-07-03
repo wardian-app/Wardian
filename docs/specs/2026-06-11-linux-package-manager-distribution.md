@@ -16,7 +16,7 @@ stable release workflow.
 Linux package-manager publishing has different trust and hosting choices than
 winget and Homebrew. APT repositories, Flathub, and Snap all have real update
 models, but they imply different security boundaries and maintainer work. Wardian
-is a local command center that launches provider CLIs, watches user workspaces,
+is a local-first desktop habitat that launches provider CLIs, watches user workspaces,
 uses PTYs, and coordinates local files. That behavior maps most directly to a
 traditional Debian package today and needs a deliberate sandbox design before
 being published as Flatpak or Snap.

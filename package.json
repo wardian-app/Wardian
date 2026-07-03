@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.4.2",
   "type": "module",
-  "description": "A local desktop command center for supervising and shaping AI agent teams.",
+  "description": "A modular, local-first desktop habitat for agents, workflows, and reusable context.",
   "license": "MIT",
   "repository": {
     "type": "git",

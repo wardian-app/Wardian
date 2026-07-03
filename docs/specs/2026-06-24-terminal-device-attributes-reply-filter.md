@@ -49,6 +49,23 @@ scrolls around the grid. Wardian-originated injections still call the Tauri inpu
 commands directly, so capability-broker replies, control sends, and CLI sends do
 not depend on xterm stdin and remain active for unselected cards.
 
+## Update 2026-07-02: OpenCode mouse-motion input guard
+
+The selected or maximized OpenCode terminal still has xterm stdin enabled, so
+OpenCode can enable mouse tracking for its in-TUI scroll surface. On Windows,
+passive pointer movement over that active terminal can produce legacy xterm
+mouse-motion bytes whose coordinate fields are printable ASCII, for example
+`CFE`, `GFF`, or adjacent descending punctuation. If those bytes reach
+OpenCode's composer instead of being consumed as mouse protocol, they appear as
+random typed characters while the user moves the pointer.
+
+Wardian now filters OpenCode passive mouse-motion reports at the frontend input
+boundary before forwarding `onData` or `onBinary` to the PTY. The filter is
+provider-scoped to OpenCode, keeps normal keyboard input, and keeps non-motion
+mouse packets such as wheel reports so OpenCode-owned scrolling remains
+available. Remote terminal attach uses the same filter before sending input
+frames over the attach websocket.
+
 ## Verification
 
 Focused regression coverage lives in
@@ -62,3 +79,6 @@ Focused regression coverage lives in
   output;
 - unselected OpenCode terminals disable xterm stdin while Wardian's capability
   broker still injects required terminal replies.
+- OpenCode passive mouse-motion reports, including bare binary triplets that
+  match the visible composer garbage pattern, are dropped before PTY forwarding
+  while wheel packets and non-OpenCode provider input are preserved.

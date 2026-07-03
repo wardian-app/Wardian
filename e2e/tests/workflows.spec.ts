@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import fs from "node:fs";
 
 type BlueprintNode = {
   id: string;
@@ -53,6 +54,32 @@ const loopBlueprint = {
     { from: "loop-1", to: "command-1", from_port: "body", to_port: "in" },
     { from: "command-1", to: "communication-1", from_port: "out", to_port: "in" },
     { from: "loop-1", to: "communication-2", from_port: "done", to_port: "in" },
+  ],
+};
+
+const parameterHeavyBlueprint = {
+  schema: 2,
+  id: "param-heavy",
+  name: "Parameter Heavy Workflow",
+  nodes: [
+    {
+      id: "trigger",
+      type: "manual_trigger",
+      name: "Trigger",
+      fields: {
+        input_schema: {
+          type: "object",
+          properties: Object.fromEntries(
+            Array.from({ length: 28 }, (_, index) => [`parameter_${index + 1}`, { type: "string" }]),
+          ),
+        },
+      },
+      position: { x: 0, y: 80 },
+    },
+    { id: "work", type: "task", name: "Work", fields: { agent: "ephemeral", prompt: "Work." }, position: { x: 320, y: 80 } },
+  ],
+  edges: [
+    { from: "trigger", to: "work", from_port: "out", to_port: "in" },
   ],
 };
 
@@ -275,4 +302,57 @@ test("workflow builder renders persisted loop workflow nodes on a visible canvas
     })
   ));
   expect(visibleNodeBoxes.some(Boolean)).toBe(true);
+});
+
+test("workflow run dialog scrolls parameter-heavy forms within the viewport", async ({ page }) => {
+  await installWorkflowsIpcMock(page, parameterHeavyBlueprint);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+  const titlebar = page.locator(".titlebar-center");
+  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
+  await page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ }).click();
+  const dialog = page.getByTestId("run-launch-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("radio", { name: "Schedule" }).click();
+
+  const body = page.getByTestId("run-launch-dialog-body");
+  const actions = page.getByTestId("run-launch-dialog-actions");
+  await expect(body.getByLabel("parameter_28")).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Save schedule" })).toBeVisible();
+
+  const geometry = await page.evaluate(() => {
+    const dialogElement = document.querySelector('[data-testid="run-launch-dialog"]');
+    const bodyElement = document.querySelector('[data-testid="run-launch-dialog-body"]');
+    const actionsElement = document.querySelector('[data-testid="run-launch-dialog-actions"]');
+    if (!dialogElement || !bodyElement || !actionsElement) return null;
+    const dialogRect = dialogElement.getBoundingClientRect();
+    const bodyRect = bodyElement.getBoundingClientRect();
+    const actionsRect = actionsElement.getBoundingClientRect();
+    return {
+      dialogBottom: dialogRect.bottom,
+      viewportHeight: window.innerHeight,
+      bodyClientHeight: bodyElement.clientHeight,
+      bodyScrollHeight: bodyElement.scrollHeight,
+      bodyBottom: bodyRect.bottom,
+      actionsTop: actionsRect.top,
+      actionsBottom: actionsRect.bottom,
+    };
+  });
+
+  expect(geometry).not.toBeNull();
+  expect(geometry!.dialogBottom).toBeLessThanOrEqual(geometry!.viewportHeight);
+  expect(geometry!.bodyScrollHeight).toBeGreaterThan(geometry!.bodyClientHeight);
+  expect(geometry!.bodyBottom).toBeLessThanOrEqual(geometry!.actionsTop);
+  expect(geometry!.actionsBottom).toBeLessThanOrEqual(geometry!.viewportHeight);
+
+  await body.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(body.getByLabel("parameter_28")).toBeInViewport();
+
+  fs.mkdirSync("e2e/screenshots/workflow-run-dialog", { recursive: true });
+  await dialog.screenshot({ path: "e2e/screenshots/workflow-run-dialog/scrollable-parameter-form.png" });
 });

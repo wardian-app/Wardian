@@ -1,7 +1,7 @@
 # JupyterLab Computational Workspace References
 
 This document maps JupyterLab's computational workspace model to design
-patterns relevant to Wardian's agent command center, restorable surface
+patterns relevant to Wardian's local agent Habitat, restorable surface
 layouts, document/session state, and extension-hosted tools.
 
 This is not an endorsement, affiliation claim, product evaluation, or

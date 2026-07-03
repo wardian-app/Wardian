@@ -37,6 +37,9 @@ Use it when a repeated multi-step agent process needs a saved visual flow instea
 The **Run** button opens a launch dialog for the current blueprint. Use **Run now** for an immediate run, or switch to **Schedule** to create a persisted schedule with the same provider, workspace, and input parameters.
 
 Manual input parameters appear in the dialog when the blueprint's entry trigger defines an input schema.
+When a workflow has many input parameters or schedule controls, the dialog stays within the Workflows view and scrolls the form body so the action buttons remain reachable.
+
+![Workflow launch dialog scrolled through a long parameter form while the save controls remain visible](../assets/screenshots/workflows/run-dialog-scroll.png)
 
 ## Running From The CLI
 

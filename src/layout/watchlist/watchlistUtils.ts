@@ -248,6 +248,34 @@ export function removeAgentsFromList(
   };
 }
 
+export function removeDeletedAgentsFromWatchlistState(
+  state: WatchlistState,
+  agentIds: string[],
+): WatchlistState {
+  const deletedIds = new Set(agentIds);
+  if (deletedIds.size === 0) return state;
+
+  const teams = state.teams
+    .map((team) => ({
+      ...team,
+      agentIds: team.agentIds.filter((agentId) => !deletedIds.has(agentId)),
+    }))
+    .filter((team) => team.agentIds.length > 0);
+  const remainingTeamIds = new Set(teams.map((team) => team.id));
+
+  return normalizeWatchlistState({
+    version: 2,
+    teams,
+    watchlists: state.watchlists.map((list) => ({
+      ...list,
+      entries: getWatchlistEntries(list).filter((entry) => {
+        if (entry.type === "agent") return !deletedIds.has(entry.agentId);
+        return remainingTeamIds.has(entry.teamId);
+      }),
+    })),
+  });
+}
+
 /**
  * Filters agents by search term, matching against session_name and agent_class.
  */

@@ -109,7 +109,7 @@ export function derivePresentedChatRows(events: AgentChatEvent[]): PresentedChat
 
 export function shouldShowStatusEvent(event: AgentChatEvent): boolean {
   if (event.metadata?.chat_thinking_indicator === true) return true;
-  return event.status === "failed" || event.status === "cancelled" || event.status === "action_required";
+  return event.status === "failed" || event.status === "cancelled";
 }
 
 export function isWorkEvent(event: AgentChatEvent): boolean {

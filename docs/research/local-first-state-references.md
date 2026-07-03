@@ -47,7 +47,7 @@ Source basis: entries were selected through public research and checked against 
 - Synchronous UI updates from local materialized queries.
 - Explicit design discussion around compaction, conflicts, and partitioning.
 
-**Wardian relevance:** Wardian already has multiple truths: app state, CLI-readable state, Markdown/docs, workflow files, PTY streams, and provider telemetry. LiveStore suggests a useful split: store append-only events for replay and audit, then materialize fast local views for the command center.
+**Wardian relevance:** Wardian already has multiple truths: app state, CLI-readable state, Markdown/docs, workflow files, PTY streams, and provider telemetry. LiveStore suggests a useful split: store append-only events for replay and audit, then materialize fast local Habitat views.
 
 ### PowerSync
 
@@ -79,7 +79,7 @@ Source basis: entries were selected through public research and checked against 
 - Property-level conflict handling.
 - Framework adapters for common frontend stacks.
 
-**Wardian relevance:** Wardian's command center is query-heavy: "which agents are active?", "which workflows are stuck?", "which skills are enabled?", "which runs changed?". Triplit is a useful reference for making those views query-scoped and reactive instead of rebuilding a whole global state object.
+**Wardian relevance:** Wardian's Habitat views are query-heavy: "which agents are active?", "which workflows are stuck?", "which skills are enabled?", "which runs changed?". Triplit is a useful reference for making those views query-scoped and reactive instead of rebuilding a whole global state object.
 
 ### Jazz
 
@@ -174,7 +174,7 @@ Near-term implications:
 
 - Treat important state changes as replayable events, not only mutable rows.
 - Keep stable file formats for workflows, skills, and specs.
-- Use SQLite/materialized views for fast command-center queries.
+- Use SQLite/materialized views for fast Habitat queries.
 - Version all durable state formats explicitly.
 - Separate local acceptance from later validation or remote sync.
 - Make merge/conflict events visible to humans and agents.

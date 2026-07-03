@@ -127,7 +127,7 @@ Alternatives considered:
 
 - `Workspace`: rejected because it conflicts with agent workspaces.
 - `Habitat`: too broad; it should remain the larger Wardian environment.
-- `Station`: too command-center oriented for Wardian's ecological theme.
+- `Station`: too control-room oriented for Wardian's ecological theme.
 - `Desk`: familiar, but too generic and less ecological.
 - `Lens`: useful metaphor for filtering, but too narrow for a full saved
   layout.
@@ -182,7 +182,7 @@ tools.
 Do not call this object a workspace. In Wardian, an agent workspace already
 means the target project directory or worktree where the provider runs.
 Overloading that term would blur the difference between "where an agent is
-working on disk" and "how the user has arranged the command-center UI."
+working on disk" and "how the user has arranged the Wardian UI."
 
 ```text
 PerspectiveDefinition

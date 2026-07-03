@@ -185,6 +185,6 @@ Near-term implications:
 - Represent host PTY, worktree, browser, container, and remote sandbox as distinct execution environments.
 - Add policy metadata before adding powerful automation.
 - Keep secrets and network access explicit.
-- Make sandbox attach/inspect/terminate operations visible in the command center.
+- Make sandbox attach/inspect/terminate operations visible in the Wardian desktop app.
 - Log runtime actions as workflow evidence, not just terminal text.
 - Prefer deterministic browser/tool primitives for critical workflow steps, with autonomous agents reserved for exploration.

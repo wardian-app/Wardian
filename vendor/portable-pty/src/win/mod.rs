@@ -15,6 +15,8 @@ pub mod conpty;
 mod procthreadattr;
 mod psuedocon;
 
+pub use psuedocon::{conpty_load_diagnostics, ConPtyLoadDiagnostics, ConPtyLoadSource};
+
 use filedescriptor::OwnedHandle;
 
 #[derive(Debug)]

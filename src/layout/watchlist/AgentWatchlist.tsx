@@ -196,22 +196,6 @@ export default function AgentWatchlist({
     [onWatchlistsChange],
   );
 
-  // ── Prune stale agent IDs from watchlists when agents change ───────
-  useEffect(() => {
-    const validIds = new Set(agents.map((a) => a.session_id));
-    const pruned = watchlists.map((wl) => ({
-      ...wl,
-      entries: getWatchlistEntries(wl).filter((entry) => entry.type === "team" || validIds.has(entry.agentId)),
-    }));
-    // Only persist if something actually changed
-    const changed = pruned.some(
-      (wl, i) => getWatchlistEntries(wl).length !== getWatchlistEntries(watchlists[i]).length
-    );
-    if (changed) {
-      persistWatchlists(pruned);
-    }
-  }, [agents]); // intentionally omitting watchlists/persistWatchlists to avoid loops
-
   // ── Close context menus on outside click ───────────────────────────
   useEffect(() => {
     const handleClick = () => {

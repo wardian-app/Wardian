@@ -261,235 +261,239 @@ export function RunLaunchDialog({
 
   return (
     <div
-      className="run-launch-dialog rounded border border-wardian-border bg-[var(--color-wardian-card)] p-4 text-primary"
+      className="run-launch-dialog flex max-h-[min(calc(100vh-4rem),100%)] flex-col overflow-hidden rounded border border-wardian-border bg-[var(--color-wardian-card)] p-4 text-primary"
       role="dialog"
       data-testid="run-launch-dialog"
     >
-      <h3 className="mb-2 text-sm font-semibold">Run workflow</h3>
-      <div className="mb-3 flex rounded border border-wardian-border p-0.5" role="radiogroup" aria-label="Launch mode">
-        {(['run', 'schedule'] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            role="radio"
-            aria-checked={launchMode === mode}
-            aria-label={mode === 'run' ? 'Run now' : 'Schedule'}
-            className={`flex-1 rounded px-3 py-1 text-xs font-bold capitalize ${
-              launchMode === mode
-                ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]'
-                : 'text-muted'
-            }`}
-            onClick={() => setLaunchMode(mode)}
-          >
-            {mode === 'run' ? 'Run now' : 'Schedule'}
-          </button>
-        ))}
+      <div className="shrink-0">
+        <h3 className="mb-2 text-sm font-semibold">Run workflow</h3>
+        <div className="mb-3 flex rounded border border-wardian-border p-0.5" role="radiogroup" aria-label="Launch mode">
+          {(['run', 'schedule'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={launchMode === mode}
+              aria-label={mode === 'run' ? 'Run now' : 'Schedule'}
+              className={`flex-1 rounded px-3 py-1 text-xs font-bold capitalize ${
+                launchMode === mode
+                  ? 'bg-[var(--color-wardian-accent)] text-[var(--color-wardian-bg)]'
+                  : 'text-muted'
+              }`}
+              onClick={() => setLaunchMode(mode)}
+            >
+              {mode === 'run' ? 'Run now' : 'Schedule'}
+            </button>
+          ))}
+        </div>
       </div>
-      {roles.length > 0 && (
-        <div className="mb-3 grid gap-2 border-t border-wardian-border pt-3">
-          <div>
-            <h4 className="text-xs font-bold text-primary">Agent assignments</h4>
-            <p className="mt-0.5 text-[10px] text-muted">Choose an existing agent or a workflow-owned temporary agent for each role.</p>
-          </div>
-          {roles.map((role) => {
-            const id = `run-role-${role.name}`;
-            const selectedTarget = selectedRoleTargets[role.name] ?? providerTarget(provider);
-            const pickerOpen = pickerRole === role.name;
-            return (
-              <div key={role.name} className="relative rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-2">
-                <div className="flex min-w-0 items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div id={id} className="text-xs font-bold text-primary">
-                      {role.name}
+      <div className="min-h-0 overflow-y-auto pr-1" data-testid="run-launch-dialog-body">
+        {roles.length > 0 && (
+          <div className="mb-3 grid gap-2 border-t border-wardian-border pt-3">
+            <div>
+              <h4 className="text-xs font-bold text-primary">Agent assignments</h4>
+              <p className="mt-0.5 text-[10px] text-muted">Choose an existing agent or a workflow-owned temporary agent for each role.</p>
+            </div>
+            {roles.map((role) => {
+              const id = `run-role-${role.name}`;
+              const selectedTarget = selectedRoleTargets[role.name] ?? providerTarget(provider);
+              const pickerOpen = pickerRole === role.name;
+              return (
+                <div key={role.name} className="relative rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-2">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div id={id} className="text-xs font-bold text-primary">
+                        {role.name}
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] text-muted" title={roleTargetSummary(selectedTarget, providerOptions, agents)}>
+                        {roleTargetSummary(selectedTarget, providerOptions, agents)}
+                      </div>
                     </div>
-                    <div className="mt-0.5 truncate text-[11px] text-muted" title={roleTargetSummary(selectedTarget, providerOptions, agents)}>
-                      {roleTargetSummary(selectedTarget, providerOptions, agents)}
-                    </div>
+                    <button
+                      type="button"
+                      aria-label={`Change ${role.name} assignment`}
+                      aria-expanded={pickerOpen}
+                      aria-controls={`${id}-picker`}
+                      className="shrink-0 rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+                      onClick={() => {
+                        setPickerRole(pickerOpen ? null : role.name);
+                        setAgentSearch('');
+                      }}
+                    >
+                      Change
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    aria-label={`Change ${role.name} assignment`}
-                    aria-expanded={pickerOpen}
-                    aria-controls={`${id}-picker`}
-                    className="shrink-0 rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
-                    onClick={() => {
-                      setPickerRole(pickerOpen ? null : role.name);
-                      setAgentSearch('');
-                    }}
-                  >
-                    Change
-                  </button>
-                </div>
-                {pickerOpen ? (
-                  <RoleAssignmentPicker
-                    id={`${id}-picker`}
-                    agents={agents}
-                    providerOptions={providerOptions}
-                    selectedTarget={selectedTarget}
-                    search={agentSearch}
-                    onSearch={setAgentSearch}
-                    onSelect={(value) => {
-                      setRoleBindings((current) => ({ ...current, [role.name]: value }));
-                      setPickerRole(null);
-                      setAgentSearch('');
-                    }}
-                  />
-                ) : null}
-                {selectedTarget.startsWith(AGENT_TARGET_PREFIX) && (
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="mb-1 block text-[10px] font-bold text-muted" htmlFor={`${id}-conversation`}>
-                        Conversation
-                      </label>
-                      <select
-                        id={`${id}-conversation`}
-                        className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-                        value={roleConversations[role.name] ?? 'current'}
-                        onChange={(event) => {
-                          const value = event.currentTarget.value as WorkflowAgentConversation;
-                          setRoleConversations((current) => ({ ...current, [role.name]: value }));
-                        }}
-                      >
-                        <option value="current">Current conversation</option>
-                        <option value="fresh_background">Separate background conversation</option>
-                      </select>
-                    </div>
-                    {(roleConversations[role.name] ?? 'current') === 'current' && (
+                  {pickerOpen ? (
+                    <RoleAssignmentPicker
+                      id={`${id}-picker`}
+                      agents={agents}
+                      providerOptions={providerOptions}
+                      selectedTarget={selectedTarget}
+                      search={agentSearch}
+                      onSearch={setAgentSearch}
+                      onSelect={(value) => {
+                        setRoleBindings((current) => ({ ...current, [role.name]: value }));
+                        setPickerRole(null);
+                        setAgentSearch('');
+                      }}
+                    />
+                  ) : null}
+                  {selectedTarget.startsWith(AGENT_TARGET_PREFIX) && (
+                    <div className="mt-2 grid grid-cols-2 gap-2">
                       <div>
-                        <label className="mb-1 block text-[10px] font-bold text-muted" htmlFor={`${id}-busy`}>
-                          When busy
+                        <label className="mb-1 block text-[10px] font-bold text-muted" htmlFor={`${id}-conversation`}>
+                          Conversation
                         </label>
                         <select
-                          id={`${id}-busy`}
+                          id={`${id}-conversation`}
                           className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-                          value={roleBusyPolicies[role.name] ?? (launchMode === 'schedule' ? 'skip' : 'fail')}
+                          value={roleConversations[role.name] ?? 'current'}
                           onChange={(event) => {
-                            const value = event.currentTarget.value as WorkflowBusyPolicy;
-                            setRoleBusyPolicies((current) => ({ ...current, [role.name]: value }));
+                            const value = event.currentTarget.value as WorkflowAgentConversation;
+                            setRoleConversations((current) => ({ ...current, [role.name]: value }));
                           }}
                         >
-                          <option value="skip">Skip this run</option>
-                          <option value="fail">Fail this run</option>
+                          <option value="current">Current conversation</option>
+                          <option value="fresh_background">Separate background conversation</option>
                         </select>
                       </div>
-                    )}
-                  </div>
-                )}
+                      {(roleConversations[role.name] ?? 'current') === 'current' && (
+                        <div>
+                          <label className="mb-1 block text-[10px] font-bold text-muted" htmlFor={`${id}-busy`}>
+                            When busy
+                          </label>
+                          <select
+                            id={`${id}-busy`}
+                            className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+                            value={roleBusyPolicies[role.name] ?? (launchMode === 'schedule' ? 'skip' : 'fail')}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value as WorkflowBusyPolicy;
+                              setRoleBusyPolicies((current) => ({ ...current, [role.name]: value }));
+                            }}
+                          >
+                            <option value="skip">Skip this run</option>
+                            <option value="fail">Fail this run</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {(showGlobalProvider || showWorkspace) && (
+          <div className={`${roles.length > 0 ? 'mb-3 grid gap-2 border-t border-wardian-border pt-3' : 'mb-3 grid gap-2'}`}>
+            {roles.length > 0 ? (
+              <div>
+                <h4 className="text-xs font-bold text-primary">Run context</h4>
+                <p className="mt-0.5 text-[10px] text-muted">Used only by fresh agents and local nodes that need the run workspace.</p>
               </div>
-            );
-          })}
-        </div>
-      )}
-      {(showGlobalProvider || showWorkspace) && (
-        <div className={`${roles.length > 0 ? 'mb-3 grid gap-2 border-t border-wardian-border pt-3' : 'mb-3 grid gap-2'}`}>
-          {roles.length > 0 ? (
-            <div>
-              <h4 className="text-xs font-bold text-primary">Run context</h4>
-              <p className="mt-0.5 text-[10px] text-muted">Used only by fresh agents and local nodes that need the run workspace.</p>
-            </div>
-          ) : null}
-          {showGlobalProvider && (
-            <div>
-              <label className="mb-1 block text-xs text-muted" htmlFor="run-provider">
-                Provider
-              </label>
-              <select
-                id="run-provider"
-                className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-                value={provider}
-                onChange={(event) => {
-                  setProviderTouched(true);
-                  setProvider(event.currentTarget.value as UserFacingProviderName);
-                }}
-              >
-                {providerOptions.map((option) => (
-                  <option key={option.value} value={option.value} disabled={!option.available}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {providerNote && <div className="text-xs text-wardian-warning">{providerNote}</div>}
-          {showWorkspace && (
-            <div>
-              <label className="mb-1 block text-xs text-muted" htmlFor="run-workspace">
-                Workspace (optional)
-              </label>
-              <input
-                id="run-workspace"
-                className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-                value={workspace}
-                onChange={(event) => setWorkspace(event.currentTarget.value)}
-                placeholder="Defaults to the run directory"
-              />
-            </div>
-          )}
-        </div>
-      )}
-      {inputParams.length > 0 && (
-        <div className="mb-3 grid gap-2 border-t border-wardian-border pt-3">
-          {inputParams.map((param) => {
-            const id = `run-param-${param.name}`;
-            if (param.type === 'boolean') {
+            ) : null}
+            {showGlobalProvider && (
+              <div>
+                <label className="mb-1 block text-xs text-muted" htmlFor="run-provider">
+                  Provider
+                </label>
+                <select
+                  id="run-provider"
+                  className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+                  value={provider}
+                  onChange={(event) => {
+                    setProviderTouched(true);
+                    setProvider(event.currentTarget.value as UserFacingProviderName);
+                  }}
+                >
+                  {providerOptions.map((option) => (
+                    <option key={option.value} value={option.value} disabled={!option.available}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {providerNote && <div className="text-xs text-wardian-warning">{providerNote}</div>}
+            {showWorkspace && (
+              <div>
+                <label className="mb-1 block text-xs text-muted" htmlFor="run-workspace">
+                  Workspace (optional)
+                </label>
+                <input
+                  id="run-workspace"
+                  className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+                  value={workspace}
+                  onChange={(event) => setWorkspace(event.currentTarget.value)}
+                  placeholder="Defaults to the run directory"
+                />
+              </div>
+            )}
+          </div>
+        )}
+        {inputParams.length > 0 && (
+          <div className="mb-3 grid gap-2 border-t border-wardian-border pt-3">
+            {inputParams.map((param) => {
+              const id = `run-param-${param.name}`;
+              if (param.type === 'boolean') {
+                return (
+                  <label key={param.name} className="flex items-center gap-2 text-xs text-muted" htmlFor={id}>
+                    <input
+                      id={id}
+                      type="checkbox"
+                      className="h-4 w-4 accent-[var(--color-wardian-accent)]"
+                      checked={Boolean(inputValues[param.name])}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        setInputValues((current) => ({
+                          ...current,
+                          [param.name]: checked,
+                        }));
+                      }}
+                    />
+                    {param.name}
+                  </label>
+                );
+              }
               return (
-                <label key={param.name} className="flex items-center gap-2 text-xs text-muted" htmlFor={id}>
+                <div key={param.name}>
+                  <label className="mb-1 block text-xs text-muted" htmlFor={id}>
+                    {param.name}
+                  </label>
                   <input
                     id={id}
-                    type="checkbox"
-                    className="h-4 w-4 accent-[var(--color-wardian-accent)]"
-                    checked={Boolean(inputValues[param.name])}
+                    type={param.type === 'number' ? 'number' : 'text'}
+                    className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+                    value={String(inputValues[param.name] ?? '')}
                     onChange={(event) => {
-                      const checked = event.currentTarget.checked;
+                      const value = event.currentTarget.value;
                       setInputValues((current) => ({
                         ...current,
-                        [param.name]: checked,
+                        [param.name]: value,
                       }));
                     }}
                   />
-                  {param.name}
-                </label>
+                </div>
               );
-            }
-            return (
-              <div key={param.name}>
-                <label className="mb-1 block text-xs text-muted" htmlFor={id}>
-                  {param.name}
-                </label>
-                <input
-                  id={id}
-                  type={param.type === 'number' ? 'number' : 'text'}
-                  className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-                  value={String(inputValues[param.name] ?? '')}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setInputValues((current) => ({
-                      ...current,
-                      [param.name]: value,
-                    }));
-                  }}
-                />
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {launchMode === 'schedule' && (
-        <div className="mb-3 border-t border-wardian-border pt-3">
-          <label className="mb-1 block text-xs text-muted" htmlFor="schedule-name">
-            Schedule name
-          </label>
-          <input
-            id="schedule-name"
-            className="mb-2 w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
-            value={scheduleName}
-            onChange={(event) => setScheduleName(event.currentTarget.value)}
-          />
-          <ScheduleEditor value={scheduleDef} onChange={setScheduleDef} compact />
-        </div>
-      )}
-      {error && <div className="mb-2 text-xs text-wardian-error">{error}</div>}
-      <div className="flex justify-end gap-2">
+            })}
+          </div>
+        )}
+        {launchMode === 'schedule' && (
+          <div className="mb-3 border-t border-wardian-border pt-3">
+            <label className="mb-1 block text-xs text-muted" htmlFor="schedule-name">
+              Schedule name
+            </label>
+            <input
+              id="schedule-name"
+              className="mb-2 w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary"
+              value={scheduleName}
+              onChange={(event) => setScheduleName(event.currentTarget.value)}
+            />
+            <ScheduleEditor value={scheduleDef} onChange={setScheduleDef} compact />
+          </div>
+        )}
+        {error && <div className="mb-2 text-xs text-wardian-error">{error}</div>}
+      </div>
+      <div className="mt-3 flex shrink-0 justify-end gap-2 border-t border-wardian-border pt-3" data-testid="run-launch-dialog-actions">
         <button
           type="button"
           className="rounded border border-wardian-border px-3 py-1 text-xs text-primary"
@@ -547,7 +551,7 @@ function RoleAssignmentPicker({
   return (
     <div
       id={id}
-      className="absolute left-2 right-2 top-[calc(100%-0.25rem)] z-30 rounded border border-wardian-border bg-[var(--color-wardian-card)] p-2 shadow-xl"
+      className="mt-2 rounded border border-wardian-border bg-[var(--color-wardian-card)] p-2 shadow-xl"
     >
       <input
         type="search"
