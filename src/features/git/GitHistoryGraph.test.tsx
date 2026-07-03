@@ -167,6 +167,15 @@ describe("GitHistoryGraph", () => {
       expect.objectContaining({ hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
       { path: "src/changed.ts", status: "M" },
     );
+
+    onOpenHistoryFile.mockClear();
+    fireEvent.contextMenu(changeRow, { clientX: 12, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: "Open File" }));
+
+    expect(onOpenHistoryFile).toHaveBeenCalledWith(
+      expect.objectContaining({ hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+      { path: "src/changed.ts", status: "M" },
+    );
   });
 
   it("renders expanded commit changes as a collapsible tree and can switch to flat list mode", async () => {

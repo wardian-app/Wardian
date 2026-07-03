@@ -628,6 +628,29 @@ export function GitHistoryGraph({
     });
   };
 
+  const openHistoryChangeContextMenu = (
+    event: MouseEvent,
+    entry: GitLogEntry,
+    change: GitCommitChangeEntry,
+  ) => {
+    if (!onOpenHistoryFile) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    setHistoryContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          label: "Open File",
+          icon: <FileText className="h-3.5 w-3.5" />,
+          onClick: () => onOpenHistoryFile(entry, change),
+        },
+      ],
+    });
+  };
+
   const renderChangeRow = (
     row: HistoryGraphRow,
     width: number,
@@ -643,6 +666,7 @@ export function GitHistoryGraph({
       data-testid={`history-graph-change-row-${short}-${change.path}`}
       disabled={!onOpenHistoryFile}
       onClick={() => onOpenHistoryFile?.(row.entry, change)}
+      onContextMenu={(event) => openHistoryChangeContextMenu(event, row.entry, change)}
       className="flex w-full items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
       style={{ height: `${metrics.rowHeight}px` }}
     >
