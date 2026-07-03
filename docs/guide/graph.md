@@ -23,7 +23,7 @@ Particles flow in message direction; during a pending ask, the stream drifts tow
 
 An agent with **no manual edges** automatically sees its workspace-mates (workspace-fallback rule). This ensures fresh agents aren't isolated and newly created teams aren't disconnected. The moment you draw an agent's first manual edge, workspace-fallback disengages — its neighbors become exactly what the graph shows.
 
-Each neighbor is labeled with its origin: `manual` (edges you created or that were seeded by team membership) or `rule:workspace-fallback` (shown only when the agent has no manual edges). Ghost edges appear as "Unmapped communication" until you formalize or dismiss them.
+The inspector's neighbors panel lists every agent visible through the topology. Persisted connections carry no extra label (they are all manual edges); ghost pairs are badged "Unmapped" until you formalize or dismiss them. The CLI's `--verbose` output still reports the underlying visibility reason (`manual` or `rule:workspace-fallback`).
 
 ## Editing: Create and Delete Edges
 
@@ -45,7 +45,7 @@ Each neighbor is labeled with its origin: `manual` (edges you created or that we
 
 Select any node to open the inspector with:
 - Agent identity, current status, workspace, and telemetry.
-- **Neighbors panel**: all agents you see through the topology (manual, team, workspace fallback), each tagged with its origin reason.
+- **Neighbors panel**: all agents you see through the topology (manual, team-seeded, workspace fallback); ghost pairs are badged "Unmapped".
 - **Add connection…**: searchable picker to create new manual edges.
 - Right-click to access the same context menu as the roster and other views.
 
@@ -75,7 +75,7 @@ On first launch, Wardian seeds all existing team memberships as edges and upgrad
 
 ## Graph Layout
 
-The graph positions agents using force-directed layout over communication edges. Drawing a manual edge pulls two agents visibly closer; edgeless agents naturally settle on the periphery. Dormant edges remain fully visible so topology structure is always inspectable — only the *activity* state (recency, particles) varies.
+The graph positions agents using force-directed layout over communication edges: connected agents settle closer together, edgeless agents drift to the periphery. To keep editing calm, node positions are **frozen while you work** — drawing or deleting edges updates the edges immediately but never moves nodes. Press the **Re-run layout** button in the toolbar (next to Reset view) when you're done linking to apply your edits to node positions. The layout also re-runs automatically when agents enter or leave the visible scope. Dormant edges remain fully visible so topology structure is always inspectable — only the *activity* state (recency, particles) varies.
 
 ## Legacy Lenses
 

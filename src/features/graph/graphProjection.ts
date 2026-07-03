@@ -70,6 +70,12 @@ export interface BuildAgentGraphInput {
   topology?: TopologySnapshot;
   pairActivity?: PairActivityEntry[];
   now?: number;
+  /**
+   * Node positions to reuse instead of running the force simulation. Nodes
+   * absent from the map still get simulated positions. Lets the view freeze
+   * the layout while the user edits edges, re-running it only on demand.
+   */
+  frozenPositions?: Map<string, { x: number; y: number }>;
 }
 
 const REASON_ORDER: GraphRelationshipReason[] = [
@@ -113,8 +119,23 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
   // Build communication edges first (needed for layout)
   const commEdges = buildCommEdges(input.topology, input.pairActivity, visibleIds, input.now ?? Date.now());
 
-  // Compute positions based on communication edges, not team membership
-  const positions = computePositions(visibleAgents, commEdges);
+  // Compute positions based on communication edges, not team membership.
+  // Frozen positions win when provided; the simulation only runs if some
+  // visible agent has no frozen position yet.
+  const frozen = input.frozenPositions;
+  const needsSimulation =
+    !frozen || visibleAgents.some((agent) => !frozen.has(agent.session_id));
+  const simulated = needsSimulation
+    ? computePositions(visibleAgents, commEdges)
+    : null;
+  const positions = new Map<string, { x: number; y: number }>();
+  for (const agent of visibleAgents) {
+    const position =
+      frozen?.get(agent.session_id) ??
+      simulated?.get(agent.session_id) ??
+      { x: 0, y: 0 };
+    positions.set(agent.session_id, position);
+  }
 
   const nodes = visibleAgents.map((agent) => {
     const telemetry = input.telemetry[agent.session_id];
@@ -450,14 +471,18 @@ function computePositions(
     }
   }
 
-  // Clamp final positions to a reasonable bounding box and extract coordinates
+  // Normalize to the bounding box by uniform scaling. A hard clamp would
+  // flatten dense graphs against the box edges; scaling preserves the
+  // simulated shape (Sigma's camera fits to extent either way).
   const result = new Map<string, { x: number; y: number }>();
   const BOUNDS = 5.0;
+  let maxAbs = 0;
+  for (const pos of positions.values()) {
+    maxAbs = Math.max(maxAbs, Math.abs(pos.x), Math.abs(pos.y));
+  }
+  const scale = maxAbs > BOUNDS ? BOUNDS / maxAbs : 1;
   for (const [id, pos] of positions) {
-    result.set(id, {
-      x: Math.max(-BOUNDS, Math.min(BOUNDS, pos.x)),
-      y: Math.max(-BOUNDS, Math.min(BOUNDS, pos.y)),
-    });
+    result.set(id, { x: pos.x * scale, y: pos.y * scale });
   }
 
   return result;

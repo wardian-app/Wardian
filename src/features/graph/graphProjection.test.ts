@@ -423,6 +423,62 @@ describe("force-directed layout (computePositions)", () => {
       expect(Math.abs(pos1.y - pos2!.y)).toBeLessThan(1e-10);
     }
   });
+
+  it("scales into bounds instead of clamping nodes onto the box edge", () => {
+    // Many mutually-repelling edgeless agents push well past the bounding
+    // box; a hard clamp would pile them up at exactly ±5.
+    const agents = Array.from({ length: 30 }, (_, i) => agent({ session_id: `agent-${i}` }));
+    const graph = buildTestGraph({ agents });
+
+    let onBoundary = 0;
+    for (const node of graph.nodes) {
+      expect(Math.abs(node.x)).toBeLessThanOrEqual(5);
+      expect(Math.abs(node.y)).toBeLessThanOrEqual(5);
+      if (Math.abs(Math.abs(node.x) - 5) < 1e-6 || Math.abs(Math.abs(node.y) - 5) < 1e-6) {
+        onBoundary += 1;
+      }
+    }
+    // Uniform scaling puts at most the extreme node(s) on the boundary,
+    // never a pile-up (clamping put a large fraction there).
+    expect(onBoundary).toBeLessThanOrEqual(4);
+  });
+
+  it("reuses frozenPositions verbatim and skips the simulation", () => {
+    const agents = [agent({ session_id: "a" }), agent({ session_id: "b" })];
+    const frozen = new Map([
+      ["a", { x: 1.25, y: -0.5 }],
+      ["b", { x: -2, y: 3 }],
+    ]);
+
+    const graph = buildTestGraph({ agents, frozenPositions: frozen });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    expect(posMap.get("a")).toEqual({ x: 1.25, y: -0.5 });
+    expect(posMap.get("b")).toEqual({ x: -2, y: 3 });
+  });
+
+  it("simulates positions for nodes missing from frozenPositions", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "new" }),
+    ];
+    const frozen = new Map([
+      ["a", { x: 1, y: 1 }],
+      ["b", { x: -1, y: -1 }],
+    ]);
+
+    const graph = buildTestGraph({ agents, frozenPositions: frozen });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    // Frozen nodes keep their positions; the new node gets a finite
+    // simulated position that doesn't sit on top of a frozen node.
+    expect(posMap.get("a")).toEqual({ x: 1, y: 1 });
+    expect(posMap.get("b")).toEqual({ x: -1, y: -1 });
+    const fresh = posMap.get("new")!;
+    expect(Number.isFinite(fresh.x)).toBe(true);
+    expect(Number.isFinite(fresh.y)).toBe(true);
+  });
 });
 
 describe("communication edges", () => {

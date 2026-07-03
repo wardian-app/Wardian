@@ -177,10 +177,11 @@ test.describe("Graph Topology", () => {
     // Wait for and verify the neighbors panel is visible
     await expect(page.locator(".graph-neighbors-list")).toBeVisible();
 
-    // Verify the neighbor (Beta) is listed with "manual" origin tag
+    // Verify the neighbor (Beta) is listed; persisted edges carry no origin
+    // tag (all are manual) — only ghost pairs get an "Unmapped" badge
     const neighborsRow = page.locator(".graph-neighbors-row").first();
     await expect(neighborsRow).toContainText("Beta");
-    await expect(neighborsRow.locator(".graph-neighbors-origin")).toContainText("manual");
+    await expect(neighborsRow.locator(".graph-inspector-unmapped")).toHaveCount(0);
   });
 
   test("add-connection picker opens and filters agents", async () => {

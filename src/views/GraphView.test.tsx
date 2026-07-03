@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../features/graph/GraphCanvas", () => ({
   GraphCanvas: ({
+    projection,
     resetSignal,
     onSelectAgent,
     onContextMenu,
@@ -22,6 +23,7 @@ vi.mock("../features/graph/GraphCanvas", () => ({
     selectedEdgeId,
     onSelectEdge,
   }: {
+    projection: { nodes: Array<{ id: string; x: number; y: number }>; commEdges: Array<{ id: string }> };
     resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
@@ -34,6 +36,8 @@ vi.mock("../features/graph/GraphCanvas", () => ({
         data-testid="mock-graph-node"
         data-connect-mode={connectMode ? "true" : "false"}
         data-selected-edge={selectedEdgeId ?? "none"}
+        data-node-positions={JSON.stringify(projection.nodes.map((n) => [n.id, n.x, n.y]))}
+        data-comm-edge-ids={JSON.stringify(projection.commEdges.map((e) => e.id))}
         onClick={() => onSelectAgent("a")}
         onContextMenu={(event) => {
           event.preventDefault();
@@ -283,7 +287,7 @@ describe("GraphView", () => {
   });
 
   describe("Communication Panel - Origin Tags", () => {
-    it("inspector shows origin tags: manual edge is displayed", async () => {
+    it("inspector lists manual neighbors without an origin tag", async () => {
       const { invoke } = await import("@tauri-apps/api/core");
       const mockInvoke = vi.mocked(invoke);
 
@@ -307,12 +311,13 @@ describe("GraphView", () => {
 
       render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
+      // The relationship shows up (Beta is the neighbor of a in the b-a edge)
       await waitFor(() => {
-        expect(screen.getByText("manual")).toBeInTheDocument();
+        expect(screen.getByText("Beta")).toBeInTheDocument();
       });
 
-      // Verify the relationship shows up (Beta is the neighbor of a in the b-a edge)
-      expect(screen.getByText("Beta")).toBeInTheDocument();
+      // All persisted edges are manual, so no origin tag is rendered
+      expect(screen.queryByText("manual")).not.toBeInTheDocument();
     });
 
     it("formalize click → invoke called with add_topology_edge for ghost pair", async () => {
@@ -556,6 +561,59 @@ describe("GraphView", () => {
       await waitFor(() => {
         expect(screen.getByText("Add connection…")).toBeInTheDocument();
       });
+    });
+  });
+
+  describe("layout freeze", () => {
+    it("keeps node positions fixed across topology changes until Re-run layout", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const { listen } = await import("@tauri-apps/api/event");
+      const mockInvoke = vi.mocked(invoke);
+      const mockListen = vi.mocked(listen);
+
+      const listeners = new Map<string, () => void>();
+      mockListen.mockImplementation(async (event: string, handler: unknown) => {
+        listeners.set(event, handler as () => void);
+        return () => {};
+      });
+
+      let edges: Array<{ a: string; b: string; origin: string }> = [
+        { a: "a", b: "b", origin: "manual" },
+      ];
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges, ignored_pairs: [], fallback_groups: [] };
+        }
+        if (command === "get_pair_activity") return [];
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} />);
+
+      const node = screen.getByTestId("mock-graph-node");
+      await waitFor(() => {
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual(["a--b"]);
+      });
+      const frozenPositions = node.getAttribute("data-node-positions");
+
+      // Simulate an edge deletion arriving via the topology-changed event
+      edges = [];
+      listeners.get("topology-changed")!();
+      await waitFor(() => {
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual([]);
+      });
+
+      // Edges updated but positions did not move
+      expect(node.getAttribute("data-node-positions")).toBe(frozenPositions);
+
+      // Re-run layout applies the new topology to positions
+      fireEvent.click(screen.getByRole("button", { name: "Re-run layout" }));
+      await waitFor(() => {
+        expect(node.getAttribute("data-node-positions")).not.toBe(frozenPositions);
+      });
+
+      mockListen.mockReset();
+      mockListen.mockResolvedValue(() => {});
     });
   });
 });

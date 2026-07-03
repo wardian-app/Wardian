@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { PanelRightOpen, Plus, RotateCcw, X } from "lucide-react";
+import { PanelRightOpen, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode, TopologySnapshot, PairActivityEntry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
@@ -15,7 +15,6 @@ function formatProviderName(provider: string | null | undefined): string {
 import {
   buildAgentGraph,
   type GraphRelationshipReason,
-  type CommunicationEdge,
 } from "../features/graph/graphProjection";
 
 type MaybePromise = void | Promise<void>;
@@ -73,6 +72,16 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
+  // Layout freeze: node positions are captured once topology data is loaded
+  // and reused across edge edits, so drawing or deleting edges never moves
+  // nodes. A re-layout (button or node-set change) clears the freeze.
+  const frozenLayoutRef = useRef<{ nodeKey: string; positions: Map<string, { x: number; y: number }> } | null>(null);
+  const [layoutNonce, setLayoutNonce] = useState(0);
+
+  const rerunLayout = () => {
+    frozenLayoutRef.current = null;
+    setLayoutNonce((value) => value + 1);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -123,6 +132,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     offAgentIds: props.offAgentIds,
     topology: topology ?? undefined,
     pairActivity,
+    frozenPositions: frozenLayoutRef.current?.positions,
   }), [
     props.allAgents,
     props.telemetry,
@@ -134,11 +144,31 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     enabledReasons,
     topology,
     pairActivity,
+    layoutNonce,
   ]);
   const projectionNodeIds = useMemo(
     () => new Set(projection.nodes.map((node) => node.id)),
     [projection.nodes],
   );
+
+  // Capture the layout once topology is loaded, and re-run it when the set
+  // of visible nodes changes (agents added/removed or scope switched).
+  useEffect(() => {
+    if (!topology) return; // don't freeze the pre-topology layout
+    const nodeKey = projection.nodes.map((node) => node.id).sort().join("|");
+    const frozen = frozenLayoutRef.current;
+    if (frozen && frozen.nodeKey !== nodeKey) {
+      frozenLayoutRef.current = null;
+      setLayoutNonce((value) => value + 1);
+      return;
+    }
+    if (!frozen) {
+      frozenLayoutRef.current = {
+        nodeKey,
+        positions: new Map(projection.nodes.map((node) => [node.id, { x: node.x, y: node.y }])),
+      };
+    }
+  }, [projection.nodes, topology]);
 
   useEffect(() => {
     const selectedIds = Array.from(props.selectedAgentIds);
@@ -248,6 +278,15 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           ))}
         </div>
         <div className="graph-toolbar-action">
+          <button
+            type="button"
+            className="graph-icon-button"
+            aria-label="Re-run layout"
+            title="Re-run layout (applies edge changes to node positions)"
+            onClick={rerunLayout}
+          >
+            <Waypoints size={14} strokeWidth={2.2} />
+          </button>
           <button
             type="button"
             className="graph-icon-button"
@@ -405,11 +444,6 @@ function isInsideContextMenu(target: EventTarget | null) {
   return target instanceof Element && Boolean(target.closest('[data-testid="agent-context-menu"]'));
 }
 
-function getOriginLabel(edge: CommunicationEdge): string {
-  if (edge.origin === "manual") return "manual";
-  return "unmapped";
-}
-
 function renderNeighborsPanel(
   agentId: string,
   projection: ReturnType<typeof buildAgentGraph>,
@@ -435,7 +469,6 @@ function renderNeighborsPanel(
         const neighborId = edge.source === agentId ? edge.target : edge.source;
         const neighbor = projection.nodes.find((node) => node.id === neighborId);
         const label = neighbor?.label ?? neighborId;
-        const originLabel = getOriginLabel(edge);
 
         return (
           <li key={edge.id} className="graph-neighbors-row">
@@ -448,9 +481,6 @@ function renderNeighborsPanel(
               }}
             >
               <span className="graph-neighbors-name">{label}</span>
-              <small className={`graph-neighbors-origin graph-origin--${edge.origin}`}>
-                {originLabel}
-              </small>
               {edge.origin === "ghost" && (
                 <span className="graph-inspector-unmapped">Unmapped</span>
               )}
