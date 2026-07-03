@@ -23,6 +23,7 @@ import {
   removeAgentFromTeam,
   removeAgentFromTeamAtEntry,
   reorderTeamMember,
+  removeDeletedAgentsFromWatchlistState,
 } from "./watchlistUtils";
 import type { Watchlist, WatchlistEntry, WatchlistPrefs, WatchlistState } from "./types";
 import type { AgentConfig, AgentTelemetry } from "../../types";
@@ -378,6 +379,45 @@ describe("team mutations", () => {
     const next = reorderTeamMember(state, "team-1", "a", "c", "after");
 
     expect(next.teams[0].agentIds).toEqual(["b", "c", "a"]);
+  });
+
+  it("removes deleted agents from direct watchlist entries and teams", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a", "b"] }],
+      watchlists: [
+        {
+          id: "l1",
+          name: "List 1",
+          entries: [
+            { type: "agent", agentId: "x" },
+            { type: "team", teamId: "team-1" },
+            { type: "agent", agentId: "z" },
+          ],
+        },
+      ],
+    });
+
+    const next = removeDeletedAgentsFromWatchlistState(state, ["a", "x"]);
+
+    expect(next.teams).toEqual([{ id: "team-1", name: "Core", agentIds: ["b"] }]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "z" },
+    ]);
+  });
+
+  it("drops team entries when all team members are deleted", () => {
+    const state = normalizeWatchlistState({
+      version: 2,
+      teams: [{ id: "team-1", name: "Core", agentIds: ["a"] }],
+      watchlists: [{ id: "l1", name: "List 1", entries: [{ type: "team", teamId: "team-1" }] }],
+    });
+
+    const next = removeDeletedAgentsFromWatchlistState(state, ["a"]);
+
+    expect(next.teams).toEqual([]);
+    expect(getWatchlistEntries(next.watchlists[0])).toEqual([]);
   });
 
   it("removes a team member after the target solo agent", () => {

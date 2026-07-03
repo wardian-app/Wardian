@@ -1956,4 +1956,51 @@ describe("Agent Off State Operations", () => {
     });
     expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
   });
+
+  it("removes a deleted agent from persisted watchlists and teams", async () => {
+    setupDefaultMocksWithWatchlists(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [
+        {
+          id: "today",
+          name: "Today",
+          entries: [
+            { type: "team", teamId: "team-1" },
+            { type: "agent", agentId: "agent-3" },
+          ],
+        },
+      ],
+    });
+    render(
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>,
+    );
+
+    const alphaWatchlistRow = await waitFor(() => {
+      const row = screen
+        .getAllByText("Alpha")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Alpha watchlist row not found");
+      return row;
+    });
+
+    fireEvent.contextMenu(alphaWatchlistRow);
+    fireEvent.click(screen.getByText("Delete"));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("kill_agent", { sessionId: "agent-1" });
+      expect(mockInvoke).toHaveBeenCalledWith("save_watchlists", expect.anything());
+    });
+
+    const state = normalizeWatchlistState(currentWatchlists);
+    expect(state.teams).toEqual([{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-2"] }]);
+    expect(state.watchlists[0].entries).toEqual([
+      { type: "team", teamId: "team-1" },
+      { type: "agent", agentId: "agent-3" },
+    ]);
+  });
 });

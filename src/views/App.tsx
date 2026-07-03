@@ -20,6 +20,7 @@ import {
   removeAgentFromTeam,
   removeAgentFromTeamAtEntry,
   reorderTeamMember,
+  removeDeletedAgentsFromWatchlistState,
 } from "../layout/watchlist/watchlistUtils";
 import type { Watchlist, WatchlistPrefs, AgentInteractions, AgentTeam, WatchlistState, WatchlistEntry } from "../layout/watchlist/types";
 import { DEFAULT_WATCHLIST_PREFS } from "../layout/watchlist/types";
@@ -930,6 +931,10 @@ function AppBody() {
     if (await confirm('Delete this agent?')) {
       try {
         await invoke('kill_agent', { sessionId: id });
+        await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
+          { version: 2, watchlists, teams },
+          [id],
+        ));
         setOffAgentIds(prev => {
           const next = new Set(prev);
           next.delete(id);
@@ -968,6 +973,11 @@ function AppBody() {
     }
 
     if (deletedIds.size === 0) return;
+
+    await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
+      { version: 2, watchlists, teams },
+      [...deletedIds],
+    ));
 
     setOffAgentIds(prev => {
       const next = new Set(prev);
