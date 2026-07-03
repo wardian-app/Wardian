@@ -424,23 +424,74 @@ describe("force-directed layout (computePositions)", () => {
     }
   });
 
-  it("scales into bounds instead of clamping nodes onto the box edge", () => {
-    // Many mutually-repelling edgeless agents push well past the bounding
-    // box; a hard clamp would pile them up at exactly ±5.
+  it("keeps disconnected subgraphs in disjoint regions", () => {
+    // Two triangle cliques with no edge between them
+    const agents = [
+      agent({ session_id: "a1" }),
+      agent({ session_id: "a2" }),
+      agent({ session_id: "a3" }),
+      agent({ session_id: "b1" }),
+      agent({ session_id: "b2" }),
+      agent({ session_id: "b3" }),
+    ];
+    const topology = {
+      edges: [
+        { a: "a1", b: "a2", origin: "manual" as const },
+        { a: "a2", b: "a3", origin: "manual" as const },
+        { a: "a1", b: "a3", origin: "manual" as const },
+        { a: "b1", b: "b2", origin: "manual" as const },
+        { a: "b2", b: "b3", origin: "manual" as const },
+        { a: "b1", b: "b3", origin: "manual" as const },
+      ],
+      ignored_pairs: [],
+      fallback_groups: [],
+    };
+
+    const graph = buildTestGraph({ agents, topology });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    const bbox = (ids: string[]) => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const id of ids) {
+        const pos = posMap.get(id)!;
+        minX = Math.min(minX, pos.x);
+        minY = Math.min(minY, pos.y);
+        maxX = Math.max(maxX, pos.x);
+        maxY = Math.max(maxY, pos.y);
+      }
+      return { minX, minY, maxX, maxY };
+    };
+
+    const boxA = bbox(["a1", "a2", "a3"]);
+    const boxB = bbox(["b1", "b2", "b3"]);
+
+    // Bounding boxes of the two components must not intersect
+    const separated =
+      boxA.maxX < boxB.minX ||
+      boxB.maxX < boxA.minX ||
+      boxA.maxY < boxB.minY ||
+      boxB.maxY < boxA.minY;
+    expect(separated).toBe(true);
+  });
+
+  it("scales into bounds without piling nodes onto the same spot", () => {
+    // Many edgeless agents overflow the bounding box before normalization;
+    // a hard clamp collapsed distinct nodes onto identical boundary
+    // coordinates, while uniform scaling keeps every node separated.
     const agents = Array.from({ length: 30 }, (_, i) => agent({ session_id: `agent-${i}` }));
     const graph = buildTestGraph({ agents });
 
-    let onBoundary = 0;
     for (const node of graph.nodes) {
       expect(Math.abs(node.x)).toBeLessThanOrEqual(5);
       expect(Math.abs(node.y)).toBeLessThanOrEqual(5);
-      if (Math.abs(Math.abs(node.x) - 5) < 1e-6 || Math.abs(Math.abs(node.y) - 5) < 1e-6) {
-        onBoundary += 1;
+    }
+    for (let i = 0; i < graph.nodes.length; i++) {
+      for (let j = i + 1; j < graph.nodes.length; j++) {
+        const dx = graph.nodes[i].x - graph.nodes[j].x;
+        const dy = graph.nodes[i].y - graph.nodes[j].y;
+        expect(Math.sqrt(dx * dx + dy * dy)).toBeGreaterThan(0.2);
       }
     }
-    // Uniform scaling puts at most the extreme node(s) on the boundary,
-    // never a pile-up (clamping put a large fraction there).
-    expect(onBoundary).toBeLessThanOrEqual(4);
   });
 
   it("reuses frozenPositions verbatim and skips the simulation", () => {

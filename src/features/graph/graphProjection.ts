@@ -341,15 +341,15 @@ interface ForceSimulationState {
 }
 
 /**
- * Simple deterministic force-directed layout using Verlet integration.
- * Positions nodes to minimize communication edge lengths while repelling agents apart.
- * No Math.random() — seed positions and iterations are deterministic.
+ * Deterministic force-directed layout, computed per connected component.
  *
- * Forces:
- * - Repulsion: all-pairs, inverse-square, clamped min distance
- * - Spring attraction: stronger for manual edges, weaker for ghost edges
- * - Centering: gentle pull toward origin
- * - Damping: velocity dissipates over iterations for stability
+ * A single global simulation lets disconnected subgraphs drift through each
+ * other: nothing but weak repulsion separates them, and the centering force
+ * actively pulls every component toward the same origin. Instead, each
+ * component is simulated in isolation and the resulting component boxes are
+ * shelf-packed side by side with a guaranteed gap, so disconnected subgraphs
+ * can never overlap. The packed arrangement is centered and uniformly scaled
+ * to fit the bounding box.
  */
 function computePositions(
   agents: AgentConfig[],
@@ -359,6 +359,118 @@ function computePositions(
     return new Map();
   }
 
+  const components = findComponents(agents, commEdges);
+  const boxes = components.map((members) => {
+    const positions = simulateComponent(members, commEdges);
+    // Half-gap padding on each side keeps a full gap between neighbors.
+    // The full gap (2×PAD) must exceed the spring equilibrium distance so
+    // cross-component pairs always read as farther apart than connected ones.
+    const PAD = 1.25;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const pos of positions.values()) {
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x);
+      maxY = Math.max(maxY, pos.y);
+    }
+    return {
+      positions,
+      minX: minX - PAD,
+      minY: minY - PAD,
+      width: maxX - minX + PAD * 2,
+      height: maxY - minY + PAD * 2,
+      minId: [...positions.keys()].sort((a, b) => a.localeCompare(b))[0],
+    };
+  });
+
+  // Shelf-pack components largest-first into rows targeting a roughly
+  // square arrangement. Sorting is fully deterministic (area, then id).
+  boxes.sort((a, b) => {
+    const areaDiff = b.width * b.height - a.width * a.height;
+    if (areaDiff !== 0) return areaDiff;
+    return a.minId.localeCompare(b.minId);
+  });
+  const totalArea = boxes.reduce((sum, box) => sum + box.width * box.height, 0);
+  const targetWidth = Math.max(
+    Math.sqrt(totalArea) * 1.15,
+    ...boxes.map((box) => box.width),
+  );
+
+  const placed = new Map<string, { x: number; y: number }>();
+  let shelfX = 0;
+  let shelfY = 0;
+  let shelfHeight = 0;
+  for (const box of boxes) {
+    if (shelfX > 0 && shelfX + box.width > targetWidth) {
+      shelfX = 0;
+      shelfY += shelfHeight;
+      shelfHeight = 0;
+    }
+    const offsetX = shelfX - box.minX;
+    const offsetY = shelfY - box.minY;
+    for (const [id, pos] of box.positions) {
+      placed.set(id, { x: pos.x + offsetX, y: pos.y + offsetY });
+    }
+    shelfX += box.width;
+    shelfHeight = Math.max(shelfHeight, box.height);
+  }
+
+  return centerAndFit(placed);
+}
+
+/**
+ * Split agents into connected components over the communication edges
+ * (manual and ghost alike — anything drawn should not overlap another
+ * component). Deterministic: agents are visited in session_id order.
+ */
+function findComponents(
+  agents: AgentConfig[],
+  commEdges: CommunicationEdge[],
+): AgentConfig[][] {
+  const byId = new Map(agents.map((agent) => [agent.session_id, agent]));
+  const adjacency = new Map<string, string[]>();
+  for (const edge of commEdges) {
+    if (!byId.has(edge.source) || !byId.has(edge.target)) continue;
+    adjacency.set(edge.source, [...(adjacency.get(edge.source) ?? []), edge.target]);
+    adjacency.set(edge.target, [...(adjacency.get(edge.target) ?? []), edge.source]);
+  }
+
+  const sortedIds = [...byId.keys()].sort((a, b) => a.localeCompare(b));
+  const visited = new Set<string>();
+  const components: AgentConfig[][] = [];
+  for (const startId of sortedIds) {
+    if (visited.has(startId)) continue;
+    const members: AgentConfig[] = [];
+    const queue = [startId];
+    visited.add(startId);
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      members.push(byId.get(id)!);
+      for (const neighbor of adjacency.get(id) ?? []) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+    components.push(members);
+  }
+  return components;
+}
+
+/**
+ * Verlet force simulation for one connected component. No Math.random() —
+ * seed positions and iterations are deterministic.
+ *
+ * Forces:
+ * - Repulsion: all-pairs, inverse-square, clamped min distance
+ * - Spring attraction: stronger for manual edges, weaker for ghost edges
+ * - Centering: gentle pull toward the component origin
+ * - Damping: velocity dissipates over iterations for stability
+ */
+function simulateComponent(
+  agents: AgentConfig[],
+  commEdges: CommunicationEdge[],
+): Map<string, ForceSimulationState> {
   const positions = new Map<string, ForceSimulationState>();
 
   // Deterministic seed: place nodes evenly on a circle, ordered by session_id
@@ -367,16 +479,18 @@ function computePositions(
   sortedAgents.forEach((agent, index) => {
     const angle = (Math.PI * 2 * index) / Math.max(1, sortedAgents.length);
     positions.set(agent.session_id, {
-      x: Math.cos(angle) * seedRadius,
-      y: Math.sin(angle) * seedRadius,
+      x: sortedAgents.length === 1 ? 0 : Math.cos(angle) * seedRadius,
+      y: sortedAgents.length === 1 ? 0 : Math.sin(angle) * seedRadius,
       vx: 0,
       vy: 0,
     });
   });
 
-  // Build edge index for fast lookup
+  // Build edge index for fast lookup (edges outside this component are
+  // skipped via the positions.has guard below)
   const edgesBySource = new Map<string, Array<{ target: string; strength: number }>>();
   for (const edge of commEdges) {
+    if (!positions.has(edge.source) || !positions.has(edge.target)) continue;
     const strength = edge.origin === "manual" ? 1.0 : 0.3;
 
     // Bidirectional edges
@@ -471,20 +585,36 @@ function computePositions(
     }
   }
 
-  // Normalize to the bounding box by uniform scaling. A hard clamp would
-  // flatten dense graphs against the box edges; scaling preserves the
-  // simulated shape (Sigma's camera fits to extent either way).
-  const result = new Map<string, { x: number; y: number }>();
-  const BOUNDS = 5.0;
-  let maxAbs = 0;
-  for (const pos of positions.values()) {
-    maxAbs = Math.max(maxAbs, Math.abs(pos.x), Math.abs(pos.y));
-  }
-  const scale = maxAbs > BOUNDS ? BOUNDS / maxAbs : 1;
-  for (const [id, pos] of positions) {
-    result.set(id, { x: pos.x * scale, y: pos.y * scale });
-  }
+  return positions;
+}
 
+/**
+ * Center the arrangement on the origin and normalize to the bounding box by
+ * uniform scaling. A hard clamp would flatten dense graphs against the box
+ * edges; scaling preserves the packed shape (Sigma's camera fits to extent
+ * either way).
+ */
+function centerAndFit(
+  positions: Map<string, { x: number; y: number }>,
+): Map<string, { x: number; y: number }> {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const pos of positions.values()) {
+    minX = Math.min(minX, pos.x);
+    minY = Math.min(minY, pos.y);
+    maxX = Math.max(maxX, pos.x);
+    maxY = Math.max(maxY, pos.y);
+  }
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  const BOUNDS = 5.0;
+  const maxAbs = Math.max(maxX - centerX, maxY - centerY);
+  const scale = maxAbs > BOUNDS ? BOUNDS / maxAbs : 1;
+
+  const result = new Map<string, { x: number; y: number }>();
+  for (const [id, pos] of positions) {
+    result.set(id, { x: (pos.x - centerX) * scale, y: (pos.y - centerY) * scale });
+  }
   return result;
 }
 
