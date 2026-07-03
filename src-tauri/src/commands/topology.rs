@@ -35,7 +35,7 @@ pub async fn get_topology(
     let topology = load_topology(&home);
     let refs = agent_refs(&state).await;
 
-    let edges = snapshot_edges(&topology, &refs);
+    let edges = snapshot_edges(&topology);
 
     // Fallback groups: agents whose neighbors come only from workspace-fallback.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -69,10 +69,7 @@ pub async fn get_topology(
 }
 
 /// Manual edges only. Teams have been seeded as manual edges at write time.
-pub(crate) fn snapshot_edges(
-    topology: &Topology,
-    _known: &[wardian_core::topology::AgentRef],
-) -> Vec<TopologyEdgeDto> {
+pub(crate) fn snapshot_edges(topology: &Topology) -> Vec<TopologyEdgeDto> {
     topology
         .edges
         .iter()
@@ -146,18 +143,7 @@ mod tests {
             ignored_pairs: vec![],
         };
 
-        let known = vec![
-            wardian_core::topology::AgentRef {
-                uuid: "a".to_string(),
-                workspace: None,
-            },
-            wardian_core::topology::AgentRef {
-                uuid: "b".to_string(),
-                workspace: None,
-            },
-        ];
-
-        let edges = snapshot_edges(&topology, &known);
+        let edges = snapshot_edges(&topology);
 
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].a, "a");

@@ -24,28 +24,29 @@ pub async fn save_watchlists(watchlists: serde_json::Value, app: AppHandle) -> R
     let json = serde_json::to_string_pretty(&watchlists).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
 
-    // Seed team cliques into topology when teams are created or members are added.
+    // Seed team cliques into topology when teams are created or members are
+    // added. Save and notify only when seeding actually added edges — plain
+    // watchlist saves (reorders, renames) must not churn topology.json or
+    // trigger graph refreshes.
     if let Some(teams) = watchlists.get("teams").and_then(|v| v.as_array()) {
         let mut topology = wardian_core::topology::load_topology(&app_dir);
         let now = chrono::Utc::now().to_rfc3339();
+        let mut edges_added = 0;
         for team in teams {
-            if let Some(agent_ids) = team
-                .get("agentIds")
-                .or_else(|| team.get("agent_ids"))
-                .and_then(|v| v.as_array())
-                .map(|ids| {
-                    ids.iter()
-                        .filter_map(|id| id.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-            {
-                wardian_core::topology::seed_team_clique(&mut topology, &agent_ids, &now);
+            let agent_ids = team_agent_ids(team);
+            if !agent_ids.is_empty() {
+                edges_added +=
+                    wardian_core::topology::seed_team_clique(&mut topology, &agent_ids, &now);
             }
         }
-        if let Err(e) = wardian_core::topology::save_topology(&app_dir, &topology) {
-            crate::manager::log_debug(&format!("[Wardian] topology seeding on watchlist save failed: {e}"));
-        } else {
-            let _ = app.emit("topology-changed", ());
+        if edges_added > 0 {
+            if let Err(e) = wardian_core::topology::save_topology(&app_dir, &topology) {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology seeding on watchlist save failed: {e}"
+                ));
+            } else {
+                let _ = app.emit("topology-changed", ());
+            }
         }
     }
 
