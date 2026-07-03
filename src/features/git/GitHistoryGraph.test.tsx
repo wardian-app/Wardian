@@ -4,6 +4,10 @@ import { GitHistoryGraph } from "./GitHistoryGraph";
 
 const mockInvoke = vi.mocked(invoke);
 
+const openHistoryRefPicker = () => {
+  fireEvent.click(screen.getByRole("button", { name: /History refs:/ }));
+};
+
 describe("GitHistoryGraph", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -393,8 +397,11 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
     expect(screen.getByText("Release tag")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "History refs: Auto" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Filter history to current branch" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Filter history to upstream" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Upstream" }));
 
     expect(screen.queryByText("Current work")).not.toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
@@ -407,14 +414,18 @@ describe("GitHistoryGraph", () => {
     expect(screen.queryByText("Current work")).not.toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
     expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "History refs: Upstream" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Filter history to current branch" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Current Branch" }));
 
     expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
     expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "History refs: Current Branch" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show all history refs" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
 
     expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
@@ -437,7 +448,8 @@ describe("GitHistoryGraph", () => {
       <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Filter history to current branch" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Current Branch" }));
 
     const currentRow = screen.getByTestId("history-graph-row-aaaaaaaa");
     expect(within(currentRow).getByText("HEAD")).toBeInTheDocument();
@@ -445,7 +457,8 @@ describe("GitHistoryGraph", () => {
     expect(within(currentRow).queryByText("origin/main")).not.toBeInTheDocument();
     expect(within(currentRow).queryByText("v1.0.0")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show all history ref badges" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Show All Ref Badges" }));
 
     expect(within(currentRow).getByText("origin/main")).toBeInTheDocument();
     expect(within(currentRow).getByText("v1.0.0")).toBeInTheDocument();
@@ -454,7 +467,8 @@ describe("GitHistoryGraph", () => {
     unmount();
 
     render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
-    fireEvent.click(screen.getByRole("button", { name: "Filter history to current branch" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Current Branch" }));
 
     expect(within(screen.getByTestId("history-graph-row-aaaaaaaa")).getByText("v1.0.0")).toBeInTheDocument();
   });
@@ -502,7 +516,8 @@ describe("GitHistoryGraph", () => {
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
     expect(currentRow).toHaveFocus();
 
-    fireEvent.click(screen.getByRole("button", { name: "Filter history to upstream" }));
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Upstream" }));
 
     expect(revealButton).toBeDisabled();
     expect(screen.queryByText("Current work")).not.toBeInTheDocument();

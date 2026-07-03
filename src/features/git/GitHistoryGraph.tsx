@@ -1,20 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Check,
+  ChevronDown,
   ChevronRight,
   ChevronsUp,
-  CircleDot,
-  Cloud,
   Copy,
   Eye,
   FileText,
   GitBranch,
   List,
-  ListFilter,
   ListTree,
   Maximize2,
   Minimize2,
-  Tags,
   Target,
 } from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
@@ -293,6 +291,13 @@ const refsForBadgeMode = (
 };
 
 const historyGraphTooltipId = (rowId: string) => `history-graph-tooltip-${rowId}`;
+
+const refFilterLabel = (filter: GraphRefFilter) => {
+  if (filter === "all") return "All";
+  if (filter === "current") return "Current Branch";
+  if (filter === "upstream") return "Upstream";
+  return "Auto";
+};
 
 const syntheticEntry = (
   kind: Exclude<HistoryGraphRowKind, "commit">,
@@ -602,6 +607,51 @@ export function GitHistoryGraph({
     void navigator.clipboard?.writeText(text);
   };
 
+  const openHistoryRefMenu = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const refItems: ContextMenuItem[] = [
+      {
+        label: "Auto",
+        icon: refFilter === "auto" ? <Check className="h-3.5 w-3.5" /> : <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => updateRefFilter("auto"),
+      },
+      {
+        label: "All",
+        icon: refFilter === "all" ? <Check className="h-3.5 w-3.5" /> : <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => updateRefFilter("all"),
+      },
+      {
+        label: "Current Branch",
+        icon: refFilter === "current" ? <Check className="h-3.5 w-3.5" /> : <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => updateRefFilter("current"),
+      },
+    ];
+
+    if (upstream) {
+      refItems.push({
+        label: "Upstream",
+        icon: refFilter === "upstream" ? <Check className="h-3.5 w-3.5" /> : <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => updateRefFilter("upstream"),
+      });
+    }
+
+    setHistoryContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        ...refItems,
+        { divider: true },
+        {
+          label: badgeMode === "filter" ? "Show All Ref Badges" : "Show Filtered Ref Badges",
+          icon: <GitBranch className="h-3.5 w-3.5" />,
+          onClick: () => updateBadgeMode(badgeMode === "filter" ? "all" : "filter"),
+        },
+      ],
+    });
+  };
+
   const openHistoryContextMenu = (event: MouseEvent, row: HistoryGraphRow) => {
     if (row.kind !== "commit") return;
 
@@ -747,44 +797,15 @@ export function GitHistoryGraph({
       >
         <button
           type="button"
-          aria-label="Use auto history refs"
-          aria-pressed={refFilter === "auto"}
-          title="Use auto history refs"
-          onClick={() => updateRefFilter("auto")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+          aria-label={`History refs: ${refFilterLabel(refFilter)}`}
+          aria-haspopup="menu"
+          title={`History refs: ${refFilterLabel(refFilter)}`}
+          onClick={openHistoryRefMenu}
+          className="h-6 max-w-[116px] inline-flex items-center justify-center gap-1 rounded px-1.5 text-[11px] text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted"
         >
-          <CircleDot className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="Show all history refs"
-          aria-pressed={refFilter === "all"}
-          title="Show all history refs"
-          onClick={() => updateRefFilter("all")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <ListFilter className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="Filter history to current branch"
-          aria-pressed={refFilter === "current"}
-          title="Filter history to current branch"
-          onClick={() => updateRefFilter("current")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="Filter history to upstream"
-          aria-pressed={refFilter === "upstream"}
-          title="Filter history to upstream"
-          onClick={() => updateRefFilter("upstream")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)] disabled:opacity-40"
-          disabled={!upstream}
-        >
-          <Cloud className="h-3.5 w-3.5" aria-hidden="true" />
+          <GitBranch className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="truncate">{refFilterLabel(refFilter)}</span>
+          <ChevronDown className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -795,16 +816,6 @@ export function GitHistoryGraph({
           disabled={!currentRow}
         >
           <Target className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label={badgeMode === "filter" ? "Show all history ref badges" : "Show filtered history ref badges"}
-          aria-pressed={badgeMode === "all"}
-          title={badgeMode === "filter" ? "Show all history ref badges" : "Show filtered history ref badges"}
-          onClick={() => updateBadgeMode(badgeMode === "filter" ? "all" : "filter")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <Tags className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
         <button

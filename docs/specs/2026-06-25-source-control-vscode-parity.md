@@ -262,10 +262,11 @@ Wardian parity backlog:
 71. History graph ref badge filter/all mode.
 72. History graph changed-file context menu `Open File` action.
 73. History graph commit hover metadata.
+74. History graph compact reference picker.
 
 ## Current Slice
 
-Implemented the first seventy-three slices:
+Implemented the first seventy-four slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -385,6 +386,11 @@ Implemented the first seventy-three slices:
 - History graph commit rows now expose VS Code-like hover/focus metadata with
   the full subject, commit id, author, date, refs, and parent summaries. The
   details stay off the main graph row so compact sidebar density is preserved.
+- The history graph title controls now use a single VS Code-like reference
+  picker that displays `Auto`, `All`, `Current Branch`, or `Upstream` and opens
+  a compact menu for ref filtering and ref-badge mode. This replaces the
+  previous cluster of always-visible ref buttons and keeps the graph title row
+  closer to VS Code's density.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -610,6 +616,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph ref badge filter/all mode coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph changed-file context menu coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph commit hover metadata coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph compact reference picker coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`
