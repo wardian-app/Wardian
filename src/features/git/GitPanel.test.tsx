@@ -304,12 +304,27 @@ describe("GitPanel", () => {
 
     fireEvent.click(screen.getByTitle("More Source Control Actions"));
 
+    expect(await screen.findByRole("button", { name: "Branch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stash" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Checkout to..." })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fetch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use Tree View" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Branch" }));
     expect(await screen.findByRole("button", { name: "Checkout to..." })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Fetch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Branch..." })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sync" }));
+    expect(await screen.findByRole("button", { name: "Fetch" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pull" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Push" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Use Tree View" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    expect(await screen.findByRole("button", { name: "Use Tree View" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Use List View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sort by Path" })).toBeInTheDocument();
   });
 
   it("uses a supplied source-control observer without resolving or watching git itself", async () => {
@@ -410,6 +425,7 @@ describe("GitPanel", () => {
     expect(await screen.findByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(screen.getByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
     fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
 
     expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
@@ -451,6 +467,7 @@ describe("GitPanel", () => {
     });
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
     fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
 
     expect(labels()).toEqual([
@@ -460,6 +477,7 @@ describe("GitPanel", () => {
     ]);
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sort by Name" }));
 
     expect(labels()).toEqual([
@@ -2613,6 +2631,7 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
     fireEvent.click(await screen.findByRole("button", { name: "Push" }));
 
     expect(await screen.findByText("remote rejected")).toBeInTheDocument();
@@ -2639,6 +2658,7 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
     fireEvent.click(await screen.findByRole("button", { name: "Pull" }));
 
     await waitFor(() => {
@@ -2660,6 +2680,7 @@ describe("GitPanel", () => {
     });
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
     fireEvent.click(await screen.findByRole("button", { name: "Fetch" }));
 
     await waitFor(() => {
@@ -2689,6 +2710,7 @@ describe("GitPanel", () => {
     });
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Branch" }));
     fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
     fireEvent.click(await screen.findByRole("button", { name: "feature/source-control" }));
 
@@ -2720,6 +2742,7 @@ describe("GitPanel", () => {
     });
 
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Branch" }));
     fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
     fireEvent.click(await screen.findByRole("button", { name: "Create Branch..." }));
     const input = await screen.findByPlaceholderText("branch-name");
@@ -2779,14 +2802,17 @@ describe("GitPanel", () => {
     return { refreshStatus };
   };
 
-  const openSourceControlActionMenu = async () => {
+  const openSourceControlActionMenu = async (section?: string) => {
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    if (section) {
+      fireEvent.click(await screen.findByRole("button", { name: section }));
+    }
   };
 
   it("stashes changes including untracked files from the source control header menu", async () => {
     const { refreshStatus } = setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Stash Changes Including Untracked" }));
 
     await waitFor(() => {
@@ -2802,7 +2828,7 @@ describe("GitPanel", () => {
   it("stashes staged changes from the source control header menu", async () => {
     setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Stash Staged" }));
 
     await waitFor(() => {
@@ -2813,7 +2839,7 @@ describe("GitPanel", () => {
   it("applies the latest stash from the source control header menu", async () => {
     setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Apply Latest Stash" }));
 
     await waitFor(() => {
@@ -2824,7 +2850,7 @@ describe("GitPanel", () => {
   it("applies a selected stash from the source control header menu", async () => {
     const { refreshStatus } = setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Apply Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
 
@@ -2841,7 +2867,7 @@ describe("GitPanel", () => {
   it("pops the latest stash from the source control header menu", async () => {
     setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Pop Latest Stash" }));
 
     await waitFor(() => {
@@ -2852,7 +2878,7 @@ describe("GitPanel", () => {
   it("pops a selected stash from the source control header menu", async () => {
     const { refreshStatus } = setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Pop Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
 
@@ -2869,7 +2895,7 @@ describe("GitPanel", () => {
   it("previews a selected stash from the source control header menu", async () => {
     setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "View Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
 
@@ -2887,7 +2913,7 @@ describe("GitPanel", () => {
   it("drops a selected stash from the source control header menu", async () => {
     const { refreshStatus } = setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Drop Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
     expect(await screen.findByText("Drop stash stash@{1}? This cannot be undone.")).toBeInTheDocument();
@@ -2906,7 +2932,7 @@ describe("GitPanel", () => {
   it("drops all stashes from the source control header menu", async () => {
     setupStashActionsPanel();
 
-    await openSourceControlActionMenu();
+    await openSourceControlActionMenu("Stash");
     fireEvent.click(await screen.findByRole("button", { name: "Drop All Stashes..." }));
     expect(await screen.findByText("Drop all stashes for this workspace? This cannot be undone.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));

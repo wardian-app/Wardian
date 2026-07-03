@@ -1338,118 +1338,146 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     event.preventDefault();
     event.stopPropagation();
     const rect = event.currentTarget.getBoundingClientRect();
+    const branchItems: ContextMenuItem[] = [
+      {
+        label: "Checkout to...",
+        icon: <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => void openCheckoutMenuFromOverflow(),
+      },
+      {
+        label: "Create Branch...",
+        icon: <GitBranch className="h-3.5 w-3.5" />,
+        onClick: () => {
+          setBranchName("");
+          setIsCreatingBranch(true);
+        },
+      },
+    ];
+    const syncItems: ContextMenuItem[] = [
+      {
+        label: "Fetch",
+        icon: <Download className="h-3.5 w-3.5" />,
+        onClick: () => void handleFetch(),
+      },
+      {
+        label: "Pull",
+        icon: <Download className="h-3.5 w-3.5" />,
+        onClick: () => void handlePull(),
+      },
+      {
+        label: pushTitle,
+        icon: <Upload className="h-3.5 w-3.5" />,
+        onClick: () => void handlePush(),
+      },
+    ];
+    const viewItems: ContextMenuItem[] = [
+      {
+        label: "Use Tree View",
+        icon: resourceDisplayMode === "tree" ? <Check className="h-3.5 w-3.5" /> : <ListTree className="h-3.5 w-3.5" />,
+        onClick: () => updateResourceDisplayMode("tree"),
+      },
+      {
+        label: "Use List View",
+        icon: resourceDisplayMode === "list" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+        onClick: () => updateResourceDisplayMode("list"),
+      },
+      { divider: true },
+      {
+        label: "Sort by Path",
+        icon: resourceSortMode === "path" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+        onClick: () => updateResourceSortMode("path"),
+      },
+      {
+        label: "Sort by Name",
+        icon: resourceSortMode === "name" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+        onClick: () => updateResourceSortMode("name"),
+      },
+      {
+        label: "Sort by Status",
+        icon: resourceSortMode === "status" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+        onClick: () => updateResourceSortMode("status"),
+      },
+    ];
+    const stashItems: ContextMenuItem[] = [
+      {
+        label: "Stash Changes",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void handleStashPush(false),
+      },
+      {
+        label: "Stash Changes Including Untracked",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void handleStashPush(true),
+      },
+      {
+        label: "Stash Staged",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void handleStashStaged(),
+      },
+      { divider: true },
+      {
+        label: "Apply Latest Stash",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void handleStashApplyLatest(),
+      },
+      {
+        label: "Apply Stash...",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void openStashApplyMenu(),
+      },
+      {
+        label: "Pop Latest Stash",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void handleStashPopLatest(),
+      },
+      {
+        label: "Pop Stash...",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void openStashPopMenu(),
+      },
+      {
+        label: "View Stash...",
+        icon: <Archive className="h-3.5 w-3.5" />,
+        onClick: () => void openStashViewMenu(),
+      },
+      { divider: true },
+      {
+        label: "Drop Stash...",
+        icon: <Trash2 className="h-3.5 w-3.5" />,
+        danger: true,
+        onClick: () => void openStashDropMenu(),
+      },
+      {
+        label: "Drop All Stashes...",
+        icon: <Trash2 className="h-3.5 w-3.5" />,
+        danger: true,
+        onClick: () => void handleStashDropAll(),
+      },
+    ];
+
     setSourceControlActionMenu({
       x: rect.right - 220,
       y: rect.bottom + 4,
       items: [
         {
-          label: "Checkout to...",
+          label: "Branch",
           icon: <GitBranch className="h-3.5 w-3.5" />,
-          onClick: () => void openCheckoutMenuFromOverflow(),
+          subItems: branchItems,
         },
         {
-          label: "Create Branch...",
-          icon: <GitBranch className="h-3.5 w-3.5" />,
-          onClick: () => {
-            setBranchName("");
-            setIsCreatingBranch(true);
-          },
-        },
-        { divider: true },
-        {
-          label: "Fetch",
-          icon: <Download className="h-3.5 w-3.5" />,
-          onClick: () => void handleFetch(),
+          label: "Sync",
+          icon: <RefreshCw className="h-3.5 w-3.5" />,
+          subItems: syncItems,
         },
         {
-          label: "Pull",
-          icon: <Download className="h-3.5 w-3.5" />,
-          onClick: () => void handlePull(),
+          label: "View",
+          icon: <ListTree className="h-3.5 w-3.5" />,
+          subItems: viewItems,
         },
         {
-          label: pushTitle,
-          icon: <Upload className="h-3.5 w-3.5" />,
-          onClick: () => void handlePush(),
-        },
-        { divider: true },
-        {
-          label: "Use Tree View",
-          icon: resourceDisplayMode === "tree" ? <Check className="h-3.5 w-3.5" /> : <ListTree className="h-3.5 w-3.5" />,
-          onClick: () => updateResourceDisplayMode("tree"),
-        },
-        {
-          label: "Use List View",
-          icon: resourceDisplayMode === "list" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
-          onClick: () => updateResourceDisplayMode("list"),
-        },
-        { divider: true },
-        {
-          label: "Sort by Path",
-          icon: resourceSortMode === "path" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
-          onClick: () => updateResourceSortMode("path"),
-        },
-        {
-          label: "Sort by Name",
-          icon: resourceSortMode === "name" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
-          onClick: () => updateResourceSortMode("name"),
-        },
-        {
-          label: "Sort by Status",
-          icon: resourceSortMode === "status" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
-          onClick: () => updateResourceSortMode("status"),
-        },
-        { divider: true },
-        {
-          label: "Stash Changes",
+          label: "Stash",
           icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashPush(false),
-        },
-        {
-          label: "Stash Changes Including Untracked",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashPush(true),
-        },
-        {
-          label: "Stash Staged",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashStaged(),
-        },
-        { divider: true },
-        {
-          label: "Apply Latest Stash",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashApplyLatest(),
-        },
-        {
-          label: "Apply Stash...",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void openStashApplyMenu(),
-        },
-        {
-          label: "Pop Latest Stash",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashPopLatest(),
-        },
-        {
-          label: "Pop Stash...",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void openStashPopMenu(),
-        },
-        {
-          label: "View Stash...",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void openStashViewMenu(),
-        },
-        { divider: true },
-        {
-          label: "Drop Stash...",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void openStashDropMenu(),
-        },
-        {
-          label: "Drop All Stashes...",
-          icon: <Archive className="h-3.5 w-3.5" />,
-          onClick: () => void handleStashDropAll(),
+          subItems: stashItems,
         },
       ],
     });

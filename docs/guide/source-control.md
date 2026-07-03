@@ -20,7 +20,11 @@ At the top, Wardian shows:
 
 This is a quick sync layer for checking divergence and moving changes without leaving the app. Use **Checkout to...** to switch to another local branch in the selected workspace, or choose **Create Branch...** from that menu to create and check out a new local branch. Use **Fetch** to update remote-tracking refs without merging. If the selected branch has not been published yet, the push action publishes it to `origin` and sets the upstream branch.
 
-Use the overflow action menu for common stash operations. **Stash Changes**
+The overflow action menu is grouped into **Branch**, **Sync**, **View**, and
+**Stash** submenus so secondary actions stay available without crowding the
+Source Control title row.
+
+Use the **Stash** submenu for common stash operations. **Stash Changes**
 parks tracked changes, **Stash Changes Including Untracked** also includes new
 untracked files, **Stash Staged** parks only staged changes while leaving
 unstaged edits in the workspace, **Apply Latest Stash** applies the latest
@@ -50,16 +54,17 @@ The panel groups files into:
 - **Untracked**
 
 Nested paths render as an expandable tree by default. Use **Use Tree View** or
-**Use List View** in the Source Control overflow menu to switch presentation;
+**Use List View** in the Source Control overflow menu's **View** submenu to
+switch presentation;
 Wardian remembers the choice for each repository root.
 
 Within each section, files are ordered for scanability by default: conflict
 states first, modified/copied/type-changed files next, then ordinary
 added/deleted/renamed/untracked files by path. Use **Sort by Path**, **Sort by
-Name**, or **Sort by Status** in the Source Control overflow menu to choose the
-resource ordering. Wardian remembers the sort mode for each repository root.
-Tree mode keeps directories grouped while applying the selected ordering inside
-each folder.
+Name**, or **Sort by Status** in the Source Control overflow menu's **View**
+submenu to choose the resource ordering. Wardian remembers the sort mode for
+each repository root. Tree mode keeps directories grouped while applying the
+selected ordering inside each folder.
 
 Available actions include:
 

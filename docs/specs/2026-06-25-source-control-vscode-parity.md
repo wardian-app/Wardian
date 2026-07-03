@@ -172,6 +172,8 @@ Wardian parity backlog:
 - expose VS Code's stash preview action with a compact stash selector
 - expose VS Code-like fetch in the title/header area so users can update
   remote refs without merging
+- organize the Source Control overflow into compact command groups so VS
+  Code-like secondary actions do not bloat the title row or root menu
 - improve non-git and git-missing states with direct actions where Wardian can
   offer them
 - avoid duplicating expensive git status work where the badge and panel observe
@@ -247,10 +249,12 @@ Wardian parity backlog:
     file.
 62. Source Control diff hunk actions for staging and unstaging a selected diff
     hunk.
+63. Source Control overflow command grouping for Branch, Sync, View, and Stash
+    actions.
 
 ## Current Slice
 
-Implemented the first sixty-two slices:
+Implemented the first sixty-three slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -329,7 +333,11 @@ Implemented the first sixty-two slices:
   `git apply --cached` or `git apply --cached --reverse`. This matches the
   next stable part of VS Code's `git.diff.stageHunk` and selected-range staging
   workflow without pretending the current diff renderer can yet support
-  arbitrary selected ranges.
+  arbitrary selected line ranges.
+- The Source Control overflow root menu is now grouped into `Branch`, `Sync`,
+  `View`, and `Stash` submenus. Checkout/create-branch, fetch/pull/push,
+  display/sort, and stash commands stay discoverable while the root menu
+  remains compact enough for the sidebar.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
