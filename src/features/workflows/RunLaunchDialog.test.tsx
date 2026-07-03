@@ -126,6 +126,36 @@ describe('RunLaunchDialog', () => {
     );
   });
 
+  it('keeps long workflow forms inside a scrollable viewport-bounded dialog', async () => {
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        blueprintId="wf"
+        inputParams={Array.from({ length: 24 }, (_, index) => ({
+          name: `param_${index + 1}`,
+          type: 'string',
+        }))}
+        onLaunched={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText(/provider/i)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('radio', { name: /schedule/i }));
+
+    expect(screen.getByTestId('run-launch-dialog')).toHaveClass(
+      'flex',
+      'max-h-[min(calc(100vh-4rem),100%)]',
+      'overflow-hidden',
+    );
+    expect(screen.getByTestId('run-launch-dialog-body')).toHaveClass(
+      'min-h-0',
+      'overflow-y-auto',
+    );
+    expect(screen.getByTestId('run-launch-dialog-actions')).toHaveClass('shrink-0');
+    expect(screen.getByLabelText(/param_24/i)).toBeInTheDocument();
+  });
+
   it('preserves provider and input when editing an existing schedule', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_provider_readiness') return providerReadiness;
@@ -304,6 +334,34 @@ describe('RunLaunchDialog', () => {
     const temporaryOptions = screen.getByTestId('temporary-provider-options');
     expect(temporaryOptions).toHaveClass('flex-wrap');
     expect(screen.getByRole('button', { name: /new temporary antigravity/i })).toHaveClass('max-w-full');
+  });
+
+  it('renders the role assignment picker in flow so scrollable dialogs do not clip it', async () => {
+    const blueprint: Blueprint = {
+      schema: 2,
+      id: 'wf',
+      name: 'Workflow',
+      nodes: [
+        { id: 'heartbeat', type: 'task', fields: { agent: 'role:reasoning_gate', prompt: 'Check in.' } },
+      ],
+      edges: [],
+    };
+
+    render(
+      <RunLaunchDialog
+        path="/x/wf.md"
+        blueprint={blueprint}
+        onLaunched={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /change reasoning_gate assignment/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /change reasoning_gate assignment/i }));
+
+    const picker = screen.getByRole('searchbox', { name: /search agents/i }).parentElement;
+    expect(picker).toHaveClass('mt-2');
+    expect(picker).not.toHaveClass('absolute');
   });
 
   it('lets each workflow role choose its own fresh provider', async () => {
