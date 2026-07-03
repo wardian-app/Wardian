@@ -192,11 +192,11 @@ describe("buildAgentGraph", () => {
     });
   });
 
-  it("links worktree agents whose worktrees come from the same source repo", () => {
+  it("agents in different worktrees of the same repo share a workspace, not a worktree", () => {
     const graph = buildAgentGraph({
       agents: [
-        agent({ session_id: "a", git_worktree_source: "D:/src/", git_worktree_folder: "D:/wt/a" }),
-        agent({ session_id: "b", git_worktree_source: "d:\\src", git_worktree_folder: "D:/wt/b" }),
+        agent({ session_id: "a", folder: "D:/wt/a", git_worktree_source: "D:/src/", git_worktree_folder: "D:/wt/a" }),
+        agent({ session_id: "b", folder: "D:/wt/b", git_worktree_source: "d:\\src", git_worktree_folder: "D:/wt/b" }),
       ],
       telemetry: {},
       teams: [],
@@ -209,14 +209,14 @@ describe("buildAgentGraph", () => {
     expect(graph.edges).toHaveLength(1);
     expect(graph.edges[0]).toMatchObject({
       id: "a--b",
-      reasons: ["same_worktree"],
+      reasons: ["shared_workspace"],
     });
   });
 
-  it("links a worktree agent to a plain agent working in its source repo", () => {
+  it("links a worktree agent to a plain agent in the source repo by workspace", () => {
     const graph = buildAgentGraph({
       agents: [
-        agent({ session_id: "a", folder: "D:/src", git_worktree_source: "d:\\src\\", git_worktree_folder: "D:/wt/a" }),
+        agent({ session_id: "a", folder: "D:/wt/a", git_worktree_source: "d:\\src\\", git_worktree_folder: "D:/wt/a" }),
         agent({ session_id: "b", folder: "D:/src" }),
       ],
       telemetry: {},
@@ -227,14 +227,15 @@ describe("buildAgentGraph", () => {
       enabledReasons: allReasons(),
     });
 
-    // Agent a's folder is the worktree path in production, but even with a
-    // matching folder the pair must carry the worktree reason.
-    const edge = graph.edges.find((e) => e.id === "a--b");
-    expect(edge).toBeDefined();
-    expect(edge!.reasons).toContain("same_worktree");
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0]).toMatchObject({
+      id: "a--b",
+      reasons: ["shared_workspace"],
+    });
   });
 
-  it("does not tag plain agents sharing a folder as same_worktree", () => {
+  it("plain agents sharing a folder share both workspace and worktree", () => {
+    // The main checkout is itself a worktree several agents can occupy
     const graph = buildAgentGraph({
       agents: [
         agent({ session_id: "a", folder: "D:/src" }),
@@ -249,7 +250,7 @@ describe("buildAgentGraph", () => {
     });
 
     expect(graph.edges).toHaveLength(1);
-    expect(graph.edges[0].reasons).toEqual(["shared_workspace"]);
+    expect(graph.edges[0].reasons).toEqual(["shared_workspace", "same_worktree"]);
   });
 
   it("does not create edges for recent activity, status, provider, class, missing paths, or hidden agents", () => {

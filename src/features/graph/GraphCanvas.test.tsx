@@ -142,7 +142,7 @@ describe("GraphCanvas", () => {
       forceLabel: true,
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.objectContaining({
-      label: "same_team",
+      label: "same team",
     }));
     // Label color must be re-applied on render so labels track theme changes
     // in lockstep with edge colors.
@@ -211,7 +211,7 @@ describe("GraphCanvas", () => {
     }));
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("multi", "a", "e", expect.objectContaining({
       color: "var(--color-wardian-processing)",
-      label: "shared_workspace, same_worktree",
+      label: "same project, same folder",
       size: 1,
       type: "line",
     }));

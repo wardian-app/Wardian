@@ -14,6 +14,7 @@ function formatProviderName(provider: string | null | undefined): string {
 }
 import {
   buildAgentGraph,
+  RELATIONSHIP_REASON_LABELS,
   type GraphRelationshipReason,
 } from "../features/graph/graphProjection";
 
@@ -273,7 +274,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               className={`graph-lens graph-lens--${reason.replace(/_/g, "-")} ${enabledReasons.has(reason) ? "active" : ""}`}
               onClick={() => toggleReason(reason)}
             >
-              {reason.replace(/_/g, " ")}
+              {RELATIONSHIP_REASON_LABELS[reason]}
             </button>
           ))}
         </div>

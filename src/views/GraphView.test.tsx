@@ -137,8 +137,8 @@ describe("GraphView", () => {
     expect(screen.getByText("Shift-drag to connect")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toHaveClass("graph-lens--same-team");
-    expect(screen.getByRole("button", { name: "shared workspace" })).toHaveClass("graph-lens--shared-workspace");
-    expect(screen.getByRole("button", { name: "same worktree" })).toHaveClass("graph-lens--same-worktree");
+    expect(screen.getByRole("button", { name: "same project" })).toHaveClass("graph-lens--shared-workspace");
+    expect(screen.getByRole("button", { name: "same folder" })).toHaveClass("graph-lens--same-worktree");
     // Lenses should be off by default
     expect(screen.getByRole("button", { name: "same team" })).not.toHaveClass("active");
     expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
@@ -265,7 +265,7 @@ describe("GraphView", () => {
 
   it("toggles relationship lenses", () => {
     render(<GraphView {...defaultProps} />);
-    const workspaceLens = screen.getByRole("button", { name: "shared workspace" });
+    const workspaceLens = screen.getByRole("button", { name: "same project" });
 
     expect(workspaceLens).not.toHaveClass("active");
     fireEvent.click(workspaceLens);

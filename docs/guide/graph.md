@@ -79,4 +79,7 @@ The graph positions agents using force-directed layout over communication edges:
 
 ## Legacy Lenses
 
-The three legacy relationship overlays (Same Team, Shared Workspace, Same Worktree) remain as read-only lenses in the toolbar, off by default. Toggle them to see derived signals without affecting the topology. Same Worktree links agents whose git worktrees were created from the same source repository (including a plain agent working directly in that repository), since each agent's worktree folder is unique to it.
+The three legacy relationship overlays (Same Team, Same Project, Same Folder) remain as read-only lenses in the toolbar, off by default. Toggle them to see derived signals without affecting the topology.
+
+- **Same Project** is the general relation: agents working on the same repository, following git worktrees back to their source — an agent in the main checkout and agents in spawned worktrees of that repo all share a project.
+- **Same Folder** is the narrow relation: agents running in the same physical checkout directory (the main checkout is itself a worktree that several agents can share).

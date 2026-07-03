@@ -7,6 +7,18 @@ export type GraphRelationshipReason =
   | "shared_workspace"
   | "same_worktree";
 
+/**
+ * User-facing lens labels. The reason ids stay stable (CSS classes, tests),
+ * but "workspace"/"worktree" are overloaded and git-specific: what users see
+ * is the plain meaning — same project (main checkout + its worktrees) vs.
+ * same folder (same physical checkout).
+ */
+export const RELATIONSHIP_REASON_LABELS: Record<GraphRelationshipReason, string> = {
+  same_team: "same team",
+  shared_workspace: "same project",
+  same_worktree: "same folder",
+};
+
 export type CommEdgeOrigin = "manual" | "ghost";
 export type CommEdgeState = "ongoing" | "recent" | "dormant";
 
@@ -203,8 +215,25 @@ function buildEdges(
     }
   }
 
-  addPathEdges(visibleAgents, "folder", "shared_workspace", enabledReasons, edgeReasons);
-  addWorktreeEdges(visibleAgents, enabledReasons, edgeReasons);
+  // Workspace is the general relation (same project): worktree agents trace
+  // back to the repository their worktree came from, so agents in different
+  // worktrees of the same repo still share a workspace. Worktree is the
+  // narrow relation (same physical checkout): plain folder equality — the
+  // main checkout is itself a worktree that several agents can share.
+  addPathEdges(
+    visibleAgents,
+    (agent) => normalizeGraphPath(agent.git_worktree_source) ?? normalizeGraphPath(agent.folder),
+    "shared_workspace",
+    enabledReasons,
+    edgeReasons,
+  );
+  addPathEdges(
+    visibleAgents,
+    (agent) => normalizeGraphPath(agent.folder),
+    "same_worktree",
+    enabledReasons,
+    edgeReasons,
+  );
 
   return [...edgeReasons.entries()]
     .map(([id, reasons]) => {
@@ -294,7 +323,7 @@ function pairKey(a: string, b: string): string | null {
 
 function addPathEdges(
   agents: AgentConfig[],
-  field: "folder" | "git_worktree_folder",
+  pathOf: (agent: AgentConfig) => string | null,
   reason: GraphRelationshipReason,
   enabledReasons: Set<GraphRelationshipReason>,
   edgeReasons: Map<string, Set<GraphRelationshipReason>>,
@@ -303,50 +332,13 @@ function addPathEdges(
 
   const groups = new Map<string, string[]>();
   for (const agent of agents) {
-    const value = normalizeGraphPath(agent[field]);
+    const value = pathOf(agent);
     if (!value) continue;
     groups.set(value, [...(groups.get(value) ?? []), agent.session_id]);
   }
 
   for (const ids of groups.values()) {
     forEachPair(ids, (source, target) => addReason(edgeReasons, source, target, reason));
-  }
-}
-
-/**
- * Worktrees are created per agent, so grouping by the worktree folder itself
- * (the old behavior) almost never linked anything. Agents relate through the
- * repository their worktree came from: worktree agents key on
- * git_worktree_source, plain agents on their folder, and a pair qualifies
- * only when at least one member actually runs in a worktree — a plain pair
- * sharing a folder already reads as shared_workspace.
- */
-function addWorktreeEdges(
-  agents: AgentConfig[],
-  enabledReasons: Set<GraphRelationshipReason>,
-  edgeReasons: Map<string, Set<GraphRelationshipReason>>,
-) {
-  if (!enabledReasons.has("same_worktree")) return;
-
-  const groups = new Map<string, Array<{ id: string; inWorktree: boolean }>>();
-  for (const agent of agents) {
-    const worktreeFolder = normalizeGraphPath(agent.git_worktree_folder);
-    const inWorktree = worktreeFolder !== null;
-    const root = inWorktree
-      ? normalizeGraphPath(agent.git_worktree_source) ?? worktreeFolder
-      : normalizeGraphPath(agent.folder);
-    if (!root) continue;
-    groups.set(root, [...(groups.get(root) ?? []), { id: agent.session_id, inWorktree }]);
-  }
-
-  for (const members of groups.values()) {
-    const sorted = [...members].sort((a, b) => a.id.localeCompare(b.id));
-    for (let i = 0; i < sorted.length; i += 1) {
-      for (let j = i + 1; j < sorted.length; j += 1) {
-        if (!sorted[i].inWorktree && !sorted[j].inWorktree) continue;
-        addReason(edgeReasons, sorted[i].id, sorted[j].id, "same_worktree");
-      }
-    }
   }
 }
 

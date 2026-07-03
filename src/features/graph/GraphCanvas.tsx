@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
-import type { AgentGraphProjection, GraphRelationshipReason } from "./graphProjection";
+import { RELATIONSHIP_REASON_LABELS, type AgentGraphProjection, type GraphRelationshipReason } from "./graphProjection";
 import { EdgeActivityOverlay } from "./EdgeActivityOverlay";
 import { resolveGraphColor, withAlpha } from "./graphColorUtils";
 
@@ -238,7 +238,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
         size: 1,
         color: resolveGraphColor(EDGE_REASON_COLORS[primaryReason], container),
-        label: edge.reasons.join(", "),
+        label: edge.reasons.map(formatRelationshipReason).join(", "),
         type: "line",
       });
     }
@@ -342,7 +342,7 @@ function graphRenderSignature(projection: AgentGraphProjection) {
 }
 
 function formatRelationshipReason(reason: GraphRelationshipReason) {
-  return reason.replace(/_/g, " ");
+  return RELATIONSHIP_REASON_LABELS[reason];
 }
 
 /**
