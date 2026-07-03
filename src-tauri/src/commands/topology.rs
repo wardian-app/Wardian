@@ -2,8 +2,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter};
 use wardian_core::topology::{
-    load_team_memberships, load_topology, pair_activity_from_records, resolve_neighbors,
-    save_topology, PairActivity, Topology,
+    load_topology, pair_activity_from_records, resolve_neighbors, save_topology, PairActivity,
+    Topology,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,15 +33,14 @@ pub async fn get_topology(
 ) -> Result<TopologySnapshot, String> {
     let home = home()?;
     let topology = load_topology(&home);
-    let teams = load_team_memberships(&home);
     let refs = agent_refs(&state).await;
 
-    let edges = snapshot_edges(&topology, &teams, &refs);
+    let edges = snapshot_edges(&topology, &refs);
 
     // Fallback groups: agents whose neighbors come only from workspace-fallback.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for agent in &refs {
-        let view = resolve_neighbors(&agent.uuid, &topology, &teams, &refs);
+        let view = resolve_neighbors(&agent.uuid, &topology, &refs);
         let only_fallback = !view.members.is_empty()
             && view.members.iter().all(|m| {
                 m.reasons
@@ -69,13 +68,12 @@ pub async fn get_topology(
     })
 }
 
-/// Manual edges plus team-clique edges (manual wins on overlap).
+/// Manual edges only. Teams have been seeded as manual edges at write time.
 pub(crate) fn snapshot_edges(
     topology: &Topology,
-    teams: &[wardian_core::topology::TeamMembership],
-    known: &[wardian_core::topology::AgentRef],
+    _known: &[wardian_core::topology::AgentRef],
 ) -> Vec<TopologyEdgeDto> {
-    let mut edges: Vec<TopologyEdgeDto> = topology
+    topology
         .edges
         .iter()
         .map(|edge| TopologyEdgeDto {
@@ -83,33 +81,7 @@ pub(crate) fn snapshot_edges(
             b: edge.b.clone(),
             origin: "manual".into(),
         })
-        .collect();
-
-    for team in teams {
-        let members: Vec<&String> = team
-            .agent_ids
-            .iter()
-            .filter(|id| known.iter().any(|r| &r.uuid == *id))
-            .collect();
-
-        for i in 0..members.len() {
-            for j in (i + 1)..members.len() {
-                if let Some((a, b)) =
-                    wardian_core::topology::canonical_pair(members[i], members[j])
-                {
-                    if !edges.iter().any(|e| e.a == a && e.b == b) {
-                        edges.push(TopologyEdgeDto {
-                            a,
-                            b,
-                            origin: format!("rule:team-clique:{}", team.id),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    edges
+        .collect()
 }
 
 #[tauri::command]
@@ -163,9 +135,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_edges_manual_edge_not_duplicated_by_team() {
+    fn snapshot_edges_manual_only() {
         let topology = Topology {
-            version: 1,
+            version: 2,
             edges: vec![wardian_core::topology::TopologyEdge {
                 a: "a".to_string(),
                 b: "b".to_string(),
@@ -174,64 +146,6 @@ mod tests {
             ignored_pairs: vec![],
         };
 
-        let teams = vec![wardian_core::topology::TeamMembership {
-            id: "t1".to_string(),
-            agent_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-        }];
-
-        let known = vec![
-            wardian_core::topology::AgentRef {
-                uuid: "a".to_string(),
-                workspace: None,
-            },
-            wardian_core::topology::AgentRef {
-                uuid: "b".to_string(),
-                workspace: None,
-            },
-            wardian_core::topology::AgentRef {
-                uuid: "c".to_string(),
-                workspace: None,
-            },
-        ];
-
-        let edges = snapshot_edges(&topology, &teams, &known);
-
-        // Should have a--b (manual), a--c (rule:team-clique:t1), b--c (rule:team-clique:t1)
-        // but NOT a duplicate a--b from the team
-        assert_eq!(edges.len(), 3);
-
-        let ab_manual = edges
-            .iter()
-            .find(|e| e.a == "a" && e.b == "b")
-            .expect("a--b should exist");
-        assert_eq!(ab_manual.origin, "manual");
-
-        let ac_team = edges
-            .iter()
-            .find(|e| e.a == "a" && e.b == "c")
-            .expect("a--c should exist");
-        assert_eq!(ac_team.origin, "rule:team-clique:t1");
-
-        let bc_team = edges
-            .iter()
-            .find(|e| e.a == "b" && e.b == "c")
-            .expect("b--c should exist");
-        assert_eq!(bc_team.origin, "rule:team-clique:t1");
-    }
-
-    #[test]
-    fn snapshot_edges_excludes_team_members_not_in_known() {
-        let topology = Topology {
-            version: 1,
-            edges: vec![],
-            ignored_pairs: vec![],
-        };
-
-        let teams = vec![wardian_core::topology::TeamMembership {
-            id: "t1".to_string(),
-            agent_ids: vec!["a".to_string(), "b".to_string(), "unknown".to_string()],
-        }];
-
         let known = vec![
             wardian_core::topology::AgentRef {
                 uuid: "a".to_string(),
@@ -243,54 +157,11 @@ mod tests {
             },
         ];
 
-        let edges = snapshot_edges(&topology, &teams, &known);
+        let edges = snapshot_edges(&topology, &known);
 
-        // Should only have a--b (rule:team-clique:t1), not edges involving "unknown"
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].a, "a");
         assert_eq!(edges[0].b, "b");
-        assert_eq!(edges[0].origin, "rule:team-clique:t1");
-    }
-
-    #[test]
-    fn snapshot_edges_multiple_teams() {
-        let topology = Topology {
-            version: 1,
-            edges: vec![],
-            ignored_pairs: vec![],
-        };
-
-        let teams = vec![
-            wardian_core::topology::TeamMembership {
-                id: "t1".to_string(),
-                agent_ids: vec!["a".to_string(), "b".to_string()],
-            },
-            wardian_core::topology::TeamMembership {
-                id: "t2".to_string(),
-                agent_ids: vec!["b".to_string(), "c".to_string()],
-            },
-        ];
-
-        let known = vec![
-            wardian_core::topology::AgentRef {
-                uuid: "a".to_string(),
-                workspace: None,
-            },
-            wardian_core::topology::AgentRef {
-                uuid: "b".to_string(),
-                workspace: None,
-            },
-            wardian_core::topology::AgentRef {
-                uuid: "c".to_string(),
-                workspace: None,
-            },
-        ];
-
-        let edges = snapshot_edges(&topology, &teams, &known);
-
-        // Should have a--b (rule:team-clique:t1), b--c (rule:team-clique:t2)
-        assert_eq!(edges.len(), 2);
-        assert!(edges.iter().any(|e| e.a == "a" && e.b == "b" && e.origin == "rule:team-clique:t1"));
-        assert!(edges.iter().any(|e| e.a == "b" && e.b == "c" && e.origin == "rule:team-clique:t2"));
+        assert_eq!(edges[0].origin, "manual");
     }
 }

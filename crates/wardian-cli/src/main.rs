@@ -1371,15 +1371,14 @@ fn filter_to_neighbors(
     self_uuid: &str,
     home: &std::path::Path,
 ) -> Vec<wardian_core::identity::AgentIdentity> {
-    use wardian_core::topology::{load_topology, load_team_memberships, resolve_neighbors, AgentRef};
+    use wardian_core::topology::{load_topology, resolve_neighbors, AgentRef};
 
     let topology = load_topology(home);
-    let teams = load_team_memberships(home);
     let refs: Vec<AgentRef> = agents
         .iter()
         .map(|agent| AgentRef { uuid: agent.uuid.clone(), workspace: agent.workspace.clone() })
         .collect();
-    let view = resolve_neighbors(self_uuid, &topology, &teams, &refs);
+    let view = resolve_neighbors(self_uuid, &topology, &refs);
     let reasons: std::collections::HashMap<String, String> = view
         .members
         .iter()

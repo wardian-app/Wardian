@@ -821,10 +821,9 @@ async fn resolve_send_targets_scoped(
         return global;
     };
     let topology = wardian_core::topology::load_topology(&home);
-    let teams = wardian_core::topology::load_team_memberships(&home);
     let refs = state.topology_agent_refs().await;
 
-    let neighbors = wardian_core::topology::resolve_neighbors(sender, &topology, &teams, &refs);
+    let neighbors = wardian_core::topology::resolve_neighbors(sender, &topology, &refs);
     let allowed = neighbors.member_uuids();
 
     if target == "all" || target.starts_with("class:") {
