@@ -2606,7 +2606,7 @@ describe("GitPanel", () => {
     });
   });
 
-  it("runs stash actions from the source control header menu", async () => {
+  const setupStashActionsPanel = () => {
     const refreshStatus = vi.fn(async () => true);
     mockInvoke.mockImplementation(async (command, args) => {
       if (command === "git_log") return [];
@@ -2646,7 +2646,17 @@ describe("GitPanel", () => {
       }),
     });
 
+    return { refreshStatus };
+  };
+
+  const openSourceControlActionMenu = async () => {
     fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  };
+
+  it("stashes changes including untracked files from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Stash Changes Including Untracked" }));
 
     await waitFor(() => {
@@ -2657,22 +2667,34 @@ describe("GitPanel", () => {
       expect(refreshStatus).toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("stashes staged changes from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Stash Staged" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_stash_staged", { cwd: "C:/repo" });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("applies the latest stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Apply Latest Stash" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_stash_apply_latest", { cwd: "C:/repo" });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("applies a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Apply Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
 
@@ -2684,15 +2706,23 @@ describe("GitPanel", () => {
       expect(refreshStatus).toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("pops the latest stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Pop Latest Stash" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_stash_pop_latest", { cwd: "C:/repo" });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("pops a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Pop Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
 
@@ -2704,8 +2734,12 @@ describe("GitPanel", () => {
       expect(refreshStatus).toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("previews a selected stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "View Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
 
@@ -2718,8 +2752,12 @@ describe("GitPanel", () => {
       expect(screen.getByText("+stash preview")).toBeInTheDocument();
     });
     fireEvent.click(screen.getByTitle("Close diff"));
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("drops a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Drop Stash..." }));
     fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
     expect(await screen.findByText("Drop stash stash@{1}? This cannot be undone.")).toBeInTheDocument();
@@ -2733,8 +2771,12 @@ describe("GitPanel", () => {
       expect(refreshStatus).toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
     });
+  });
 
-    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+  it("drops all stashes from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu();
     fireEvent.click(await screen.findByRole("button", { name: "Drop All Stashes..." }));
     expect(await screen.findByText("Drop all stashes for this workspace? This cannot be undone.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
@@ -2742,7 +2784,7 @@ describe("GitPanel", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_stash_drop_all", { cwd: "C:/repo" });
     });
-  }, 10000);
+  });
 
   it("keeps file status visible when commit history cannot be loaded", async () => {
     mockInvoke.mockImplementation(async (command) => {
