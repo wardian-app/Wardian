@@ -2,7 +2,7 @@ use crate::state::AppState;
 use crate::utils::fs::create_directory_link;
 use crate::utils::process::apply_silent_std_command_policy;
 use notify::Watcher;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
@@ -94,6 +94,52 @@ fn run_git_allowing_status_with_candidates(
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(git_failure_message(
                 status_code,
+                stdout.as_ref(),
+                stderr.as_ref(),
+            ));
+        }
+
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    let message = last_not_found.map_or_else(
+        || "no git command candidates configured".to_string(),
+        |error| error.to_string(),
+    );
+    Err(format!("Failed to execute git: {}", message))
+}
+
+fn run_git_with_stdin(cwd: &str, args: &[&str], stdin: &str) -> Result<String, String> {
+    let mut last_not_found = None;
+
+    for candidate in git_command_candidates() {
+        let mut command = build_git_command(&candidate, cwd, args);
+        command.stdin(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+                continue;
+            }
+            Err(error) => return Err(format!("Failed to execute git: {}", error)),
+        };
+
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin
+                .write_all(stdin.as_bytes())
+                .map_err(|error| format!("Failed to write git input: {}", error))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("Failed to execute git: {}", error))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(git_failure_message(
+                output.status.code(),
                 stdout.as_ref(),
                 stderr.as_ref(),
             ));
@@ -487,6 +533,25 @@ pub async fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
         args.push(p);
     }
     run_git(&cwd, &args)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_apply_diff_hunk(
+    cwd: String,
+    patch: String,
+    reverse: bool,
+) -> Result<(), String> {
+    if patch.trim().is_empty() {
+        return Err("Diff hunk patch is required.".to_string());
+    }
+
+    let args: Vec<&str> = if reverse {
+        vec!["apply", "--cached", "--reverse"]
+    } else {
+        vec!["apply", "--cached"]
+    };
+    run_git_with_stdin(&cwd, &args, &patch)?;
     Ok(())
 }
 
@@ -1361,6 +1426,26 @@ pub async fn git_unwatch(cwd: String, state: tauri::State<'_, AppState>) -> Resu
 mod tests {
     use super::*;
 
+    fn first_hunk_patch(diff: &str) -> String {
+        let mut lines = Vec::new();
+        let mut hunk_count = 0;
+
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                hunk_count += 1;
+                if hunk_count > 1 {
+                    break;
+                }
+            }
+
+            if hunk_count <= 1 {
+                lines.push(line);
+            }
+        }
+
+        format!("{}\n", lines.join("\n"))
+    }
+
     #[test]
     fn parse_status_simple() {
         let raw = "## main...origin/main [ahead 2, behind 1]\n M src/foo.rs\nA  src/bar.rs\n?? new_file.txt\n";
@@ -2157,6 +2242,96 @@ bare
         assert!(diff.contains("+++ b/new.txt"), "{diff}");
         assert!(diff.contains("+first line"), "{diff}");
         assert!(diff.contains("+second line"), "{diff}");
+    }
+
+    #[tokio::test]
+    async fn git_apply_diff_hunk_stages_only_the_selected_worktree_hunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        let base = (1..=24)
+            .map(|line| format!("line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(temp.path().join("tracked.txt"), base).unwrap();
+        run_git(cwd, &["add", "tracked.txt"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let updated = (1..=24)
+            .map(|line| match line {
+                2 => "changed 02".to_string(),
+                20 => "changed 20".to_string(),
+                _ => format!("line {line:02}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(temp.path().join("tracked.txt"), updated).unwrap();
+        let diff = run_git(cwd, &["diff", "--no-color", "--", "tracked.txt"]).unwrap();
+        let patch = first_hunk_patch(&diff);
+
+        git_apply_diff_hunk(cwd.to_string(), patch, false)
+            .await
+            .unwrap();
+
+        let staged = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
+            .unwrap();
+        assert!(staged.contains("+changed 02"), "{staged}");
+        assert!(!staged.contains("+changed 20"), "{staged}");
+
+        let unstaged = run_git(cwd, &["diff", "--no-color", "--", "tracked.txt"]).unwrap();
+        assert!(!unstaged.contains("+changed 02"), "{unstaged}");
+        assert!(unstaged.contains("+changed 20"), "{unstaged}");
+    }
+
+    #[tokio::test]
+    async fn git_apply_diff_hunk_unstages_only_the_selected_staged_hunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        let base = (1..=24)
+            .map(|line| format!("line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(temp.path().join("tracked.txt"), base).unwrap();
+        run_git(cwd, &["add", "tracked.txt"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        let updated = (1..=24)
+            .map(|line| match line {
+                2 => "changed 02".to_string(),
+                20 => "changed 20".to_string(),
+                _ => format!("line {line:02}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(temp.path().join("tracked.txt"), updated).unwrap();
+        run_git(cwd, &["add", "tracked.txt"]).unwrap();
+        let diff = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
+            .unwrap();
+        let patch = first_hunk_patch(&diff);
+
+        git_apply_diff_hunk(cwd.to_string(), patch, true)
+            .await
+            .unwrap();
+
+        let staged = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
+            .unwrap();
+        assert!(!staged.contains("+changed 02"), "{staged}");
+        assert!(staged.contains("+changed 20"), "{staged}");
+
+        let unstaged = run_git(cwd, &["diff", "--no-color", "--", "tracked.txt"]).unwrap();
+        assert!(unstaged.contains("+changed 02"), "{unstaged}");
+        assert!(!unstaged.contains("+changed 20"), "{unstaged}");
     }
 
     #[tokio::test]

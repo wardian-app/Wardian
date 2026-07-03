@@ -91,7 +91,9 @@ Clicking a file opens an inline diff modal with colored additions, deletions,
 and hunk markers. Untracked files show a new-file diff so you can inspect them
 before staging. Working-tree file diffs include **Stage Changes**, and staged
 file diffs include **Unstage Changes**, so you can act on the file you are
-reviewing without returning to the resource list.
+reviewing without returning to the resource list. Individual hunk headers also
+include **Stage Hunk** or **Unstage Hunk** for applying only that hunk to the
+index.
 
 Right-click a file and choose **Open File** to launch it through Wardian's
 configured external editor, or **Reveal in Explorer View** to inspect its

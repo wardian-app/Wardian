@@ -62,4 +62,54 @@ describe('GitDiffView', () => {
     expect(onStage).toHaveBeenCalledTimes(1);
     expect(onUnstage).toHaveBeenCalledTimes(1);
   });
+
+  it('renders hunk review actions with a single-hunk patch', async () => {
+    const user = userEvent.setup();
+    const onStageHunk = vi.fn();
+
+    render(
+      <GitDiffView
+        filePath="src/app.tsx"
+        onClose={() => {}}
+        diff={[
+          'diff --git a/src/app.tsx b/src/app.tsx',
+          'index 1111111..2222222 100644',
+          '--- a/src/app.tsx',
+          '+++ b/src/app.tsx',
+          '@@ -1,3 +1,3 @@',
+          ' one',
+          '-two',
+          '+TWO',
+          ' three',
+          '@@ -10,3 +10,3 @@',
+          ' ten',
+          '-eleven',
+          '+ELEVEN',
+          ' twelve',
+        ].join('\n')}
+        hunkActions={[{ label: 'Stage Hunk', onClick: onStageHunk }]}
+      />,
+    );
+
+    const stageHunkButtons = screen.getAllByRole('button', { name: 'Stage Hunk' });
+    expect(stageHunkButtons).toHaveLength(2);
+
+    await user.click(stageHunkButtons[0]);
+
+    expect(onStageHunk).toHaveBeenCalledTimes(1);
+    expect(onStageHunk).toHaveBeenCalledWith(
+      [
+        'diff --git a/src/app.tsx b/src/app.tsx',
+        'index 1111111..2222222 100644',
+        '--- a/src/app.tsx',
+        '+++ b/src/app.tsx',
+        '@@ -1,3 +1,3 @@',
+        ' one',
+        '-two',
+        '+TWO',
+        ' three',
+        '',
+      ].join('\n'),
+    );
+  });
 });

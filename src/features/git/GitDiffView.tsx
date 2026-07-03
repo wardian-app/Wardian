@@ -5,15 +5,55 @@ export interface GitDiffAction {
   onClick: () => void;
 }
 
+export interface GitDiffHunkAction {
+  label: string;
+  onClick: (patch: string) => void;
+}
+
 interface GitDiffViewProps {
   diff: string;
   filePath: string;
   onClose: () => void;
   actions?: GitDiffAction[];
+  hunkActions?: GitDiffHunkAction[];
 }
 
-export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClose, actions = [] }) => {
+const buildHunkPatches = (lines: string[]) => {
+  const hunkPatches = new Map<number, string>();
+  const firstHunkIndex = lines.findIndex((line) => line.startsWith("@@"));
+  if (firstHunkIndex === -1) {
+    return hunkPatches;
+  }
+
+  const fileHeader = lines.slice(0, firstHunkIndex);
+  for (let i = firstHunkIndex; i < lines.length; i += 1) {
+    if (!lines[i].startsWith("@@")) {
+      continue;
+    }
+
+    let nextHunkIndex = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (lines[j].startsWith("@@")) {
+        nextHunkIndex = j;
+        break;
+      }
+    }
+
+    hunkPatches.set(i, `${[...fileHeader, ...lines.slice(i, nextHunkIndex)].join("\n")}\n`);
+  }
+
+  return hunkPatches;
+};
+
+export const GitDiffView: React.FC<GitDiffViewProps> = ({
+  diff,
+  filePath,
+  onClose,
+  actions = [],
+  hunkActions = [],
+}) => {
   const lines = diff.split("\n");
+  const hunkPatches = hunkActions.length > 0 ? buildHunkPatches(lines) : new Map<number, string>();
 
   return (
     <div
@@ -78,7 +118,30 @@ export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClos
                 }
                 return (
                   <div key={i} className={lineClass} style={lineStyle}>
-                    {line}
+                    {line.startsWith("@@") && hunkActions.length > 0 ? (
+                      <span className="flex min-h-[1.375rem] items-center justify-between gap-3">
+                        <span>{line}</span>
+                        <span className="flex shrink-0 items-center gap-1.5 font-sans">
+                          {hunkActions.map((action) => (
+                            <button
+                              key={action.label}
+                              type="button"
+                              onClick={() => {
+                                const patch = hunkPatches.get(i);
+                                if (patch) {
+                                  action.onClick(patch);
+                                }
+                              }}
+                              className="rounded border border-wardian-border px-2 py-0.5 text-[11px] font-medium text-primary hover:bg-wardian-card-bg-muted transition-colors"
+                            >
+                              {action.label}
+                            </button>
+                          ))}
+                        </span>
+                      </span>
+                    ) : (
+                      line
+                    )}
                   </div>
                 );
               })}

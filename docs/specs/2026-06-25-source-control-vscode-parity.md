@@ -22,6 +22,8 @@ Key source files inspected:
 - `src/vs/workbench/contrib/scm/browser/scmHistoryViewPane.ts`
 - `src/vs/workbench/contrib/scm/browser/media/scm.css`
 - `extensions/git/src/repository.ts`
+- `extensions/git/src/commands.ts`
+- `extensions/git/src/staging.ts`
 - `extensions/git/src/historyProvider.ts`
 - `extensions/git/package.json`
 
@@ -61,6 +63,10 @@ can stage, unstage, discard, or ignore only the resources under that folder.
 For individual SCM resources, VS Code also contributes navigation actions such
 as `Open File` and `Reveal in Explorer View`, alongside change viewing and
 modification commands.
+VS Code's Git extension also contributes diff-editor commands such as
+`git.diff.stageHunk`, `git.diff.stageSelection`,
+`git.stageSelectedRanges`, and `git.unstageSelectedRanges`, implemented through
+line-change patch application helpers in `extensions/git/src/staging.ts`.
 
 User value: users can scan what changed, where it changed, and what actions are
 available without opening a terminal.
@@ -80,6 +86,8 @@ Wardian parity backlog:
   staged, tracked, or untracked group from its header menu
 - add resource navigation actions so changed files can be opened externally or
   revealed from the Source Control context menu
+- add diff-review hunk actions, then selected-range actions once Wardian's
+  diff renderer supports stable text selections
 
 ### 3. Commit Input and Action Button
 
@@ -237,10 +245,12 @@ Wardian parity backlog:
 60. Source Control resource sort menu for path, name, and status ordering.
 61. Source Control diff review actions for staging and unstaging the opened
     file.
+62. Source Control diff hunk actions for staging and unstaging a selected diff
+    hunk.
 
 ## Current Slice
 
-Implemented the first sixty-one slices:
+Implemented the first sixty-two slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -313,6 +323,13 @@ Implemented the first sixty-one slices:
   read-only. This is Wardian's first bounded step toward VS Code's
   `git.stageChange` / diff-editor staging workflow while keeping the current
   line renderer stable.
+- Single-file diff hunks now expose per-hunk review actions. Working-tree hunk
+  headers show `Stage Hunk`, staged hunk headers show `Unstage Hunk`, and
+  Wardian applies only that unified-diff hunk to the index with
+  `git apply --cached` or `git apply --cached --reverse`. This matches the
+  next stable part of VS Code's `git.diff.stageHunk` and selected-range staging
+  workflow without pretending the current diff renderer can yet support
+  arbitrary selected ranges.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -518,6 +535,7 @@ Focused tests:
 
 - `npm run test -- src/features/git/GitPanel.test.tsx src/features/git/GitFileList.test.tsx` (resource sort mode and compact overflow coverage)
 - `npm run test -- src/features/git/GitDiffView.test.tsx src/features/git/GitPanel.test.tsx` (diff review stage/unstage coverage)
+- `cargo test git_apply_diff_hunk --manifest-path src-tauri/Cargo.toml`
 - `npm run lint`
 - `npm run test`
 - `npm run build`

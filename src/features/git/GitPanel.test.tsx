@@ -515,6 +515,71 @@ describe("GitPanel", () => {
     });
   });
 
+  it("stages a single opened working-tree diff hunk from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    const diff = [
+      "diff --git a/src/app.tsx b/src/app.tsx",
+      "index 1111111..2222222 100644",
+      "--- a/src/app.tsx",
+      "+++ b/src/app.tsx",
+      "@@ -1,3 +1,3 @@",
+      " one",
+      "-two",
+      "+TWO",
+      " three",
+      "@@ -10,3 +10,3 @@",
+      " ten",
+      "-eleven",
+      "+ELEVEN",
+      " twelve",
+    ].join("\n");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return diff;
+      if (command === "git_apply_diff_hunk") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Stage Hunk" }))[0]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_apply_diff_hunk", {
+        cwd: "C:/repo",
+        patch: [
+          "diff --git a/src/app.tsx b/src/app.tsx",
+          "index 1111111..2222222 100644",
+          "--- a/src/app.tsx",
+          "+++ b/src/app.tsx",
+          "@@ -1,3 +1,3 @@",
+          " one",
+          "-two",
+          "+TWO",
+          " three",
+          "",
+        ].join("\n"),
+        reverse: false,
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
   it("unstages the opened staged diff from the diff review action", async () => {
     const refreshStatus = vi.fn(async () => true);
     mockInvoke.mockImplementation(async (command) => {
@@ -545,6 +610,71 @@ describe("GitPanel", () => {
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_unstage", { cwd: "C:/repo", paths: ["src/app.tsx"] });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("unstages a single opened staged diff hunk from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    const diff = [
+      "diff --git a/src/app.tsx b/src/app.tsx",
+      "index 1111111..2222222 100644",
+      "--- a/src/app.tsx",
+      "+++ b/src/app.tsx",
+      "@@ -1,3 +1,3 @@",
+      " one",
+      "-two",
+      "+TWO",
+      " three",
+      "@@ -10,3 +10,3 @@",
+      " ten",
+      "-eleven",
+      "+ELEVEN",
+      " twelve",
+    ].join("\n");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return diff;
+      if (command === "git_apply_diff_hunk") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Unstage Hunk" }))[0]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_apply_diff_hunk", {
+        cwd: "C:/repo",
+        patch: [
+          "diff --git a/src/app.tsx b/src/app.tsx",
+          "index 1111111..2222222 100644",
+          "--- a/src/app.tsx",
+          "+++ b/src/app.tsx",
+          "@@ -1,3 +1,3 @@",
+          " one",
+          "-two",
+          "+TWO",
+          " three",
+          "",
+        ].join("\n"),
+        reverse: true,
+      });
       expect(refreshStatus).toHaveBeenCalled();
     });
   });

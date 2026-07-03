@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import { AgentConfig, AgentWorktreeSummary, GitBranchSummary, GitFileEntry, GitLogEntry, GitStashEntry } from "../../types";
 import { GitFileList, type ResourceSortMode } from "./GitFileList";
-import { GitDiffView, type GitDiffAction } from "./GitDiffView";
+import { GitDiffView, type GitDiffAction, type GitDiffHunkAction } from "./GitDiffView";
 import { GitHistoryGraph } from "./GitHistoryGraph";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { formatGitStatusError, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
@@ -138,6 +138,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [diffContent, setDiffContent] = useState<string | null>(null);
   const [diffFilePath, setDiffFilePath] = useState<string>("");
   const [diffActions, setDiffActions] = useState<GitDiffAction[]>([]);
+  const [diffHunkActions, setDiffHunkActions] = useState<GitDiffHunkAction[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [initializingRepository, setInitializingRepository] = useState(false);
@@ -286,6 +287,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     setPanelError(null);
     setDiffContent(null);
     setDiffActions([]);
+    setDiffHunkActions([]);
     setCloneRepositoryUrl("");
     setIsCloneRepositoryFormOpen(false);
     setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
@@ -453,6 +455,22 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           ? { label: "Unstage Changes", onClick: () => void handleUnstage(path) }
           : { label: "Stage Changes", onClick: () => void handleStage(path) },
       ]);
+      setDiffHunkActions([
+        staged
+          ? { label: "Unstage Hunk", onClick: (patch) => void handleApplyDiffHunk(patch, true) }
+          : { label: "Stage Hunk", onClick: (patch) => void handleApplyDiffHunk(patch, false) },
+      ]);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleApplyDiffHunk = async (patch: string, reverse: boolean) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      await invoke("git_apply_diff_hunk", { cwd: rootPath, patch, reverse });
+      await refreshStatus();
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -466,6 +484,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setDiffContent(diff);
       setDiffFilePath(`Workspace: ${path}`);
       setDiffActions([]);
+      setDiffHunkActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -499,6 +518,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setDiffContent(content);
       setDiffFilePath(`HEAD: ${path}`);
       setDiffActions([]);
+      setDiffHunkActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -531,6 +551,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setDiffContent(diffs.filter(Boolean).join("\n"));
       setDiffFilePath(label);
       setDiffActions([]);
+      setDiffHunkActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -1261,6 +1282,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       setDiffContent(diff);
       setDiffFilePath(`Stash ${stash.selector}`);
       setDiffActions([]);
+      setDiffHunkActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     } finally {
@@ -2392,9 +2414,11 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           diff={diffContent}
           filePath={diffFilePath}
           actions={diffActions}
+          hunkActions={diffHunkActions}
           onClose={() => {
             setDiffContent(null);
             setDiffActions([]);
+            setDiffHunkActions([]);
           }}
         />
       )}

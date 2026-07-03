@@ -521,6 +521,7 @@ pub fn run() {
             commands::git::git_diff_file_against_workspace,
             commands::git::git_show_file_revision,
             commands::git::git_stage,
+            commands::git::git_apply_diff_hunk,
             commands::git::git_unstage,
             commands::git::git_discard_changes,
             commands::git::git_ignore,
