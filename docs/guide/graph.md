@@ -79,4 +79,4 @@ The graph positions agents using force-directed layout over communication edges:
 
 ## Legacy Lenses
 
-The three legacy relationship overlays (Same Team, Shared Workspace, Same Worktree) remain as read-only lenses in the toolbar, off by default. Toggle them to see derived signals without affecting the topology.
+The three legacy relationship overlays (Same Team, Shared Workspace, Same Worktree) remain as read-only lenses in the toolbar, off by default. Toggle them to see derived signals without affecting the topology. Same Worktree links agents whose git worktrees were created from the same source repository (including a plain agent working directly in that repository), since each agent's worktree folder is unique to it.
