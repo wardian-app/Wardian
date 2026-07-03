@@ -487,6 +487,7 @@ pub fn run() {
             commands::terminal::broadcast_input,
             commands::terminal::resize_agent_terminal,
             commands::terminal::read_agent_pty,
+            commands::terminal::get_terminal_runtime_diagnostics,
             commands::terminal::ensure_user_terminal,
             commands::terminal::send_input_to_user_terminal,
             commands::terminal::send_binary_input_to_user_terminal,

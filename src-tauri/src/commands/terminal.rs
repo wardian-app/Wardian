@@ -3,13 +3,85 @@ use crate::state::{AppState, UserTerminalSession};
 use crate::utils::append_bounded_pty_output;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
 use tauri::{AppHandle, Emitter};
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalRuntimeDiagnostics {
+    pub platform: String,
+    pub conpty: Option<WindowsConptyRuntimeDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WindowsConptyRuntimeDiagnostics {
+    pub load_source: String,
+    pub bundled_conpty_path: Option<String>,
+    pub bundled_conpty_exists: bool,
+    pub bundled_openconsole_path: Option<String>,
+    pub bundled_openconsole_exists: bool,
+    pub bundled_load_error: Option<String>,
+    pub bare_load_error: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_terminal_runtime_diagnostics() -> TerminalRuntimeDiagnostics {
+    build_terminal_runtime_diagnostics()
+}
+
+pub(crate) fn log_terminal_runtime_diagnostics_once() {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_err() {
+        return;
+    }
+
+    let diagnostics = build_terminal_runtime_diagnostics();
+    let message = serde_json::to_string(&diagnostics)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{}\"}}", error));
+    manager::log_debug(&format!(
+        "[Wardian] Terminal runtime diagnostics: {message}"
+    ));
+}
+
+fn build_terminal_runtime_diagnostics() -> TerminalRuntimeDiagnostics {
+    TerminalRuntimeDiagnostics {
+        platform: std::env::consts::OS.to_string(),
+        conpty: windows_conpty_runtime_diagnostics(),
+    }
+}
+
+#[cfg(windows)]
+fn windows_conpty_runtime_diagnostics() -> Option<WindowsConptyRuntimeDiagnostics> {
+    let diagnostics = portable_pty::win::conpty_load_diagnostics();
+    let load_source = match diagnostics.load_source {
+        portable_pty::win::ConPtyLoadSource::Bundled => "bundled",
+        portable_pty::win::ConPtyLoadSource::Bare => "bare",
+        portable_pty::win::ConPtyLoadSource::Kernel32 => "kernel32",
+    };
+
+    Some(WindowsConptyRuntimeDiagnostics {
+        load_source: load_source.to_string(),
+        bundled_conpty_path: diagnostics
+            .bundled_conpty_path
+            .map(|path| path.display().to_string()),
+        bundled_conpty_exists: diagnostics.bundled_conpty_exists,
+        bundled_openconsole_path: diagnostics
+            .bundled_openconsole_path
+            .map(|path| path.display().to_string()),
+        bundled_openconsole_exists: diagnostics.bundled_openconsole_exists,
+        bundled_load_error: diagnostics.bundled_load_error,
+        bare_load_error: diagnostics.bare_load_error,
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_conpty_runtime_diagnostics() -> Option<WindowsConptyRuntimeDiagnostics> {
+    None
+}
 
 #[cfg(test)]
 pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
@@ -480,6 +552,8 @@ fn spawn_user_terminal_session(
     cols: u16,
     rows: u16,
 ) -> Result<UserTerminalSession, String> {
+    log_terminal_runtime_diagnostics_once();
+
     let launch = crate::utils::build_interactive_shell_launch()?;
     let cwd = crate::utils::get_wardian_home().ok_or("Could not find Wardian home")?;
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -798,6 +872,33 @@ mod tests {
         let missing = std::env::temp_dir().join("wardian-missing-user-terminal-dir");
         let err = validate_user_terminal_cwd(&missing.to_string_lossy()).expect_err("missing dir");
         assert!(err.contains("does not exist"));
+    }
+
+    #[test]
+    fn terminal_runtime_diagnostics_reports_platform() {
+        let diagnostics = super::build_terminal_runtime_diagnostics();
+
+        assert!(!diagnostics.platform.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_runtime_diagnostics_reports_windows_conpty_bundle_paths() {
+        let diagnostics = super::build_terminal_runtime_diagnostics();
+        let conpty = diagnostics.conpty.expect("windows conpty diagnostics");
+
+        assert!(matches!(
+            conpty.load_source.as_str(),
+            "bundled" | "bare" | "kernel32"
+        ));
+        assert!(conpty
+            .bundled_conpty_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(r"conpty\x64\conpty.dll")));
+        assert!(conpty
+            .bundled_openconsole_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(r"conpty\x64\OpenConsole.exe")));
     }
 
     #[test]

@@ -406,6 +406,8 @@ pub async fn spawn_agent(
         cleanup_stale_session_processes(&config.session_id, &config.provider);
     }
 
+    crate::commands::terminal::log_terminal_runtime_diagnostics_once();
+
     let pty_system = NativePtySystem::default();
 
     let (initial_cols, initial_rows) = {

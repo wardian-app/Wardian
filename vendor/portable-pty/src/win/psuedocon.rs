@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
@@ -48,12 +48,55 @@ shared_library!(ConPtyFuncs,
     pub fn ClosePseudoConsole(hpc: HPCON),
 );
 
-fn load_conpty() -> ConPtyFuncs {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConPtyLoadSource {
+    Bundled,
+    Bare,
+    Kernel32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConPtyLoadDiagnostics {
+    pub load_source: ConPtyLoadSource,
+    pub bundled_conpty_path: Option<PathBuf>,
+    pub bundled_conpty_exists: bool,
+    pub bundled_openconsole_path: Option<PathBuf>,
+    pub bundled_openconsole_exists: bool,
+    pub bundled_load_error: Option<String>,
+    pub bare_load_error: Option<String>,
+}
+
+struct ConPtyLoad {
+    funcs: ConPtyFuncs,
+    diagnostics: ConPtyLoadDiagnostics,
+}
+
+fn bundled_conpty_path_from_exe_dir(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("conpty").join("x64").join("conpty.dll")
+}
+
+fn bundled_openconsole_path_from_exe_dir(exe_dir: &Path) -> PathBuf {
+    exe_dir
+        .join("conpty")
+        .join("x64")
+        .join("OpenConsole.exe")
+}
+
+fn load_conpty() -> ConPtyLoad {
     // If the kernel doesn't export these functions then their system is
     // too old and we cannot run.
     let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
         "this system does not support conpty.  Windows 10 October 2018 or newer is required",
     );
+    let mut diagnostics = ConPtyLoadDiagnostics {
+        load_source: ConPtyLoadSource::Kernel32,
+        bundled_conpty_path: None,
+        bundled_conpty_exists: false,
+        bundled_openconsole_path: None,
+        bundled_openconsole_exists: false,
+        bundled_load_error: None,
+        bare_load_error: None,
+    };
 
     // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
     // alongside the application.  We check for this after checking for kernel
@@ -70,23 +113,52 @@ fn load_conpty() -> ConPtyFuncs {
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
     {
-        let bundled = exe_dir.join("conpty").join("x64").join("conpty.dll");
+        let bundled = bundled_conpty_path_from_exe_dir(&exe_dir);
+        let openconsole = bundled_openconsole_path_from_exe_dir(&exe_dir);
+        diagnostics.bundled_conpty_exists = bundled.exists();
+        diagnostics.bundled_openconsole_exists = openconsole.exists();
+        diagnostics.bundled_conpty_path = Some(bundled.clone());
+        diagnostics.bundled_openconsole_path = Some(openconsole);
         if bundled.exists() {
-            if let Ok(sideloaded) = ConPtyFuncs::open(&bundled) {
-                return sideloaded;
+            match ConPtyFuncs::open(&bundled) {
+                Ok(sideloaded) => {
+                    diagnostics.load_source = ConPtyLoadSource::Bundled;
+                    return ConPtyLoad {
+                        funcs: sideloaded,
+                        diagnostics,
+                    };
+                }
+                Err(error) => {
+                    diagnostics.bundled_load_error = Some(format!("{:?}", error));
+                }
             }
         }
     }
 
-    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
-        sideloaded
-    } else {
-        kernel
+    match ConPtyFuncs::open(Path::new("conpty.dll")) {
+        Ok(sideloaded) => {
+            diagnostics.load_source = ConPtyLoadSource::Bare;
+            ConPtyLoad {
+                funcs: sideloaded,
+                diagnostics,
+            }
+        }
+        Err(error) => {
+            diagnostics.bare_load_error = Some(format!("{:?}", error));
+            ConPtyLoad {
+                funcs: kernel,
+                diagnostics,
+            }
+        }
     }
 }
 
 lazy_static! {
-    static ref CONPTY: ConPtyFuncs = load_conpty();
+    static ref CONPTY: ConPtyLoad = load_conpty();
+}
+
+pub fn conpty_load_diagnostics() -> ConPtyLoadDiagnostics {
+    CONPTY.diagnostics.clone()
 }
 
 pub struct PsuedoCon {
@@ -98,7 +170,7 @@ unsafe impl Sync for PsuedoCon {}
 
 impl Drop for PsuedoCon {
     fn drop(&mut self) {
-        unsafe { (CONPTY.ClosePseudoConsole)(self.con) };
+        unsafe { (CONPTY.funcs.ClosePseudoConsole)(self.con) };
     }
 }
 
@@ -106,7 +178,7 @@ impl PsuedoCon {
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
         let mut con: HPCON = INVALID_HANDLE_VALUE;
         let result = unsafe {
-            (CONPTY.CreatePseudoConsole)(
+            (CONPTY.funcs.CreatePseudoConsole)(
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
@@ -125,7 +197,7 @@ impl PsuedoCon {
     }
 
     pub fn resize(&self, size: COORD) -> Result<(), Error> {
-        let result = unsafe { (CONPTY.ResizePseudoConsole)(self.con, size) };
+        let result = unsafe { (CONPTY.funcs.ResizePseudoConsole)(self.con, size) };
         ensure!(
             result == S_OK,
             "failed to resize console to {}x{}: HRESULT: {}",
@@ -205,6 +277,8 @@ impl PsuedoCon {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     #[test]
     fn conpty_child_process_creation_flags_preserve_extended_startup_info() {
         assert_ne!(
@@ -220,6 +294,33 @@ mod tests {
         assert_eq!(
             super::conpty_child_process_creation_flags() & CREATE_NO_WINDOW,
             0
+        );
+    }
+
+    #[test]
+    fn bundled_conpty_path_is_relative_to_executable_directory() {
+        let path = super::bundled_conpty_path_from_exe_dir(Path::new(r"C:\Program Files\Wardian"));
+
+        assert_eq!(
+            path,
+            Path::new(r"C:\Program Files\Wardian")
+                .join("conpty")
+                .join("x64")
+                .join("conpty.dll")
+        );
+    }
+
+    #[test]
+    fn bundled_openconsole_path_sits_next_to_bundled_conpty() {
+        let path =
+            super::bundled_openconsole_path_from_exe_dir(Path::new(r"C:\Program Files\Wardian"));
+
+        assert_eq!(
+            path,
+            Path::new(r"C:\Program Files\Wardian")
+                .join("conpty")
+                .join("x64")
+                .join("OpenConsole.exe")
         );
     }
 }
