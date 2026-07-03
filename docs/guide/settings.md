@@ -220,6 +220,13 @@ when Codex agents do not set explicit advanced sandbox or approval overrides.
 Wardian's default Codex policy is workspace write access with approval prompts
 and autonomous mode off.
 
+**Trust launch workspaces** is off by default. When enabled, new Codex launches
+mark the agent's configured workspace as a trusted Codex project for that
+launch. This reduces repeated Codex directory trust prompts without enabling
+autonomous mode or changing the sandbox and approval controls. It affects future
+launches and resumes only; restart an existing Codex agent for the setting to
+take effect.
+
 ## Provider Utilities
 
 The Gemini patch controls help Gemini discover Wardian skills:

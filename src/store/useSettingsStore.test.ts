@@ -188,7 +188,49 @@ describe('Codex runtime defaults', () => {
       sandbox_mode: 'workspace-write',
       approval_policy: 'on-request',
       full_auto: false,
+      trust_workspaces: false,
     });
+  });
+
+  it('saves Codex workspace trust only when explicitly enabled', async () => {
+    mockedInvoke.mockReset();
+    mockedInvoke.mockResolvedValueOnce({
+      schema_version: 2,
+      settings: {
+        shell_id: 'auto',
+        custom_executable: null,
+        custom_args: null,
+        agent_session_persistence: 'resume',
+        conversation_logging: 'enabled',
+        default_provider: 'auto',
+        codex_runtime_policy: {
+          sandbox_mode: 'workspace-write',
+          approval_policy: 'on-request',
+          full_auto: false,
+          trust_workspaces: true,
+        },
+      },
+      overrides: {
+        codex_runtime_policy: {
+          trust_workspaces: true,
+        },
+      },
+    });
+
+    useSettingsStore.getState().setCodexTrustWorkspaces(true);
+    await useSettingsStore.getState().saveShellSettings();
+
+    expect(mockedInvoke).toHaveBeenCalledWith('save_shell_settings', {
+      settings: expect.objectContaining({
+        schema_version: 2,
+        overrides: expect.objectContaining({
+          codex_runtime_policy: expect.objectContaining({
+            trust_workspaces: true,
+          }),
+        }),
+      }),
+    });
+    expect(useSettingsStore.getState().codex_runtime_policy.trust_workspaces).toBe(true);
   });
 });
 

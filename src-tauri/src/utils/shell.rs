@@ -54,6 +54,8 @@ pub struct CodexRuntimePolicyOverrides {
     pub approval_policy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_workspaces: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +99,8 @@ pub struct CodexRuntimePolicy {
     pub sandbox_mode: String,
     pub approval_policy: String,
     pub full_auto: bool,
+    #[serde(default)]
+    pub trust_workspaces: bool,
 }
 
 impl Default for CodexRuntimePolicy {
@@ -105,6 +109,7 @@ impl Default for CodexRuntimePolicy {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             full_auto: false,
+            trust_workspaces: false,
         }
     }
 }
@@ -418,6 +423,9 @@ fn codex_runtime_policy_from_overrides(
         full_auto: overrides
             .and_then(|overrides| overrides.full_auto)
             .unwrap_or(defaults.full_auto),
+        trust_workspaces: overrides
+            .and_then(|overrides| overrides.trust_workspaces)
+            .unwrap_or(defaults.trust_workspaces),
     })
 }
 
@@ -443,6 +451,7 @@ fn normalize_shell_overrides(mut overrides: ShellSettingsOverrides) -> ShellSett
             if policy.sandbox_mode.is_none()
                 && policy.approval_policy.is_none()
                 && policy.full_auto.is_none()
+                && policy.trust_workspaces.is_none()
             {
                 None
             } else {
@@ -513,10 +522,13 @@ fn codex_overrides_from_settings(
         approval_policy: (settings.approval_policy != defaults.approval_policy)
             .then(|| settings.approval_policy.clone()),
         full_auto: (settings.full_auto != defaults.full_auto).then_some(settings.full_auto),
+        trust_workspaces: (settings.trust_workspaces != defaults.trust_workspaces)
+            .then_some(settings.trust_workspaces),
     };
     if overrides.sandbox_mode.is_none()
         && overrides.approval_policy.is_none()
         && overrides.full_auto.is_none()
+        && overrides.trust_workspaces.is_none()
     {
         None
     } else {
@@ -530,6 +542,7 @@ fn legacy_shell_settings_defaults() -> ShellSettings {
             sandbox_mode: "danger-full-access".to_string(),
             approval_policy: "never".to_string(),
             full_auto: true,
+            trust_workspaces: false,
         },
         ..ShellSettings::default()
     }
@@ -1356,6 +1369,7 @@ mod tests {
                 sandbox_mode: "workspace-write".to_string(),
                 approval_policy: "on-request".to_string(),
                 full_auto: false,
+                trust_workspaces: false,
             }
         );
     }
@@ -1380,6 +1394,7 @@ mod tests {
                 sandbox_mode: "workspace-write".to_string(),
                 approval_policy: "on-request".to_string(),
                 full_auto: false,
+                trust_workspaces: false,
             },
             ..Default::default()
         };
@@ -1392,6 +1407,31 @@ mod tests {
         assert_eq!(json["overrides"]["default_provider"], "codex");
         assert!(json["overrides"].get("codex_runtime_policy").is_none());
         assert!(json["overrides"].get("shell_id").is_none());
+    }
+
+    #[test]
+    fn shell_settings_persists_codex_workspace_trust_override() {
+        let temp_dir = tempdir().expect("temp dir");
+        let path = temp_dir.path().join("shell_settings.json");
+        let settings = ShellSettings {
+            codex_runtime_policy: CodexRuntimePolicy {
+                trust_workspaces: true,
+                ..CodexRuntimePolicy::default()
+            },
+            ..ShellSettings::default()
+        };
+
+        save_shell_settings_to_path(&path, &settings).expect("save settings");
+        let raw = std::fs::read_to_string(&path).expect("read settings");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse settings");
+        let loaded = load_shell_settings_from_path(&path).expect("load settings");
+
+        assert_eq!(json["schema_version"], 2);
+        assert_eq!(
+            json["overrides"]["codex_runtime_policy"]["trust_workspaces"],
+            true
+        );
+        assert!(loaded.codex_runtime_policy.trust_workspaces);
     }
 
     #[test]
@@ -1423,6 +1463,7 @@ mod tests {
                 sandbox_mode: "danger-full-access".to_string(),
                 approval_policy: "never".to_string(),
                 full_auto: true,
+                trust_workspaces: false,
             }
         );
     }

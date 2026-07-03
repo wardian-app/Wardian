@@ -64,6 +64,7 @@ describe("SettingsModal", () => {
         sandbox_mode: "workspace-write",
         approval_policy: "on-request",
         full_auto: false,
+        trust_workspaces: false,
       },
       available_shells: [],
       app_settings_loaded: true,
@@ -175,6 +176,7 @@ describe("SettingsModal", () => {
     expect(within(agentRuntime).getByText("Sandbox")).toBeInTheDocument();
     expect(within(agentRuntime).getByText("Approval")).toBeInTheDocument();
     expect(within(agentRuntime).getByText("Autonomous mode")).toBeInTheDocument();
+    expect(within(agentRuntime).getByText("Trust launch workspaces")).toBeInTheDocument();
   });
 
   it("shows Codex autonomous mode as an explicit off/on selection", () => {
@@ -184,6 +186,31 @@ describe("SettingsModal", () => {
 
     expect(screen.getByLabelText("Codex autonomous mode")).toHaveValue("false");
     expect(screen.getByRole("option", { name: "On: bypass approvals and sandbox" })).toBeInTheDocument();
+  });
+
+  it("saves Codex launch workspace trust as an explicit off-by-default setting", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent Runtime" }));
+
+    const select = screen.getByLabelText("Codex trust launch workspaces");
+    expect(select).toHaveValue("false");
+
+    fireEvent.change(select, { target: { value: "true" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent Runtime" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_shell_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            codex_runtime_policy: expect.objectContaining({
+              trust_workspaces: true,
+            }),
+          }),
+        }),
+      });
+    });
   });
 
   it("resets app settings to defaults through the backend app settings file", async () => {

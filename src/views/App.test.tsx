@@ -278,6 +278,7 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
             sandbox_mode: "workspace-write",
             approval_policy: "on-request",
             full_auto: false,
+            trust_workspaces: false,
           },
         };
       case "list_available_shells":
