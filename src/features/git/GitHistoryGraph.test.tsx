@@ -390,7 +390,7 @@ describe("GitHistoryGraph", () => {
       },
     ];
 
-    const { unmount } = render(
+    let view = render(
       <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
     );
 
@@ -407,9 +407,9 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
     expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
 
-    unmount();
+    view.unmount();
 
-    render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
+    view = render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
 
     expect(screen.queryByText("Current work")).not.toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
@@ -430,6 +430,28 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
     expect(screen.getByText("Release tag")).toBeInTheDocument();
+
+    openHistoryRefPicker();
+    fireEvent.click(screen.getByRole("button", { name: "v1.0.0" }));
+
+    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+    expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
+    const taggedRows = screen.getAllByTestId(/history-graph-row-/);
+    expect(taggedRows).toHaveLength(1);
+    expect(taggedRows[0]).toHaveTextContent("Release tag");
+    expect(screen.getByRole("button", { name: "History refs: v1.0.0" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("wardian:source-control:history-graph:C:/repo:ref-filter")).toBe("ref:v1.0.0");
+
+    view.unmount();
+
+    render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
+
+    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+    expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
+    const restoredTaggedRows = screen.getAllByTestId(/history-graph-row-/);
+    expect(restoredTaggedRows).toHaveLength(1);
+    expect(restoredTaggedRows[0]).toHaveTextContent("Release tag");
+    expect(screen.getByRole("button", { name: "History refs: v1.0.0" })).toBeInTheDocument();
   });
 
   it("toggles ref badges between the active filter and all refs per root", () => {

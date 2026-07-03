@@ -263,10 +263,11 @@ Wardian parity backlog:
 72. History graph changed-file context menu `Open File` action.
 73. History graph commit hover metadata.
 74. History graph compact reference picker.
+75. History graph concrete reference picker filters.
 
 ## Current Slice
 
-Implemented the first seventy-four slices:
+Implemented the first seventy-five slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -391,6 +392,9 @@ Implemented the first seventy-four slices:
   a compact menu for ref filtering and ref-badge mode. This replaces the
   previous cluster of always-visible ref buttons and keeps the graph title row
   closer to VS Code's density.
+- The history graph reference picker now lists decorated refs from loaded
+  history entries and persists exact ref selections such as tags, matching VS
+  Code's ability to filter to concrete history item references.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -617,6 +621,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph changed-file context menu coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph commit hover metadata coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph compact reference picker coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph concrete reference picker coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`

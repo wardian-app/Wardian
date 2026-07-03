@@ -19,7 +19,7 @@ import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 
 type GraphDensity = "detailed" | "tiny";
-type GraphRefFilter = "auto" | "all" | "current" | "upstream";
+type GraphRefFilter = "auto" | "all" | "current" | "upstream" | `ref:${string}`;
 type GraphChangeViewMode = "tree" | "list";
 type GraphBadgeMode = "filter" | "all";
 
@@ -142,6 +142,7 @@ const saveDensity = (rootPath: string, density: GraphDensity) => {
 const loadRefFilter = (rootPath: string): GraphRefFilter => {
   if (typeof window === "undefined") return "auto";
   const stored = window.localStorage.getItem(storageKey(rootPath, "ref-filter"));
+  if (stored?.startsWith("ref:") && stored.length > "ref:".length) return stored as GraphRefFilter;
   return stored === "all" || stored === "current" || stored === "upstream" || stored === "auto" ? stored : "auto";
 };
 
@@ -266,6 +267,7 @@ const refsMatchFilter = (
   const refs = uniqueRefsForEntry(entry, index, branch);
   if (filter === "current") return refs.includes("HEAD") || (!!branch && refs.includes(branch));
   if (filter === "upstream") return !!upstream && refs.includes(upstream);
+  if (filter.startsWith("ref:")) return refs.includes(filter.slice("ref:".length));
 
   return true;
 };
@@ -287,6 +289,11 @@ const refsForBadgeMode = (
     return refs.filter((ref) => !!upstream && ref === upstream);
   }
 
+  if (refFilter.startsWith("ref:")) {
+    const selectedRef = refFilter.slice("ref:".length);
+    return refs.filter((ref) => ref === selectedRef);
+  }
+
   return refs.filter((ref) => ref === "HEAD" || (!!branch && ref === branch) || (!!upstream && ref === upstream));
 };
 
@@ -296,6 +303,7 @@ const refFilterLabel = (filter: GraphRefFilter) => {
   if (filter === "all") return "All";
   if (filter === "current") return "Current Branch";
   if (filter === "upstream") return "Upstream";
+  if (filter.startsWith("ref:")) return filter.slice("ref:".length);
   return "Auto";
 };
 
@@ -468,6 +476,13 @@ export function GitHistoryGraph({
   const originalIndexByHash = useMemo(
     () => new Map(entries.map((entry, index) => [entry.hash, index])),
     [entries],
+  );
+  const availableRefs = useMemo(
+    () =>
+      Array.from(
+        new Set(entries.flatMap((entry, index) => uniqueRefsForEntry(entry, index, branch))),
+      ).filter((ref) => ref !== "HEAD"),
+    [branch, entries],
   );
   const metrics = GRAPH_DENSITY_METRICS[density];
 
@@ -642,6 +657,16 @@ export function GitHistoryGraph({
       y: event.clientY,
       items: [
         ...refItems,
+        ...(availableRefs.length > 0
+          ? [
+            { divider: true },
+            ...availableRefs.map((ref) => ({
+              label: ref,
+              icon: refFilter === `ref:${ref}` ? <Check className="h-3.5 w-3.5" /> : <GitBranch className="h-3.5 w-3.5" />,
+              onClick: () => updateRefFilter(`ref:${ref}`),
+            })),
+          ]
+          : []),
         { divider: true },
         {
           label: badgeMode === "filter" ? "Show All Ref Badges" : "Show Filtered Ref Badges",
