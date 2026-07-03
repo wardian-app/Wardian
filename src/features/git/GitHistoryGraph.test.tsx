@@ -51,6 +51,46 @@ describe("GitHistoryGraph", () => {
     expect(within(row).getByText(/Ada Lovelace/)).toBeInTheDocument();
   });
 
+  it("shows detailed commit metadata in a history row hover", () => {
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Merge feature branch",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "cccccccccccccccccccccccccccccccccccccccc",
+            ],
+            refs: ["HEAD", "main", "origin/main"],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    const row = screen.getByTestId("history-graph-row-aaaaaaaa");
+    fireEvent.mouseEnter(row);
+
+    const tooltip = screen.getByRole("tooltip");
+    expect(row).toHaveAttribute("aria-describedby", "history-graph-tooltip-aaaaaaaa");
+    expect(within(tooltip).getByText("Merge feature branch")).toBeInTheDocument();
+    expect(within(tooltip).getByText("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBeInTheDocument();
+    expect(within(tooltip).getByText("Ada Lovelace")).toBeInTheDocument();
+    expect(within(tooltip).getByText("2026-06-25 08:00:00 -0400")).toBeInTheDocument();
+    expect(within(tooltip).getByText("HEAD, main, origin/main")).toBeInTheDocument();
+    expect(within(tooltip).getByText("bbbbbbbb, cccccccc")).toBeInTheDocument();
+
+    fireEvent.mouseLeave(row);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
   it("renders incoming and outgoing divergence nodes with VS Code-style dashed graph markers", () => {
     render(
       <GitHistoryGraph

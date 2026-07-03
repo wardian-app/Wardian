@@ -292,6 +292,8 @@ const refsForBadgeMode = (
   return refs.filter((ref) => ref === "HEAD" || (!!branch && ref === branch) || (!!upstream && ref === upstream));
 };
 
+const historyGraphTooltipId = (rowId: string) => `history-graph-tooltip-${rowId}`;
+
 const syntheticEntry = (
   kind: Exclude<HistoryGraphRowKind, "commit">,
   count: number,
@@ -446,6 +448,7 @@ export function GitHistoryGraph({
   const [loadingHashes, setLoadingHashes] = useState<Set<string>>(() => new Set());
   const [errorByHash, setErrorByHash] = useState<Record<string, string>>({});
   const [collapsedChangeFolders, setCollapsedChangeFolders] = useState<Set<string>>(() => new Set());
+  const [activeDetailRowId, setActiveDetailRowId] = useState<string | null>(null);
   const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(
     null,
   );
@@ -473,6 +476,7 @@ export function GitHistoryGraph({
     setLoadingHashes(new Set());
     setErrorByHash({});
     setCollapsedChangeFolders(new Set());
+    setActiveDetailRowId(null);
   }, [rootPath]);
 
   const loadCommitChanges = useCallback(
@@ -871,19 +875,25 @@ export function GitHistoryGraph({
         const isSynthetic = row.kind !== "commit";
         const short = shortHash(row.entry.hash);
         const isExpanded = !isSynthetic && expandedHashes.has(row.entry.hash);
+        const showDetails = !isSynthetic && activeDetailRowId === rowId;
         const changes = changesByHash[row.entry.hash] ?? [];
         const isLoading = loadingHashes.has(row.entry.hash);
         const isTiny = density === "tiny";
         const isDivergenceNode = row.kind === "incoming-changes" || row.kind === "outgoing-changes";
+        const parentSummary = row.entry.parent_hashes?.length
+          ? row.entry.parent_hashes.map(shortHash).join(", ")
+          : "None";
+        const refsSummary = refs.length > 0 ? refs.join(", ") : "None";
 
         return (
-          <div key={row.entry.hash}>
+          <div key={row.entry.hash} className="relative">
             <button
               type="button"
               ref={(element) => {
                 rowRefs.current[rowId] = element;
               }}
               data-testid={`history-graph-row-${rowId}`}
+              aria-describedby={showDetails ? historyGraphTooltipId(rowId) : undefined}
               aria-expanded={isSynthetic ? undefined : isExpanded}
               aria-current={isHead ? "true" : undefined}
               aria-label={
@@ -895,6 +905,18 @@ export function GitHistoryGraph({
                 if (!isSynthetic) void toggleRow(row.entry);
               }}
               onContextMenu={(event) => openHistoryContextMenu(event, row)}
+              onMouseEnter={() => {
+                if (!isSynthetic) setActiveDetailRowId(rowId);
+              }}
+              onMouseLeave={() => {
+                setActiveDetailRowId((current) => (current === rowId ? null : current));
+              }}
+              onFocus={() => {
+                if (!isSynthetic) setActiveDetailRowId(rowId);
+              }}
+              onBlur={() => {
+                setActiveDetailRowId((current) => (current === rowId ? null : current));
+              }}
               className="group w-full flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded cursor-default min-w-0 text-left"
               style={{ height: `${metrics.rowHeight}px` }}
             >
@@ -972,6 +994,27 @@ export function GitHistoryGraph({
                 </span>
               )}
             </button>
+            {showDetails && (
+              <div
+                id={historyGraphTooltipId(rowId)}
+                role="tooltip"
+                className="pointer-events-none absolute left-8 top-full z-30 mt-1 w-[320px] max-w-[calc(100vw-2rem)] rounded border border-[var(--color-wardian-border)] bg-[var(--color-wardian-bg)] px-3 py-2 text-[11px] text-[var(--color-wardian-text)] shadow-2xl ring-1 ring-white/10"
+              >
+                <div className="mb-1 truncate font-medium text-primary">{row.entry.message}</div>
+                <dl className="grid grid-cols-[56px_minmax(0,1fr)] gap-x-2 gap-y-1">
+                  <dt className="text-[var(--color-wardian-text-muted)]">Commit</dt>
+                  <dd className="min-w-0 truncate font-mono">{row.entry.hash}</dd>
+                  <dt className="text-[var(--color-wardian-text-muted)]">Author</dt>
+                  <dd className="min-w-0 truncate">{row.entry.author}</dd>
+                  <dt className="text-[var(--color-wardian-text-muted)]">Date</dt>
+                  <dd className="min-w-0 truncate">{row.entry.date}</dd>
+                  <dt className="text-[var(--color-wardian-text-muted)]">Refs</dt>
+                  <dd className="min-w-0 truncate">{refsSummary}</dd>
+                  <dt className="text-[var(--color-wardian-text-muted)]">Parents</dt>
+                  <dd className="min-w-0 truncate font-mono">{parentSummary}</dd>
+                </dl>
+              </div>
+            )}
             {isExpanded && (
               <div>
                 {isLoading && (
