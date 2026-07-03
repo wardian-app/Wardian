@@ -10,7 +10,8 @@ use wardian_core::topology::{
 pub struct TopologyEdgeDto {
     pub a: String,
     pub b: String,
-    /// "manual" or "rule:<rule-id>:<instance-id>"
+    /// Always "manual" in schema v2: team edges are seeded as manual edges at
+    /// write time, never computed from rules at read time.
     pub origin: String,
 }
 
@@ -18,7 +19,9 @@ pub struct TopologyEdgeDto {
 pub struct TopologySnapshot {
     pub edges: Vec<TopologyEdgeDto>,
     pub ignored_pairs: Vec<[String; 2]>,
-    /// Groups of agent UUIDs visible to each other only via workspace-fallback (render as halos).
+    /// Groups of agent UUIDs visible to each other only via workspace-fallback.
+    /// Not currently consumed by the frontend (the halo rendering it fed was
+    /// removed); kept for API stability until a consumer returns or it's retired.
     pub fallback_groups: Vec<Vec<String>>,
 }
 
