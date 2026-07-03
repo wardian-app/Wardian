@@ -252,10 +252,11 @@ Wardian parity backlog:
 63. Source Control overflow command grouping for Branch, Sync, View, and Stash
     actions.
 64. History graph incoming/outgoing divergence markers with dashed graph nodes.
+65. History graph expanded commit changes tree/list view mode.
 
 ## Current Slice
 
-Implemented the first sixty-four slices:
+Implemented the first sixty-five slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -343,6 +344,9 @@ Implemented the first sixty-four slices:
   `Incoming Changes` rows when Git reports branch divergence. The rows use
   dashed graph markers, local/remote commit counts, and non-expandable graph
   row behavior while preserving the real commit lanes below them.
+- Expanded history graph commits now default to a collapsible changed-file tree
+  with graph-aligned folder and file rows, plus a persisted list/tree toggle for
+  users who want the flat full-path change list.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -558,6 +562,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx`
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (expanded commit change tree/list coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`

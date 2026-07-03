@@ -135,9 +135,9 @@ Wardian shows an advisory warning when the commit subject line is longer than 50
 
 ## History Graph
 
-The History section shows recent commits for the selected workspace as compact graph rows. Rows use fixed swimlane spacing, highlight the current `HEAD`, show branch/upstream labels when Git reports them, and keep the commit subject, short hash, author, and date visible for quick scanning. When the selected branch has remote divergence, the graph adds dashed **Outgoing Changes** and **Incoming Changes** markers with commit counts so the branch shape and sync direction are visible before syncing. Expand a commit row to inspect the files changed by that commit without leaving the Source Control panel.
+The History section shows recent commits for the selected workspace as compact graph rows. Rows use fixed swimlane spacing, highlight the current `HEAD`, show branch/upstream labels when Git reports them, and keep the commit subject, short hash, author, and date visible for quick scanning. When the selected branch has remote divergence, the graph adds dashed **Outgoing Changes** and **Incoming Changes** markers with commit counts so the branch shape and sync direction are visible before syncing. Expand a commit row to inspect the files changed by that commit without leaving the Source Control panel. Expanded changes default to a collapsible folder tree and can be switched to a flat full-path list from the graph controls.
 
-Use the graph controls to switch between auto refs, all refs, current branch, and upstream filters, then switch between detailed and tiny density. Wardian remembers the chosen ref filter, density, and expanded commit rows for each selected repository root, and the collapse control closes all expanded commits in the current graph.
+Use the graph controls to switch between auto refs, all refs, current branch, and upstream filters, switch expanded changes between tree and list mode, then switch between detailed and tiny density. Wardian remembers the chosen ref filter, change view mode, density, and expanded commit rows for each selected repository root, and the collapse control closes all expanded commits in the current graph.
 
 ## Worktree Mode
 

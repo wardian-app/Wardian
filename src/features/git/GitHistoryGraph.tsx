@@ -1,10 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsUp, CircleDot, Cloud, GitBranch, ListFilter, Maximize2, Minimize2 } from "lucide-react";
+import {
+  ChevronRight,
+  ChevronsUp,
+  CircleDot,
+  Cloud,
+  GitBranch,
+  List,
+  ListFilter,
+  ListTree,
+  Maximize2,
+  Minimize2,
+} from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
 
 type GraphDensity = "detailed" | "tiny";
 type GraphRefFilter = "auto" | "all" | "current" | "upstream";
+type GraphChangeViewMode = "tree" | "list";
 
 interface GraphMetrics {
   rowHeight: number;
@@ -72,6 +84,22 @@ interface HistoryGraphEntry extends GitLogEntry {
   syntheticCount?: number;
 }
 
+interface ChangeTreeDirectory {
+  type: "directory";
+  name: string;
+  path: string;
+  children: ChangeTreeNode[];
+}
+
+interface ChangeTreeFile {
+  type: "file";
+  name: string;
+  path: string;
+  change: GitCommitChangeEntry;
+}
+
+type ChangeTreeNode = ChangeTreeDirectory | ChangeTreeFile;
+
 const INCOMING_CHANGES_HASH = "__wardian_incoming_changes__";
 const OUTGOING_CHANGES_HASH = "__wardian_outgoing_changes__";
 
@@ -112,6 +140,17 @@ const saveRefFilter = (rootPath: string, filter: GraphRefFilter) => {
   window.localStorage.setItem(storageKey(rootPath, "ref-filter"), filter);
 };
 
+const loadChangeViewMode = (rootPath: string): GraphChangeViewMode => {
+  if (typeof window === "undefined") return "tree";
+  const stored = window.localStorage.getItem(storageKey(rootPath, "change-view-mode"));
+  return stored === "list" || stored === "tree" ? stored : "tree";
+};
+
+const saveChangeViewMode = (rootPath: string, mode: GraphChangeViewMode) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(storageKey(rootPath, "change-view-mode"), mode);
+};
+
 const loadExpandedHashes = (rootPath: string) => {
   if (typeof window === "undefined") return new Set<string>();
 
@@ -142,6 +181,49 @@ const changeStatusClassName = (status: string) => {
   if (status === "D") return `${base} text-[var(--color-wardian-error)]`;
   if (status === "R") return `${base} text-[var(--color-wardian-processing)]`;
   return `${base} text-[var(--color-wardian-warning)]`;
+};
+
+const splitChangePath = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean);
+
+const buildChangeTree = (changes: GitCommitChangeEntry[]): ChangeTreeNode[] => {
+  const root: ChangeTreeDirectory = { type: "directory", name: "", path: "", children: [] };
+  const directories = new Map<string, ChangeTreeDirectory>([["", root]]);
+
+  changes.forEach((change) => {
+    const parts = splitChangePath(change.path);
+    if (parts.length === 0) {
+      root.children.push({ type: "file", name: change.path, path: change.path, change });
+      return;
+    }
+
+    let current = root;
+    parts.slice(0, -1).forEach((part, index) => {
+      const path = parts.slice(0, index + 1).join("/");
+      const existing = directories.get(path);
+      if (existing) {
+        current = existing;
+        return;
+      }
+
+      const directory: ChangeTreeDirectory = { type: "directory", name: part, path, children: [] };
+      directories.set(path, directory);
+      current.children.push(directory);
+      current = directory;
+    });
+
+    const name = parts[parts.length - 1] ?? change.path;
+    current.children.push({ type: "file", name, path: parts.join("/"), change });
+  });
+
+  const sortNodes = (nodes: ChangeTreeNode[]): ChangeTreeNode[] =>
+    [...nodes]
+      .sort((left, right) => {
+        if (left.type !== right.type) return left.type === "directory" ? -1 : 1;
+        return left.name.localeCompare(right.name);
+      })
+      .map((node) => (node.type === "directory" ? { ...node, children: sortNodes(node.children) } : node));
+
+  return sortNodes(root.children);
 };
 
 const uniqueRefsForEntry = (entry: GitLogEntry, index: number, branch: string) => {
@@ -302,10 +384,12 @@ const renderGraphPaths = (row: HistoryGraphRow, metrics: GraphMetrics) => {
 export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0, behind = 0 }: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
+  const [changeViewMode, setChangeViewMode] = useState<GraphChangeViewMode>(() => loadChangeViewMode(rootPath));
   const [expandedHashes, setExpandedHashes] = useState<Set<string>>(() => loadExpandedHashes(rootPath));
   const [changesByHash, setChangesByHash] = useState<Record<string, GitCommitChangeEntry[]>>({});
   const [loadingHashes, setLoadingHashes] = useState<Set<string>>(() => new Set());
   const [errorByHash, setErrorByHash] = useState<Record<string, string>>({});
+  const [collapsedChangeFolders, setCollapsedChangeFolders] = useState<Set<string>>(() => new Set());
   const visibleEntries = useMemo(
     () => buildVisibleHistoryEntries(entries, branch, upstream, refFilter, ahead, behind),
     [ahead, behind, branch, entries, refFilter, upstream],
@@ -320,10 +404,12 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
   useEffect(() => {
     setDensity(loadDensity(rootPath));
     setRefFilter(loadRefFilter(rootPath));
+    setChangeViewMode(loadChangeViewMode(rootPath));
     setExpandedHashes(loadExpandedHashes(rootPath));
     setChangesByHash({});
     setLoadingHashes(new Set());
     setErrorByHash({});
+    setCollapsedChangeFolders(new Set());
   }, [rootPath]);
 
   const loadCommitChanges = useCallback(
@@ -381,10 +467,28 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
     saveRefFilter(rootPath, nextFilter);
   };
 
+  const updateChangeViewMode = (nextMode: GraphChangeViewMode) => {
+    setChangeViewMode(nextMode);
+    saveChangeViewMode(rootPath, nextMode);
+  };
+
   const collapseAll = () => {
     const nextExpanded = new Set<string>();
     setExpandedHashes(nextExpanded);
     saveExpandedHashes(rootPath, nextExpanded);
+  };
+
+  const toggleChangeFolder = (hash: string, path: string) => {
+    const key = `${hash}:${path}`;
+    setCollapsedChangeFolders((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
   };
 
   const toggleRow = async (entry: GitLogEntry) => {
@@ -401,6 +505,84 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
     saveExpandedHashes(rootPath, nextExpanded);
     await loadCommitChanges(entry);
   };
+
+  const renderChangeRow = (
+    row: HistoryGraphRow,
+    width: number,
+    short: string,
+    change: GitCommitChangeEntry,
+    displayPath: string,
+    depth = 0,
+  ) => (
+    <div
+      key={`${row.entry.hash}-${change.path}`}
+      data-testid={`history-graph-change-row-${short}-${change.path}`}
+      className="flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0"
+      style={{ height: `${metrics.rowHeight}px` }}
+    >
+      <GraphPlaceholder
+        testId={`history-graph-change-placeholder-${short}-${change.path}`}
+        width={width}
+        lanes={row.outputLanes}
+        highlightIndex={row.circleIndex}
+        metrics={metrics}
+      />
+      <span aria-hidden="true" style={{ width: `${depth * 12}px` }} className="shrink-0" />
+      <span className={changeStatusClassName(change.status)}>{change.status}</span>
+      <span
+        className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-wardian-text-muted)]"
+        title={change.path}
+      >
+        {displayPath}
+      </span>
+    </div>
+  );
+
+  const renderChangeTreeNodes = (
+    row: HistoryGraphRow,
+    width: number,
+    short: string,
+    nodes: ChangeTreeNode[],
+    depth = 0,
+  ): ReactNode =>
+    nodes.map((node) => {
+      if (node.type === "file") {
+        return renderChangeRow(row, width, short, node.change, node.name, depth);
+      }
+
+      const key = `${row.entry.hash}:${node.path}`;
+      const isOpen = !collapsedChangeFolders.has(key);
+      return (
+        <div key={`${row.entry.hash}-${node.path}`}>
+          <div
+            className="flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0"
+            style={{ height: `${metrics.rowHeight}px` }}
+          >
+            <GraphPlaceholder
+              width={width}
+              lanes={row.outputLanes}
+              highlightIndex={row.circleIndex}
+              metrics={metrics}
+            />
+            <button
+              type="button"
+              aria-expanded={isOpen}
+              onClick={() => toggleChangeFolder(row.entry.hash, node.path)}
+              className="min-w-0 flex flex-1 items-center gap-1 rounded text-left text-[11px] text-[var(--color-wardian-text-muted)] hover:text-primary"
+              style={{ paddingLeft: `${depth * 12}px` }}
+              title={node.path}
+            >
+              <ChevronRight
+                className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
+                aria-hidden="true"
+              />
+              <span className="truncate">{node.name}</span>
+            </button>
+          </div>
+          {isOpen && renderChangeTreeNodes(row, width, short, node.children, depth + 1)}
+        </div>
+      );
+    });
 
   return (
     <div className="flex flex-col" aria-label="Git history graph">
@@ -449,6 +631,27 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
           disabled={!upstream}
         >
           <Cloud className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+        <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
+        <button
+          type="button"
+          aria-label="View history changes as tree"
+          aria-pressed={changeViewMode === "tree"}
+          title="View history changes as tree"
+          onClick={() => updateChangeViewMode("tree")}
+          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+        >
+          <ListTree className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label="View history changes as list"
+          aria-pressed={changeViewMode === "list"}
+          title="View history changes as list"
+          onClick={() => updateChangeViewMode("list")}
+          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+        >
+          <List className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
         <button
@@ -607,26 +810,9 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
                     {errorByHash[row.entry.hash]}
                   </div>
                 )}
-                {changes.map((change) => (
-                  <div
-                    key={`${row.entry.hash}-${change.path}`}
-                    data-testid={`history-graph-change-row-${short}-${change.path}`}
-                    className="flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0"
-                    style={{ height: `${metrics.rowHeight}px` }}
-                  >
-                    <GraphPlaceholder
-                      testId={`history-graph-change-placeholder-${short}-${change.path}`}
-                      width={width}
-                      lanes={row.outputLanes}
-                      highlightIndex={row.circleIndex}
-                      metrics={metrics}
-                    />
-                    <span className={changeStatusClassName(change.status)}>{change.status}</span>
-                    <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-wardian-text-muted)]">
-                      {change.path}
-                    </span>
-                  </div>
-                ))}
+                {changeViewMode === "tree"
+                  ? renderChangeTreeNodes(row, width, short, buildChangeTree(changes))
+                  : changes.map((change) => renderChangeRow(row, width, short, change, change.path))}
               </div>
             )}
           </div>

@@ -151,12 +151,65 @@ describe("GitHistoryGraph", () => {
 
     const changeRow = await screen.findByTestId("history-graph-change-row-aaaaaaaa-src/changed.ts");
     expect(changeRow).toHaveStyle({ height: "22px" });
-    expect(within(changeRow).getByText("src/changed.ts")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(changeRow).getByText("changed.ts")).toBeInTheDocument();
     expect(within(changeRow).getByText("M")).toBeInTheDocument();
     expect(within(changeRow).getByTestId("history-graph-change-placeholder-aaaaaaaa-src/changed.ts")).toHaveAttribute(
       "width",
       "33",
     );
+  });
+
+  it("renders expanded commit changes as a collapsible tree and can switch to flat list mode", async () => {
+    mockInvoke.mockResolvedValue([
+      { path: "README.md", status: "M" },
+      { path: "src/components/Button.tsx", status: "M" },
+      { path: "src/features/git/GitHistoryGraph.tsx", status: "A" },
+    ]);
+
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Structure graph changes",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Expand Structure graph changes/ }));
+
+    const srcFolder = await screen.findByRole("button", { name: "src" });
+    expect(srcFolder).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "components" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "features" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "git" })).toHaveAttribute("aria-expanded", "true");
+
+    const nestedChange = screen.getByTestId("history-graph-change-row-aaaaaaaa-src/features/git/GitHistoryGraph.tsx");
+    expect(within(nestedChange).getByText("GitHistoryGraph.tsx")).toBeInTheDocument();
+    expect(within(nestedChange).getByTestId("history-graph-change-placeholder-aaaaaaaa-src/features/git/GitHistoryGraph.tsx")).toHaveAttribute(
+      "width",
+      "22",
+    );
+    expect(screen.queryByText("src/features/git/GitHistoryGraph.tsx")).not.toBeInTheDocument();
+
+    fireEvent.click(srcFolder);
+    expect(srcFolder).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("history-graph-change-row-aaaaaaaa-src/features/git/GitHistoryGraph.tsx")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View history changes as list" }));
+
+    expect(screen.getByText("src/features/git/GitHistoryGraph.tsx")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("wardian:source-control:history-graph:C:/repo:change-view-mode")).toBe("list");
   });
 
   it("switches to tiny density and persists the presentation per root", () => {
