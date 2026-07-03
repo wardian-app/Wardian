@@ -348,8 +348,10 @@ interface ForceSimulationState {
  * actively pulls every component toward the same origin. Instead, each
  * component is simulated in isolation and the resulting component boxes are
  * shelf-packed side by side with a guaranteed gap, so disconnected subgraphs
- * can never overlap. The packed arrangement is centered and uniformly scaled
- * to fit the bounding box.
+ * can never overlap. Edgeless agents are not packed — they form an evenly
+ * spaced ring around the packed core, keeping the connected structure
+ * visually central. The arrangement is centered and uniformly scaled to fit
+ * the bounding box.
  */
 function computePositions(
   agents: AgentConfig[],
@@ -360,7 +362,13 @@ function computePositions(
   }
 
   const components = findComponents(agents, commEdges);
-  const boxes = components.map((members) => {
+  const connected = components.filter((members) => members.length > 1);
+  const singletons = components
+    .filter((members) => members.length === 1)
+    .map((members) => members[0])
+    .sort((a, b) => a.session_id.localeCompare(b.session_id));
+
+  const boxes = connected.map((members) => {
     const positions = simulateComponent(members, commEdges);
     // Half-gap padding on each side keeps a full gap between neighbors.
     // The full gap (2×PAD) must exceed the spring equilibrium distance so
@@ -413,6 +421,44 @@ function computePositions(
     }
     shelfX += box.width;
     shelfHeight = Math.max(shelfHeight, box.height);
+  }
+
+  // Edgeless agents form an evenly spaced ring around the packed core,
+  // outside its radius and wide enough that neighbors don't crowd.
+  if (singletons.length > 0) {
+    let coreCenterX = 0;
+    let coreCenterY = 0;
+    let coreRadius = 0;
+    if (placed.size > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const pos of placed.values()) {
+        minX = Math.min(minX, pos.x);
+        minY = Math.min(minY, pos.y);
+        maxX = Math.max(maxX, pos.x);
+        maxY = Math.max(maxY, pos.y);
+      }
+      coreCenterX = (minX + maxX) / 2;
+      coreCenterY = (minY + maxY) / 2;
+      for (const pos of placed.values()) {
+        const dx = pos.x - coreCenterX;
+        const dy = pos.y - coreCenterY;
+        coreRadius = Math.max(coreRadius, Math.sqrt(dx * dx + dy * dy));
+      }
+    }
+
+    const RING_GAP = 2.0;      // clearance between core and ring
+    const RING_SPACING = 1.8;  // minimum arc distance between ring neighbors
+    const radius = Math.max(
+      coreRadius + RING_GAP,
+      (singletons.length * RING_SPACING) / (2 * Math.PI),
+    );
+    singletons.forEach((agent, index) => {
+      const angle = (Math.PI * 2 * index) / singletons.length;
+      placed.set(agent.session_id, {
+        x: coreCenterX + Math.cos(angle) * radius,
+        y: coreCenterY + Math.sin(angle) * radius,
+      });
+    });
   }
 
   return centerAndFit(placed);

@@ -474,6 +474,44 @@ describe("force-directed layout (computePositions)", () => {
     expect(separated).toBe(true);
   });
 
+  it("arranges edgeless agents on a ring around the connected core", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "s1" }),
+      agent({ session_id: "s2" }),
+      agent({ session_id: "s3" }),
+      agent({ session_id: "s4" }),
+    ];
+    const topology = {
+      edges: [{ a: "a", b: "b", origin: "manual" as const }],
+      ignored_pairs: [],
+      fallback_groups: [],
+    };
+
+    const graph = buildTestGraph({ agents, topology });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+    const singles = ["s1", "s2", "s3", "s4"].map((id) => posMap.get(id)!);
+
+    // Evenly spaced ring: the singleton centroid is the ring center and
+    // every singleton sits at the same distance from it
+    const center = {
+      x: singles.reduce((sum, p) => sum + p.x, 0) / singles.length,
+      y: singles.reduce((sum, p) => sum + p.y, 0) / singles.length,
+    };
+    const radii = singles.map((p) => Math.hypot(p.x - center.x, p.y - center.y));
+    for (const radius of radii) {
+      expect(Math.abs(radius - radii[0])).toBeLessThan(1e-9);
+    }
+
+    // The ring encloses the connected pair: connected nodes are strictly
+    // closer to the ring center than the ring radius
+    for (const id of ["a", "b"]) {
+      const pos = posMap.get(id)!;
+      expect(Math.hypot(pos.x - center.x, pos.y - center.y)).toBeLessThan(radii[0]);
+    }
+  });
+
   it("scales into bounds without piling nodes onto the same spot", () => {
     // Many edgeless agents overflow the bounding box before normalization;
     // a hard clamp collapsed distinct nodes onto identical boundary
