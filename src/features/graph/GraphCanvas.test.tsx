@@ -465,9 +465,11 @@ describe("GraphCanvas", () => {
       type: "line",
     }));
 
-    // Dormant edge: size 2, muted color
+    // Dormant edge: size 2, muted color at FULL opacity — dormant edges are
+    // topology structure, not faded activity residue.
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--d", "a", "d", expect.objectContaining({
       size: 2,
+      color: "var(--color-wardian-text-muted)",
       type: "line",
     }));
   });

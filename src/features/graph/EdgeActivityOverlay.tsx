@@ -164,7 +164,8 @@ function renderOverlay(
   // Collect edges to render
   const overlayEdges: OverlayEdge[] = [];
   for (const commEdge of commEdges) {
-    // Skip manual edges (Sigma draws them); we only draw rule/ghost and particles
+    // Skip manual edges (Sigma draws them); we only draw ghost edges and
+    // particles (including particles over ongoing manual edges)
     if (commEdge.origin === "manual" && commEdge.state !== "ongoing") continue;
 
     const sourceNode = sigma.getNodeDisplayData(commEdge.source);
