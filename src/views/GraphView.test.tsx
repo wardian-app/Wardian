@@ -440,44 +440,6 @@ describe("GraphView", () => {
       });
     });
 
-    it("delete key with selected rule edge → invoke ignore_topology_pair", async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const mockInvoke = vi.mocked(invoke);
-
-      mockInvoke.mockImplementation(async (command: string) => {
-        if (command === "get_topology") {
-          return {
-            edges: [{ a: "a", b: "b", origin: "rule:team-clique:team" }],
-            ignored_pairs: [],
-          };
-        }
-        if (command === "get_pair_activity") {
-          return [];
-        }
-        return undefined;
-      });
-
-      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
-
-      // Wait for the rule-derived row to reach the neighbors panel before selecting the edge
-      await waitFor(() => {
-        expect(screen.getByText("managed by team Team")).toBeInTheDocument();
-      });
-
-      fireEvent.click(screen.getByTestId("mock-graph-edge"));
-
-      mockInvoke.mockClear();
-      mockInvoke.mockResolvedValue(undefined);
-
-      fireEvent.keyDown(window, { key: "Delete" });
-
-      // Should call ignore_topology_pair for rule edges (override behavior)
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "ignore_topology_pair",
-        { a: "a", b: "b" }
-      );
-    });
-
     it("delete key while focus is in an input → NOT invoke remove_topology_edge", async () => {
       const { invoke } = await import("@tauri-apps/api/core");
       const mockInvoke = vi.mocked(invoke);

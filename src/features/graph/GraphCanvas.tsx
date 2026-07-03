@@ -391,16 +391,21 @@ function drawThemedNodeHover(
 }
 
 function getCommEdgeColor(edge: { state: string; recency: number }, container: HTMLElement) {
-  // ongoing/recent → processing (cyan), dormant → muted
-  const baseColorVar = edge.state === "dormant" ? "var(--color-wardian-text-muted)" : "var(--color-wardian-processing)";
-  const baseColor = resolveGraphColor(baseColorVar, container);
-
-  // Fade by recency: dormant has alpha 0.35, ongoing is full opacity
-  // recent fades based on recency (0 = oldest, 1 = newest)
+  // ongoing → processing (cyan) at full opacity
+  // recent → processing with alpha fading by recency (floor at 0.6)
+  // dormant → muted gray at full opacity (structure legibility)
   if (edge.state === "ongoing") {
-    return baseColor;
+    const ongoingColor = resolveGraphColor("var(--color-wardian-processing)", container);
+    return ongoingColor;
   }
 
-  const alpha = 0.35 + 0.5 * edge.recency;
-  return withAlpha(baseColor, alpha);
+  if (edge.state === "dormant") {
+    const dormantColor = resolveGraphColor("var(--color-wardian-text-muted)", container);
+    return dormantColor;
+  }
+
+  // recent: processing color with recency-based alpha fade, floor at 0.6
+  const recentColor = resolveGraphColor("var(--color-wardian-processing)", container);
+  const alpha = 0.6 + 0.4 * edge.recency;
+  return withAlpha(recentColor, alpha);
 }

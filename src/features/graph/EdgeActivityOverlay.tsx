@@ -22,11 +22,11 @@ const STATE_ALPHAS = {
 };
 
 /**
- * Absolutely-positioned Canvas2D overlay for rendering rule/ghost edge textures
+ * Absolutely-positioned Canvas2D overlay for rendering ghost edge textures
  * and activity particles. Synced to Sigma camera via framedGraphToViewport.
  *
- * Texture channel (origin): rule → dash [2,5], ghost → sparse dash [3,9], manual → skip (Sigma draws)
- * Motion channel (state): ongoing → cyan+2 particles, recent → fade by recency, dormant → dim
+ * Texture channel (origin): ghost → sparse dash [3,9], manual → skip (Sigma draws)
+ * Motion channel (state): ongoing → cyan+2 particles, recent → fade by recency, dormant → static
  * Particle direction: toward awaiting agent (awaitingReplyFrom), or neutral if none
  */
 export const EdgeActivityOverlay: React.FC<EdgeActivityOverlayProps> = ({
@@ -93,7 +93,7 @@ export const EdgeActivityOverlay: React.FC<EdgeActivityOverlayProps> = ({
     renderFrame();
 
     // Set up camera listener to redraw on camera updates (regardless of hasOngoing).
-    // Static rule/ghost dashes must track pan/zoom between data refreshes.
+    // Static ghost dashes must track pan/zoom between data refreshes.
     if (sigma) {
       const camera = sigma.getCamera();
       const onCameraUpdate = () => {
@@ -142,7 +142,7 @@ export const EdgeActivityOverlay: React.FC<EdgeActivityOverlayProps> = ({
 };
 
 /**
- * Main render function: draws rule/ghost edges and particles for all ongoing edges.
+ * Main render function: draws ghost edges and particles for all ongoing edges.
  */
 function renderOverlay(
   ctx: CanvasRenderingContext2D,
@@ -187,7 +187,7 @@ function renderOverlay(
     });
   }
 
-  // Draw dashed rule/ghost edges
+  // Draw dashed ghost edges
   for (const edge of overlayEdges) {
     if (edge.origin === "manual") continue; // Manual edges drawn by Sigma
     const dash = dashPattern(edge.origin);

@@ -7,10 +7,6 @@ import {
 
 describe("edgeOverlayGeometry", () => {
   describe("dashPattern", () => {
-    it("returns [2, 5] for rule edges", () => {
-      expect(dashPattern("rule")).toEqual([2, 5]);
-    });
-
     it("returns [3, 9] for ghost edges", () => {
       expect(dashPattern("ghost")).toEqual([3, 9]);
     });

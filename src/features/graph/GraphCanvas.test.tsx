@@ -509,7 +509,7 @@ describe("GraphCanvas", () => {
     );
   });
 
-  it("does not render rule or ghost communication edges", () => {
+  it("does not render ghost communication edges, only manual", () => {
     render(
       <GraphCanvas
         projection={{
@@ -519,8 +519,7 @@ describe("GraphCanvas", () => {
               id: "a--c",
               source: "a",
               target: "c",
-              origin: "rule",
-              ruleId: "team-clique:t1",
+              origin: "manual",
               state: "ongoing",
               recency: 1,
             },
@@ -540,9 +539,9 @@ describe("GraphCanvas", () => {
       />,
     );
 
-    // Only legacy edges should be added, not comm edges
+    // Manual edges should be added to Sigma; ghost edges are rendered via overlay
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.anything());
-    expect(mocks.graphology.addEdgeWithKey).not.toHaveBeenCalledWith("a--c", expect.anything(), expect.anything(), expect.anything());
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--c", "a", "c", expect.anything());
     expect(mocks.graphology.addEdgeWithKey).not.toHaveBeenCalledWith("a--d", expect.anything(), expect.anything(), expect.anything());
   });
 

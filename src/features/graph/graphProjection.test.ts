@@ -259,7 +259,7 @@ describe("communication edges", () => {
       topology: {
         edges: [
           { a: "agent-1", b: "agent-2", origin: "manual" },
-          { a: "agent-1", b: "agent-3", origin: "rule:team-clique:t1" },
+          { a: "agent-1", b: "agent-3", origin: "manual" },
         ],
         ignored_pairs: [],
         fallback_groups: [],
@@ -283,15 +283,38 @@ describe("communication edges", () => {
       now: NOW,
     });
 
-    const manual = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
-    expect(manual?.origin).toBe("manual");
-    expect(manual?.state).toBe("ongoing");
-    expect(manual?.awaitingReplyFrom).toBe("agent-2");
+    const manual1 = projection.commEdges.find((e) => e.id === "agent-1--agent-2");
+    expect(manual1?.origin).toBe("manual");
+    expect(manual1?.state).toBe("ongoing");
+    expect(manual1?.awaitingReplyFrom).toBe("agent-2");
 
-    const rule = projection.commEdges.find((e) => e.id === "agent-1--agent-3");
-    expect(rule?.origin).toBe("rule");
-    expect(rule?.ruleId).toBe("team-clique:t1");
-    expect(rule?.state).toBe("dormant");
+    const manual2 = projection.commEdges.find((e) => e.id === "agent-1--agent-3");
+    expect(manual2?.origin).toBe("manual");
+    expect(manual2?.state).toBe("dormant");
+  });
+
+  it("renders dormant manual edges as legible structure (no alpha fade)", () => {
+    const projection = buildTestGraph({
+      topology: {
+        edges: [
+          { a: "agent-1", b: "agent-2", origin: "manual" },
+          { a: "agent-2", b: "agent-3", origin: "manual" },
+        ],
+        ignored_pairs: [],
+        fallback_groups: [],
+      },
+      pairActivity: [], // No activity means dormant
+      now: NOW,
+    });
+
+    const edges = projection.commEdges;
+    expect(edges).toHaveLength(2);
+    for (const edge of edges) {
+      expect(edge.origin).toBe("manual");
+      expect(edge.state).toBe("dormant");
+      // Dormant edges have zero recency (no activity)
+      expect(edge.recency).toBe(0);
+    }
   });
 
   it("treats malformed timestamps as dormant with finite recency", () => {
@@ -345,11 +368,11 @@ describe("communication edges", () => {
   });
 
   describe("active_ask time-bounding (Bug 3 fix)", () => {
-    it("marks rule edge as 'ongoing' when active_ask is true and age is within window", () => {
+    it("marks manual edge as 'ongoing' when active_ask is true and age is within window", () => {
       const recentTime = new Date(NOW - 30 * 60 * 1000).toISOString(); // 30 min ago
       const projection = buildTestGraph({
         topology: {
-          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          edges: [{ a: "agent-1", b: "agent-2", origin: "manual" }],
           ignored_pairs: [],
           fallback_groups: [],
         },
@@ -370,11 +393,11 @@ describe("communication edges", () => {
       expect(edge?.state).toBe("ongoing");
     });
 
-    it("marks rule edge as 'dormant' when active_ask is true but age exceeds window", () => {
+    it("marks manual edge as 'dormant' when active_ask is true but age exceeds window", () => {
       const oldTime = new Date(NOW - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
       const projection = buildTestGraph({
         topology: {
-          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          edges: [{ a: "agent-1", b: "agent-2", origin: "manual" }],
           ignored_pairs: [],
           fallback_groups: [],
         },
@@ -395,11 +418,11 @@ describe("communication edges", () => {
       expect(edge?.state).toBe("dormant");
     });
 
-    it("marks rule edge as 'dormant' when active_ask is true but age is negative (future date)", () => {
+    it("marks manual edge as 'dormant' when active_ask is true but age is negative (future date)", () => {
       const futureTime = new Date(NOW + 10 * 60 * 1000).toISOString(); // 10 min in future
       const projection = buildTestGraph({
         topology: {
-          edges: [{ a: "agent-1", b: "agent-2", origin: "rule:team-clique:t1" }],
+          edges: [{ a: "agent-1", b: "agent-2", origin: "manual" }],
           ignored_pairs: [],
           fallback_groups: [],
         },

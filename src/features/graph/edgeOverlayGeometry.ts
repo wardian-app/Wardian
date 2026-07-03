@@ -9,7 +9,7 @@ export interface OverlayEdge {
   y1: number;
   x2: number;
   y2: number;
-  origin: "manual" | "rule" | "ghost";
+  origin: "manual" | "ghost";
   state: "ongoing" | "recent" | "dormant";
   recency: number;
   /** +1 = particles flow source→target, -1 = target→source, 0 = neutral */
@@ -18,10 +18,9 @@ export interface OverlayEdge {
 
 /**
  * Dash pattern per origin. Manual edges are drawn by Sigma; overlay skips them
- * unless state === "ongoing" (particles only).
+ * unless state === "ongoing" (particles only). Ghost edges use sparse dash.
  */
 export function dashPattern(origin: OverlayEdge["origin"]): number[] | null {
-  if (origin === "rule") return [2, 5];
   if (origin === "ghost") return [3, 9];
   return null;
 }

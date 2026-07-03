@@ -7,7 +7,7 @@ export type GraphRelationshipReason =
   | "shared_workspace"
   | "same_worktree";
 
-export type CommEdgeOrigin = "manual" | "rule" | "ghost";
+export type CommEdgeOrigin = "manual" | "ghost";
 export type CommEdgeState = "ongoing" | "recent" | "dormant";
 
 export interface CommunicationEdge {
@@ -15,7 +15,6 @@ export interface CommunicationEdge {
   source: string;
   target: string;
   origin: CommEdgeOrigin;
-  ruleId?: string;          // "team-clique:t1"
   state: CommEdgeState;
   lastMessageAt?: string;
   recency: number;          // 0..1, 1 = just now (drives fade)
@@ -223,8 +222,7 @@ function buildCommEdges(
       id: key,
       source: key.split("--")[0],
       target: key.split("--")[1],
-      origin: edge.origin === "manual" ? "manual" : "rule",
-      ruleId: edge.origin.startsWith("rule:") ? edge.origin.slice("rule:".length) : undefined,
+      origin: "manual",
       ...activityFields(activity, now),
     });
   }
