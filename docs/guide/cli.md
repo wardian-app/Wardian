@@ -22,7 +22,7 @@ building repeatable automation around Wardian.
 1. Launch Wardian once so the CLI is installed into the Wardian bin directory.
 2. Restart your terminal if `wardian` is not on `PATH`.
 3. Set the same `WARDIAN_HOME` in both the app and terminal when using an isolated test home.
-4. Run `wardian agent list --scope all` to confirm the CLI sees the expected state.
+4. Run `wardian agent list` to confirm the CLI sees your neighbors, or `wardian agent list --scope all` to see all agents.
 5. Use live-control commands only while the desktop app is running for that same home.
 
 ## Installation
@@ -57,13 +57,37 @@ wardian agent coder-a1
 wardian agent show uuid-1
 ```
 
+## Communication Topology & Scope
+
+Wardian maintains a communication topology that shapes which agents you see and interact with by default. Your **neighbors** are determined by the graph topology: manual edges (including team-seeded edges) or your workspace-mates (if you have no manual edges).
+
+**Why it matters:**
+- `wardian agent list` shows your neighbors by default — the agents you're connected to — so you work within your context.
+- `wardian send --to all` broadcasts within your neighbors, not globally.
+- `wardian send --to class:Coder` resolves within your neighbors.
+- Bare-name targets resolve neighbors-first; explicit UUIDs and exact names always work regardless of topology.
+
+**Scope modes for `wardian agent list`:**
+- `--scope auto` (default): neighbors when `WARDIAN_SESSION_ID` is set (inside a Wardian agent terminal), else workspace.
+- `--scope neighbors`: self + direct topology neighbors (manual edges, workspace fallback when you have no manual edges).
+- `--scope workspace`: all agents in your workspace.
+- `--scope all`: all known agents across all workspaces.
+
+**When to use each scope:**
+- Default (`auto`): Normal agent work within your context (neighbors inside a session, workspace outside).
+- `--scope neighbors`: Explicit neighbors-only listing (same as auto inside a session).
+- `--scope workspace`: When you need to see all agents in your workspace regardless of edges.
+- `--scope all`: Only for orchestration tasks that genuinely span multiple neighbor sets or workspaces.
+
+When you create a team or add a team member, Wardian automatically wires up edges between all team members in the topology. These connections shape your default visibility and are completely editable through the Graph view. See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
+
 ## Commands
 
 ```bash
 wardian agent
 wardian agent <name-or-uuid>
 wardian agent show [name-or-uuid]
-wardian agent list --scope workspace
+wardian agent list
 wardian agent list --scope all
 wardian agent kill <name-or-uuid>
 wardian agent pause <name-or-uuid>
@@ -104,7 +128,13 @@ wardian send "stand down" --to all
 
 ## Common Workflows
 
-Inspect the live roster before an agent coordinates work:
+Inspect your neighbors (default):
+
+```bash
+wardian agent list --fields name,class,provider,workspace,status
+```
+
+Inspect the full roster when coordinating across multiple neighbor sets:
 
 ```bash
 wardian agent list --scope all --fields name,class,provider,workspace,status,status_source
@@ -210,7 +240,12 @@ Use `--until output:<token>` only when you explicitly need the older output-subs
 
 `reply <request-id> --status done|blocked|failed --stdin` records a structured reply through the live control endpoint. Wardian resolves the request ID against the interaction store. Unknown request IDs fail deterministically, and duplicate replies are rejected unless a future explicit idempotency policy says otherwise. When run from a Wardian-managed agent terminal, `WARDIAN_SESSION_ID` is used to verify that the reply came from the target agent for that request. Replies submitted outside a Wardian-managed session are accepted for this first live-control slice so a human terminal can unblock a request, but that caller identity is not authenticated.
 
-`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. By default, Wardian keeps inter-agent attribution and delivers messages with a `From <sender>:` prefix when sender context is available. Use `--as-command` for provider slash commands that must start at the first input token:
+`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. By default:
+- `--to all` broadcasts within your **neighbors**, not globally.
+- `--to class:ClassName` resolves within your neighbors.
+- Bare agent names resolve neighbors-first; explicit UUIDs always work globally.
+
+Use `--scope all` to broadcast/resolve globally (orchestration across multiple neighbor sets only). `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. By default, Wardian keeps inter-agent attribution and delivers messages with a `From <sender>:` prefix when sender context is available. Use `--as-command` for provider slash commands that must start at the first input token:
 
 ```bash
 wardian send --as-command "/goal test" --to coder-a1
@@ -240,7 +275,7 @@ Output options:
 - `--fields name,status,uuid` returns indented JSON with only those fields.
 - `--field status` returns one bare value plus a newline.
 - `--field status_source` returns `live` or `persisted`.
-- `--verbose` adds `pid`, `started_at`, and `last_status_at`.
+- `--verbose` adds `pid`, `started_at`, `last_status_at`, and `visibility` (why each neighbor is visible: `manual` or `rule:workspace-fallback`).
 - `--pretty` returns aligned text for interactive inspection instead of JSON.
 
 Default JSON is indented for terminal readability. It includes `schema: 1` and an `agent` or `agents` payload with `name`, `uuid`, `class`, `provider`, `workspace`, and `status`.

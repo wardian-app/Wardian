@@ -17,7 +17,7 @@ describe("GardenCanvas", () => {
   it("renders one node per agent and workflow unit", () => {
     render(
       <GardenCanvas
-        agentUnits={[{ ref: { kind: "agent", id: "a1" }, label: "Alpha", status: "Idle", color: "#fff", recent: false, position: { x: 0, y: 0 } }]}
+        agentUnits={[{ ref: { kind: "agent", id: "a1" }, label: "Alpha", status: "Idle", color: "#fff", position: { x: 0, y: 0 } }]}
         workflowUnits={[{ ref: { kind: "workflow", id: "w1" }, label: "Build", runStatus: "none", nodeCount: 1, position: { x: 0, y: 0 } }]}
         selectedKey={null}
         onSelect={vi.fn()}

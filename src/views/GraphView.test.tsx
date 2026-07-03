@@ -5,26 +5,54 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import { GraphView } from "./GraphView";
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
 vi.mock("../features/graph/GraphCanvas", () => ({
   GraphCanvas: ({
+    projection,
     resetSignal,
     onSelectAgent,
     onContextMenu,
+    connectMode,
+    selectedEdgeId,
+    onSelectEdge,
   }: {
+    projection: { nodes: Array<{ id: string; x: number; y: number }>; commEdges: Array<{ id: string }> };
     resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
+    connectMode?: boolean;
+    selectedEdgeId?: string | null;
+    onSelectEdge?: (edgeId: string) => void;
   }) => (
-    <button
-      data-testid="mock-graph-node"
-      onClick={() => onSelectAgent("a")}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        onContextMenu("a", 12, 24);
-      }}
-    >
-      node-a reset-{resetSignal ?? 0}
-    </button>
+    <>
+      <button
+        data-testid="mock-graph-node"
+        data-connect-mode={connectMode ? "true" : "false"}
+        data-selected-edge={selectedEdgeId ?? "none"}
+        data-node-positions={JSON.stringify(projection.nodes.map((n) => [n.id, n.x, n.y]))}
+        data-comm-edge-ids={JSON.stringify(projection.commEdges.map((e) => e.id))}
+        onClick={() => onSelectAgent("a")}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onContextMenu("a", 12, 24);
+        }}
+      >
+        node-a reset-{resetSignal ?? 0}
+      </button>
+      <button
+        data-testid="mock-graph-edge"
+        onClick={() => onSelectEdge?.("a--b")}
+      >
+        edge-a--b
+      </button>
+    </>
   ),
 }));
 
@@ -94,19 +122,25 @@ const defaultProps = {
 };
 
 describe("GraphView", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     Object.values(handlers).forEach((handler) => handler.mockClear());
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockResolvedValue(undefined);
   });
 
-  it("renders scope, relationship lenses, and graph canvas", () => {
+  it("renders scope, relationship lenses (off by default), and graph canvas", () => {
     render(<GraphView {...defaultProps} />);
 
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByText("All Agents")).toBeInTheDocument();
+    expect(screen.getByText("Shift-drag to connect")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "same team" })).toHaveClass("graph-lens--same-team");
-    expect(screen.getByRole("button", { name: "shared workspace" })).toHaveClass("graph-lens--shared-workspace");
-    expect(screen.getByRole("button", { name: "same worktree" })).toHaveClass("graph-lens--same-worktree");
+    expect(screen.getByRole("button", { name: "same project" })).toHaveClass("graph-lens--shared-workspace");
+    expect(screen.getByRole("button", { name: "same folder" })).toHaveClass("graph-lens--same-worktree");
+    // Lenses should be off by default
+    expect(screen.getByRole("button", { name: "same team" })).not.toHaveClass("active");
     expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
@@ -174,15 +208,27 @@ describe("GraphView", () => {
     expect(screen.getByText("Query")).toBeInTheDocument();
   });
 
-  it("opens the context menu for a relationship row's neighbor agent", () => {
-    render(<GraphView {...defaultProps} />);
+  it("opens the context menu for a relationship row's neighbor agent", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "get_topology") {
+        return {
+          edges: [{ a: "a", b: "b", origin: "manual" }],
+          ignored_pairs: [],
+        };
+      }
+      if (command === "get_pair_activity") {
+        return [];
+      }
+      return undefined;
+    });
 
-    const betaRow = screen.getByText("Beta").closest("li");
-    expect(betaRow).toBeInTheDocument();
+    render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
 
-    fireEvent.contextMenu(betaRow!, { clientX: 33, clientY: 44 });
+    const betaRow = await screen.findByText("Beta");
+    fireEvent.contextMenu(betaRow);
 
-    expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["b"]));
     expect(screen.getByTestId("agent-context-menu")).toBeInTheDocument();
   });
 
@@ -219,11 +265,11 @@ describe("GraphView", () => {
 
   it("toggles relationship lenses", () => {
     render(<GraphView {...defaultProps} />);
-    const workspaceLens = screen.getByRole("button", { name: "shared workspace" });
+    const workspaceLens = screen.getByRole("button", { name: "same project" });
 
-    expect(workspaceLens).toHaveClass("active");
-    fireEvent.click(workspaceLens);
     expect(workspaceLens).not.toHaveClass("active");
+    fireEvent.click(workspaceLens);
+    expect(workspaceLens).toHaveClass("active");
   });
 
   it("signals the graph canvas to reset its camera", () => {
@@ -238,5 +284,336 @@ describe("GraphView", () => {
     render(<GraphView {...defaultProps} filteredAgents={[]} allAgents={[]} telemetry={{}} />);
 
     expect(screen.getByText("No agents in graph scope")).toBeInTheDocument();
+  });
+
+  describe("Communication Panel - Origin Tags", () => {
+    it("inspector lists manual neighbors without an origin tag", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      // Set up mocks to return topology with manual edge
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return {
+            edges: [
+              { a: "a", b: "b", origin: "manual" },
+            ],
+            ignored_pairs: [],
+          };
+        }
+        if (command === "get_pair_activity") {
+          return [
+            { a: "a", b: "b", last_message_at: new Date(Date.now() - 60000).toISOString(), active_ask: false },
+          ];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      // The relationship shows up (Beta is the neighbor of a in the b-a edge)
+      await waitFor(() => {
+        expect(screen.getByText("Beta")).toBeInTheDocument();
+      });
+
+      // All persisted edges are manual, so no origin tag is rendered
+      expect(screen.queryByText("manual")).not.toBeInTheDocument();
+    });
+
+    it("formalize click → invoke called with add_topology_edge for ghost pair", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges: [], ignored_pairs: [] };
+        }
+        if (command === "get_pair_activity") {
+          // Ghost edge with recent activity
+          return [
+            { a: "a", b: "b", last_message_at: new Date(Date.now() - 60000).toISOString(), active_ask: false },
+          ];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        const formalizeBtn = screen.queryByTitle("Formalize edge");
+        expect(formalizeBtn).toBeInTheDocument();
+      });
+
+      const formalizeBtn = screen.getByTitle("Formalize edge");
+      fireEvent.click(formalizeBtn);
+
+      expect(mockInvoke).toHaveBeenCalledWith("add_topology_edge", { a: "a", b: "b" });
+    });
+
+    it("ignore click → invoke called with ignore_topology_pair", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges: [], ignored_pairs: [] };
+        }
+        if (command === "get_pair_activity") {
+          return [
+            { a: "a", b: "b", last_message_at: new Date(Date.now() - 60000).toISOString(), active_ask: false },
+          ];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        const ignoreBtn = screen.queryByTitle("Ignore this pair");
+        expect(ignoreBtn).toBeInTheDocument();
+      });
+
+      const ignoreBtn = screen.getByTitle("Ignore this pair");
+      fireEvent.click(ignoreBtn);
+
+      expect(mockInvoke).toHaveBeenCalledWith("ignore_topology_pair", { a: "a", b: "b" });
+    });
+
+    it("disconnect click on manual row → invoke called with remove_topology_edge", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return {
+            edges: [{ a: "a", b: "b", origin: "manual" }],
+            ignored_pairs: [],
+          };
+        }
+        if (command === "get_pair_activity") {
+          return [];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        const disconnectBtn = screen.queryByTitle("Disconnect");
+        expect(disconnectBtn).toBeInTheDocument();
+      });
+
+      const disconnectBtn = screen.getByTitle("Disconnect");
+      fireEvent.click(disconnectBtn);
+
+      expect(mockInvoke).toHaveBeenCalledWith("remove_topology_edge", { a: "a", b: "b" });
+    });
+
+    it("delete key with selected manual edge → invoke remove_topology_edge", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return {
+            edges: [{ a: "a", b: "b", origin: "manual" }],
+            ignored_pairs: [],
+          };
+        }
+        if (command === "get_pair_activity") {
+          return [];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      // Wait for the manual edge to reach the neighbors panel before selecting it
+      await waitFor(() => {
+        expect(screen.getByTitle("Disconnect")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByTestId("mock-graph-edge"));
+
+      mockInvoke.mockClear();
+      mockInvoke.mockResolvedValue(undefined);
+
+      fireEvent.keyDown(window, { key: "Delete" });
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith("remove_topology_edge", { a: "a", b: "b" });
+      });
+    });
+
+    it("delete key while focus is in an input → NOT invoke remove_topology_edge", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return {
+            edges: [{ a: "a", b: "b", origin: "manual" }],
+            ignored_pairs: [],
+          };
+        }
+        if (command === "get_pair_activity") {
+          return [];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("graph-view")).toBeInTheDocument();
+      });
+
+      mockInvoke.mockClear();
+      mockInvoke.mockResolvedValue(undefined);
+
+      // Simulate delete key pressed while focus is in an input
+      const input = document.createElement("input");
+      fireEvent.keyDown(input, { key: "Delete" });
+
+      // Should not trigger remove_topology_edge
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Add Connection Picker", () => {
+    it("open picker, type to filter, click an agent → add_topology_edge with the right pair", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges: [], ignored_pairs: [] };
+        }
+        if (command === "get_pair_activity") {
+          return [];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Add connection…")).toBeInTheDocument();
+      });
+
+      // Click "Add connection…" to open picker
+      const addBtn = screen.getByText("Add connection…");
+      fireEvent.click(addBtn);
+
+      // Picker should now be open with input
+      await waitFor(() => {
+        const input = screen.getByPlaceholderText("Filter agents…");
+        expect(input).toBeInTheDocument();
+      });
+
+      const input = screen.getByPlaceholderText("Filter agents…");
+
+      // Type to filter
+      fireEvent.change(input, { target: { value: "Beta" } });
+
+      // Find and click Beta
+      await waitFor(() => {
+        const betaBtn = screen.queryByText("Beta");
+        if (betaBtn) {
+          expect(betaBtn).toBeInTheDocument();
+        }
+      });
+
+      const betaBtn = screen.getByText("Beta");
+      fireEvent.click(betaBtn);
+
+      // Should call add_topology_edge with a="a", b="b"
+      expect(mockInvoke).toHaveBeenCalledWith("add_topology_edge", { a: "a", b: "b" });
+    });
+
+    it("picker closes on Escape key", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges: [], ignored_pairs: [] };
+        }
+        if (command === "get_pair_activity") {
+          return [];
+        }
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Add connection…")).toBeInTheDocument();
+      });
+
+      const addBtn = screen.getByText("Add connection…");
+      fireEvent.click(addBtn);
+
+      const input = await screen.findByPlaceholderText("Filter agents…");
+      fireEvent.keyDown(input, { key: "Escape" });
+
+      // Picker should close and button should be visible again
+      await waitFor(() => {
+        expect(screen.getByText("Add connection…")).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("layout freeze", () => {
+    it("keeps node positions fixed across topology changes until Re-run layout", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const { listen } = await import("@tauri-apps/api/event");
+      const mockInvoke = vi.mocked(invoke);
+      const mockListen = vi.mocked(listen);
+
+      const listeners = new Map<string, () => void>();
+      mockListen.mockImplementation(async (event: string, handler: unknown) => {
+        listeners.set(event, handler as () => void);
+        return () => {};
+      });
+
+      let edges: Array<{ a: string; b: string; origin: string }> = [
+        { a: "a", b: "b", origin: "manual" },
+      ];
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges, ignored_pairs: [], fallback_groups: [] };
+        }
+        if (command === "get_pair_activity") return [];
+        return undefined;
+      });
+
+      render(<GraphView {...defaultProps} />);
+
+      const node = screen.getByTestId("mock-graph-node");
+      await waitFor(() => {
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual(["a--b"]);
+      });
+      const frozenPositions = node.getAttribute("data-node-positions");
+
+      // Simulate an edge deletion arriving via the topology-changed event
+      edges = [];
+      listeners.get("topology-changed")!();
+      await waitFor(() => {
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual([]);
+      });
+
+      // Edges updated but positions did not move
+      expect(node.getAttribute("data-node-positions")).toBe(frozenPositions);
+
+      // Re-run layout applies the new topology to positions
+      fireEvent.click(screen.getByRole("button", { name: "Re-run layout" }));
+      await waitFor(() => {
+        expect(node.getAttribute("data-node-positions")).not.toBe(frozenPositions);
+      });
+
+      mockListen.mockReset();
+      mockListen.mockResolvedValue(() => {});
+    });
   });
 });

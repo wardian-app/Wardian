@@ -277,6 +277,26 @@ export interface GridLayout {
     row_height: number;      // Fixed height for all rows in pixels
 }
 
+export interface TopologyEdgeDto {
+  a: string;
+  b: string;
+  origin: string; // "manual" | "rule:<rule-id>:<instance>"
+}
+
+export interface TopologySnapshot {
+  edges: TopologyEdgeDto[];
+  ignored_pairs: [string, string][];
+  fallback_groups: string[][];
+}
+
+export interface PairActivityEntry {
+  a: string;
+  b: string;
+  last_message_at: string;
+  active_ask: boolean;
+  awaiting_reply_from: string | null;
+}
+
 export interface AgentTelemetry {
     session_id: string;
     cpu_usage: number;

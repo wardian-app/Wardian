@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
@@ -311,8 +311,10 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             queue_policy,
             approval_action,
             origin,
+            target_scope,
         } => {
             let state = app.state::<AppState>();
+            let scope_all = target_scope.as_deref() == Some("all");
             let delivery = deliver_message_to_target(
                 Some(app),
                 &state,
@@ -323,6 +325,7 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 queue_policy,
                 approval_action.as_ref(),
                 origin.as_ref(),
+                scope_all,
             )
             .await?;
             record_conversation_delivery(&state, &delivery, &message, origin.as_ref()).await;
@@ -360,9 +363,15 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             origin,
         } => {
             let state = app.state::<AppState>();
-            let reply =
-                submit_structured_reply(&state, &request_id, status, &body, origin.as_ref())
-                    .await?;
+            let reply = submit_structured_reply(
+                &state,
+                &request_id,
+                status,
+                &body,
+                origin.as_ref(),
+                Some(app),
+            )
+            .await?;
             ok_json(&ReplyResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
                 ok: true,
@@ -786,6 +795,47 @@ async fn resolve_send_targets_in_state(state: &AppState, target: &str) -> Vec<St
         .unwrap_or_default()
 }
 
+/// Neighbors-scoped broadcast/class/name resolution when the sender is an agent.
+/// UUID and exact-name misses fall back to global (soft boundary: explicit
+/// targeting always works). scope_all=true disables scoping (e.g. orchestrator broadcast).
+async fn resolve_send_targets_scoped(
+    state: &AppState,
+    target: &str,
+    sender_session_id: Option<&str>,
+    scope_all: bool,
+) -> Vec<String> {
+    let global = resolve_send_targets_in_state(state, target).await;
+    let Some(sender) = sender_session_id.filter(|_| !scope_all) else {
+        return global;
+    };
+
+    // Exact UUID targeting is never scoped.
+    if global.len() == 1 && global[0] == target {
+        return global;
+    }
+
+    let Some(home) = crate::utils::fs::get_wardian_home() else {
+        crate::utils::logging::log_debug(
+            "[Wardian] wardian home unavailable; send target resolution falling back to global scope",
+        );
+        return global;
+    };
+    let topology = wardian_core::topology::load_topology(&home);
+    let refs = state.topology_agent_refs().await;
+
+    let neighbors = wardian_core::topology::resolve_neighbors(sender, &topology, &refs);
+    let allowed = neighbors.member_uuids();
+
+    if target == "all" || target.starts_with("class:") {
+        return global.into_iter().filter(|id| allowed.contains(id)).collect();
+    }
+
+    // Bare name: prefer neighbors match; fall back to global exact match.
+    let neighbors_matches: Vec<String> =
+        global.iter().filter(|id| allowed.contains(*id)).cloned().collect();
+    if neighbors_matches.is_empty() { global } else { neighbors_matches }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn deliver_message_to_target(
     app: Option<&AppHandle>,
@@ -797,9 +847,12 @@ async fn deliver_message_to_target(
     queue_policy: QueuePolicy,
     approval_action: Option<&ApprovalAction>,
     origin: Option<&MessageOrigin>,
+    scope_all: bool,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
     validate_send_message_options(target, thread, input_mode)?;
-    let session_ids = resolve_send_targets_in_state(state, target).await;
+    let sender_session_id =
+        origin.as_ref().map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
+    let session_ids = resolve_send_targets_scoped(state, target, sender_session_id, scope_all).await;
     if session_ids.is_empty() {
         return Err(ControlError::not_found(format!(
             "no agents matched target: {target}"
@@ -833,6 +886,9 @@ async fn deliver_message_to_target(
             )
             .await;
         let interaction_id = interaction.id.clone();
+        if let Some(app) = app {
+            let _ = app.emit("pair-activity-changed", ());
+        }
         let route = if input_mode == MessageInputMode::ApprovalAction
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
@@ -1681,6 +1737,7 @@ async fn handle_structured_ask(
             body_ref,
         )
         .await;
+    let _ = app.emit("pair-activity-changed", ());
     let mut payload = serde_json::json!({
         "request_id": task.id,
         "target_session_id": target_uuid,
@@ -1706,6 +1763,7 @@ async fn handle_structured_ask(
         QueuePolicy::QueueIfBusy,
         None,
         origin,
+        false,
     )
     .await
     {
@@ -1957,6 +2015,7 @@ async fn submit_structured_reply(
     status: ReplyStatus,
     body: &str,
     origin: Option<&MessageOrigin>,
+    app: Option<&AppHandle>,
 ) -> Result<StructuredReply, ControlError> {
     let source_session_id =
         origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
@@ -1984,6 +2043,10 @@ async fn submit_structured_reply(
                 ),
                 _ => ControlError::request_failed("failed to complete ask interaction"),
             })?;
+
+        if let Some(app) = app {
+            let _ = app.emit("pair-activity-changed", ());
+        }
 
         push_watch_event_for_agent(
             state,
@@ -3048,6 +3111,7 @@ async fn agent_config_to_identity(
             workspace: (!config.folder.trim().is_empty()).then_some(config.folder.clone()),
             last_status_at: None,
             status_source: StatusSource::Live,
+            visibility: None,
         }
     }
 }
@@ -3220,6 +3284,7 @@ fn snapshot_agent(agent: &crate::state::ActiveAgent) -> AgentIdentity {
         workspace: (!config.folder.trim().is_empty()).then_some(config.folder),
         last_status_at,
         status_source: StatusSource::Live,
+        visibility: None,
     }
 }
 
@@ -3253,6 +3318,10 @@ mod tests {
                 previous_home,
                 _temp: temp,
             }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self._temp.path()
         }
     }
 
@@ -3579,6 +3648,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3770,6 +3840,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4082,6 +4153,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcast_targets_scope_to_sender_neighbors() {
+        let home = TestWardianHome::new();
+        let mut topology = wardian_core::topology::Topology::default();
+        topology.add_edge("sender-1", "peer-1", "2026-07-02T00:00:00Z");
+        wardian_core::topology::save_topology(home.path(), &topology).unwrap();
+
+        let state = AppState::new();
+        insert_test_agent(&state, "sender-1", "SenderOne", "Coder").await;
+        insert_test_agent(&state, "peer-1", "PeerOne", "Reviewer").await;
+        insert_test_agent(&state, "stranger-1", "StrangerOne", "Coder").await;
+
+        // Neighbors-scoped send to "all": only peer-1 (in neighbors)
+        let neighbors = resolve_send_targets_scoped(&state, "all", Some("sender-1"), false).await;
+        let mut neighbors = neighbors;
+        neighbors.sort();
+        assert_eq!(neighbors, vec!["peer-1".to_string()]);
+
+        // Globally-scoped send to "all": all agents (including sender)
+        let global = resolve_send_targets_scoped(&state, "all", Some("sender-1"), true).await;
+        let mut global = global;
+        global.sort();
+        assert_eq!(global, vec!["peer-1".to_string(), "sender-1".to_string(), "stranger-1".to_string()]);
+
+        // No sender (human origin): same as scope_all=true (all agents)
+        let human_send = resolve_send_targets_scoped(&state, "all", None, false).await;
+        let mut human_send = human_send;
+        human_send.sort();
+        assert_eq!(human_send, vec!["peer-1".to_string(), "sender-1".to_string(), "stranger-1".to_string()]);
+
+        // Exact UUID targeting always works (soft boundary)
+        let exact_uuid = resolve_send_targets_scoped(&state, "stranger-1", Some("sender-1"), false).await;
+        assert_eq!(exact_uuid, vec!["stranger-1".to_string()]);
+    }
+
+    #[tokio::test]
     async fn message_delivery_writes_terminal_bytes_to_matched_agent() {
         let _home = TestWardianHome::new();
         let state = AppState::new();
@@ -4115,6 +4221,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4182,6 +4289,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            false,
         )
         .await
         .unwrap();
@@ -4223,6 +4331,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            false,
         )
         .await
         .unwrap();
@@ -4276,6 +4385,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            false,
         )
         .await
         .unwrap();
@@ -4316,6 +4426,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             Some(&ApprovalAction::Accept),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4362,6 +4473,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4451,6 +4563,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4497,6 +4610,7 @@ mod tests {
             QueuePolicy::LiveOnly,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4548,6 +4662,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4612,6 +4727,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4689,6 +4805,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4755,6 +4872,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4814,6 +4932,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4827,6 +4946,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4908,6 +5028,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             Some(&ApprovalAction::Accept),
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -4949,6 +5070,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4999,6 +5121,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5039,6 +5162,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5099,6 +5223,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5162,6 +5287,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5250,6 +5376,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5321,6 +5448,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            false,
         )
         .await
         .unwrap();
@@ -5343,6 +5471,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5375,6 +5504,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5429,6 +5559,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap_err();
@@ -5472,6 +5603,7 @@ mod tests {
             QueuePolicy::QueueIfBusy,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5550,6 +5682,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "agent-1".to_string(),
             }),
+            None,
         )
         .await
         .unwrap();
@@ -5663,6 +5796,7 @@ mod tests {
             wardian_core::control::ReplyStatus::Done,
             "finished",
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -5677,6 +5811,7 @@ mod tests {
             Some(&wardian_core::control::MessageOrigin::WardianAgent {
                 session_id: "agent-2".to_string(),
             }),
+            None,
         )
         .await
         .unwrap_err();
@@ -5688,6 +5823,7 @@ mod tests {
             wardian_core::control::ReplyStatus::Blocked,
             "blocked on review",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -5696,6 +5832,7 @@ mod tests {
             &request_id,
             wardian_core::control::ReplyStatus::Done,
             "finished",
+            None,
             None,
         )
         .await
@@ -5726,7 +5863,7 @@ mod tests {
             let state = AppState::new();
             insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
             let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None)
+            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None, None)
                 .await
                 .unwrap();
 

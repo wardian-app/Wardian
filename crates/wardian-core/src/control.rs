@@ -63,6 +63,9 @@ pub enum ControlRequest {
         approval_action: Option<ApprovalAction>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
+        /// Target resolution scope: "neighbors" (default) or "all" — for agent senders only
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_scope: Option<String>,
     },
     Ask {
         target: String,
@@ -677,6 +680,7 @@ mod tests {
             queue_policy: QueuePolicy::QueueIfBusy,
             approval_action: None,
             origin: None,
+            target_scope: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"send_message""#));
@@ -696,6 +700,7 @@ mod tests {
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -717,6 +722,7 @@ mod tests {
             origin: Some(MessageOrigin::WardianAgent {
                 session_id: "source-1".to_string(),
             }),
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -736,6 +742,7 @@ mod tests {
                 option: "allow_once".to_string(),
             }),
             origin: None,
+            target_scope: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -763,6 +770,7 @@ mod tests {
                 queue_policy: QueuePolicy::QueueIfBusy,
                 approval_action: None,
                 origin: None,
+                target_scope: None,
             }
         );
     }
@@ -1120,6 +1128,7 @@ mod tests {
                 workspace: Some("D:/repo/worktrees/review".to_string()),
                 last_status_at: None,
                 status_source: crate::identity::StatusSource::Live,
+                visibility: None,
             })
             .agent,
             worktree: Some(AgentWorktreeSummary {

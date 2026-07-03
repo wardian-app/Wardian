@@ -13,6 +13,9 @@ pub struct AgentIdentity {
     pub workspace: Option<String>,
     pub last_status_at: Option<String>,
     pub status_source: StatusSource,
+    /// Neighbors-visibility reason ("manual", "rule:...") — set only by neighbors-scoped listings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +159,7 @@ fn row_to_identity(row: AgentRow) -> AgentIdentity {
         workspace: row.workspace,
         last_status_at: row.last_status_at,
         status_source: StatusSource::Persisted,
+        visibility: None,
     }
 }
 

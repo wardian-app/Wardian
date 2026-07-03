@@ -15,14 +15,41 @@ pub async fn load_watchlists(_app: AppHandle) -> Result<serde_json::Value, Strin
 }
 
 #[tauri::command]
-pub async fn save_watchlists(watchlists: serde_json::Value, _app: AppHandle) -> Result<(), String> {
+pub async fn save_watchlists(watchlists: serde_json::Value, app: AppHandle) -> Result<(), String> {
     let app_dir = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Could not find home directory".to_string())?;
     let _ = std::fs::create_dir_all(&app_dir);
     let _ = std::fs::create_dir_all(app_dir.join("watchlists"));
     let path = app_dir.join("watchlists/index.json");
     let json = serde_json::to_string_pretty(&watchlists).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+
+    // Seed team cliques into topology when teams are created or members are
+    // added. Save and notify only when seeding actually added edges — plain
+    // watchlist saves (reorders, renames) must not churn topology.json or
+    // trigger graph refreshes.
+    if let Some(teams) = watchlists.get("teams").and_then(|v| v.as_array()) {
+        let mut topology = wardian_core::topology::load_topology(&app_dir);
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut edges_added = 0;
+        for team in teams {
+            let agent_ids = team_agent_ids(team);
+            if !agent_ids.is_empty() {
+                edges_added +=
+                    wardian_core::topology::seed_team_clique(&mut topology, &agent_ids, &now);
+            }
+        }
+        if edges_added > 0 {
+            if let Err(e) = wardian_core::topology::save_topology(&app_dir, &topology) {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology seeding on watchlist save failed: {e}"
+                ));
+            } else {
+                let _ = app.emit("topology-changed", ());
+            }
+        }
+    }
+
     Ok(())
 }
 

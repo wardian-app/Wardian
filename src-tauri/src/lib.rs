@@ -180,6 +180,27 @@ pub fn run() {
         eprintln!("Failed to initialize database: {}", e);
     }
 
+    // One-time topology migration: seed team cliques as manual edges, upgrade to version 2.
+    if let Some(home) = crate::utils::fs::get_wardian_home() {
+        let mut topology = wardian_core::topology::load_topology(&home);
+        // Home-aware check: a missing topology.json loads as a default carrying
+        // the CURRENT schema version, but machines with pre-existing teams and
+        // no file still need their one-time seed.
+        if wardian_core::topology::needs_team_seed_migration_for_home(&home, &topology) {
+            let teams = wardian_core::topology::load_team_memberships(&home);
+            let now = chrono::Utc::now().to_rfc3339();
+            for team in teams {
+                wardian_core::topology::seed_team_clique(&mut topology, &team.agent_ids, &now);
+            }
+            topology.version = 2;
+            if let Err(e) = wardian_core::topology::save_topology(&home, &topology) {
+                crate::manager::log_debug(&format!("[Wardian] topology migration save failed: {e}"));
+            } else {
+                crate::manager::log_debug("[Wardian] topology migrated to version 2 with seeded team cliques");
+            }
+        }
+    }
+
     #[cfg(windows)]
     if let Err(e) = crate::utils::process::init_app_process_supervisor() {
         eprintln!("Failed to initialize process supervisor: {}", e);
@@ -537,6 +558,12 @@ pub fn run() {
             commands::watchlist::load_opencode_last_assistant_text,
             commands::watchlist::load_agent_interactions,
             commands::watchlist::save_agent_interactions,
+            commands::topology::get_topology,
+            commands::topology::add_topology_edge,
+            commands::topology::remove_topology_edge,
+            commands::topology::ignore_topology_pair,
+            commands::topology::unignore_topology_pair,
+            commands::topology::get_pair_activity,
             commands::workflow::workflow_parse,
             commands::workflow::workflow_validate,
             commands::workflow::workflow_write,

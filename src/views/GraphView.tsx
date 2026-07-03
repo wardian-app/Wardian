@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { PanelRightOpen, RotateCcw, X } from "lucide-react";
-import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { PanelRightOpen, Plus, RotateCcw, Waypoints, X } from "lucide-react";
+import type { AgentConfig, AgentTelemetry, CloneMode, TopologySnapshot, PairActivityEntry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
@@ -12,7 +14,7 @@ function formatProviderName(provider: string | null | undefined): string {
 }
 import {
   buildAgentGraph,
-  type AgentGraphEdge,
+  RELATIONSHIP_REASON_LABELS,
   type GraphRelationshipReason,
 } from "../features/graph/graphProjection";
 
@@ -59,13 +61,66 @@ const ALL_REASONS: GraphRelationshipReason[] = [
 ];
 
 export const GraphView: React.FC<GraphViewProps> = (props) => {
-  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(new Set(ALL_REASONS));
+  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(new Set());
+  const [topology, setTopology] = useState<TopologySnapshot | null>(null);
+  const [pairActivity, setPairActivity] = useState<PairActivityEntry[]>([]);
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(
     Array.from(props.selectedAgentIds)[0] ?? null,
   );
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [resetSignal, setResetSignal] = useState(0);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState("");
+  // Layout freeze: node positions are captured once topology data is loaded
+  // and reused across edge edits, so drawing or deleting edges never moves
+  // nodes. A re-layout (button or node-set change) clears the freeze.
+  const frozenLayoutRef = useRef<{ nodeKey: string; positions: Map<string, { x: number; y: number }> } | null>(null);
+  const [layoutNonce, setLayoutNonce] = useState(0);
+
+  const rerunLayout = () => {
+    frozenLayoutRef.current = null;
+    setLayoutNonce((value) => value + 1);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshTopology = async () => {
+      try {
+        const t = await invoke<TopologySnapshot>("get_topology");
+        if (!cancelled) setTopology(t);
+      } catch {
+        // Silently ignore errors
+      }
+    };
+    const refreshActivity = async () => {
+      try {
+        const a = await invoke<PairActivityEntry[]>("get_pair_activity");
+        if (!cancelled) setPairActivity(a);
+      } catch {
+        // Silently ignore errors
+      }
+    };
+
+    void refreshTopology();
+    void refreshActivity();
+
+    // Capture the listen() promises synchronously so cleanup can always
+    // reach the unsubscribe functions, even if unmount happens before the
+    // registrations resolve.
+    const unlistenPromises: Promise<() => void>[] = [
+      listen("topology-changed", refreshTopology),
+      listen("pair-activity-changed", refreshActivity),
+    ];
+
+    return () => {
+      cancelled = true;
+      unlistenPromises.forEach((p) => {
+        p.then((un) => un()).catch(() => {});
+      });
+    };
+  }, []);
 
   const projection = useMemo(() => buildAgentGraph({
     agents: props.allAgents,
@@ -76,6 +131,9 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     selectedAgentIds: props.selectedAgentIds,
     enabledReasons,
     offAgentIds: props.offAgentIds,
+    topology: topology ?? undefined,
+    pairActivity,
+    frozenPositions: frozenLayoutRef.current?.positions,
   }), [
     props.allAgents,
     props.telemetry,
@@ -85,11 +143,33 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     props.selectedAgentIds,
     props.offAgentIds,
     enabledReasons,
+    topology,
+    pairActivity,
+    layoutNonce,
   ]);
   const projectionNodeIds = useMemo(
     () => new Set(projection.nodes.map((node) => node.id)),
     [projection.nodes],
   );
+
+  // Capture the layout once topology is loaded, and re-run it when the set
+  // of visible nodes changes (agents added/removed or scope switched).
+  useEffect(() => {
+    if (!topology) return; // don't freeze the pre-topology layout
+    const nodeKey = projection.nodes.map((node) => node.id).sort().join("|");
+    const frozen = frozenLayoutRef.current;
+    if (frozen && frozen.nodeKey !== nodeKey) {
+      frozenLayoutRef.current = null;
+      setLayoutNonce((value) => value + 1);
+      return;
+    }
+    if (!frozen) {
+      frozenLayoutRef.current = {
+        nodeKey,
+        positions: new Map(projection.nodes.map((node) => [node.id, { x: node.x, y: node.y }])),
+      };
+    }
+  }, [projection.nodes, topology]);
 
   useEffect(() => {
     const selectedIds = Array.from(props.selectedAgentIds);
@@ -106,8 +186,32 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     });
   }, [projection.nodes, projectionNodeIds, props.selectedAgentIds]);
 
+  useEffect(() => {
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      if (event.key === "Delete" && selectedEdgeId) {
+        // Skip if typing in an input or contentEditable element
+        if (event.target instanceof HTMLInputElement ||
+            event.target instanceof HTMLTextAreaElement ||
+            (event.target instanceof HTMLElement && event.target.contentEditable === "true")) {
+          return;
+        }
+
+        const edge = projection.commEdges.find((e) => e.id === selectedEdgeId);
+        if (edge && edge.origin === "manual") {
+          try {
+            await invoke("remove_topology_edge", { a: edge.source, b: edge.target });
+            setSelectedEdgeId(null);
+          } catch {
+            // Silently ignore errors
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedEdgeId, projection.commEdges]);
+
   const inspectedAgent = projection.nodes.find((node) => node.id === inspectedAgentId) ?? projection.nodes[0] ?? null;
-  const relationshipEdges = inspectedAgent ? relatedEdges(projection.edges, inspectedAgent.id) : [];
   const filteredCount = props.filteredAgents.length;
 
   const toggleReason = (reason: GraphRelationshipReason) => {
@@ -158,6 +262,11 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
           <div className="graph-scope-count">{filteredCount} agents visible</div>
         </div>
         <div className="graph-lenses" aria-label="Graph relationship lenses">
+          <div className="graph-shift-drag-hint" title="Shift-drag between agents to create connections">
+            <Plus size={14} strokeWidth={2.2} />
+            <span className="text-muted">Shift-drag to connect</span>
+          </div>
+          <div className="graph-lens-separator" />
           {ALL_REASONS.map((reason) => (
             <button
               key={reason}
@@ -165,11 +274,20 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               className={`graph-lens graph-lens--${reason.replace(/_/g, "-")} ${enabledReasons.has(reason) ? "active" : ""}`}
               onClick={() => toggleReason(reason)}
             >
-              {reason.replace(/_/g, " ")}
+              {RELATIONSHIP_REASON_LABELS[reason]}
             </button>
           ))}
         </div>
         <div className="graph-toolbar-action">
+          <button
+            type="button"
+            className="graph-icon-button"
+            aria-label="Re-run layout"
+            title="Re-run layout (applies edge changes to node positions)"
+            onClick={rerunLayout}
+          >
+            <Waypoints size={14} strokeWidth={2.2} />
+          </button>
           <button
             type="button"
             className="graph-icon-button"
@@ -204,6 +322,13 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               onSelectAgent={selectAgent}
               onOpenAgent={props.onOpenAgentInGrid}
               onContextMenu={openContextMenu}
+              selectedEdgeId={selectedEdgeId}
+              onSelectEdge={setSelectedEdgeId}
+              onConnect={(a, b) => {
+                invoke("add_topology_edge", { a, b }).catch((error) => {
+                  console.error("add_topology_edge failed", error);
+                });
+              }}
             />
           )}
         </div>
@@ -257,28 +382,24 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               </dl>
               <div className="graph-relationships">
                 <div className="label-small">Relationships</div>
-                {relationshipEdges.length === 0 ? (
-                  <p>No visible relationships under the current lenses.</p>
-                ) : (
-                  <ul>
-                    {relationshipEdges.map((edge) => {
-                      const neighborId = edge.source === inspectedAgent.id ? edge.target : edge.source;
-                      const neighbor = projection.nodes.find((node) => node.id === neighborId);
-                      return (
-                        <li
-                          key={edge.id}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            openContextMenu(neighborId, event.clientX, event.clientY);
-                          }}
-                        >
-                          <span>{neighbor?.label ?? neighborId}</span>
-                          <small>{edge.reasons.join(", ").replace(/_/g, " ")}</small>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                {renderNeighborsPanel(
+                  inspectedAgent.id,
+                  projection,
+                  props.allAgents,
+                  (a, b) => {
+                    invoke("add_topology_edge", { a, b }).catch(() => {});
+                  },
+                  (a, b) => {
+                    invoke("remove_topology_edge", { a, b }).catch(() => {});
+                  },
+                  (a, b) => {
+                    invoke("ignore_topology_pair", { a, b }).catch(() => {});
+                  },
+                  openContextMenu,
+                  pickerOpen,
+                  setPickerOpen,
+                  pickerSearch,
+                  setPickerSearch,
                 )}
               </div>
               <button type="button" className="graph-open-grid" onClick={() => props.onOpenAgentInGrid(inspectedAgent.id)}>
@@ -320,10 +441,175 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   );
 };
 
-function relatedEdges(edges: AgentGraphEdge[], agentId: string) {
-  return edges.filter((edge) => edge.source === agentId || edge.target === agentId);
-}
-
 function isInsideContextMenu(target: EventTarget | null) {
   return target instanceof Element && Boolean(target.closest('[data-testid="agent-context-menu"]'));
+}
+
+function renderNeighborsPanel(
+  agentId: string,
+  projection: ReturnType<typeof buildAgentGraph>,
+  allAgents: AgentConfig[],
+  onAdd: (a: string, b: string) => void,
+  onRemove: (a: string, b: string) => void,
+  onIgnore: (a: string, b: string) => void,
+  onContextMenu: (agentId: string, x: number, y: number) => void,
+  pickerOpen: boolean,
+  setPickerOpen: (open: boolean) => void,
+  pickerSearch: string,
+  setPickerSearch: (search: string) => void,
+): React.ReactNode {
+  const edges = projection.commEdges.filter((e) => e.source === agentId || e.target === agentId);
+
+  return (
+    <>
+      {edges.length === 0 ? (
+        <p>No visible connections.</p>
+      ) : (
+        <ul className="graph-neighbors-list">
+          {edges.map((edge) => {
+        const neighborId = edge.source === agentId ? edge.target : edge.source;
+        const neighbor = projection.nodes.find((node) => node.id === neighborId);
+        const label = neighbor?.label ?? neighborId;
+
+        return (
+          <li key={edge.id} className="graph-neighbors-row">
+            <div
+              className="graph-neighbors-row-info"
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onContextMenu(neighborId, event.clientX, event.clientY);
+              }}
+            >
+              <span className="graph-neighbors-name">{label}</span>
+              {edge.origin === "ghost" && (
+                <span className="graph-inspector-unmapped">Unmapped</span>
+              )}
+            </div>
+            {edge.origin === "manual" && (
+              <button
+                type="button"
+                className="graph-neighbors-action-btn"
+                onClick={() => onRemove(edge.source, edge.target)}
+                title="Disconnect"
+              >
+                ×
+              </button>
+            )}
+            {edge.origin === "ghost" && (
+              <div className="graph-neighbors-ghost-actions">
+                <button
+                  type="button"
+                  className="graph-neighbors-action-btn graph-neighbors-action-formalize"
+                  onClick={() => onAdd(edge.source, edge.target)}
+                  title="Formalize edge"
+                >
+                  Formalize
+                </button>
+                <button
+                  type="button"
+                  className="graph-neighbors-action-btn graph-neighbors-action-ignore"
+                  onClick={() => onIgnore(edge.source, edge.target)}
+                  title="Ignore this pair"
+                >
+                  Ignore
+                </button>
+              </div>
+            )}
+          </li>
+        );
+          })}
+        </ul>
+      )}
+      <div className={edges.length === 0 ? "graph-neighbors-add-standalone" : "graph-neighbors-row graph-neighbors-add-row"}>
+        {pickerOpen ? (
+          <div className="graph-neighbors-picker">
+            <input
+              type="text"
+              className="graph-neighbors-picker-input"
+              placeholder="Filter agents…"
+              value={pickerSearch}
+              onChange={(e) => setPickerSearch(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setPickerOpen(false);
+                  setPickerSearch("");
+                }
+              }}
+              autoFocus
+            />
+            {renderPickerList(
+              agentId,
+              allAgents,
+              projection,
+              pickerSearch,
+              (selectedId) => {
+                onAdd(agentId, selectedId);
+                setPickerOpen(false);
+                setPickerSearch("");
+              },
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="graph-neighbors-add-btn"
+            onClick={() => setPickerOpen(true)}
+          >
+            Add connection…
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+function renderPickerList(
+  agentId: string,
+  allAgents: AgentConfig[],
+  projection: ReturnType<typeof buildAgentGraph>,
+  search: string,
+  onSelect: (agentId: string) => void,
+): React.ReactNode {
+  // Get IDs of agents already connected via manual edges
+  const connectedIds = new Set(
+    projection.commEdges
+      .filter((e) => e.origin === "manual" && (e.source === agentId || e.target === agentId))
+      .map((e) => (e.source === agentId ? e.target : e.source)),
+  );
+
+  // Filter agents: visible in projection, not the inspected agent, not already connected
+  const available = projection.nodes
+    .filter((node) => node.id !== agentId && !connectedIds.has(node.id))
+    .map((node) => node.id);
+
+  // Apply search filter
+  const searchLower = search.toLowerCase();
+  const filtered = available.filter((id) => {
+    const agent = allAgents.find((a) => a.session_id === id);
+    return agent && agent.session_name.toLowerCase().includes(searchLower);
+  });
+
+  if (filtered.length === 0) {
+    return <p className="graph-neighbors-picker-empty">No available agents</p>;
+  }
+
+  return (
+    <ul className="graph-neighbors-picker-list">
+      {filtered.map((id) => {
+        const agent = allAgents.find((a) => a.session_id === id);
+        return (
+          <li key={id}>
+            <button
+              type="button"
+              className="graph-neighbors-picker-item"
+              onClick={() => onSelect(id)}
+            >
+              {agent?.session_name}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }

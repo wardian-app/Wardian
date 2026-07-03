@@ -19,7 +19,6 @@ function node(id: string, label: string) {
     agent: {} as never,
     clusterId: null,
     selected: false,
-    recent: true,
   };
 }
 
@@ -41,7 +40,6 @@ describe("buildGardenAgentUnits", () => {
     expect(first.ref).toEqual({ kind: "agent", id: "a1" });
     expect(first.position).toEqual(AGENT_LAYOUT_CENTER);
     expect(first.color).toBe("var(--color-wardian-success)");
-    expect(first.recent).toBe(true);
     // The second unit fans outward, so it never overlaps the first.
     expect(distance(second.position, AGENT_LAYOUT_CENTER)).toBeCloseTo(60, 5);
     expect(second.position).not.toEqual(first.position);

@@ -243,6 +243,10 @@ pub struct SendArgs {
     /// Maximum time to wait, e.g. 30s, 10m, or 1000ms
     #[arg(long, default_value = "10m")]
     pub timeout: String,
+
+    /// Target resolution scope for broadcast/class targets: neighbors (default) or all
+    #[arg(long, value_parser = ["neighbors", "all"], default_value = "neighbors")]
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -353,7 +357,9 @@ pub enum AgentCommand {
         target: Option<String>,
     },
     List {
-        #[arg(long, default_value = "workspace")]
+        /// auto (neighbors when WARDIAN_SESSION_ID is set, else workspace),
+        /// neighbors, workspace, or all
+        #[arg(long, default_value = "auto")]
         scope: String,
         #[arg(long)]
         status: Option<String>,
@@ -755,6 +761,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_send_scope_all() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "send",
+            "hi",
+            "--to",
+            "all",
+            "--scope",
+            "all",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+        assert_eq!(args.scope, "all");
+    }
+
+    #[test]
+    fn send_scope_defaults_to_neighbors() {
+        let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "agent-1"]).unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!("expected Send command")
+        };
+        assert_eq!(args.scope, "neighbors");
+    }
+
+    #[test]
     fn parses_agent_show_explicit_target() {
         let cli = Cli::try_parse_from(["wardian", "agent", "show", "coder-a1"]).unwrap();
         let Command::Agent(args) = cli.command else {
@@ -796,6 +829,21 @@ mod tests {
                 && status.as_deref() == Some("idle")
                 && class_name.as_deref() == Some("Coder")
                 && workspace.as_deref() == Some("D:/Development/Wardian")
+        ));
+    }
+
+    #[test]
+    fn parses_agent_list_scope_defaults_to_auto() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "list"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::List {
+                scope,
+                ..
+            }) if scope == "auto"
         ));
     }
 

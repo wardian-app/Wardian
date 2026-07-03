@@ -27,7 +27,6 @@ describe("AgentUnit", () => {
           label: "Alpha",
           status: "Idle",
           color: "var(--color-wardian-success)",
-          recent: false,
           position: { x: 0, y: 0 },
         }}
         selected={false}

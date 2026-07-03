@@ -923,6 +923,21 @@ select option {
   height: 100%;
 }
 
+.graph-connect-line {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.graph-connect-line line {
+  stroke: var(--color-wardian-accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
 .graph-tooltip {
   position: absolute;
   z-index: 2;
@@ -1061,6 +1076,203 @@ select option {
   font-size: 11px;
   font-weight: 700;
 }
+
+.graph-shift-drag-hint {
+  height: 26px;
+  padding: 0 6px;
+  color: var(--color-wardian-text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+  font-size: 12px;
+}
+
+.graph-lens-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--color-wardian-border);
+  pointer-events: none;
+}
+
+.graph-neighbors-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.graph-neighbors-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 6px;
+  background: var(--color-wardian-input-bg);
+}
+
+.graph-neighbors-row-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.graph-neighbors-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-wardian-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-inspector-unmapped {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--color-wardian-warning), transparent 90%);
+  color: var(--color-wardian-warning);
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.graph-neighbors-action-btn {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  color: var(--color-wardian-text-muted);
+  background: var(--color-wardian-card);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.graph-neighbors-action-btn:hover {
+  color: var(--color-wardian-text);
+  border-color: var(--color-wardian-accent);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
+}
+
+.graph-neighbors-ghost-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.graph-neighbors-action-formalize {
+  color: var(--color-wardian-success);
+}
+
+.graph-neighbors-action-formalize:hover {
+  border-color: var(--color-wardian-success);
+  background: color-mix(in srgb, var(--color-wardian-success), transparent 92%);
+}
+
+.graph-neighbors-action-ignore {
+  color: var(--color-wardian-error);
+}
+
+.graph-neighbors-action-ignore:hover {
+  border-color: var(--color-wardian-error);
+  background: color-mix(in srgb, var(--color-wardian-error), transparent 92%);
+}
+
+.graph-neighbors-add-row,
+.graph-neighbors-add-standalone {
+  margin-top: 6px;
+  padding: 6px;
+}
+
+.graph-neighbors-add-btn {
+  width: 100%;
+  height: 28px;
+  border: 1px dashed var(--color-wardian-border);
+  border-radius: 6px;
+  color: var(--color-wardian-text-muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: capitalize;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.graph-neighbors-add-btn:hover {
+  color: var(--color-wardian-accent);
+  border-color: var(--color-wardian-accent);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 92%);
+}
+
+.graph-neighbors-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.graph-neighbors-picker-input {
+  width: 100%;
+  height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  color: var(--color-wardian-text);
+  background: var(--color-wardian-input-bg);
+  font-size: 11px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.graph-neighbors-picker-input:focus {
+  border-color: var(--color-wardian-accent);
+}
+
+.graph-neighbors-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  background: var(--color-wardian-card);
+}
+
+.graph-neighbors-picker-item {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-wardian-text);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.graph-neighbors-picker-item:hover {
+  background-color: color-mix(in srgb, var(--color-wardian-accent), transparent 88%);
+}
+
+.graph-neighbors-picker-empty {
+  padding: 8px;
+  margin: 0;
+  color: var(--color-wardian-text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
 
 @media (max-width: 760px) {
   .graph-toolbar {

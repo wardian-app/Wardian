@@ -17,7 +17,6 @@ export interface GardenAgentUnit {
   label: string;
   status: string;
   color: string; // may be a CSS var() expression; resolve before Konva fill
-  recent: boolean;
   position: GardenPosition;
 }
 

@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use wardian_core::identity::{AgentIdentity, StatusSource};
 
 const DEFAULT_FIELDS: &[&str] = &["name", "uuid", "class", "provider", "workspace", "status"];
-const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at"];
+const VERBOSE_FIELDS: &[&str] = &["pid", "started_at", "last_status_at", "visibility"];
 const ALL_FIELDS: &[&str] = &[
     "name",
     "uuid",
@@ -15,6 +15,7 @@ const ALL_FIELDS: &[&str] = &[
     "pid",
     "started_at",
     "last_status_at",
+    "visibility",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -155,6 +156,9 @@ fn agent_to_map(agent: &AgentIdentity) -> Map<String, Value> {
             Value::String(last_status_at.clone()),
         );
     }
+    if let Some(visibility) = &agent.visibility {
+        values.insert("visibility".to_string(), Value::String(visibility.clone()));
+    }
     values
 }
 
@@ -200,6 +204,7 @@ mod tests {
             workspace: Some("D:/Development/Wardian".to_string()),
             last_status_at: Some("2026-05-03T20:01:00.000Z".to_string()),
             status_source: StatusSource::Persisted,
+            visibility: None,
         }
     }
 
@@ -260,6 +265,24 @@ mod tests {
         .unwrap();
         assert!(rendered.contains(r#""pid": 111"#));
         assert!(rendered.contains(r#""workspace": "D:/Development/Wardian""#));
+    }
+
+    #[test]
+    fn verbose_adds_visibility_when_set() {
+        let mut visible = agent();
+        visible.visibility = Some("manual".to_string());
+        let rendered = render_show(
+            &visible,
+            &RenderOptions {
+                verbose: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(rendered.contains(r#""visibility": "manual""#));
+
+        let default_rendered = render_show(&visible, &RenderOptions::default()).unwrap();
+        assert!(!default_rendered.contains(r#""visibility""#));
     }
 
     #[test]
