@@ -62,6 +62,22 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const renderSignature = useMemo(() => graphRenderSignature(projection), [projection]);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; title: string; detail?: string } | null>(null);
   const [sigmaInstance, setSigmaInstance] = useState<Sigma | null>(null);
+  const [themeVersion, setThemeVersion] = useState(0);
+  const [connectLine, setConnectLine] = useState<
+    { x1: number; y1: number; x2: number; y2: number } | null
+  >(null);
+
+  // Sigma bakes resolved CSS-variable values into node/edge/label attributes,
+  // so a theme flip (root data-theme attribute) must force a re-render pass
+  // that re-resolves them — otherwise the graph keeps the old theme's colors.
+  useEffect(() => {
+    const observer = new MutationObserver(() => setThemeVersion((v) => v + 1));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     handlersRef.current = { onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect };
@@ -88,6 +104,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       // Agent graphs stay small (tens of nodes), so every label can render
       // at every zoom level without clutter or measurable cost.
       labelRenderedSizeThreshold: 0,
+      // Sigma's default hover/highlight drawer hardcodes a white bubble, which
+      // makes light labels unreadable in dark theme (and vice versa once the
+      // theme flips). Resolve bubble and text from theme variables at draw
+      // time instead — hover draws are infrequent, so per-draw resolution is
+      // cheap and always current.
+      defaultDrawNodeHover: (hoverContext, data, hoverSettings) =>
+        drawThemedNodeHover(hoverContext, data, hoverSettings, container),
     });
     graphRef.current = graph;
     rendererRef.current = renderer;
@@ -99,11 +122,21 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       if (!isShiftKey) return;
       dragSourceRef.current = node;
       renderer.getCamera().disable();
+      // Rubber-band feedback: without a visible line the gesture is
+      // indistinguishable from a dead drag, and a release over empty canvas
+      // silently discards the connection.
+      const display = renderer.getNodeDisplayData(node);
+      const start = display ? renderer.framedGraphToViewport(display) : null;
+      const point = sigmaPointerPosition(event);
+      if (start) {
+        setConnectLine({ x1: start.x, y1: start.y, x2: point.x, y2: point.y });
+      }
     });
     renderer.on("upNode", ({ node }: SigmaNodePayload) => {
       const source = dragSourceRef.current;
       dragSourceRef.current = null;
       renderer.getCamera().enable();
+      setConnectLine(null);
       if (source && node !== source) {
         handlersRef.current.onConnect?.(source, node);
       }
@@ -126,6 +159,12 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     renderer.getMouseCaptor().on("mouseup", () => {
       renderer.getCamera().enable();
       dragSourceRef.current = null;
+      setConnectLine(null);
+    });
+    renderer.getMouseCaptor().on("mousemovebody", (coords: { x?: number; y?: number }) => {
+      if (!dragSourceRef.current) return;
+      const point = sigmaPointerPosition(coords);
+      setConnectLine((line) => (line ? { ...line, x2: point.x, y2: point.y } : line));
     });
     renderer.on("enterNode", ({ node, event }: SigmaPointerPayload) => {
       const graphNode = projectionRef.current.nodes.find((candidate) => candidate.id === node);
@@ -231,7 +270,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     renderer.setSetting("labelColor", { color: labelColor });
 
     renderer.refresh();
-  }, [renderSignature, selectedEdgeId]);
+  }, [renderSignature, selectedEdgeId, themeVersion]);
 
   const previousResetSignalRef = useRef(resetSignal);
   useEffect(() => {
@@ -245,6 +284,11 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
       <div ref={containerRef} data-testid="graph-canvas" className="graph-canvas">
         <EdgeActivityOverlay sigma={sigmaInstance} commEdges={projection.commEdges} />
       </div>
+      {connectLine && (
+        <svg className="graph-connect-line" data-testid="graph-connect-line" aria-hidden="true">
+          <line x1={connectLine.x1} y1={connectLine.y1} x2={connectLine.x2} y2={connectLine.y2} />
+        </svg>
+      )}
       {tooltip && (
         <div
           className="graph-tooltip"
@@ -299,6 +343,51 @@ function graphRenderSignature(projection: AgentGraphProjection) {
 
 function formatRelationshipReason(reason: GraphRelationshipReason) {
   return reason.replace(/_/g, " ");
+}
+
+/**
+ * Themed replacement for Sigma's default hover/highlight label drawer, whose
+ * hardcoded white bubble makes light-on-dark labels unreadable. Colors are
+ * resolved from theme variables per draw so they always match the live theme.
+ */
+function drawThemedNodeHover(
+  context: CanvasRenderingContext2D,
+  data: { x: number; y: number; size: number; label?: string | null },
+  settings: { labelSize: number; labelFont: string; labelWeight?: string },
+  container: HTMLElement,
+) {
+  if (typeof data.label !== "string" || data.label.length === 0) return;
+
+  const size = settings.labelSize;
+  context.font = `${settings.labelWeight ?? "normal"} ${size}px ${settings.labelFont}`;
+
+  const background = resolveGraphColor("var(--color-wardian-card)", container);
+  const border = resolveGraphColor("var(--color-wardian-border)", container);
+  const text = resolveGraphColor("var(--color-wardian-text)", container);
+
+  const PADDING = 3;
+  const textWidth = context.measureText(data.label).width;
+  const boxWidth = Math.round(textWidth + 2 * PADDING);
+  const boxHeight = Math.round(size + 2 * PADDING);
+  const boxX = data.x + data.size + 2;
+  const boxY = data.y - boxHeight / 2;
+
+  const roundable = context as CanvasRenderingContext2D & {
+    roundRect?: (x: number, y: number, w: number, h: number, radii: number) => void;
+  };
+  context.beginPath();
+  if (typeof roundable.roundRect === "function") {
+    roundable.roundRect(boxX, boxY, boxWidth, boxHeight, 4);
+  } else {
+    context.rect(boxX, boxY, boxWidth, boxHeight);
+  }
+  context.fillStyle = background;
+  context.fill();
+  context.strokeStyle = border;
+  context.lineWidth = 1;
+  context.stroke();
+  context.fillStyle = text;
+  context.fillText(data.label, boxX + PADDING, data.y + size / 3);
 }
 
 function getCommEdgeColor(edge: { state: string; recency: number }, container: HTMLElement) {

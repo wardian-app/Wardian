@@ -52,6 +52,8 @@ vi.mock("sigma", () => ({
       kill: mocks.kill,
       refresh: mocks.refresh,
       setSetting: mocks.setSetting,
+      getNodeDisplayData: (node: string) => ({ x: 10, y: 10, size: 6, node }),
+      framedGraphToViewport: (coords: { x: number; y: number }) => coords,
     };
   }),
 }));
@@ -668,6 +670,69 @@ describe("GraphCanvas", () => {
     mocks.handlers.get("upNode")?.({ node: "b" });
 
     expect(onConnect).toHaveBeenCalledWith("a", "b");
+  });
+
+  it("shows a rubber-band line during a shift-drag and clears it on release", () => {
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+        onConnect={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("graph-connect-line")).not.toBeInTheDocument();
+
+    act(() => {
+      mocks.handlers.get("downNode")?.({
+        node: "a",
+        event: { x: 20, y: 20, original: { shiftKey: true } as MouseEvent },
+      });
+    });
+    expect(screen.getByTestId("graph-connect-line")).toBeInTheDocument();
+
+    act(() => {
+      mocks.handlers.get("mousemovebody")?.({ x: 40, y: 50 });
+    });
+    const line = screen.getByTestId("graph-connect-line").querySelector("line");
+    expect(line?.getAttribute("x2")).toBe("40");
+    expect(line?.getAttribute("y2")).toBe("50");
+
+    act(() => {
+      mocks.handlers.get("mouseup")?.({});
+    });
+    expect(screen.queryByTestId("graph-connect-line")).not.toBeInTheDocument();
+  });
+
+  it("re-renders theme-derived colors when the root data-theme attribute changes", async () => {
+    render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    const rebuildsBefore = mocks.graphology.clear.mock.calls.length;
+    const previous = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute(
+      "data-theme",
+      previous === "dark" ? "light" : "dark",
+    );
+
+    // MutationObserver delivery is async; the render effect must re-run and
+    // rebuild the graph so node/edge/label colors re-resolve under the new theme.
+    await vi.waitFor(() => {
+      expect(mocks.graphology.clear.mock.calls.length).toBeGreaterThan(rebuildsBefore);
+    });
+    if (previous === null) {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", previous);
+    }
   });
 
   it("does not call onConnect when shift-dragging a node back to itself", () => {

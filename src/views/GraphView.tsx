@@ -290,7 +290,9 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
               selectedEdgeId={selectedEdgeId}
               onSelectEdge={setSelectedEdgeId}
               onConnect={(a, b) => {
-                invoke("add_topology_edge", { a, b }).catch(() => {});
+                invoke("add_topology_edge", { a, b }).catch((error) => {
+                  console.error("add_topology_edge failed", error);
+                });
               }}
             />
           )}
