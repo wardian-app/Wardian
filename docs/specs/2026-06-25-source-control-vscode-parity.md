@@ -235,10 +235,12 @@ Wardian parity backlog:
 58. Source Control tracked-group Discard All Tracked Changes action.
 59. Source Control tracked/untracked inline group discard controls.
 60. Source Control resource sort menu for path, name, and status ordering.
+61. Source Control diff review actions for staging and unstaging the opened
+    file.
 
 ## Current Slice
 
-Implemented the first sixty slices:
+Implemented the first sixty-one slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -305,6 +307,12 @@ Implemented the first sixty slices:
   ordering as the default, applies the selected mode to both list and tree file
   rows, and persists the choice for each repository root alongside the
   list/tree display mode.
+- The diff modal now exposes review-context actions for single-file resource
+  diffs. Working-tree diffs show `Stage Changes`, staged diffs show `Unstage
+  Changes`, and aggregate, stash, HEAD, and compare-with-workspace views remain
+  read-only. This is Wardian's first bounded step toward VS Code's
+  `git.stageChange` / diff-editor staging workflow while keeping the current
+  line renderer stable.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -509,6 +517,7 @@ Implemented the first sixty slices:
 Focused tests:
 
 - `npm run test -- src/features/git/GitPanel.test.tsx src/features/git/GitFileList.test.tsx` (resource sort mode and compact overflow coverage)
+- `npm run test -- src/features/git/GitDiffView.test.tsx src/features/git/GitPanel.test.tsx` (diff review stage/unstage coverage)
 - `npm run lint`
 - `npm run test`
 - `npm run build`

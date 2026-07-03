@@ -1,12 +1,18 @@
 import React from "react";
 
+export interface GitDiffAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface GitDiffViewProps {
   diff: string;
   filePath: string;
   onClose: () => void;
+  actions?: GitDiffAction[];
 }
 
-export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClose }) => {
+export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClose, actions = [] }) => {
   const lines = diff.split("\n");
 
   return (
@@ -23,6 +29,20 @@ export const GitDiffView: React.FC<GitDiffViewProps> = ({ diff, filePath, onClos
           <h3 className="font-bold text-lg text-[var(--color-wardian-accent)] truncate flex-1 mr-4">
             {filePath}
           </h3>
+          {actions.length > 0 && (
+            <div className="flex shrink-0 items-center gap-1.5 mr-2">
+              {actions.map((action) => (
+                <button
+                  key={action.label}
+                  type="button"
+                  onClick={action.onClick}
+                  className="rounded border border-wardian-border px-2 py-1 text-[11px] font-medium text-primary hover:bg-wardian-card-bg-muted transition-colors"
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             onClick={onClose}
             aria-label="Close diff"

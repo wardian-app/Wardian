@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import { AgentConfig, AgentWorktreeSummary, GitBranchSummary, GitFileEntry, GitLogEntry, GitStashEntry } from "../../types";
 import { GitFileList, type ResourceSortMode } from "./GitFileList";
-import { GitDiffView } from "./GitDiffView";
+import { GitDiffView, type GitDiffAction } from "./GitDiffView";
 import { GitHistoryGraph } from "./GitHistoryGraph";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { formatGitStatusError, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
@@ -137,6 +137,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [commitMsg, setCommitMsg] = useState("");
   const [diffContent, setDiffContent] = useState<string | null>(null);
   const [diffFilePath, setDiffFilePath] = useState<string>("");
+  const [diffActions, setDiffActions] = useState<GitDiffAction[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [initializingRepository, setInitializingRepository] = useState(false);
@@ -284,6 +285,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     setOperationError(null);
     setPanelError(null);
     setDiffContent(null);
+    setDiffActions([]);
     setCloneRepositoryUrl("");
     setIsCloneRepositoryFormOpen(false);
     setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
@@ -446,6 +448,11 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       const diff = await invoke<string>("git_diff_file", { cwd: rootPath, path, staged });
       setDiffContent(diff);
       setDiffFilePath(path);
+      setDiffActions([
+        staged
+          ? { label: "Unstage Changes", onClick: () => void handleUnstage(path) }
+          : { label: "Stage Changes", onClick: () => void handleStage(path) },
+      ]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -458,6 +465,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       const diff = await invoke<string>("git_diff_file_against_workspace", { cwd: rootPath, path });
       setDiffContent(diff);
       setDiffFilePath(`Workspace: ${path}`);
+      setDiffActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -490,6 +498,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       });
       setDiffContent(content);
       setDiffFilePath(`HEAD: ${path}`);
+      setDiffActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -521,6 +530,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       );
       setDiffContent(diffs.filter(Boolean).join("\n"));
       setDiffFilePath(label);
+      setDiffActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     }
@@ -1250,6 +1260,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       const diff = await invoke<string>("git_show_stash", { cwd: rootPath, stash: stash.selector });
       setDiffContent(diff);
       setDiffFilePath(`Stash ${stash.selector}`);
+      setDiffActions([]);
     } catch (err) {
       setOperationError(formatError(err));
     } finally {
@@ -2380,7 +2391,11 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         <GitDiffView
           diff={diffContent}
           filePath={diffFilePath}
-          onClose={() => setDiffContent(null)}
+          actions={diffActions}
+          onClose={() => {
+            setDiffContent(null);
+            setDiffActions([]);
+          }}
         />
       )}
       {groupContextMenu && (

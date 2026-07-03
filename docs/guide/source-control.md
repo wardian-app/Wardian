@@ -87,7 +87,11 @@ discarding a directory without touching sibling changes. Use **Add to
 .gitignore** on an untracked or changed folder to append that folder pattern to
 the repository `.gitignore` and refresh Source Control.
 
-Clicking a file opens an inline diff modal with colored additions, deletions, and hunk markers. Untracked files show a new-file diff so you can inspect them before staging.
+Clicking a file opens an inline diff modal with colored additions, deletions,
+and hunk markers. Untracked files show a new-file diff so you can inspect them
+before staging. Working-tree file diffs include **Stage Changes**, and staged
+file diffs include **Unstage Changes**, so you can act on the file you are
+reviewing without returning to the resource list.
 
 Right-click a file and choose **Open File** to launch it through Wardian's
 configured external editor, or **Reveal in Explorer View** to inspect its

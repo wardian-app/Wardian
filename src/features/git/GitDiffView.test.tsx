@@ -38,4 +38,28 @@ describe('GitDiffView', () => {
 
     expect(screen.getByText('No differences to display.')).toBeInTheDocument();
   });
+
+  it('renders review actions for the opened diff', async () => {
+    const user = userEvent.setup();
+    const onStage = vi.fn();
+    const onUnstage = vi.fn();
+
+    render(
+      <GitDiffView
+        filePath="src/app.tsx"
+        diff="+new"
+        onClose={() => {}}
+        actions={[
+          { label: 'Stage Changes', onClick: onStage },
+          { label: 'Unstage Changes', onClick: onUnstage },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Stage Changes' }));
+    await user.click(screen.getByRole('button', { name: 'Unstage Changes' }));
+
+    expect(onStage).toHaveBeenCalledTimes(1);
+    expect(onUnstage).toHaveBeenCalledTimes(1);
+  });
 });

@@ -481,6 +481,74 @@ describe("GitPanel", () => {
     ]);
   });
 
+  it("stages the opened working-tree diff from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return "diff --git a/src/app.tsx b/src/app.tsx\n-old\n+new\n";
+      if (command === "git_stage") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stage Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", { cwd: "C:/repo", paths: ["src/app.tsx"] });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("unstages the opened staged diff from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return "diff --git a/src/app.tsx b/src/app.tsx\n-old\n+new\n";
+      if (command === "git_unstage") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unstage Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_unstage", { cwd: "C:/repo", paths: ["src/app.tsx"] });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
   it("shows the non-git workspace path and reveal action", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "reveal_in_explorer") return null;
