@@ -69,6 +69,7 @@ interface GitHistoryGraphProps {
   hasMoreHistory?: boolean;
   isLoadingMoreHistory?: boolean;
   onLoadMoreHistory?: () => void;
+  onOpenHistoryFile?: (entry: GitLogEntry, change: GitCommitChangeEntry) => void;
 }
 
 interface Lane {
@@ -399,6 +400,7 @@ export function GitHistoryGraph({
   hasMoreHistory = false,
   isLoadingMoreHistory = false,
   onLoadMoreHistory,
+  onOpenHistoryFile,
 }: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
@@ -592,10 +594,14 @@ export function GitHistoryGraph({
     displayPath: string,
     depth = 0,
   ) => (
-    <div
+    <button
+      type="button"
       key={`${row.entry.hash}-${change.path}`}
+      aria-label={`Open ${change.path} from ${short}`}
       data-testid={`history-graph-change-row-${short}-${change.path}`}
-      className="flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0"
+      disabled={!onOpenHistoryFile}
+      onClick={() => onOpenHistoryFile?.(row.entry, change)}
+      className="flex w-full items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
       style={{ height: `${metrics.rowHeight}px` }}
     >
       <GraphPlaceholder
@@ -613,7 +619,7 @@ export function GitHistoryGraph({
       >
         {displayPath}
       </span>
-    </div>
+    </button>
   );
 
   const renderChangeTreeNodes = (

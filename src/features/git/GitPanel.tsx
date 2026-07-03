@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
-import { AgentConfig, AgentWorktreeSummary, GitBranchSummary, GitFileEntry, GitLogEntry, GitStashEntry } from "../../types";
+import {
+  AgentConfig,
+  AgentWorktreeSummary,
+  GitBranchSummary,
+  GitCommitChangeEntry,
+  GitFileEntry,
+  GitLogEntry,
+  GitStashEntry,
+} from "../../types";
 import { GitFileList, type ResourceSortMode } from "./GitFileList";
 import { GitDiffView, type GitDiffAction, type GitDiffHunkAction } from "./GitDiffView";
 import { GitHistoryGraph } from "./GitHistoryGraph";
@@ -530,6 +538,24 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       });
       setDiffContent(content);
       setDiffFilePath(`HEAD: ${path}`);
+      setDiffActions([]);
+      setDiffHunkActions([]);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
+  const handleOpenHistoryFile = async (entry: GitLogEntry, change: GitCommitChangeEntry) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      const content = await invoke<string>("git_show_file_revision", {
+        cwd: rootPath,
+        path: change.path,
+        revision: entry.hash,
+      });
+      setDiffContent(content);
+      setDiffFilePath(`${entry.hash.slice(0, 8)}: ${change.path}`);
       setDiffActions([]);
       setDiffHunkActions([]);
     } catch (err) {
@@ -2451,6 +2477,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     hasMoreHistory={history.length >= historyLimit}
                     isLoadingMoreHistory={historyLoadingMore}
                     onLoadMoreHistory={loadMoreHistory}
+                    onOpenHistoryFile={handleOpenHistoryFile}
                   />
                 )}
               </div>

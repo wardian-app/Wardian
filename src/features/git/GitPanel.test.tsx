@@ -439,6 +439,44 @@ describe("GitPanel", () => {
     expect(await screen.findByText("Commit 100")).toBeInTheDocument();
   });
 
+  it("opens a changed file from an expanded history graph commit", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Inspect history file",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ];
+      }
+      if (command === "git_commit_changes") return [{ path: "src/changed.ts", status: "M" }];
+      if (command === "git_show_file_revision") return "historical version\n";
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Inspect history file/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open src/changed.ts from aaaaaaaa" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_show_file_revision", {
+        cwd: "C:/repo",
+        path: "src/changed.ts",
+        revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      });
+    });
+    expect(await screen.findByText("aaaaaaaa: src/changed.ts")).toBeInTheDocument();
+    expect(screen.getByText("historical version")).toBeInTheDocument();
+  });
+
   it("switches source-control resources between tree and list mode per root", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];

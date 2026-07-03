@@ -113,6 +113,7 @@ describe("GitHistoryGraph", () => {
   });
 
   it("expands a commit into changed files using the first parent and aligned graph placeholders", async () => {
+    const onOpenHistoryFile = vi.fn();
     mockInvoke.mockResolvedValue([
       { path: "src/changed.ts", status: "M" },
       { path: "src/renamed.ts", status: "R" },
@@ -123,6 +124,7 @@ describe("GitHistoryGraph", () => {
         rootPath="C:/repo"
         branch="main"
         upstream="origin/main"
+        onOpenHistoryFile={onOpenHistoryFile}
         entries={[
           {
             hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -157,6 +159,13 @@ describe("GitHistoryGraph", () => {
     expect(within(changeRow).getByTestId("history-graph-change-placeholder-aaaaaaaa-src/changed.ts")).toHaveAttribute(
       "width",
       "33",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open src/changed.ts from aaaaaaaa" }));
+
+    expect(onOpenHistoryFile).toHaveBeenCalledWith(
+      expect.objectContaining({ hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+      { path: "src/changed.ts", status: "M" },
     );
   });
 
