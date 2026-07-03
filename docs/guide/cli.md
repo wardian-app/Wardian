@@ -275,7 +275,7 @@ Output options:
 - `--fields name,status,uuid` returns indented JSON with only those fields.
 - `--field status` returns one bare value plus a newline.
 - `--field status_source` returns `live` or `persisted`.
-- `--verbose` adds `pid`, `started_at`, and `last_status_at`.
+- `--verbose` adds `pid`, `started_at`, `last_status_at`, and `visibility` (why each neighbor is visible: `manual` or `rule:workspace-fallback`).
 - `--pretty` returns aligned text for interactive inspection instead of JSON.
 
 Default JSON is indented for terminal readability. It includes `schema: 1` and an `agent` or `agents` payload with `name`, `uuid`, `class`, `provider`, `workspace`, and `status`.

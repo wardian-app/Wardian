@@ -86,8 +86,10 @@ the answer came from the running desktop app or persisted state:
 - `live` means the running desktop app answered.
 - `persisted` means the CLI fell back to `state.db`.
 
-Use `--verbose` for `pid`, `started_at`, and `last_status_at`. Use `--pretty`
-only for human-readable terminal inspection; automation should keep JSON.
+Use `--verbose` for `pid`, `started_at`, `last_status_at`, and `visibility`
+(the reason a neighbor is visible: `manual` or `rule:workspace-fallback`).
+Use `--pretty` only for human-readable terminal inspection; automation should
+keep JSON.
 
 ## Lifecycle Control
 
