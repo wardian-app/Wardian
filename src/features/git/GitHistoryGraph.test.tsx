@@ -362,4 +362,37 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
     expect(screen.getByText("Release tag")).toBeInTheDocument();
   });
+
+  it("renders a compact load-more row at the end of a paged history graph", () => {
+    const onLoadMore = vi.fn();
+
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        hasMoreHistory
+        isLoadingMoreHistory={false}
+        onLoadMoreHistory={onLoadMore}
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Current work",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ]}
+      />,
+    );
+
+    const loadMore = screen.getByRole("button", { name: "Load more history commits" });
+    expect(loadMore).toHaveTextContent("Load More...");
+    expect(loadMore).toHaveStyle({ height: "22px" });
+    expect(within(loadMore).getByTestId("history-graph-load-more-placeholder")).toHaveAttribute("width", "22");
+
+    fireEvent.click(loadMore);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
 });

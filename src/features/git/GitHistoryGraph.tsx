@@ -61,6 +61,9 @@ interface GitHistoryGraphProps {
   upstream?: string | null;
   ahead?: number;
   behind?: number;
+  hasMoreHistory?: boolean;
+  isLoadingMoreHistory?: boolean;
+  onLoadMoreHistory?: () => void;
 }
 
 interface Lane {
@@ -381,7 +384,17 @@ const renderGraphPaths = (row: HistoryGraphRow, metrics: GraphMetrics) => {
   return paths;
 };
 
-export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0, behind = 0 }: GitHistoryGraphProps) {
+export function GitHistoryGraph({
+  entries,
+  branch,
+  rootPath,
+  upstream,
+  ahead = 0,
+  behind = 0,
+  hasMoreHistory = false,
+  isLoadingMoreHistory = false,
+  onLoadMoreHistory,
+}: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
   const [changeViewMode, setChangeViewMode] = useState<GraphChangeViewMode>(() => loadChangeViewMode(rootPath));
@@ -818,6 +831,25 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0
           </div>
         );
       })}
+      {hasMoreHistory && rows.length > 0 && (
+        <button
+          type="button"
+          aria-label="Load more history commits"
+          onClick={onLoadMoreHistory}
+          disabled={isLoadingMoreHistory}
+          className="w-full flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left text-[11px] text-[var(--color-wardian-text-muted)] disabled:opacity-60"
+          style={{ height: `${metrics.rowHeight}px` }}
+        >
+          <GraphPlaceholder
+            testId="history-graph-load-more-placeholder"
+            width={metrics.swimlaneWidth * (Math.max(rows[rows.length - 1]?.outputLanes.length ?? 0, 1) + 1)}
+            lanes={rows[rows.length - 1]?.outputLanes ?? []}
+            highlightIndex={rows[rows.length - 1]?.circleIndex ?? 0}
+            metrics={metrics}
+          />
+          <span className="truncate">{isLoadingMoreHistory ? "Loading More..." : "Load More..."}</span>
+        </button>
+      )}
     </div>
   );
 }

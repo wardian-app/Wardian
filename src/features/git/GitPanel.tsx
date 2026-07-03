@@ -12,6 +12,7 @@ import { useSettingsStore } from "../../store/useSettingsStore";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
 const MERGE_CONFLICT_STATUSES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+const HISTORY_PAGE_SIZE = 50;
 const COMMIT_SUMMARY_LIMIT = 50;
 const COMMIT_BODY_LINE_LIMIT = 72;
 
@@ -178,6 +179,8 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   // Commit history
   const [history, setHistory] = useState<GitLogEntry[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
@@ -283,6 +286,8 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   useEffect(() => {
     setHistory([]);
     setHistoryError(null);
+    setHistoryLimit(HISTORY_PAGE_SIZE);
+    setHistoryLoadingMore(false);
     setOperationError(null);
     setPanelError(null);
     setDiffContent(null);
@@ -303,14 +308,22 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const refreshHistory = useCallback(async () => {
     if (!rootPath) return;
     try {
-      const log = await invoke<GitLogEntry[]>("git_log", { cwd: rootPath, count: 50 });
+      const log = await invoke<GitLogEntry[]>("git_log", { cwd: rootPath, count: historyLimit });
       setHistory(log);
       setHistoryError(null);
     } catch (err) {
       setHistory([]);
       setHistoryError(formatError(err));
+    } finally {
+      setHistoryLoadingMore(false);
     }
-  }, [rootPath]);
+  }, [historyLimit, rootPath]);
+
+  const loadMoreHistory = () => {
+    if (!rootPath || historyLoadingMore) return;
+    setHistoryLoadingMore(true);
+    setHistoryLimit((current) => current + HISTORY_PAGE_SIZE);
+  };
 
   useEffect(() => {
     if (!rootPath || !hasStatus) {
@@ -2435,6 +2448,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     upstream={status.upstream}
                     ahead={status.ahead}
                     behind={status.behind}
+                    hasMoreHistory={history.length >= historyLimit}
+                    isLoadingMoreHistory={historyLoadingMore}
+                    onLoadMoreHistory={loadMoreHistory}
                   />
                 )}
               </div>

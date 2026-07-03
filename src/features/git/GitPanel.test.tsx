@@ -403,6 +403,42 @@ describe("GitPanel", () => {
     });
   });
 
+  it("loads the next history page from the graph load-more row", async () => {
+    const createHistory = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        hash: `${index.toString(16).padStart(8, "0")}${"0".repeat(32)}`,
+        message: `Commit ${index + 1}`,
+        author: "Tester",
+        date: "2026-06-25 08:00:00 -0400",
+        parent_hashes:
+          index < count - 1 ? [`${(index + 1).toString(16).padStart(8, "0")}${"0".repeat(32)}`] : [],
+        refs: index === 0 ? ["HEAD", "main"] : [],
+      }));
+
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") {
+        const count = (args as { count?: number } | undefined)?.count ?? 50;
+        return createHistory(count);
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    expect(await screen.findByText("Commit 1")).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more history commits" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 100 });
+    });
+    expect(await screen.findByText("Commit 100")).toBeInTheDocument();
+  });
+
   it("switches source-control resources between tree and list mode per root", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];

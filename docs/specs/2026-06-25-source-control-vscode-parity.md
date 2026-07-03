@@ -253,10 +253,11 @@ Wardian parity backlog:
     actions.
 64. History graph incoming/outgoing divergence markers with dashed graph nodes.
 65. History graph expanded commit changes tree/list view mode.
+66. History graph paged loading through a compact `Load More...` row.
 
 ## Current Slice
 
-Implemented the first sixty-five slices:
+Implemented the first sixty-six slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -347,6 +348,9 @@ Implemented the first sixty-five slices:
 - Expanded history graph commits now default to a collapsible changed-file tree
   with graph-aligned folder and file rows, plus a persisted list/tree toggle for
   users who want the flat full-path change list.
+- The history graph now renders a VS Code-style `Load More...` row when the
+  current page is full. Selecting it requests the next page of commits while
+  preserving the graph density, ref filter, expanded rows, and change view mode.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -563,6 +567,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx`
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (expanded commit change tree/list coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx` (history graph load-more paging coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`
