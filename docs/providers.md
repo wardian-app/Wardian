@@ -47,6 +47,8 @@ Claude runs directly in the real target workspace.
 
 Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and maintains `.claude/skills` links where needed so Claude can see Wardian-managed common, class, and agent skills without those files living in the repository root.
 
+Wardian also launches Claude-managed terminal surfaces with Claude Code's alternate-screen opt-out enabled. This preserves native terminal scrollback for desktop terminals and mobile PWA drag scrolling while keeping Claude's existing `CLAUDE.md` discovery behavior.
+
 ### Session and Status Handling
 
 Wardian assigns fresh Claude session IDs up front and uses explicit resume flags for resumed provider sessions. Claude permission requests are captured through a generated hook under the Wardian agent directory, which lets the UI surface `Action Needed` with request details.
@@ -55,7 +57,7 @@ Visible Claude agents run through Claude Code's interactive mode. Do not pass `-
 
 ### Debug First
 
-If Claude appears blocked, inspect the permission hook output, `CLAUDE.md` discovery, and resume flags before treating the issue as a generic PTY failure.
+If Claude appears blocked, inspect the permission hook output, `CLAUDE.md` discovery, and resume flags before treating the issue as a generic PTY failure. If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes Claude Code's alternate-screen opt-out.
 
 ## Codex (`@openai/codex`)
 

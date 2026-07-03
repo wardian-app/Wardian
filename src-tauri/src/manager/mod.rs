@@ -790,6 +790,12 @@ pub(crate) fn apply_interactive_provider_runtime_env(
     provider_name: &str,
     cmd: &mut CommandBuilder,
 ) -> Result<(), String> {
+    if provider_name == "claude" {
+        for (key, value) in claude_terminal_runtime_env() {
+            cmd.env(key, value);
+        }
+    }
+
     #[cfg(windows)]
     if provider_name == "claude" {
         if let Some(script) = ensure_claude_bash_env_script()? {
@@ -806,6 +812,12 @@ pub(crate) fn apply_process_provider_runtime_env(
     provider_name: &str,
     cmd: &mut tokio::process::Command,
 ) -> Result<(), String> {
+    if provider_name == "claude" {
+        for (key, value) in claude_terminal_runtime_env() {
+            cmd.env(key, value);
+        }
+    }
+
     #[cfg(windows)]
     if provider_name == "claude" {
         if let Some(script) = ensure_claude_bash_env_script()? {
@@ -816,6 +828,13 @@ pub(crate) fn apply_process_provider_runtime_env(
     let _ = (provider_name, cmd);
 
     Ok(())
+}
+
+pub(crate) fn claude_terminal_runtime_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1"),
+        ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
+    ]
 }
 
 #[cfg(windows)]
@@ -1146,6 +1165,19 @@ mod tests {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
             None => std::env::remove_var("WARDIAN_HOME"),
         }
+    }
+
+    #[test]
+    fn claude_interactive_runtime_env_disables_alternate_screen() {
+        let mut interactive = CommandBuilder::new("claude");
+        apply_interactive_provider_runtime_env("claude", &mut interactive).unwrap();
+
+        let disable_alt_screen = interactive
+            .get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+            .expect("Claude alternate-screen opt-out env")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(disable_alt_screen, "1");
     }
 
     #[cfg(windows)]
