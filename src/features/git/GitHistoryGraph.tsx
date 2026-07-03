@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronRight,
@@ -14,6 +14,7 @@ import {
   ListTree,
   Maximize2,
   Minimize2,
+  Target,
 } from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
@@ -410,11 +411,14 @@ export function GitHistoryGraph({
   const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(
     null,
   );
+  const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const visibleEntries = useMemo(
     () => buildVisibleHistoryEntries(entries, branch, upstream, refFilter, ahead, behind),
     [ahead, behind, branch, entries, refFilter, upstream],
   );
   const rows = useMemo(() => buildRows(visibleEntries), [visibleEntries]);
+  const currentHash = entries[0]?.hash;
+  const currentRow = currentHash ? rows.find((row) => row.kind === "commit" && row.entry.hash === currentHash) : undefined;
   const originalIndexByHash = useMemo(
     () => new Map(entries.map((entry, index) => [entry.hash, index])),
     [entries],
@@ -496,6 +500,16 @@ export function GitHistoryGraph({
     const nextExpanded = new Set<string>();
     setExpandedHashes(nextExpanded);
     saveExpandedHashes(rootPath, nextExpanded);
+  };
+
+  const revealCurrentHistoryItem = () => {
+    if (!currentRow) return;
+
+    const element = rowRefs.current[graphRowId(currentRow)];
+    if (!element) return;
+
+    element.scrollIntoView({ block: "center", inline: "nearest" });
+    element.focus({ preventScroll: true });
   };
 
   const toggleChangeFolder = (hash: string, path: string) => {
@@ -696,6 +710,16 @@ export function GitHistoryGraph({
         >
           <Cloud className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
+        <button
+          type="button"
+          aria-label="Go to Current History Item"
+          title="Go to Current History Item"
+          onClick={revealCurrentHistoryItem}
+          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted disabled:opacity-40"
+          disabled={!currentRow}
+        >
+          <Target className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
         <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
         <button
           type="button"
@@ -773,8 +797,12 @@ export function GitHistoryGraph({
           <div key={row.entry.hash}>
             <button
               type="button"
+              ref={(element) => {
+                rowRefs.current[rowId] = element;
+              }}
               data-testid={`history-graph-row-${rowId}`}
               aria-expanded={isSynthetic ? undefined : isExpanded}
+              aria-current={isHead ? "true" : undefined}
               aria-label={
                 isSynthetic
                   ? `${row.entry.message}, ${commitCountLabel(row.entry.syntheticCount ?? 0)}`

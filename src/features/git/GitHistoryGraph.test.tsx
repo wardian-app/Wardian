@@ -363,6 +363,55 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Release tag")).toBeInTheDocument();
   });
 
+  it("reveals and focuses the current history item from the graph controls", () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Current work",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+          {
+            hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            message: "Upstream base",
+            author: "Grace Hopper",
+            date: "2026-06-24 07:00:00 -0400",
+            parent_hashes: [],
+            refs: ["origin/main"],
+          },
+        ]}
+      />,
+    );
+
+    const revealButton = screen.getByRole("button", { name: "Go to Current History Item" });
+    const currentRow = screen.getByTestId("history-graph-row-aaaaaaaa");
+
+    expect(currentRow).toHaveAttribute("aria-current", "true");
+
+    fireEvent.click(revealButton);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
+    expect(currentRow).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter history to upstream" }));
+
+    expect(revealButton).toBeDisabled();
+    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+  });
+
   it("renders a compact load-more row at the end of a paged history graph", () => {
     const onLoadMore = vi.fn();
 
