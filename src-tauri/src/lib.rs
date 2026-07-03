@@ -183,7 +183,10 @@ pub fn run() {
     // One-time topology migration: seed team cliques as manual edges, upgrade to version 2.
     if let Some(home) = crate::utils::fs::get_wardian_home() {
         let mut topology = wardian_core::topology::load_topology(&home);
-        if wardian_core::topology::needs_team_seed_migration(&topology) {
+        // Home-aware check: a missing topology.json loads as a default carrying
+        // the CURRENT schema version, but machines with pre-existing teams and
+        // no file still need their one-time seed.
+        if wardian_core::topology::needs_team_seed_migration_for_home(&home, &topology) {
             let teams = wardian_core::topology::load_team_memberships(&home);
             let now = chrono::Utc::now().to_rfc3339();
             for team in teams {

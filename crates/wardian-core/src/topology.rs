@@ -286,6 +286,14 @@ pub fn needs_team_seed_migration(topology: &Topology) -> bool {
     topology.version < 2
 }
 
+/// Home-aware migration check: a MISSING topology.json also needs migration,
+/// because `Topology::default()` carries the current schema version — teams
+/// that predate the topology feature would otherwise never get seeded on a
+/// machine that never wrote the file.
+pub fn needs_team_seed_migration_for_home(home: &Path, topology: &Topology) -> bool {
+    needs_team_seed_migration(topology) || !crate::paths::topology_path_for_home(home).exists()
+}
+
 /// Read team memberships from `<home>/watchlists/index.json`. Missing/corrupt → empty.
 pub fn load_team_memberships(home: &Path) -> Vec<TeamMembership> {
     let path = home.join("watchlists").join("index.json");
@@ -734,5 +742,30 @@ mod tests {
     fn needs_team_seed_migration_false_for_version_2() {
         let topology = Topology { version: 2, edges: vec![], ignored_pairs: vec![] };
         assert!(!needs_team_seed_migration(&topology));
+    }
+
+    #[test]
+    fn home_aware_migration_check_treats_missing_file_as_unmigrated() {
+        let dir = std::env::temp_dir().join(format!(
+            "wardian-topology-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No topology.json: even a default (current-version) topology needs
+        // migration, so pre-existing teams get their one-time seed.
+        let topology = Topology::default();
+        assert!(needs_team_seed_migration_for_home(&dir, &topology));
+
+        // Once the file exists at the current version, migration is done.
+        save_topology(&dir, &topology).unwrap();
+        let loaded = load_topology(&dir);
+        assert!(!needs_team_seed_migration_for_home(&dir, &loaded));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
