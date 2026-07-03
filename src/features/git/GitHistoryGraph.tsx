@@ -70,6 +70,7 @@ interface GitHistoryGraphProps {
   isLoadingMoreHistory?: boolean;
   onLoadMoreHistory?: () => void;
   onOpenHistoryFile?: (entry: GitLogEntry, change: GitCommitChangeEntry) => void;
+  onViewHistoryChanges?: (entry: GitLogEntry) => void;
 }
 
 interface Lane {
@@ -401,6 +402,7 @@ export function GitHistoryGraph({
   isLoadingMoreHistory = false,
   onLoadMoreHistory,
   onOpenHistoryFile,
+  onViewHistoryChanges,
 }: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
@@ -569,7 +571,7 @@ export function GitHistoryGraph({
         {
           label: "View Changes",
           icon: <Eye className="h-3.5 w-3.5" />,
-          onClick: () => void viewCommitChanges(row.entry),
+          onClick: () => (onViewHistoryChanges ? onViewHistoryChanges(row.entry) : void viewCommitChanges(row.entry)),
         },
         { divider: true },
         {

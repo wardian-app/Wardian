@@ -258,10 +258,11 @@ Wardian parity backlog:
     details.
 68. History graph `Go to Current History Item` title action.
 69. History graph changed-file `Open File` action.
+70. History graph commit `View Changes` patch action.
 
 ## Current Slice
 
-Implemented the first sixty-nine slices:
+Implemented the first seventy slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -367,6 +368,10 @@ Implemented the first sixty-nine slices:
   action. Wardian reads the selected path at the expanded commit hash and opens
   it in the existing read-only diff modal with a short-hash label, matching the
   stable history-file inspection path without adding Monaco-backed editing.
+- History graph commit context menus now route `View Changes` through a
+  commit-vs-parent patch command when the graph is hosted in `GitPanel`.
+  Wardian opens the resulting patch in the existing read-only diff modal while
+  preserving row-click expansion for changed-file tree inspection.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -587,6 +592,8 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph commit context menu coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph current-item reveal coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx` (history graph changed-file open coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx` (history graph commit patch view coverage)
+- `cargo test git_commit_diff_compares_commit_with_parent --manifest-path src-tauri/Cargo.toml`
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`

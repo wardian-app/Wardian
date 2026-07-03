@@ -477,6 +477,46 @@ describe("GitPanel", () => {
     expect(screen.getByText("historical version")).toBeInTheDocument();
   });
 
+  it("opens a commit patch from the history graph context menu", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Inspect commit patch",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ];
+      }
+      if (command === "git_commit_diff") {
+        return "diff --git a/src/changed.ts b/src/changed.ts\n-old\n+new\n";
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    const row = await screen.findByRole("button", { name: /Expand Inspect commit patch/ });
+    fireEvent.contextMenu(row, { clientX: 12, clientY: 24 });
+    fireEvent.click(await screen.findByRole("button", { name: "View Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_diff", {
+        cwd: "C:/repo",
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        parentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      });
+    });
+    expect(await screen.findByText("aaaaaaaa: Inspect commit patch")).toBeInTheDocument();
+    expect(screen.getByText("diff --git a/src/changed.ts b/src/changed.ts")).toBeInTheDocument();
+  });
+
   it("switches source-control resources between tree and list mode per root", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];

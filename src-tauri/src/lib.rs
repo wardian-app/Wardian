@@ -517,6 +517,7 @@ pub fn run() {
             commands::git::git_current_branch,
             commands::git::git_log,
             commands::git::git_commit_changes,
+            commands::git::git_commit_diff,
             commands::git::git_diff_file,
             commands::git::git_diff_file_against_workspace,
             commands::git::git_show_file_revision,

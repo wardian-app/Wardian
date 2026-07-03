@@ -563,6 +563,24 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
+  const handleViewHistoryChanges = async (entry: GitLogEntry) => {
+    if (!rootPath) return;
+    setOperationError(null);
+    try {
+      const diff = await invoke<string>("git_commit_diff", {
+        cwd: rootPath,
+        hash: entry.hash,
+        parentHash: entry.parent_hashes?.[0] ?? null,
+      });
+      setDiffContent(diff);
+      setDiffFilePath(`${entry.hash.slice(0, 8)}: ${entry.message}`);
+      setDiffActions([]);
+      setDiffHunkActions([]);
+    } catch (err) {
+      setOperationError(formatError(err));
+    }
+  };
+
   const handleRevealFile = async (path: string) => {
     if (!rootPath) return;
     setOperationError(null);
@@ -2478,6 +2496,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     isLoadingMoreHistory={historyLoadingMore}
                     onLoadMoreHistory={loadMoreHistory}
                     onOpenHistoryFile={handleOpenHistoryFile}
+                    onViewHistoryChanges={handleViewHistoryChanges}
                   />
                 )}
               </div>

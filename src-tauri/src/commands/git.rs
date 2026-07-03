@@ -503,6 +503,38 @@ pub async fn git_commit_changes(
 }
 
 #[tauri::command]
+pub async fn git_commit_diff(
+    cwd: String,
+    hash: String,
+    parent_hash: Option<String>,
+) -> Result<String, String> {
+    if let Some(parent_hash) = parent_hash.filter(|value| !value.trim().is_empty()) {
+        return run_git(
+            &cwd,
+            &[
+                "diff",
+                "--no-color",
+                "--find-renames",
+                parent_hash.trim(),
+                hash.trim(),
+            ],
+        );
+    }
+
+    run_git(
+        &cwd,
+        &[
+            "show",
+            "--format=",
+            "--patch",
+            "--no-color",
+            "--find-renames",
+            hash.trim(),
+        ],
+    )
+}
+
+#[tauri::command]
 pub async fn git_diff_file(cwd: String, path: String, staged: bool) -> Result<String, String> {
     if !staged && is_untracked_path(&cwd, &path)? {
         return run_git_allowing_status(
@@ -1425,6 +1457,7 @@ pub async fn git_unwatch(cwd: String, state: tauri::State<'_, AppState>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn first_hunk_patch(diff: &str) -> String {
         let mut lines = Vec::new();
@@ -1550,6 +1583,31 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
         assert_eq!(changes[2].path, "src/old.ts");
         assert_eq!(changes[3].status, "R");
         assert_eq!(changes[3].path, "src/after.ts");
+    }
+
+    #[tokio::test]
+    async fn git_commit_diff_compares_commit_with_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        fs::write(temp.path().join("tracked.txt"), "old\n").unwrap();
+        run_git(cwd, &["add", "tracked.txt"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+        let parent = run_git(cwd, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        fs::write(temp.path().join("tracked.txt"), "new\n").unwrap();
+        run_git(cwd, &["add", "tracked.txt"]).unwrap();
+        run_git(cwd, &["commit", "-m", "change tracked"]).unwrap();
+        let hash = run_git(cwd, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        let diff = git_commit_diff(cwd.to_string(), hash, Some(parent)).await.unwrap();
+
+        assert!(diff.contains("diff --git a/tracked.txt b/tracked.txt"));
+        assert!(diff.contains("-old"));
+        assert!(diff.contains("+new"));
     }
 
     #[test]
