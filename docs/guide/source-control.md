@@ -49,9 +49,17 @@ The panel groups files into:
 - **Changes** (unstaged tracked files)
 - **Untracked**
 
-Nested paths render as an expandable tree by default. Use the list/tree controls in the branch bar to switch presentation; Wardian remembers the choice for each repository root.
+Nested paths render as an expandable tree by default. Use **Use Tree View** or
+**Use List View** in the Source Control overflow menu to switch presentation;
+Wardian remembers the choice for each repository root.
 
-Within each section, files are ordered for scanability: conflict states first, modified/copied/type-changed files next, then ordinary added/deleted/renamed/untracked files by path. Tree mode keeps directories grouped while applying the same priority inside each folder.
+Within each section, files are ordered for scanability by default: conflict
+states first, modified/copied/type-changed files next, then ordinary
+added/deleted/renamed/untracked files by path. Use **Sort by Path**, **Sort by
+Name**, or **Sort by Status** in the Source Control overflow menu to choose the
+resource ordering. Wardian remembers the sort mode for each repository root.
+Tree mode keeps directories grouped while applying the selected ordering inside
+each folder.
 
 Available actions include:
 

@@ -2,9 +2,12 @@ import React, { useState } from "react";
 import { GitFileEntry } from "../../types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 
+export type ResourceSortMode = "path" | "name" | "status";
+
 interface GitFileListProps {
   files: GitFileEntry[];
   displayMode?: "list" | "tree";
+  sortMode?: ResourceSortMode;
   onStage?: (path: string) => void;
   onStagePaths?: (paths: string[]) => void;
   onUnstage?: (path: string) => void;
@@ -83,17 +86,25 @@ const resourcePriority = (status: string) => {
 
 const compareFilePaths = (a: string, b: string) => a.replace(/\\/g, "/").localeCompare(b.replace(/\\/g, "/"));
 
-const sortFilesByResourcePriority = (files: GitFileEntry[]) =>
+const compareFileNames = (a: string, b: string) => {
+  const nameDiff = lastPathPart(a).localeCompare(lastPathPart(b));
+  return nameDiff !== 0 ? nameDiff : compareFilePaths(a, b);
+};
+
+const sortFiles = (files: GitFileEntry[], sortMode: ResourceSortMode) =>
   [...files].sort((a, b) => {
-    const priorityDiff = resourcePriority(b.status) - resourcePriority(a.status);
-    if (priorityDiff !== 0) return priorityDiff;
+    if (sortMode === "name") return compareFileNames(a.path, b.path);
+    if (sortMode === "status") {
+      const priorityDiff = resourcePriority(b.status) - resourcePriority(a.status);
+      if (priorityDiff !== 0) return priorityDiff;
+    }
     return compareFilePaths(a.path, b.path);
   });
 
-const buildFileTree = (files: GitFileEntry[]): FileTreeNode[] => {
+const buildFileTree = (files: GitFileEntry[], sortMode: ResourceSortMode): FileTreeNode[] => {
   const root: FileTreeDirectory = { type: "directory", name: "", path: "", children: [] };
 
-  for (const file of sortFilesByResourcePriority(files)) {
+  for (const file of sortFiles(files, sortMode)) {
     const parts = splitPath(file.path);
     let current = root;
     parts.slice(0, -1).forEach((part, index) => {
@@ -114,8 +125,11 @@ const buildFileTree = (files: GitFileEntry[]): FileTreeNode[] => {
     nodes.sort((a, b) => {
       if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
       if (a.type === "file" && b.type === "file") {
-        const priorityDiff = resourcePriority(b.file.status) - resourcePriority(a.file.status);
-        if (priorityDiff !== 0) return priorityDiff;
+        if (sortMode === "name") return compareFileNames(a.file.path, b.file.path);
+        if (sortMode === "status") {
+          const priorityDiff = resourcePriority(b.file.status) - resourcePriority(a.file.status);
+          if (priorityDiff !== 0) return priorityDiff;
+        }
         return compareFilePaths(a.file.path, b.file.path);
       }
       const aName = a.type === "directory" ? a.name : lastPathPart(a.file.path);
@@ -134,6 +148,7 @@ const buildFileTree = (files: GitFileEntry[]): FileTreeNode[] => {
 export const GitFileList: React.FC<GitFileListProps> = ({
   files,
   displayMode = "list",
+  sortMode = "status",
   onStage,
   onStagePaths,
   onUnstage,
@@ -153,7 +168,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
     items: ContextMenuItem[];
   } | null>(null);
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(() => new Set());
-  const sortedFiles = sortFilesByResourcePriority(files);
+  const sortedFiles = sortFiles(files, sortMode);
 
   if (files.length === 0) return null;
 
@@ -391,7 +406,7 @@ export const GitFileList: React.FC<GitFileListProps> = ({
     <>
       <ul className="flex flex-col gap-0.5">
         {displayMode === "tree"
-          ? renderTreeNodes(buildFileTree(sortedFiles))
+          ? renderTreeNodes(buildFileTree(sortedFiles, sortMode))
           : sortedFiles.map((file, index) => renderFileRow(file, index, 0, true))}
       </ul>
       {contextMenu && (

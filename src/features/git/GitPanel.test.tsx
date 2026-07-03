@@ -425,6 +425,62 @@ describe("GitPanel", () => {
     expect(screen.getByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
   });
 
+  it("sorts source-control resources from the overflow menu and persists the sort mode per root", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    const status = {
+      branch: "main",
+      upstream: "origin/main",
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      files: [
+        { path: "beta/zeta.ts", status: "M", is_staged: false },
+        { path: "alpha/readme.md", status: "M", is_staged: false },
+        { path: "gamma/app.ts", status: "M", is_staged: false },
+      ],
+    };
+    const labels = () =>
+      screen.getAllByRole("button", { name: /View diff for/ }).map((button) => button.getAttribute("aria-label"));
+
+    const { unmount } = renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ status, changeCount: 3 }),
+    });
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
+
+    expect(labels()).toEqual([
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+      "View diff for gamma/app.ts",
+    ]);
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sort by Name" }));
+
+    expect(labels()).toEqual([
+      "View diff for gamma/app.ts",
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+    ]);
+
+    unmount();
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ status, changeCount: 3 }),
+    });
+
+    expect(labels()).toEqual([
+      "View diff for gamma/app.ts",
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+    ]);
+  });
+
   it("shows the non-git workspace path and reveal action", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "reveal_in_explorer") return null;

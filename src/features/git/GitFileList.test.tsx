@@ -141,4 +141,39 @@ describe('GitFileList', () => {
       'View diff for zeta/new-file.ts',
     ]);
   });
+
+  it('supports VS Code-style resource sort modes for list rows', () => {
+    const sortableFiles: GitFileEntry[] = [
+      { path: 'beta/zeta.ts', status: '?', is_staged: false },
+      { path: 'alpha/readme.md', status: 'M', is_staged: false },
+      { path: 'gamma/app.ts', status: 'A', is_staged: false },
+    ];
+
+    const labels = () =>
+      screen.getAllByRole('button', { name: /View diff for/ }).map((button) => button.getAttribute('aria-label'));
+
+    const { rerender } = render(<GitFileList files={sortableFiles} displayMode="list" sortMode="path" />);
+
+    expect(labels()).toEqual([
+      'View diff for alpha/readme.md',
+      'View diff for beta/zeta.ts',
+      'View diff for gamma/app.ts',
+    ]);
+
+    rerender(<GitFileList files={sortableFiles} displayMode="list" sortMode="name" />);
+
+    expect(labels()).toEqual([
+      'View diff for gamma/app.ts',
+      'View diff for alpha/readme.md',
+      'View diff for beta/zeta.ts',
+    ]);
+
+    rerender(<GitFileList files={sortableFiles} displayMode="list" sortMode="status" />);
+
+    expect(labels()).toEqual([
+      'View diff for alpha/readme.md',
+      'View diff for beta/zeta.ts',
+      'View diff for gamma/app.ts',
+    ]);
+  });
 });

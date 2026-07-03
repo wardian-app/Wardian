@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import { AgentConfig, AgentWorktreeSummary, GitBranchSummary, GitFileEntry, GitLogEntry, GitStashEntry } from "../../types";
-import { GitFileList } from "./GitFileList";
+import { GitFileList, type ResourceSortMode } from "./GitFileList";
 import { GitDiffView } from "./GitDiffView";
 import { GitHistoryGraph } from "./GitHistoryGraph";
 import { useConfirm } from "../../components/ConfirmDialog";
@@ -60,6 +60,8 @@ interface CommitMessageValidation {
 const sourceControlStorageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") || "unknown-root";
 const resourceDisplayModeKey = (rootPath: string) =>
   `wardian:source-control:resources:${sourceControlStorageRoot(rootPath)}:display-mode`;
+const resourceSortModeKey = (rootPath: string) =>
+  `wardian:source-control:resources:${sourceControlStorageRoot(rootPath)}:sort-mode`;
 const commitActionStorageKey = "wardian:source-control:commit:last-action";
 
 const loadResourceDisplayMode = (rootPath: string): ResourceDisplayMode => {
@@ -71,6 +73,17 @@ const loadResourceDisplayMode = (rootPath: string): ResourceDisplayMode => {
 const saveResourceDisplayMode = (rootPath: string, mode: ResourceDisplayMode) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(resourceDisplayModeKey(rootPath), mode);
+};
+
+const loadResourceSortMode = (rootPath: string): ResourceSortMode => {
+  if (typeof window === "undefined") return "status";
+  const stored = window.localStorage.getItem(resourceSortModeKey(rootPath));
+  return stored === "path" || stored === "name" || stored === "status" ? stored : "status";
+};
+
+const saveResourceSortMode = (rootPath: string, mode: ResourceSortMode) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(resourceSortModeKey(rootPath), mode);
 };
 
 const loadLastCommitMode = (): CommitMode | null => {
@@ -157,6 +170,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [untrackedOpen, setUntrackedOpen] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [resourceDisplayMode, setResourceDisplayMode] = useState<ResourceDisplayMode>(() => loadResourceDisplayMode(""));
+  const [resourceSortMode, setResourceSortMode] = useState<ResourceSortMode>(() => loadResourceSortMode(""));
   const [lastCommitMode, setLastCommitMode] = useState<CommitMode | null>(() => loadLastCommitMode());
 
   // Commit history
@@ -273,10 +287,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     setCloneRepositoryUrl("");
     setIsCloneRepositoryFormOpen(false);
     setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
+    setResourceSortMode(loadResourceSortMode(rootPath ?? ""));
   }, [selectedAgentId, selectedWorkspaceRevision]);
 
   useEffect(() => {
     setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
+    setResourceSortMode(loadResourceSortMode(rootPath ?? ""));
   }, [rootPath]);
 
   // Fetch commit history when root changes or after a commit
@@ -1335,6 +1351,22 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         },
         { divider: true },
         {
+          label: "Sort by Path",
+          icon: resourceSortMode === "path" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+          onClick: () => updateResourceSortMode("path"),
+        },
+        {
+          label: "Sort by Name",
+          icon: resourceSortMode === "name" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+          onClick: () => updateResourceSortMode("name"),
+        },
+        {
+          label: "Sort by Status",
+          icon: resourceSortMode === "status" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+          onClick: () => updateResourceSortMode("status"),
+        },
+        { divider: true },
+        {
           label: "Stash Changes",
           icon: <Archive className="h-3.5 w-3.5" />,
           onClick: () => void handleStashPush(false),
@@ -1808,6 +1840,11 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     saveResourceDisplayMode(rootPath ?? "", mode);
   };
 
+  const updateResourceSortMode = (mode: ResourceSortMode) => {
+    setResourceSortMode(mode);
+    saveResourceSortMode(rootPath ?? "", mode);
+  };
+
   const handleRefreshSourceControl = async () => {
     setOperationError(null);
     const refreshed = await refreshStatus();
@@ -2118,6 +2155,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <GitFileList
                 files={stagedFiles}
                 displayMode={resourceDisplayMode}
+                sortMode={resourceSortMode}
                 onUnstage={handleUnstage}
                 onUnstagePaths={unstagePaths}
                 onDiff={handleDiff}
@@ -2164,6 +2202,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <GitFileList
                 files={mergeFiles}
                 displayMode={resourceDisplayMode}
+                sortMode={resourceSortMode}
                 onStage={handleStage}
                 onStagePaths={stagePaths}
                 onDiscard={handleDiscard}
@@ -2222,6 +2261,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <GitFileList
                 files={unstagedTracked}
                 displayMode={resourceDisplayMode}
+                sortMode={resourceSortMode}
                 onStage={handleStage}
                 onStagePaths={stagePaths}
                 onDiscard={handleDiscard}
@@ -2280,6 +2320,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
               <GitFileList
                 files={untrackedFiles}
                 displayMode={resourceDisplayMode}
+                sortMode={resourceSortMode}
                 onStage={handleStage}
                 onStagePaths={stagePaths}
                 onDiscard={handleDiscard}

@@ -234,10 +234,11 @@ Wardian parity backlog:
 57. Source Control untracked-group Discard All Untracked Changes action.
 58. Source Control tracked-group Discard All Tracked Changes action.
 59. Source Control tracked/untracked inline group discard controls.
+60. Source Control resource sort menu for path, name, and status ordering.
 
 ## Current Slice
 
-Implemented the first fifty-nine slices:
+Implemented the first sixty slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -299,6 +300,11 @@ Implemented the first fifty-nine slices:
   ordinary added/deleted/renamed/untracked resources by path. Tree mode
   preserves directory hierarchy while applying the same priority ordering within
   each folder.
+- The Source Control overflow now includes VS Code-style resource sort actions:
+  `Sort by Path`, `Sort by Name`, and `Sort by Status`. Wardian keeps status
+  ordering as the default, applies the selected mode to both list and tree file
+  rows, and persists the choice for each repository root alongside the
+  list/tree display mode.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -502,6 +508,10 @@ Implemented the first fifty-nine slices:
 
 Focused tests:
 
+- `npm run test -- src/features/git/GitPanel.test.tsx src/features/git/GitFileList.test.tsx` (resource sort mode and compact overflow coverage)
+- `npm run lint`
+- `npm run test`
+- `npm run build`
 - `npm run test -- src/features/git/useSourceControlBadge.test.ts src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/useSourceControlBadge.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarContentPane.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
