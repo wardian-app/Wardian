@@ -51,6 +51,67 @@ describe("GitHistoryGraph", () => {
     expect(within(row).getByText(/Ada Lovelace/)).toBeInTheDocument();
   });
 
+  it("renders incoming and outgoing divergence nodes with VS Code-style dashed graph markers", () => {
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        ahead={2}
+        behind={1}
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Local branch work",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+          {
+            hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            message: "Shared base",
+            author: "Grace Hopper",
+            date: "2026-06-24 07:00:00 -0400",
+            parent_hashes: ["cccccccccccccccccccccccccccccccccccccccc"],
+            refs: [],
+          },
+          {
+            hash: "dddddddddddddddddddddddddddddddddddddddd",
+            message: "Remote branch work",
+            author: "Katherine Johnson",
+            date: "2026-06-24 09:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["origin/main"],
+          },
+        ]}
+      />,
+    );
+
+    const rows = screen.getAllByTestId(/history-graph-row-/);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Outgoing Changes"),
+      expect.stringContaining("Local branch work"),
+      expect.stringContaining("Shared base"),
+      expect.stringContaining("Incoming Changes"),
+      expect.stringContaining("Remote branch work"),
+    ]);
+
+    const outgoingRow = screen.getByTestId("history-graph-row-outgoing-changes");
+    const incomingRow = screen.getByTestId("history-graph-row-incoming-changes");
+    expect(outgoingRow).not.toHaveAttribute("aria-expanded");
+    expect(incomingRow).not.toHaveAttribute("aria-expanded");
+    expect(within(outgoingRow).getByText("2 commits")).toBeInTheDocument();
+    expect(within(incomingRow).getByText("1 commit")).toBeInTheDocument();
+    expect(within(outgoingRow).queryByText("outgoing")).not.toBeInTheDocument();
+    expect(within(incomingRow).queryByText("incoming")).not.toBeInTheDocument();
+    expect(within(outgoingRow).getByTestId("history-graph-svg-outgoing-changes").querySelector("circle[stroke-dasharray='4,2']")).toBeTruthy();
+    expect(within(incomingRow).getByTestId("history-graph-svg-incoming-changes").querySelector("circle[stroke-dasharray='4,2']")).toBeTruthy();
+
+    fireEvent.click(outgoingRow);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
   it("expands a commit into changed files using the first parent and aligned graph placeholders", async () => {
     mockInvoke.mockResolvedValue([
       { path: "src/changed.ts", status: "M" },

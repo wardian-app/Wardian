@@ -2428,7 +2428,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     History unavailable
                   </div>
                 ) : (
-                  <GitHistoryGraph entries={history} branch={status.branch} rootPath={rootPath ?? ""} upstream={status.upstream} />
+                  <GitHistoryGraph
+                    entries={history}
+                    branch={status.branch}
+                    rootPath={rootPath ?? ""}
+                    upstream={status.upstream}
+                    ahead={status.ahead}
+                    behind={status.behind}
+                  />
                 )}
               </div>
             )}

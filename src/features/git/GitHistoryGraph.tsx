@@ -47,6 +47,8 @@ interface GitHistoryGraphProps {
   branch: string;
   rootPath: string;
   upstream?: string | null;
+  ahead?: number;
+  behind?: number;
 }
 
 interface Lane {
@@ -55,14 +57,33 @@ interface Lane {
 }
 
 interface HistoryGraphRow {
-  entry: GitLogEntry;
+  entry: HistoryGraphEntry;
   inputLanes: Lane[];
   outputLanes: Lane[];
   circleIndex: number;
   circleColor: string;
+  kind: HistoryGraphRowKind;
 }
 
+type HistoryGraphRowKind = "commit" | "incoming-changes" | "outgoing-changes";
+
+interface HistoryGraphEntry extends GitLogEntry {
+  graphKind?: HistoryGraphRowKind;
+  syntheticCount?: number;
+}
+
+const INCOMING_CHANGES_HASH = "__wardian_incoming_changes__";
+const OUTGOING_CHANGES_HASH = "__wardian_outgoing_changes__";
+
 const shortHash = (hash: string) => hash.slice(0, 8);
+
+const graphRowId = (row: HistoryGraphRow) => {
+  if (row.kind === "incoming-changes") return "incoming-changes";
+  if (row.kind === "outgoing-changes") return "outgoing-changes";
+  return shortHash(row.entry.hash);
+};
+
+const commitCountLabel = (count: number) => `${count} ${count === 1 ? "commit" : "commits"}`;
 
 const storageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") || "unknown-root";
 
@@ -146,6 +167,54 @@ const refsMatchFilter = (
   return true;
 };
 
+const syntheticEntry = (
+  kind: Exclude<HistoryGraphRowKind, "commit">,
+  count: number,
+  parentHash: string | undefined,
+): HistoryGraphEntry => ({
+  hash: kind === "incoming-changes" ? INCOMING_CHANGES_HASH : OUTGOING_CHANGES_HASH,
+  graphKind: kind,
+  syntheticCount: count,
+  message: kind === "incoming-changes" ? "Incoming Changes" : "Outgoing Changes",
+  author: commitCountLabel(count),
+  date: "",
+  parent_hashes: parentHash ? [parentHash] : [],
+  refs: [],
+});
+
+const buildVisibleHistoryEntries = (
+  entries: GitLogEntry[],
+  branch: string,
+  upstream: string | null | undefined,
+  refFilter: GraphRefFilter,
+  ahead: number,
+  behind: number,
+): HistoryGraphEntry[] => {
+  const visibleEntries: HistoryGraphEntry[] = entries
+    .filter((entry, index) => refsMatchFilter(entry, index, branch, upstream, refFilter))
+    .map((entry) => ({ ...entry, graphKind: "commit" }));
+  const headEntry = entries[0];
+  const upstreamEntry = upstream
+    ? entries.find((entry, index) => uniqueRefsForEntry(entry, index, branch).includes(upstream))
+    : undefined;
+
+  if ((refFilter === "auto" || refFilter === "all" || refFilter === "current") && ahead > 0 && headEntry) {
+    const headIndex = visibleEntries.findIndex((entry) => entry.hash === headEntry.hash);
+    if (headIndex !== -1) {
+      visibleEntries.splice(headIndex, 0, syntheticEntry("outgoing-changes", ahead, headEntry.hash));
+    }
+  }
+
+  if ((refFilter === "auto" || refFilter === "all" || refFilter === "upstream") && behind > 0 && upstreamEntry) {
+    const upstreamIndex = visibleEntries.findIndex((entry) => entry.hash === upstreamEntry.hash);
+    if (upstreamIndex !== -1) {
+      visibleEntries.splice(upstreamIndex, 0, syntheticEntry("incoming-changes", behind, upstreamEntry.hash));
+    }
+  }
+
+  return visibleEntries;
+};
+
 const refClassName = (ref: string, branch: string, upstream?: string | null) => {
   const base = "px-1 py-0 rounded-[2px] text-[9px] font-semibold leading-[14px] max-w-[88px] truncate";
   if (ref === "HEAD" || ref === branch) {
@@ -157,7 +226,7 @@ const refClassName = (ref: string, branch: string, upstream?: string | null) => 
   return `${base} bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)]`;
 };
 
-const buildRows = (entries: GitLogEntry[]): HistoryGraphRow[] => {
+const buildRows = (entries: HistoryGraphEntry[]): HistoryGraphRow[] => {
   let lanes: Lane[] = [];
 
   return entries.map((entry) => {
@@ -185,6 +254,7 @@ const buildRows = (entries: GitLogEntry[]): HistoryGraphRow[] => {
       outputLanes,
       circleIndex,
       circleColor,
+      kind: entry.graphKind ?? "commit",
     };
   });
 };
@@ -229,7 +299,7 @@ const renderGraphPaths = (row: HistoryGraphRow, metrics: GraphMetrics) => {
   return paths;
 };
 
-export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHistoryGraphProps) {
+export function GitHistoryGraph({ entries, branch, rootPath, upstream, ahead = 0, behind = 0 }: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
   const [expandedHashes, setExpandedHashes] = useState<Set<string>>(() => loadExpandedHashes(rootPath));
@@ -237,8 +307,8 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHist
   const [loadingHashes, setLoadingHashes] = useState<Set<string>>(() => new Set());
   const [errorByHash, setErrorByHash] = useState<Record<string, string>>({});
   const visibleEntries = useMemo(
-    () => entries.filter((entry, index) => refsMatchFilter(entry, index, branch, upstream, refFilter)),
-    [branch, entries, refFilter, upstream],
+    () => buildVisibleHistoryEntries(entries, branch, upstream, refFilter, ahead, behind),
+    [ahead, behind, branch, entries, refFilter, upstream],
   );
   const rows = useMemo(() => buildRows(visibleEntries), [visibleEntries]);
   const originalIndexByHash = useMemo(
@@ -295,6 +365,7 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHist
   useEffect(() => {
     rows.forEach((row) => {
       if (!expandedHashes.has(row.entry.hash)) return;
+      if (row.kind !== "commit") return;
       if (changesByHash[row.entry.hash] || loadingHashes.has(row.entry.hash) || errorByHash[row.entry.hash]) return;
       void loadCommitChanges(row.entry);
     });
@@ -422,25 +493,34 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHist
         const width = metrics.swimlaneWidth * (maxLaneCount + 1);
         const circleX = metrics.swimlaneWidth * (row.circleIndex + 1);
         const isHead = refs.includes("HEAD");
+        const rowId = graphRowId(row);
+        const isSynthetic = row.kind !== "commit";
         const short = shortHash(row.entry.hash);
-        const isExpanded = expandedHashes.has(row.entry.hash);
+        const isExpanded = !isSynthetic && expandedHashes.has(row.entry.hash);
         const changes = changesByHash[row.entry.hash] ?? [];
         const isLoading = loadingHashes.has(row.entry.hash);
         const isTiny = density === "tiny";
+        const isDivergenceNode = row.kind === "incoming-changes" || row.kind === "outgoing-changes";
 
         return (
           <div key={row.entry.hash}>
             <button
               type="button"
-              data-testid={`history-graph-row-${short}`}
-              aria-expanded={isExpanded}
-              aria-label={`${isExpanded ? "Collapse" : "Expand"} ${row.entry.message}`}
-              onClick={() => void toggleRow(row.entry)}
+              data-testid={`history-graph-row-${rowId}`}
+              aria-expanded={isSynthetic ? undefined : isExpanded}
+              aria-label={
+                isSynthetic
+                  ? `${row.entry.message}, ${commitCountLabel(row.entry.syntheticCount ?? 0)}`
+                  : `${isExpanded ? "Collapse" : "Expand"} ${row.entry.message}`
+              }
+              onClick={() => {
+                if (!isSynthetic) void toggleRow(row.entry);
+              }}
               className="group w-full flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded cursor-default min-w-0 text-left"
               style={{ height: `${metrics.rowHeight}px` }}
             >
               <svg
-                data-testid={`history-graph-svg-${short}`}
+                data-testid={`history-graph-svg-${rowId}`}
                 width={width}
                 height={metrics.rowHeight}
                 viewBox={`0 0 ${width} ${metrics.rowHeight}`}
@@ -452,30 +532,43 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHist
                   cx={circleX}
                   cy={metrics.rowHeight / 2}
                   r={
-                    isHead
+                    isHead || isDivergenceNode
                       ? metrics.headRadius
                       : row.entry.parent_hashes && row.entry.parent_hashes.length > 1
                         ? metrics.mergeRadius
                         : metrics.nodeRadius
                   }
-                  fill={isHead ? row.circleColor : "var(--color-wardian-card)"}
+                  fill={isHead || isDivergenceNode ? row.circleColor : "var(--color-wardian-card)"}
                   stroke={row.circleColor}
-                  strokeWidth={isHead ? 2 : 1.5}
+                  strokeWidth={isHead || isDivergenceNode ? 2 : 1.5}
                 />
-                {isHead && (
+                {(isHead || isDivergenceNode) && (
                   <circle
                     cx={circleX}
                     cy={metrics.rowHeight / 2}
-                    r={metrics.innerRadius}
+                    r={isDivergenceNode ? metrics.mergeRadius : metrics.innerRadius}
                     fill="var(--color-wardian-card)"
+                    stroke={isDivergenceNode ? row.circleColor : undefined}
+                    strokeWidth={isDivergenceNode ? 3 : undefined}
+                  />
+                )}
+                {isDivergenceNode && (
+                  <circle
+                    cx={circleX}
+                    cy={metrics.rowHeight / 2}
+                    r={metrics.mergeRadius}
+                    fill="none"
+                    stroke={row.circleColor}
+                    strokeWidth={1}
+                    strokeDasharray="4,2"
                   />
                 )}
               </svg>
               <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                <span className={`${isTiny ? "text-[10px] leading-[14px]" : "text-[11px] leading-[18px]"} text-primary truncate`}>
+                <span className={`${isTiny ? "text-[10px] leading-[14px]" : "text-[11px] leading-[18px]"} ${isSynthetic ? "font-medium text-[var(--color-wardian-text-muted)]" : "text-primary"} truncate`}>
                   {row.entry.message}
                 </span>
-                {!isTiny && refs.length > 0 && (
+                {!isTiny && !isSynthetic && refs.length > 0 && (
                   <span className="min-w-0 flex items-center gap-1 overflow-hidden">
                     {refs.map((ref) => (
                       <span key={ref} className={refClassName(ref, branch, upstream)} title={ref}>
@@ -485,14 +578,20 @@ export function GitHistoryGraph({ entries, branch, rootPath, upstream }: GitHist
                   </span>
                 )}
               </div>
-              {!isTiny && (
+              {!isTiny && !isSynthetic && (
                 <span className="hidden min-[360px]:inline text-[9px] text-[var(--color-wardian-text-muted)] truncate max-w-[96px]">
                   {row.entry.author} · {formatDate(row.entry.date)}
                 </span>
               )}
-              <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-70 group-hover:opacity-100">
-                {short}
-              </span>
+              {isSynthetic ? (
+                <span className="text-[9px] text-[var(--color-wardian-text-muted)] shrink-0 opacity-80">
+                  {commitCountLabel(row.entry.syntheticCount ?? 0)}
+                </span>
+              ) : (
+                <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-70 group-hover:opacity-100">
+                  {short}
+                </span>
+              )}
             </button>
             {isExpanded && (
               <div>

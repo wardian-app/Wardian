@@ -251,10 +251,11 @@ Wardian parity backlog:
     hunk.
 63. Source Control overflow command grouping for Branch, Sync, View, and Stash
     actions.
+64. History graph incoming/outgoing divergence markers with dashed graph nodes.
 
 ## Current Slice
 
-Implemented the first sixty-three slices:
+Implemented the first sixty-four slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -338,6 +339,10 @@ Implemented the first sixty-three slices:
   `View`, and `Stash` submenus. Checkout/create-branch, fetch/pull/push,
   display/sort, and stash commands stay discoverable while the root menu
   remains compact enough for the sidebar.
+- The history graph now renders VS Code-style synthetic `Outgoing Changes` and
+  `Incoming Changes` rows when Git reports branch divergence. The rows use
+  dashed graph markers, local/remote commit counts, and non-expandable graph
+  row behavior while preserving the real commit lanes below them.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
