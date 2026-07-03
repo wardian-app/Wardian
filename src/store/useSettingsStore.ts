@@ -85,6 +85,7 @@ export const DEFAULT_CODEX_RUNTIME_POLICY: CodexRuntimePolicy = {
   sandbox_mode: 'workspace-write',
   approval_policy: 'on-request',
   full_auto: false,
+  trust_workspaces: false,
 };
 
 export function normalizeCodexRuntimePolicy(
@@ -102,6 +103,9 @@ export function normalizeCodexRuntimePolicy(
     full_auto: typeof policy?.full_auto === 'boolean'
       ? policy.full_auto
       : DEFAULT_CODEX_RUNTIME_POLICY.full_auto,
+    trust_workspaces: typeof policy?.trust_workspaces === 'boolean'
+      ? policy.trust_workspaces
+      : DEFAULT_CODEX_RUNTIME_POLICY.trust_workspaces,
   };
 }
 
@@ -196,6 +200,7 @@ interface SettingsState {
   setCodexSandboxMode: (value: CodexSandboxMode) => void;
   setCodexApprovalPolicy: (value: CodexApprovalPolicy) => void;
   setCodexFullAuto: (value: boolean) => void;
+  setCodexTrustWorkspaces: (value: boolean) => void;
   loadAppSettings: () => Promise<void>;
   saveAppSettings: () => Promise<void>;
   loadShellSettings: () => Promise<void>;
@@ -343,6 +348,7 @@ function codexOverridesFromPolicy(policy: CodexRuntimePolicy): CodexRuntimePolic
     ...(normalized.sandbox_mode !== DEFAULT_CODEX_RUNTIME_POLICY.sandbox_mode ? { sandbox_mode: normalized.sandbox_mode } : {}),
     ...(normalized.approval_policy !== DEFAULT_CODEX_RUNTIME_POLICY.approval_policy ? { approval_policy: normalized.approval_policy } : {}),
     ...(normalized.full_auto !== DEFAULT_CODEX_RUNTIME_POLICY.full_auto ? { full_auto: normalized.full_auto } : {}),
+    ...(normalized.trust_workspaces !== DEFAULT_CODEX_RUNTIME_POLICY.trust_workspaces ? { trust_workspaces: normalized.trust_workspaces } : {}),
   };
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
@@ -413,6 +419,7 @@ function normalizeShellOverrides(overrides: ShellSettingsOverrides | undefined):
     ...(CODEX_SANDBOX_MODES.includes(codex?.sandbox_mode as CodexSandboxMode) ? { sandbox_mode: codex?.sandbox_mode } : {}),
     ...(CODEX_APPROVAL_POLICIES.includes(codex?.approval_policy as CodexApprovalPolicy) ? { approval_policy: codex?.approval_policy } : {}),
     ...(typeof codex?.full_auto === 'boolean' ? { full_auto: codex.full_auto } : {}),
+    ...(typeof codex?.trust_workspaces === 'boolean' ? { trust_workspaces: codex.trust_workspaces } : {}),
   };
   return {
     ...(overrides?.shell_id ? { shell_id: overrides.shell_id.trim() || 'auto' } : {}),
@@ -601,6 +608,16 @@ export const useSettingsStore = create<SettingsState>()(
           codex_runtime_policy: {
             ...state.shell_settings_overrides.codex_runtime_policy,
             full_auto,
+          },
+        },
+      })),
+      setCodexTrustWorkspaces: (trust_workspaces) => set((state) => ({
+        codex_runtime_policy: { ...state.codex_runtime_policy, trust_workspaces },
+        shell_settings_overrides: {
+          ...state.shell_settings_overrides,
+          codex_runtime_policy: {
+            ...state.shell_settings_overrides.codex_runtime_policy,
+            trust_workspaces,
           },
         },
       })),

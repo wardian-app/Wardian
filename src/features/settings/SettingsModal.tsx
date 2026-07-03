@@ -221,6 +221,14 @@ const rowDefinitions: SettingsRowDefinition[] = [
     keywords: ["codex", "full auto", "autonomous"],
   },
   {
+    id: "codex-trust-workspaces",
+    category: "Agent Runtime",
+    subgroup: "Codex",
+    label: "Trust launch workspaces",
+    detail: "Marks each Codex agent folder as a trusted project for that launch.",
+    keywords: ["codex", "trust", "workspace", "directory", "folder", "permissions"],
+  },
+  {
     id: "gemini-patch",
     category: "Provider Utilities",
     label: "Auto-patch Gemini CLI",
@@ -404,6 +412,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setCodexSandboxMode,
     setCodexApprovalPolicy,
     setCodexFullAuto,
+    setCodexTrustWorkspaces,
     loadShellSettings,
     loadAvailableShells,
     saveShellSettings,
@@ -998,6 +1007,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             >
               <option value="false">Off</option>
               <option value="true">On: bypass approvals and sandbox</option>
+            </select>
+          </SettingRow>
+        );
+      case "codex-trust-workspaces":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="Codex trust launch workspaces"
+              value={codex_runtime_policy.trust_workspaces ? "true" : "false"}
+              onChange={(event) => setCodexTrustWorkspaces(event.target.value === "true")}
+              className={optionClass}
+            >
+              <option value="false">Off</option>
+              <option value="true">On: trust launch folder</option>
             </select>
           </SettingRow>
         );

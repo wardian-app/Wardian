@@ -18,12 +18,14 @@ export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
   approval_policy: CodexApprovalPolicy;
   full_auto: boolean;
+  trust_workspaces: boolean;
 }
 
 export interface CodexRuntimePolicyOverrides {
   sandbox_mode?: CodexSandboxMode;
   approval_policy?: CodexApprovalPolicy;
   full_auto?: boolean;
+  trust_workspaces?: boolean;
 }
 
 export interface ShellSettings {

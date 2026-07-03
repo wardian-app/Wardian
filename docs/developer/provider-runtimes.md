@@ -161,6 +161,25 @@ Current sequence:
 
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 
+Wardian also exposes an off-by-default global **Trust launch workspaces** Codex
+runtime setting. When enabled, Wardian passes a launch-scoped config override
+for the agent workspace:
+
+```bash
+codex -c 'projects."<absolute-agent-workspace-path>".trust_level="trusted"'
+```
+
+PowerShell:
+
+```powershell
+codex -c 'projects."<absolute-agent-workspace-path>".trust_level="trusted"'
+```
+
+This uses Codex's project trust table without editing the user's global Codex
+config file. Keep it separate from Codex autonomous mode: autonomous mode
+bypasses approvals and sandboxing, while workspace trust only marks the launch
+folder as trusted.
+
 ### Approval and status handling
 
 Codex emits several different event shapes across live PTY output and persisted session logs.

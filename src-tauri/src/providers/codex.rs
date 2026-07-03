@@ -112,6 +112,17 @@ impl CodexProvider {
         config: &AgentConfig,
         is_exec_mode: bool,
     ) {
+        let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        self.append_common_args_with_runtime_policy(args, config, is_exec_mode, &runtime_policy);
+    }
+
+    fn append_common_args_with_runtime_policy(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        is_exec_mode: bool,
+        runtime_policy: &CodexRuntimePolicy,
+    ) {
         let codex = config.codex_config();
         if let Some(ref model) = config.model {
             args.push("--model".into());
@@ -125,8 +136,14 @@ impl CodexProvider {
             }
         }
 
-        let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-        let effective_policy = effective_codex_runtime_policy(&codex, &runtime_policy);
+        let effective_policy = effective_codex_runtime_policy(&codex, runtime_policy);
+        if effective_policy.trust_workspaces {
+            if let Some(project_override) = codex_trusted_project_override(&config.folder) {
+                args.push("-c".into());
+                args.push(project_override);
+            }
+        }
+
         if effective_policy.full_auto {
             #[cfg(target_os = "windows")]
             {
@@ -191,6 +208,65 @@ impl CodexProvider {
             args.push(dir);
         }
     }
+
+    #[cfg(test)]
+    fn spawn_args_with_runtime_policy(
+        &self,
+        config: &AgentConfig,
+        is_resume: bool,
+        runtime_policy: &CodexRuntimePolicy,
+    ) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+
+        if is_resume {
+            args.push("resume".into());
+            if let Some(resume_id) = config
+                .resume_session
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+            {
+                args.push(resume_id.clone());
+            }
+        }
+
+        self.append_common_args_with_runtime_policy(&mut args, config, false, runtime_policy);
+
+        if let Some(ref custom) = config.custom_args {
+            if let Some(parsed) = shlex::split(custom) {
+                args.extend(parsed);
+            }
+        }
+
+        args
+    }
+}
+
+fn toml_basic_string_key(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn codex_trusted_project_override(folder: &str) -> Option<String> {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        r#"projects."{}".trust_level="trusted""#,
+        toml_basic_string_key(trimmed)
+    ))
 }
 
 fn effective_codex_runtime_policy(
@@ -224,6 +300,7 @@ fn effective_codex_runtime_policy(
             .unwrap_or(global_policy.approval_policy.as_str())
             .to_string(),
         full_auto,
+        trust_workspaces: global_policy.trust_workspaces,
     }
 }
 
@@ -619,6 +696,40 @@ mod tests {
         assert!(!effective.full_auto);
         assert_eq!(effective.sandbox_mode, "workspace-write");
         assert_eq!(effective.approval_policy, "on-request");
+    }
+
+    #[test]
+    fn spawn_args_can_mark_launch_workspace_trusted_for_codex() {
+        let p = make_provider();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            folder: r#"D:\Development\Wardian.wt\wardian-3"#.into(),
+            ..Default::default()
+        };
+        let mut policy = CodexRuntimePolicy::default();
+        policy.trust_workspaces = true;
+
+        let args = p.spawn_args_with_runtime_policy(&config, false, &policy);
+
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-c"
+                && pair[1]
+                    == r#"projects."D:\\Development\\Wardian.wt\\wardian-3".trust_level="trusted""#
+        }));
+    }
+
+    #[test]
+    fn spawn_args_do_not_trust_workspace_by_default() {
+        let p = make_provider();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            folder: r#"D:\Development\Wardian.wt\wardian-3"#.into(),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(!args.iter().any(|arg| arg.contains("trust_level")));
     }
 
     #[test]
