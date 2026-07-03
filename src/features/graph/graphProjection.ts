@@ -109,7 +109,12 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
       agentIds: team.agentIds.filter((id) => visibleIds.has(id)),
     }))
     .filter((cluster) => cluster.agentIds.length > 0);
-  const positions = computePositions(visibleAgents, clusters, teamByAgent);
+
+  // Build communication edges first (needed for layout)
+  const commEdges = buildCommEdges(input.topology, input.pairActivity, visibleIds, input.now ?? Date.now());
+
+  // Compute positions based on communication edges, not team membership
+  const positions = computePositions(visibleAgents, commEdges);
 
   const nodes = visibleAgents.map((agent) => {
     const telemetry = input.telemetry[agent.session_id];
@@ -139,7 +144,7 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
     clusters,
     visibleAgents,
     scopeLabel: input.activeList?.name ?? "All Agents",
-    commEdges: buildCommEdges(input.topology, input.pairActivity, visibleIds, input.now ?? Date.now()),
+    commEdges,
   };
 }
 
@@ -307,41 +312,155 @@ function addReason(
   edgeReasons.set(key, new Set([...(edgeReasons.get(key) ?? []), reason]));
 }
 
+interface ForceSimulationState {
+  vx: number;
+  vy: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * Simple deterministic force-directed layout using Verlet integration.
+ * Positions nodes to minimize communication edge lengths while repelling agents apart.
+ * No Math.random() — seed positions and iterations are deterministic.
+ *
+ * Forces:
+ * - Repulsion: all-pairs, inverse-square, clamped min distance
+ * - Spring attraction: stronger for manual edges, weaker for ghost edges
+ * - Centering: gentle pull toward origin
+ * - Damping: velocity dissipates over iterations for stability
+ */
 function computePositions(
   agents: AgentConfig[],
-  clusters: AgentGraphCluster[],
-  teamByAgent: Map<string, AgentTeam>,
-) {
-  const positions = new Map<string, { x: number; y: number }>();
-  const clusterRadius = Math.max(3, clusters.length * 1.2);
+  commEdges: CommunicationEdge[],
+): Map<string, { x: number; y: number }> {
+  if (agents.length === 0) {
+    return new Map();
+  }
 
-  clusters.forEach((cluster, index) => {
-    const centerAngle = (Math.PI * 2 * index) / Math.max(1, clusters.length);
-    const center = {
-      x: Math.cos(centerAngle) * clusterRadius,
-      y: Math.sin(centerAngle) * clusterRadius,
-    };
-    const nodeRadius = Math.max(0.8, cluster.agentIds.length * 0.16);
-    cluster.agentIds.forEach((agentId, agentIndex) => {
-      const angle = (Math.PI * 2 * agentIndex) / Math.max(1, cluster.agentIds.length);
-      positions.set(agentId, {
-        x: center.x + Math.cos(angle) * nodeRadius,
-        y: center.y + Math.sin(angle) * nodeRadius,
-      });
-    });
-  });
+  const positions = new Map<string, ForceSimulationState>();
 
-  const ungrouped = agents.filter((agent) => !teamByAgent.has(agent.session_id));
-  const radius = Math.max(1.5, ungrouped.length * 0.2);
-  ungrouped.forEach((agent, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(1, ungrouped.length);
+  // Deterministic seed: place nodes evenly on a circle, ordered by session_id
+  const sortedAgents = [...agents].sort((a, b) => a.session_id.localeCompare(b.session_id));
+  const seedRadius = 2.0;
+  sortedAgents.forEach((agent, index) => {
+    const angle = (Math.PI * 2 * index) / Math.max(1, sortedAgents.length);
     positions.set(agent.session_id, {
-      x: Math.cos(angle) * radius,
-      y: Math.sin(angle) * radius,
+      x: Math.cos(angle) * seedRadius,
+      y: Math.sin(angle) * seedRadius,
+      vx: 0,
+      vy: 0,
     });
   });
 
-  return positions;
+  // Build edge index for fast lookup
+  const edgesBySource = new Map<string, Array<{ target: string; strength: number }>>();
+  for (const edge of commEdges) {
+    const strength = edge.origin === "manual" ? 1.0 : 0.3;
+
+    // Bidirectional edges
+    if (!edgesBySource.has(edge.source)) edgesBySource.set(edge.source, []);
+    edgesBySource.get(edge.source)!.push({ target: edge.target, strength });
+
+    if (!edgesBySource.has(edge.target)) edgesBySource.set(edge.target, []);
+    edgesBySource.get(edge.target)!.push({ target: edge.source, strength });
+  }
+
+  // Force simulation parameters
+  const ITERATIONS = 150;
+  const REPULSION_STRENGTH = 0.5;
+  const SPRING_REST_LENGTH = 1.5;
+  const CENTER_STRENGTH = 0.05;
+  const DAMPING = 0.85;
+  const MAX_VELOCITY = 0.1;
+
+  // Run simulation
+  for (let iter = 0; iter < ITERATIONS; iter++) {
+    const agentIds = Array.from(positions.keys());
+
+    // All-pairs repulsion
+    for (let i = 0; i < agentIds.length; i++) {
+      for (let j = i + 1; j < agentIds.length; j++) {
+        const a = agentIds[i];
+        const b = agentIds[j];
+        const posA = positions.get(a)!;
+        const posB = positions.get(b)!;
+
+        const dx = posB.x - posA.x;
+        const dy = posB.y - posA.y;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 0.01) dist = 0.01; // Avoid division by zero
+
+        const force = REPULSION_STRENGTH / (dist * dist);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+
+        posA.vx -= fx;
+        posA.vy -= fy;
+        posB.vx += fx;
+        posB.vy += fy;
+      }
+    }
+
+    // Spring attraction along communication edges
+    for (const [source, edges] of edgesBySource) {
+      const posSource = positions.get(source);
+      if (!posSource) continue;
+
+      for (const { target, strength } of edges) {
+        const posTarget = positions.get(target);
+        if (!posTarget) continue;
+
+        const dx = posTarget.x - posSource.x;
+        const dy = posTarget.y - posSource.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 0.01) continue;
+
+        const springForce = (dist - SPRING_REST_LENGTH) * strength * 0.1;
+        const fx = (dx / dist) * springForce;
+        const fy = (dy / dist) * springForce;
+
+        posSource.vx += fx;
+        posSource.vy += fy;
+        posTarget.vx -= fx;
+        posTarget.vy -= fy;
+      }
+    }
+
+    // Centering force
+    for (const pos of positions.values()) {
+      pos.vx -= pos.x * CENTER_STRENGTH;
+      pos.vy -= pos.y * CENTER_STRENGTH;
+    }
+
+    // Apply velocity with damping and update positions
+    for (const pos of positions.values()) {
+      pos.vx *= DAMPING;
+      pos.vy *= DAMPING;
+
+      // Clamp velocity to avoid instability
+      const velMag = Math.sqrt(pos.vx * pos.vx + pos.vy * pos.vy);
+      if (velMag > MAX_VELOCITY) {
+        pos.vx = (pos.vx / velMag) * MAX_VELOCITY;
+        pos.vy = (pos.vy / velMag) * MAX_VELOCITY;
+      }
+
+      pos.x += pos.vx;
+      pos.y += pos.vy;
+    }
+  }
+
+  // Clamp final positions to a reasonable bounding box and extract coordinates
+  const result = new Map<string, { x: number; y: number }>();
+  const BOUNDS = 5.0;
+  for (const [id, pos] of positions) {
+    result.set(id, {
+      x: Math.max(-BOUNDS, Math.min(BOUNDS, pos.x)),
+      y: Math.max(-BOUNDS, Math.min(BOUNDS, pos.y)),
+    });
+  }
+
+  return result;
 }
 
 function statusToColor(status: string) {

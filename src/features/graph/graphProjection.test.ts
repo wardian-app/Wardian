@@ -250,6 +250,181 @@ describe("buildAgentGraph", () => {
   });
 });
 
+describe("force-directed layout (computePositions)", () => {
+  const distance = (p1: { x: number; y: number }, p2: { x: number; y: number }) => {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  it("produces deterministic positions from identical inputs", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "c" }),
+    ];
+
+    const graph1 = buildTestGraph({ agents });
+    const graph2 = buildTestGraph({ agents });
+
+    expect(graph1.nodes.map((n) => [n.id, n.x, n.y])).toEqual(
+      graph2.nodes.map((n) => [n.id, n.x, n.y]),
+    );
+  });
+
+  it("places connected agents closer than disconnected agents", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "c" }),
+    ];
+
+    // Manual edge between a and b
+    const topology = {
+      edges: [{ a: "a", b: "b", origin: "manual" as const }],
+      ignored_pairs: [],
+      fallback_groups: [],
+    };
+
+    const graph = buildTestGraph({ agents, topology });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    const distAB = distance(posMap.get("a")!, posMap.get("b")!);
+    const distAC = distance(posMap.get("a")!, posMap.get("c")!);
+    const distBC = distance(posMap.get("b")!, posMap.get("c")!);
+
+    expect(distAB).toBeLessThan(distAC);
+    expect(distAB).toBeLessThan(distBC);
+  });
+
+  it("treats manual edges as stronger pull than ghost edges", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "c" }),
+    ];
+
+    // Scenario 1: manual edge a-b, ghost edge b-c
+    const NOW = 1000000000;
+    const graph1 = buildTestGraph({
+      agents,
+      topology: {
+        edges: [{ a: "a", b: "b", origin: "manual" as const }],
+        ignored_pairs: [],
+        fallback_groups: [],
+      },
+      pairActivity: [
+        {
+          a: "b",
+          b: "c",
+          last_message_at: new Date(NOW - 1000).toISOString(),
+          active_ask: false,
+          awaiting_reply_from: null,
+        },
+      ],
+      now: NOW,
+    });
+
+    const posMap1 = new Map(graph1.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+    const distAB1 = distance(posMap1.get("a")!, posMap1.get("b")!);
+    const distBC1 = distance(posMap1.get("b")!, posMap1.get("c")!);
+
+    // Manual edge should be tighter than ghost edge
+    expect(distAB1).toBeLessThan(distBC1);
+  });
+
+  it("pushes edgeless agents to the periphery", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "c" }),
+      agent({ session_id: "d" }), // edgeless
+    ];
+
+    const topology = {
+      edges: [
+        { a: "a", b: "b", origin: "manual" as const },
+        { a: "b", b: "c", origin: "manual" as const },
+      ],
+      ignored_pairs: [],
+      fallback_groups: [],
+    };
+
+    const graph = buildTestGraph({ agents, topology });
+    const posMap = new Map(graph.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    // Centroid of connected component {a, b, c}
+    const posA = posMap.get("a")!;
+    const posB = posMap.get("b")!;
+    const posC = posMap.get("c")!;
+    const centroid = {
+      x: (posA.x + posB.x + posC.x) / 3,
+      y: (posA.y + posB.y + posC.y) / 3,
+    };
+
+    // Radius of connected component (average internal distance)
+    const avgInternalDist =
+      (distance(posA, posB) +
+        distance(posB, posC) +
+        distance(posA, posC)) /
+      3;
+
+    const posD = posMap.get("d")!;
+    const distDToCentroid = distance(posD, centroid);
+
+    // Edgeless agent should be farther from centroid than internal radius
+    expect(distDToCentroid).toBeGreaterThan(avgInternalDist);
+  });
+
+  it("handles zero agents", () => {
+    const graph = buildTestGraph({ agents: [] });
+    expect(graph.nodes).toEqual([]);
+  });
+
+  it("handles a single agent", () => {
+    const graph = buildTestGraph({ agents: [agent({ session_id: "solo" })] });
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].id).toBe("solo");
+    expect(Number.isFinite(graph.nodes[0].x)).toBe(true);
+    expect(Number.isFinite(graph.nodes[0].y)).toBe(true);
+  });
+
+  it("avoids NaN/Infinity for all-edgeless scenario", () => {
+    const agents = [
+      agent({ session_id: "a" }),
+      agent({ session_id: "b" }),
+      agent({ session_id: "c" }),
+    ];
+
+    const graph = buildTestGraph({ agents, topology: { edges: [], ignored_pairs: [], fallback_groups: [] } });
+
+    for (const node of graph.nodes) {
+      expect(Number.isFinite(node.x)).toBe(true);
+      expect(Number.isFinite(node.y)).toBe(true);
+      expect(!Number.isNaN(node.x)).toBe(true);
+      expect(!Number.isNaN(node.y)).toBe(true);
+    }
+  });
+
+  it("maintains determinism with high agent count", () => {
+    const agents = Array.from({ length: 20 }, (_, i) => agent({ session_id: `agent-${i}` }));
+
+    const graph1 = buildTestGraph({ agents });
+    const graph2 = buildTestGraph({ agents });
+
+    const positions1 = new Map(graph1.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+    const positions2 = new Map(graph2.nodes.map((n) => [n.id, { x: n.x, y: n.y }]));
+
+    for (const [id, pos1] of positions1) {
+      const pos2 = positions2.get(id);
+      expect(pos2).toBeDefined();
+      // Allow tiny floating-point errors
+      expect(Math.abs(pos1.x - pos2!.x)).toBeLessThan(1e-10);
+      expect(Math.abs(pos1.y - pos2!.y)).toBeLessThan(1e-10);
+    }
+  });
+});
+
 describe("communication edges", () => {
   const RECENT_WINDOW_MS = 60 * 60 * 1000;
   const NOW = 1000000000;
