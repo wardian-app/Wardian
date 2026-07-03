@@ -133,6 +133,28 @@ describe('AgentWatchlist', () => {
     expect(screen.getByText('Beta')).toBeInTheDocument();
   });
 
+  it('does not prune persisted individual watchlist entries before agents load', async () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        agents={[]}
+        telemetry={{}}
+        watchlists={[
+          {
+            id: 'today',
+            name: 'Today',
+            entries: [{ type: 'agent', agentId: 'agent-1' }],
+          },
+        ]}
+        activeListId="today"
+      />,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockOnWatchlistsChange).not.toHaveBeenCalled();
+  });
+
   it('filters agents by search term', () => {
     render(<AgentWatchlist {...defaultProps} />);
     const searchInput = screen.getByPlaceholderText('Search agents...');
