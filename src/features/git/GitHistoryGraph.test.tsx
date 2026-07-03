@@ -372,6 +372,44 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByText("Release tag")).toBeInTheDocument();
   });
 
+  it("toggles ref badges between the active filter and all refs per root", () => {
+    const entries = [
+      {
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        message: "Current tagged work",
+        author: "Ada Lovelace",
+        date: "2026-06-25 08:00:00 -0400",
+        parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        refs: ["HEAD", "main", "origin/main", "v1.0.0"],
+      },
+    ];
+
+    const { unmount } = render(
+      <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter history to current branch" }));
+
+    const currentRow = screen.getByTestId("history-graph-row-aaaaaaaa");
+    expect(within(currentRow).getByText("HEAD")).toBeInTheDocument();
+    expect(within(currentRow).getByText("main")).toBeInTheDocument();
+    expect(within(currentRow).queryByText("origin/main")).not.toBeInTheDocument();
+    expect(within(currentRow).queryByText("v1.0.0")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all history ref badges" }));
+
+    expect(within(currentRow).getByText("origin/main")).toBeInTheDocument();
+    expect(within(currentRow).getByText("v1.0.0")).toBeInTheDocument();
+    expect(window.localStorage.getItem("wardian:source-control:history-graph:C:/repo:badge-mode")).toBe("all");
+
+    unmount();
+
+    render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
+    fireEvent.click(screen.getByRole("button", { name: "Filter history to current branch" }));
+
+    expect(within(screen.getByTestId("history-graph-row-aaaaaaaa")).getByText("v1.0.0")).toBeInTheDocument();
+  });
+
   it("reveals and focuses the current history item from the graph controls", () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {

@@ -259,10 +259,11 @@ Wardian parity backlog:
 68. History graph `Go to Current History Item` title action.
 69. History graph changed-file `Open File` action.
 70. History graph commit `View Changes` patch action.
+71. History graph ref badge filter/all mode.
 
 ## Current Slice
 
-Implemented the first seventy slices:
+Implemented the first seventy-one slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -372,6 +373,10 @@ Implemented the first seventy slices:
   commit-vs-parent patch command when the graph is hosted in `GitPanel`.
   Wardian opens the resulting patch in the existing read-only diff modal while
   preserving row-click expansion for changed-file tree inspection.
+- The history graph now exposes a VS Code-like ref badge mode. Detailed rows
+  default to badges that follow the active ref filter, while a compact title
+  action switches to all decorated refs and persists the choice by repository
+  root.
 - The commit input now shows an advisory SCM-style validation warning when the
   subject line exceeds 50 characters or a body line exceeds 72 characters, while
   leaving the commit action available.
@@ -594,6 +599,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx` (history graph changed-file open coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx src/features/git/GitPanel.test.tsx` (history graph commit patch view coverage)
 - `cargo test git_commit_diff_compares_commit_with_parent --manifest-path src-tauri/Cargo.toml`
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph ref badge filter/all mode coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`

@@ -14,6 +14,7 @@ import {
   ListTree,
   Maximize2,
   Minimize2,
+  Tags,
   Target,
 } from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
@@ -22,6 +23,7 @@ import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu"
 type GraphDensity = "detailed" | "tiny";
 type GraphRefFilter = "auto" | "all" | "current" | "upstream";
 type GraphChangeViewMode = "tree" | "list";
+type GraphBadgeMode = "filter" | "all";
 
 interface GraphMetrics {
   rowHeight: number;
@@ -150,6 +152,17 @@ const saveRefFilter = (rootPath: string, filter: GraphRefFilter) => {
   window.localStorage.setItem(storageKey(rootPath, "ref-filter"), filter);
 };
 
+const loadBadgeMode = (rootPath: string): GraphBadgeMode => {
+  if (typeof window === "undefined") return "filter";
+  const stored = window.localStorage.getItem(storageKey(rootPath, "badge-mode"));
+  return stored === "all" || stored === "filter" ? stored : "filter";
+};
+
+const saveBadgeMode = (rootPath: string, mode: GraphBadgeMode) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(storageKey(rootPath, "badge-mode"), mode);
+};
+
 const loadChangeViewMode = (rootPath: string): GraphChangeViewMode => {
   if (typeof window === "undefined") return "tree";
   const stored = window.localStorage.getItem(storageKey(rootPath, "change-view-mode"));
@@ -257,6 +270,26 @@ const refsMatchFilter = (
   if (filter === "upstream") return !!upstream && refs.includes(upstream);
 
   return true;
+};
+
+const refsForBadgeMode = (
+  refs: string[],
+  branch: string,
+  upstream: string | null | undefined,
+  refFilter: GraphRefFilter,
+  badgeMode: GraphBadgeMode,
+) => {
+  if (badgeMode === "all" || refFilter === "all") return refs;
+
+  if (refFilter === "current") {
+    return refs.filter((ref) => ref === "HEAD" || (!!branch && ref === branch));
+  }
+
+  if (refFilter === "upstream") {
+    return refs.filter((ref) => !!upstream && ref === upstream);
+  }
+
+  return refs.filter((ref) => ref === "HEAD" || (!!branch && ref === branch) || (!!upstream && ref === upstream));
 };
 
 const syntheticEntry = (
@@ -406,6 +439,7 @@ export function GitHistoryGraph({
 }: GitHistoryGraphProps) {
   const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
+  const [badgeMode, setBadgeMode] = useState<GraphBadgeMode>(() => loadBadgeMode(rootPath));
   const [changeViewMode, setChangeViewMode] = useState<GraphChangeViewMode>(() => loadChangeViewMode(rootPath));
   const [expandedHashes, setExpandedHashes] = useState<Set<string>>(() => loadExpandedHashes(rootPath));
   const [changesByHash, setChangesByHash] = useState<Record<string, GitCommitChangeEntry[]>>({});
@@ -432,6 +466,7 @@ export function GitHistoryGraph({
   useEffect(() => {
     setDensity(loadDensity(rootPath));
     setRefFilter(loadRefFilter(rootPath));
+    setBadgeMode(loadBadgeMode(rootPath));
     setChangeViewMode(loadChangeViewMode(rootPath));
     setExpandedHashes(loadExpandedHashes(rootPath));
     setChangesByHash({});
@@ -493,6 +528,11 @@ export function GitHistoryGraph({
   const updateRefFilter = (nextFilter: GraphRefFilter) => {
     setRefFilter(nextFilter);
     saveRefFilter(rootPath, nextFilter);
+  };
+
+  const updateBadgeMode = (nextMode: GraphBadgeMode) => {
+    setBadgeMode(nextMode);
+    saveBadgeMode(rootPath, nextMode);
   };
 
   const updateChangeViewMode = (nextMode: GraphChangeViewMode) => {
@@ -728,6 +768,16 @@ export function GitHistoryGraph({
         >
           <Target className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
+        <button
+          type="button"
+          aria-label={badgeMode === "filter" ? "Show all history ref badges" : "Show filtered history ref badges"}
+          aria-pressed={badgeMode === "all"}
+          title={badgeMode === "filter" ? "Show all history ref badges" : "Show filtered history ref badges"}
+          onClick={() => updateBadgeMode(badgeMode === "filter" ? "all" : "filter")}
+          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+        >
+          <Tags className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
         <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
         <button
           type="button"
@@ -788,6 +838,7 @@ export function GitHistoryGraph({
       )}
       {rows.map((row, index) => {
         const refs = uniqueRefsForEntry(row.entry, originalIndexByHash.get(row.entry.hash) ?? index, branch);
+        const badgeRefs = refsForBadgeMode(refs, branch, upstream, refFilter, badgeMode);
         const maxLaneCount = Math.max(row.inputLanes.length, row.outputLanes.length, 1);
         const width = metrics.swimlaneWidth * (maxLaneCount + 1);
         const circleX = metrics.swimlaneWidth * (row.circleIndex + 1);
@@ -872,9 +923,9 @@ export function GitHistoryGraph({
                 <span className={`${isTiny ? "text-[10px] leading-[14px]" : "text-[11px] leading-[18px]"} ${isSynthetic ? "font-medium text-[var(--color-wardian-text-muted)]" : "text-primary"} truncate`}>
                   {row.entry.message}
                 </span>
-                {!isTiny && !isSynthetic && refs.length > 0 && (
+                {!isTiny && !isSynthetic && badgeRefs.length > 0 && (
                   <span className="min-w-0 flex items-center gap-1 overflow-hidden">
-                    {refs.map((ref) => (
+                    {badgeRefs.map((ref) => (
                       <span key={ref} className={refClassName(ref, branch, upstream)} title={ref}>
                         {ref}
                       </span>
