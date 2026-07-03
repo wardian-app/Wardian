@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronRight,
   ChevronsUp,
   CircleDot,
   Cloud,
+  Copy,
+  Eye,
+  FileText,
   GitBranch,
   List,
   ListFilter,
@@ -13,6 +16,7 @@ import {
   Minimize2,
 } from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
+import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 
 type GraphDensity = "detailed" | "tiny";
 type GraphRefFilter = "auto" | "all" | "current" | "upstream";
@@ -403,6 +407,9 @@ export function GitHistoryGraph({
   const [loadingHashes, setLoadingHashes] = useState<Set<string>>(() => new Set());
   const [errorByHash, setErrorByHash] = useState<Record<string, string>>({});
   const [collapsedChangeFolders, setCollapsedChangeFolders] = useState<Set<string>>(() => new Set());
+  const [historyContextMenu, setHistoryContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(
+    null,
+  );
   const visibleEntries = useMemo(
     () => buildVisibleHistoryEntries(entries, branch, upstream, refFilter, ahead, behind),
     [ahead, behind, branch, entries, refFilter, upstream],
@@ -517,6 +524,50 @@ export function GitHistoryGraph({
     setExpandedHashes(nextExpanded);
     saveExpandedHashes(rootPath, nextExpanded);
     await loadCommitChanges(entry);
+  };
+
+  const viewCommitChanges = async (entry: GitLogEntry) => {
+    if (!expandedHashes.has(entry.hash)) {
+      const nextExpanded = new Set(expandedHashes).add(entry.hash);
+      setExpandedHashes(nextExpanded);
+      saveExpandedHashes(rootPath, nextExpanded);
+    }
+
+    await loadCommitChanges(entry);
+  };
+
+  const copyToClipboard = (text: string) => {
+    void navigator.clipboard?.writeText(text);
+  };
+
+  const openHistoryContextMenu = (event: MouseEvent, row: HistoryGraphRow) => {
+    if (row.kind !== "commit") return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    setHistoryContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          label: "View Changes",
+          icon: <Eye className="h-3.5 w-3.5" />,
+          onClick: () => void viewCommitChanges(row.entry),
+        },
+        { divider: true },
+        {
+          label: "Copy Commit ID",
+          icon: <Copy className="h-3.5 w-3.5" />,
+          onClick: () => copyToClipboard(row.entry.hash),
+        },
+        {
+          label: "Copy Commit Message",
+          icon: <FileText className="h-3.5 w-3.5" />,
+          onClick: () => copyToClipboard(row.entry.message),
+        },
+      ],
+    });
   };
 
   const renderChangeRow = (
@@ -732,6 +783,7 @@ export function GitHistoryGraph({
               onClick={() => {
                 if (!isSynthetic) void toggleRow(row.entry);
               }}
+              onContextMenu={(event) => openHistoryContextMenu(event, row)}
               className="group w-full flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded cursor-default min-w-0 text-left"
               style={{ height: `${metrics.rowHeight}px` }}
             >
@@ -849,6 +901,14 @@ export function GitHistoryGraph({
           />
           <span className="truncate">{isLoadingMoreHistory ? "Loading More..." : "Load More..."}</span>
         </button>
+      )}
+      {historyContextMenu && (
+        <ContextMenu
+          x={historyContextMenu.x}
+          y={historyContextMenu.y}
+          items={historyContextMenu.items}
+          onClose={() => setHistoryContextMenu(null)}
+        />
       )}
     </div>
   );

@@ -395,4 +395,52 @@ describe("GitHistoryGraph", () => {
     fireEvent.click(loadMore);
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
+
+  it("opens VS Code-like context actions for history commits", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    mockInvoke.mockResolvedValue([{ path: "src/changed.ts", status: "M" }]);
+
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Context graph commit",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByTestId("history-graph-row-aaaaaaaa"), { clientX: 12, clientY: 24 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy Commit ID" }));
+    expect(writeText).toHaveBeenCalledWith("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    fireEvent.contextMenu(screen.getByTestId("history-graph-row-aaaaaaaa"), { clientX: 12, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: "Copy Commit Message" }));
+    expect(writeText).toHaveBeenCalledWith("Context graph commit");
+
+    fireEvent.contextMenu(screen.getByTestId("history-graph-row-aaaaaaaa"), { clientX: 12, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: "View Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_changes", {
+        cwd: "C:/repo",
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        parentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      });
+    });
+    expect(await screen.findByTestId("history-graph-change-row-aaaaaaaa-src/changed.ts")).toBeInTheDocument();
+  });
 });
