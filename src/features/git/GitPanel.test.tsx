@@ -268,6 +268,50 @@ describe("GitPanel", () => {
     expect(await screen.findByText("Initial commit")).toBeInTheDocument();
   });
 
+  it("keeps the source control header compact and moves secondary actions into overflow", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "feature/compact-header",
+          upstream: "origin/feature/compact-header",
+          has_upstream: true,
+          ahead: 2,
+          behind: 1,
+          files: [{ path: "src/changed.ts", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toBeInTheDocument();
+    expect(screen.getByTitle("Refresh Source Control")).toBeInTheDocument();
+    expect(screen.getByTitle("More Source Control Actions")).toBeInTheDocument();
+
+    expect(screen.queryByTitle("Use source control tree view")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Use source control list view")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Checkout to...")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Fetch")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Pull")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Push")).not.toBeInTheDocument();
+    expect(screen.queryByText("↑2")).not.toBeInTheDocument();
+    expect(screen.queryByText("↓1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+
+    expect(await screen.findByRole("button", { name: "Checkout to..." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fetch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pull" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Push" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use Tree View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use List View" })).toBeInTheDocument();
+  });
+
   it("uses a supplied source-control observer without resolving or watching git itself", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
@@ -365,7 +409,8 @@ describe("GitPanel", () => {
 
     expect(await screen.findByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: "Use source control list view" }));
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
 
     expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
@@ -2225,7 +2270,7 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    expect(await screen.findByTitle("Publish Branch")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Publish Branch" })).toBeInTheDocument();
   });
 
   it("shows publish branch as the primary action for clean branches without upstream", async () => {
@@ -2313,7 +2358,8 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.click(await screen.findByTitle("Push"));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
 
     expect(await screen.findByText("remote rejected")).toBeInTheDocument();
   });
@@ -2338,7 +2384,8 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.click(await screen.findByTitle("Pull"));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Pull" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_pull", { cwd: "C:/repo" });
@@ -2358,7 +2405,8 @@ describe("GitPanel", () => {
       sourceControlStatus: createSourceControlStatus({ refreshStatus }),
     });
 
-    fireEvent.click(await screen.findByTitle("Fetch"));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Fetch" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_fetch", { cwd: "C:/repo" });
@@ -2367,7 +2415,7 @@ describe("GitPanel", () => {
     });
   });
 
-  it("checks out a local branch from the source control header", async () => {
+  it("checks out a local branch from the source control overflow", async () => {
     const refreshStatus = vi.fn(async () => true);
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
@@ -2386,7 +2434,8 @@ describe("GitPanel", () => {
       sourceControlStatus: createSourceControlStatus({ refreshStatus }),
     });
 
-    fireEvent.click(await screen.findByTitle("Checkout to..."));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
     fireEvent.click(await screen.findByRole("button", { name: "feature/source-control" }));
 
     await waitFor(() => {
@@ -2400,7 +2449,7 @@ describe("GitPanel", () => {
     });
   });
 
-  it("creates a local branch from the source control header", async () => {
+  it("creates a local branch from the source control overflow", async () => {
     const refreshStatus = vi.fn(async () => true);
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
@@ -2416,7 +2465,8 @@ describe("GitPanel", () => {
       sourceControlStatus: createSourceControlStatus({ refreshStatus }),
     });
 
-    fireEvent.click(await screen.findByTitle("Checkout to..."));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
     fireEvent.click(await screen.findByRole("button", { name: "Create Branch..." }));
     const input = await screen.findByPlaceholderText("branch-name");
     fireEvent.change(input, { target: { value: "feature/new-branch" } });
@@ -2617,9 +2667,7 @@ describe("GitPanel", () => {
       </ConfirmProvider>,
     );
 
-    await waitFor(() => {
-      expect(screen.getAllByText("wardian/repo-agent").length).toBeGreaterThan(0);
-    });
+    await screen.findByPlaceholderText("Message on wardian/repo-agent (Ctrl+Enter to commit)");
 
     rerender(
       <ConfirmProvider>

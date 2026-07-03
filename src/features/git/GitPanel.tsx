@@ -1294,6 +1294,47 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       y: rect.bottom + 4,
       items: [
         {
+          label: "Checkout to...",
+          icon: <GitBranch className="h-3.5 w-3.5" />,
+          onClick: () => void openCheckoutMenuFromOverflow(),
+        },
+        {
+          label: "Create Branch...",
+          icon: <GitBranch className="h-3.5 w-3.5" />,
+          onClick: () => {
+            setBranchName("");
+            setIsCreatingBranch(true);
+          },
+        },
+        { divider: true },
+        {
+          label: "Fetch",
+          icon: <Download className="h-3.5 w-3.5" />,
+          onClick: () => void handleFetch(),
+        },
+        {
+          label: "Pull",
+          icon: <Download className="h-3.5 w-3.5" />,
+          onClick: () => void handlePull(),
+        },
+        {
+          label: pushTitle,
+          icon: <Upload className="h-3.5 w-3.5" />,
+          onClick: () => void handlePush(),
+        },
+        { divider: true },
+        {
+          label: "Use Tree View",
+          icon: resourceDisplayMode === "tree" ? <Check className="h-3.5 w-3.5" /> : <ListTree className="h-3.5 w-3.5" />,
+          onClick: () => updateResourceDisplayMode("tree"),
+        },
+        {
+          label: "Use List View",
+          icon: resourceDisplayMode === "list" ? <Check className="h-3.5 w-3.5" /> : <List className="h-3.5 w-3.5" />,
+          onClick: () => updateResourceDisplayMode("list"),
+        },
+        { divider: true },
+        {
           label: "Stash Changes",
           icon: <Archive className="h-3.5 w-3.5" />,
           onClick: () => void handleStashPush(false),
@@ -1371,18 +1412,15 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     }
   };
 
-  const openCheckoutMenu = async (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const openCheckoutMenuAt = async (x: number, y: number) => {
     if (!rootPath) return;
 
     setOperationError(null);
-    const rect = event.currentTarget.getBoundingClientRect();
     try {
       const branches = await invoke<GitBranchSummary[]>("git_list_branches", { cwd: rootPath });
       setBranchMenu({
-        x: rect.right - 200,
-        y: rect.bottom + 4,
+        x,
+        y,
         items: [
           {
             label: "Create Branch...",
@@ -1405,6 +1443,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     } catch (err) {
       setOperationError(formatError(err));
     }
+  };
+
+  const openCheckoutMenuFromOverflow = async () => {
+    const menuX = sourceControlActionMenu?.x ?? 0;
+    const menuY = sourceControlActionMenu?.y ?? 0;
+    await openCheckoutMenuAt(menuX, menuY);
   };
 
   const handleSync = async () => {
@@ -1774,7 +1818,45 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   return (
     <div className="flex flex-col h-full w-full relative">
-      <h2 className="text-sm font-bold text-primary tracking-tight mb-2">Source Control</h2>
+      <div className="mb-2 flex min-h-7 items-center gap-1">
+        <h2 className="min-w-0 flex-1 truncate text-sm font-bold text-primary tracking-tight">Source Control</h2>
+        <button
+          type="button"
+          onClick={handlePrimaryAction}
+          disabled={primaryActionDisabled}
+          aria-label="Run primary source control action"
+          title={primaryActionTitle}
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          {primaryActionKind === "publish" ? (
+            <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : primaryActionKind === "sync" ? (
+            <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} aria-hidden="true" />
+          ) : (
+            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleRefreshSourceControl()}
+          disabled={statusLoading || statusRefreshing}
+          aria-label="Refresh Source Control"
+          title="Refresh Source Control"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${statusRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={openSourceControlActionMenu}
+          disabled={syncing}
+          aria-label="More Source Control Actions"
+          title="More Source Control Actions"
+          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      </div>
       {progressMessage && (
         <div
           role="status"
@@ -1786,125 +1868,30 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         </div>
       )}
 
-      {/* Branch bar */}
-      <div className="flex items-center gap-2 py-1.5 mb-3 border-b border-wardian-border/30">
-        <svg className="w-4 h-4 text-[var(--color-wardian-accent)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="7" cy="5" r="2" style={{fill:'none'}} /><circle cx="7" cy="19" r="2" style={{fill:'none'}} /><circle cx="17" cy="12" r="2" style={{fill:'none'}} />
-          <line x1="7" y1="7" x2="7" y2="17" /><path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
-        </svg>
-        <span className="text-xs font-semibold text-primary truncate">{status.branch}</span>
-        {isCreatingBranch && (
-          <div className="flex min-w-[160px] max-w-[240px] items-center gap-1 rounded border border-wardian-border bg-[var(--color-wardian-input-bg)] px-1.5 py-0.5">
-            <GitBranch className="h-3 w-3 shrink-0 text-[var(--color-wardian-accent)]" aria-hidden="true" />
-            <input
-              ref={branchNameInputRef}
-              value={branchName}
-              onChange={(event) => setBranchName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void createBranch();
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setBranchName("");
-                  setIsCreatingBranch(false);
-                }
-              }}
-              readOnly={syncing}
-              placeholder="branch-name"
-              className="min-w-0 flex-1 bg-transparent text-[11px] text-primary outline-none placeholder:text-[var(--color-wardian-text-muted)]"
-            />
-          </div>
-        )}
-        {status.ahead > 0 && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-success),transparent_80%)] text-[var(--color-wardian-success)] font-mono">↑{status.ahead}</span>
-        )}
-        {status.behind > 0 && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] text-[var(--color-wardian-warning)] font-mono">↓{status.behind}</span>
-        )}
-        <div className="flex-1" />
-        <button
-          type="button"
-          onClick={() => void handleRefreshSourceControl()}
-          disabled={statusLoading || statusRefreshing}
-          aria-label="Refresh Source Control"
-          title="Refresh Source Control"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-        >
-          <RefreshCw className={`h-4 w-4 ${statusRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={() => updateResourceDisplayMode("tree")}
-          aria-label="Use source control tree view"
-          aria-pressed={resourceDisplayMode === "tree"}
-          title="Use source control tree view"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary aria-pressed:text-[var(--color-wardian-accent)] transition-colors"
-        >
-          <ListTree className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={() => updateResourceDisplayMode("list")}
-          aria-label="Use source control list view"
-          aria-pressed={resourceDisplayMode === "list"}
-          title="Use source control list view"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary aria-pressed:text-[var(--color-wardian-accent)] transition-colors"
-        >
-          <List className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={(event) => void openCheckoutMenu(event)}
-          disabled={syncing}
-          aria-label="Checkout to..."
-          title="Checkout to..."
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-        >
-          <GitBranch className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={() => void handleFetch()}
-          disabled={syncing}
-          aria-label="Fetch"
-          title="Fetch"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-        >
-          <Download className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          onClick={handlePull}
-          disabled={syncing}
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-          title="Pull"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-        </button>
-        <button
-          onClick={handlePush}
-          disabled={syncing}
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-          title={pushTitle}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          onClick={openSourceControlActionMenu}
-          disabled={syncing}
-          aria-label="More Source Control Actions"
-          title="More Source Control Actions"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-        >
-          <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
-        </button>
-      </div>
+      {isCreatingBranch && (
+        <div className="mb-2 flex items-center gap-1 rounded border border-wardian-border bg-[var(--color-wardian-input-bg)] px-1.5 py-1">
+          <GitBranch className="h-3 w-3 shrink-0 text-[var(--color-wardian-accent)]" aria-hidden="true" />
+          <input
+            ref={branchNameInputRef}
+            value={branchName}
+            onChange={(event) => setBranchName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void createBranch();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setBranchName("");
+                setIsCreatingBranch(false);
+              }
+            }}
+            readOnly={syncing}
+            placeholder="branch-name"
+            className="min-w-0 flex-1 bg-transparent text-[11px] text-primary outline-none placeholder:text-[var(--color-wardian-text-muted)]"
+          />
+        </div>
+      )}
 
       {operationError && (
         <div className="mb-3 px-2 py-1.5 rounded border border-[color-mix(in_srgb,var(--color-wardian-error),transparent_60%)] bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_88%)] text-[11px] text-[var(--color-wardian-error)]">
