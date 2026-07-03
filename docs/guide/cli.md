@@ -59,7 +59,7 @@ wardian agent show uuid-1
 
 ## Communication Topology & Scope
 
-Wardian maintains a communication topology that shapes which agents you see and interact with by default. Your **neighbors** are determined by the graph topology: manual connections, your team memberships, or your workspace (if you're not yet wired into the graph).
+Wardian maintains a communication topology that shapes which agents you see and interact with by default. Your **neighbors** are determined by the graph topology: manual edges (including team-seeded edges) or your workspace-mates (if you have no manual edges).
 
 **Why it matters:**
 - `wardian agent list` shows your neighbors by default — the agents you're connected to — so you work within your context.
@@ -69,16 +69,17 @@ Wardian maintains a communication topology that shapes which agents you see and 
 
 **Scope modes for `wardian agent list`:**
 - `--scope auto` (default): neighbors when `WARDIAN_SESSION_ID` is set (inside a Wardian agent terminal), else workspace.
-- `--scope neighbors`: self + direct topology neighbors (manual edges, team cliques, workspace fallback if isolated).
+- `--scope neighbors`: self + direct topology neighbors (manual edges, workspace fallback when you have no manual edges).
 - `--scope workspace`: all agents in your workspace.
-- `--scope all`: all known agents across all workspaces and communities.
+- `--scope all`: all known agents across all workspaces.
 
 **When to use each scope:**
-- Default (`auto`): Normal agent work within your context.
-- `--scope workspace`: When you need to see all agents in your workspace.
-- `--scope all`: Only for orchestration tasks that genuinely span communities (e.g., wiring up agents across different teams).
+- Default (`auto`): Normal agent work within your context (neighbors inside a session, workspace outside).
+- `--scope neighbors`: Explicit neighbors-only listing (same as auto inside a session).
+- `--scope workspace`: When you need to see all agents in your workspace regardless of edges.
+- `--scope all`: Only for orchestration tasks that genuinely span multiple neighbor sets or workspaces.
 
-See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
+When you create a team or add a team member, Wardian automatically wires up edges between all team members in the topology. These connections shape your default visibility and are completely editable through the Graph view. See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
 
 ## Commands
 

@@ -51,14 +51,14 @@ wardian agent worktree list
 ```
 
 By default, `wardian agent list` shows your **neighbors** — the agents you're
-connected to through the communication topology (manual edges, your teams, or your
-workspace if you're not yet wired into the graph). This shapes your default attention
-without restricting capability. Bare-name agent sends resolve within your neighbors
-first, then fall back to global exact match.
+connected to through the communication topology (manual edges, including team-seeded
+edges, or your workspace-mates if you have no manual edges). This shapes your default
+attention without restricting capability. Bare-name agent sends resolve within your
+neighbors first, then fall back to global exact match.
 
 **Scope modes:**
 - `--scope auto` (default): neighbors when inside a Wardian-managed session, else workspace.
-- `--scope neighbors`: self + direct topology neighbors (manual edges, team cliques, workspace fallback).
+- `--scope neighbors`: self + direct topology neighbors (manual edges or workspace fallback when isolated).
 - `--scope workspace`: all agents in your workspace.
 - `--scope all`: all known agents (use only for orchestration tasks that span multiple neighbor sets).
 

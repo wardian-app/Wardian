@@ -1,46 +1,45 @@
 # Graph
 
-The Graph view is the control surface for the communication topology. Use it to build and inspect your agent network: see how agents cluster by team or manual connection, create/delete edges, and understand the default communication boundaries that shape CLI behavior and agent visibility.
+The Graph view is the control surface for the communication topology. Use it to build and inspect your agent network: create and delete manual connections between agents, visualize communication activity, and understand the default communication boundaries that shape CLI behavior and agent visibility.
 
 ![Wardian Graph view showing status-colored agent nodes, relationship lenses, and the inspector](../assets/screenshots/graph/graph-view.png)
 
 ## What the Graph Shows
 
-Each node is an agent. Nodes use status colors (Idle=Emerald, Processing=Cyan, Error=Red, etc.) and recency glows. Edges represent relationships in the communication topology:
+Each node is an agent. Nodes use status colors (Idle=Emerald, Processing=Cyan, Error=Red, etc.). Edges represent relationships in the communication topology:
 
 **Edge types and textures:**
-- **Solid edges**: manual connections (you created them by dragging in the graph).
-- **Dotted edges**: rule-derived edges from team membership (team-clique rule).
-- **Sparse dashed edges**: unmapped ghost connections (recent communication traffic between agents with no manual edge or team connection).
+- **Solid edges**: manual connections (you created them or they were seeded by team membership).
+- **Sparse dashed edges**: unmapped ghost connections (recent communication traffic between agents with no manual connection).
 
-**Communication state (color + motion):**
-- **Cyan + directed particles**: ongoing or recent active conversation.
-- **Light cyan fading**: recent activity within the last hour (fades over time).
-- **Dim gray**: dormant (no recent activity).
+**Communication activity (color + motion):**
+- **Cyan + directed particles**: ongoing active ask (time-bounded, within the last hour).
+- **Light cyan fading**: recent activity that has completed (fades over the hour window).
+- **Neutral gray**: dormant edges (full legibility; structure is always visible).
 
 Particles flow in message direction; during a pending ask, the stream drifts toward the agent that owes the reply — direction is the pending-ask indicator.
 
 ## Topology & Workspace Fallback
 
-An agent with **no manual edges and no team membership** automatically sees its workspace-mates (workspace-fallback rule). This ensures fresh agents aren't isolated. The moment you draw an agent's first manual edge or add it to a team, workspace-fallback disengages — its neighbors become exactly what the graph shows.
+An agent with **no manual edges** automatically sees its workspace-mates (workspace-fallback rule). This ensures fresh agents aren't isolated and newly created teams aren't disconnected. The moment you draw an agent's first manual edge, workspace-fallback disengages — its neighbors become exactly what the graph shows.
 
-Each neighbor is labeled with its origin: `manual`, `rule:team-clique`, or (in the inspector) `rule:workspace-fallback` / `ghost`.
+Each neighbor is labeled with its origin: `manual` (edges you created or that were seeded by team membership) or `rule:workspace-fallback` (shown only when the agent has no manual edges). Ghost edges appear as "Unmapped communication" until you formalize or dismiss them.
 
 ## Editing: Create and Delete Edges
 
 **Create a connection:**
-- Enable **Connect mode** in the toolbar, then drag from agent A to agent B to draw a manual edge.
+- Hold Shift and drag from agent A to agent B to draw a manual edge. A rubber-band feedback line appears while dragging.
 - Or use **Add connection…** in the inspector's neighbors panel to pick an agent from a searchable list.
 - The edge appears immediately and is saved to `<WARDIAN_HOME>/topology.json`.
 
 **Delete a connection:**
-- Click a manual edge to select it, then press Delete — or use the disconnect (×) button on the edge's row in the inspector.
-- Only manual edges are deletable; rule-derived edges are labeled "managed by team …" and are edited through their source (e.g., team membership).
+- Click an edge to select it, then press Delete — or use the disconnect (×) button on the edge's row in the inspector.
+- All edges are manual and deletable. Deleting a team-seeded edge is a permanent delete; reconnecting requires drawing the edge again.
 
 **Ghost edges (unmapped traffic):**
-- Recent communication between agents with no topology connection appears as a faint sparse-dashed edge, and the inspector's neighbors panel lists the pair with an **Unmapped** badge.
-- **Formalize**: write a manual edge to connect them.
-- **Ignore**: add the pair to `ignored_pairs` so the suggestion stops appearing.
+- Recent communication between agents with no manual connection appears as a sparse-dashed edge, and the inspector's neighbors panel labels the pair as "Unmapped communication".
+- **Formalize**: write a manual edge to make it a permanent connection.
+- **Ignore**: dismiss the ghost so the suggestion stops appearing (dismissals are durable in `topology.json`).
 
 ## Inspector and Actions
 
@@ -56,7 +55,7 @@ The graph is backed by `<WARDIAN_HOME>/topology.json` (default: `~/.wardian/topo
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "edges": [
     { "a": "agent-uuid-1", "b": "agent-uuid-2", "created_at": "2026-07-02T14:30:00Z" }
   ],
@@ -66,7 +65,17 @@ The graph is backed by `<WARDIAN_HOME>/topology.json` (default: `~/.wardian/topo
 }
 ```
 
-You can edit this file directly (the app reloads on changes), or use the UI. Edges are undirected and canonicalized (`a < b` lexicographically).
+Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly (the app reloads on changes), or use the UI. Edges are undirected and canonicalized (`a < b` lexicographically). When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the version advances to 2.
+
+## Teams and Topology Seeding
+
+When you create a team or add a member to an existing team, Wardian automatically draws manual edges connecting all members of that team (a clique). These are real edges saved to `topology.json` — after seeding, you're free to delete any team-born edge, and it stays deleted even if the team persists. Removing an agent from a team does not delete the edges; connections persist until you explicitly delete them.
+
+On first launch, Wardian seeds all existing team memberships as edges and upgrades `topology.json` to version 2. The CLI sees the same edges without needing the app to run first.
+
+## Graph Layout
+
+The graph positions agents using force-directed layout over communication edges. Drawing a manual edge pulls two agents visibly closer; edgeless agents naturally settle on the periphery. Dormant edges remain fully visible so topology structure is always inspectable — only the *activity* state (recency, particles) varies.
 
 ## Legacy Lenses
 
