@@ -114,7 +114,6 @@ type TerminalOptionTarget = {
     scrollOnEraseInDisplay?: boolean;
     minimumContrastRatio?: number;
     windowsPty?: { backend?: "conpty" | "winpty"; buildNumber?: number };
-    disableStdin?: boolean;
   };
 };
 
@@ -131,10 +130,6 @@ function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: str
   // native rendering.
   term.options.scrollOnEraseInDisplay = false;
   term.options.minimumContrastRatio = terminalMinimumContrastRatio(provider);
-}
-
-function applyTerminalInputInteractivity(term: TerminalOptionTarget, provider: string | undefined, isSelected: boolean) {
-  term.options.disableStdin = provider === "opencode" && !isSelected;
 }
 
 function providerFromAgentConfig(agent: AgentConfig | undefined) {
@@ -2064,7 +2059,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   sessionId,
   provider,
   isMaximized,
-  isSelected = true,
   theme,
   workspacePath,
   onTitleChange,
@@ -2073,7 +2067,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   sessionId: string;
   provider?: string;
   isMaximized?: boolean;
-  isSelected?: boolean;
   theme: "dark" | "light" | "system";
   workspacePath?: string | null;
   onTitleChange?: (title: string) => void;
@@ -2085,7 +2078,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
   const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
-  const isSelectedRef = useRef(isSelected);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
@@ -2187,7 +2179,6 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
 
         renderer.term.options.theme = sessionTermTheme;
-        applyTerminalInputInteractivity(renderer.term, session.provider ?? provider, isSelectedRef.current);
         attachRendererHost(session, terminalRef.current);
 
         xtermRef.current = renderer.term;
@@ -2311,17 +2302,6 @@ export const AgentTerminal = memo(function AgentTerminal({
       fitAddonRef.current = null;
     };
   }, [performFit, provider, sessionId, workspacePath]);
-
-  useEffect(() => {
-    isSelectedRef.current = isSelected;
-    const entry = terminalSessionMap.get(sessionId);
-    const term = entry?.renderer?.term;
-    if (!term) {
-      return;
-    }
-
-    applyTerminalInputInteractivity(term, entry.provider ?? provider, isSelected);
-  }, [isSelected, provider, sessionId]);
 
   useEffect(() => {
     const entry = terminalSessionMap.get(sessionId);

@@ -21,9 +21,10 @@ back into provider output and appear as visible report text.
 
 A separate OpenCode path is not spawn-bound: OpenCode owns its in-TUI scrolling
 surface and xterm can emit mouse/wheel protocol input while the pointer merely
-passes over an OpenCode terminal card. When that card is not selected, the user
-intent is viewport navigation, not provider interaction, so passive xterm stdin
-must not reach the provider.
+passes over an OpenCode terminal card. Earlier mitigation disabled OpenCode
+xterm stdin while the card was not selected. That behavior was superseded by the
+provider-scoped input guard described below, which removes passive mouse-motion
+garbage without making OpenCode interactivity depend on selection.
 
 ## Decision
 
@@ -42,12 +43,11 @@ Codex output normalization also strips echoed primary Device Attributes replies,
 matching the existing output-side cleanup for echoed color and light-dark report
 replies.
 
-OpenCode terminal cards disable xterm stdin while the card is not selected.
-xterm documents that `disableStdin` also prevents mouse events from being
-emitted by the terminal, which blocks passive wheel/mouse reports while the user
-scrolls around the grid. Wardian-originated injections still call the Tauri input
-commands directly, so capability-broker replies, control sends, and CLI sends do
-not depend on xterm stdin and remain active for unselected cards.
+OpenCode terminal cards keep xterm stdin enabled even when the card is not
+selected, matching other providers. Wardian-originated injections still call the
+Tauri input commands directly, and frontend terminal input is filtered before
+PTY forwarding when a provider-specific terminal report or passive mouse-motion
+guard applies.
 
 ## Update 2026-07-02: OpenCode mouse-motion input guard
 
@@ -66,6 +66,15 @@ mouse packets such as wheel reports so OpenCode-owned scrolling remains
 available. Remote terminal attach uses the same filter before sending input
 frames over the attach websocket.
 
+## Update 2026-07-03: OpenCode selection gate removed
+
+OpenCode no longer has a selection-only stdin exception. Terminal cards now keep
+the existing Wardian default behavior: mouse and wheel input can reach both the
+main app's viewport handling and the terminal input path without requiring the
+terminal card to be selected first. OpenCode passive mouse-motion reports remain
+filtered by `filterProviderTerminalInput`, so preserving direct terminal
+scrolling does not reintroduce composer garbage characters.
+
 ## Verification
 
 Focused regression coverage lives in
@@ -77,8 +86,8 @@ Focused regression coverage lives in
   providers retain them;
 - echoed Codex primary Device Attributes replies are stripped from rendered
   output;
-- unselected OpenCode terminals disable xterm stdin while Wardian's capability
-  broker still injects required terminal replies.
+- OpenCode terminal stdin remains enabled even when the card is not selected,
+  while Wardian's capability broker still injects required terminal replies.
 - OpenCode passive mouse-motion reports, including bare binary triplets that
   match the visible composer garbage pattern, are dropped before PTY forwarding
   while wheel packets and non-OpenCode provider input are preserved.

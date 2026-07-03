@@ -13,7 +13,6 @@ vi.mock('../features/terminal/AgentTerminal', async () => {
   return {
     AgentTerminal: React.memo((props: {
       sessionId: string;
-      isSelected?: boolean;
       onTerminalFocus?: () => void;
     }) => {
       terminalRenderSpy(props);
@@ -169,19 +168,20 @@ describe('GridView maximize behavior', () => {
     expect(onTerminalFocus).toHaveBeenCalledWith('agent-2');
   });
 
-  it('passes grid selection state through to terminal cards', () => {
+  it('keeps grid selection state out of terminal input props', () => {
     renderGrid(null, agents, vi.fn(), {
       selectedAgentIds: new Set(['agent-1']),
     });
 
     expect(terminalRenderSpy).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'agent-1',
-      isSelected: true,
     }));
     expect(terminalRenderSpy).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'agent-2',
-      isSelected: false,
     }));
+    for (const [props] of terminalRenderSpy.mock.calls) {
+      expect(props).not.toHaveProperty('isSelected');
+    }
   });
 
   it('does not size each mobile card to the full viewport height', () => {
