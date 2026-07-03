@@ -227,14 +227,14 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("disables OpenCode terminal stdin until the card is selected", async () => {
-    const view = render(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" isSelected={false} />);
+  it("keeps OpenCode terminal stdin enabled when the card is not selected", async () => {
+    const view = render(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" />);
 
     await waitFor(() => {
-      expect(getLatestTerminalInstance().options.disableStdin).toBe(true);
+      expect(getLatestTerminalInstance().options.disableStdin).toBe(false);
     });
 
-    view.rerender(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" isSelected />);
+    view.rerender(<AgentTerminal sessionId="opencode-passive" provider="opencode" theme="dark" />);
 
     await waitFor(() => {
       expect(getLatestTerminalInstance().options.disableStdin).toBe(false);
@@ -2115,7 +2115,7 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("replies to OpenCode terminal capability probes before rendering the PTY output", async () => {
+  it("replies to OpenCode terminal capability probes while keeping terminal stdin enabled", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
       switch (cmd) {
@@ -2132,11 +2132,11 @@ describe("AgentTerminal scrollback", () => {
       }
     });
 
-    render(<AgentTerminal sessionId="opencode-1" provider="opencode" theme="dark" isSelected={false} />);
+    render(<AgentTerminal sessionId="opencode-1" provider="opencode" theme="dark" />);
 
     await waitFor(() => {
       const instance = getLatestTerminalInstance();
-      expect(instance.options.disableStdin).toBe(true);
+      expect(instance.options.disableStdin).toBe(false);
       expect(instance.write).toHaveBeenCalledWith(
         "\u001b[6n\u001b[>0q\u001b[?u\u001b[?996n\u001b[?1004h\u001b[14t\u001b]4;0;?\u0007\u001b]10;?\u0007\u001b]11;?\u001b\\",
         expect.any(Function),
