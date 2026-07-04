@@ -5,6 +5,7 @@ pub mod manager;
 pub mod providers;
 pub mod remote;
 pub mod state;
+mod topology_watch;
 pub mod utils;
 pub mod workflow;
 pub use wardian_core::models;
@@ -241,6 +242,24 @@ pub fn run() {
                             "[Wardian] CLI install skipped: {err}"
                         ));
                     }
+                }
+            }
+
+            // Forward external topology.json edits (CLI writes, hand edits) to the
+            // frontend as topology-changed so an open GraphView refreshes live.
+            if let Some(home) = crate::utils::fs::get_wardian_home() {
+                let app_handle = app.handle().clone();
+                match crate::topology_watch::spawn_topology_watcher(home, move || {
+                    let _ = app_handle.emit("topology-changed", ());
+                }) {
+                    Ok(watcher) => {
+                        app.manage(crate::topology_watch::TopologyWatcherHandle(
+                            std::sync::Mutex::new(watcher),
+                        ));
+                    }
+                    Err(error) => crate::utils::logging::log_debug(&format!(
+                        "[Wardian] topology watcher not started: {error}"
+                    )),
                 }
             }
 
