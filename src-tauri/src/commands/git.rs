@@ -333,18 +333,41 @@ pub async fn git_current_branch(cwd: String) -> Result<String, String> {
     Ok(branch.trim().to_string())
 }
 
-#[tauri::command]
-pub async fn git_log(cwd: String, count: u32) -> Result<Vec<GitLogEntry>, String> {
+fn build_git_log_args(count: u32, revision: Option<&str>, all: bool) -> Result<Vec<String>, String> {
     let count_str = format!("-{}", count);
-    let raw = run_git(
-        &cwd,
-        &[
-            "log",
-            &count_str,
-            "--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%ai%x1e",
-            "--no-color",
-        ],
-    )?;
+    let mut args = vec![
+        "log".to_string(),
+        count_str,
+        "--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%ai%x1e".to_string(),
+        "--no-color".to_string(),
+    ];
+
+    if all {
+        args.push("--all".to_string());
+        return Ok(args);
+    }
+
+    if let Some(revision) = revision.map(str::trim).filter(|revision| !revision.is_empty()) {
+        if revision.starts_with('-') {
+            return Err("History revision must be a branch, tag, or commit.".to_string());
+        }
+        args.push(revision.to_string());
+        args.push("--".to_string());
+    }
+
+    Ok(args)
+}
+
+#[tauri::command]
+pub async fn git_log(
+    cwd: String,
+    count: u32,
+    revision: Option<String>,
+    all: Option<bool>,
+) -> Result<Vec<GitLogEntry>, String> {
+    let args = build_git_log_args(count, revision.as_deref(), all.unwrap_or(false))?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = run_git(&cwd, &arg_refs)?;
 
     Ok(parse_git_log_entries(&raw))
 }
@@ -1567,6 +1590,37 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
         );
         assert!(entries[1].parent_hashes.is_empty());
         assert_eq!(entries[1].refs, vec!["feature/review".to_string()]);
+    }
+
+    #[test]
+    fn build_git_log_args_targets_selected_revision() {
+        let args = build_git_log_args(100, Some("origin/main"), false).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "log".to_string(),
+                "-100".to_string(),
+                "--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%ai%x1e".to_string(),
+                "--no-color".to_string(),
+                "origin/main".to_string(),
+                "--".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_git_log_args_can_target_all_refs() {
+        let args = build_git_log_args(50, None, true).unwrap();
+
+        assert_eq!(args.last(), Some(&"--all".to_string()));
+    }
+
+    #[test]
+    fn build_git_log_args_rejects_option_like_revision() {
+        let err = build_git_log_args(50, Some("--all"), false).unwrap_err();
+
+        assert_eq!(err, "History revision must be a branch, tag, or commit.");
     }
 
     #[test]

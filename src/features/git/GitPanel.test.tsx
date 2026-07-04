@@ -439,6 +439,65 @@ describe("GitPanel", () => {
     expect(await screen.findByText("Commit 100")).toBeInTheDocument();
   });
 
+  it("reloads history from the selected ref and keeps it while loading more", async () => {
+    const createHistory = (count: number, prefix: string, refs: string[]) =>
+      Array.from({ length: count }, (_, index) => ({
+        hash: `${prefix === "Remote" ? "a" : "b"}${index.toString(16).padStart(7, "0")}${"0".repeat(32)}`,
+        message: `${prefix} Commit ${index + 1}`,
+        author: "Tester",
+        date: "2026-06-25 08:00:00 -0400",
+        parent_hashes:
+          index < count - 1
+            ? [`${prefix === "Remote" ? "a" : "b"}${(index + 1).toString(16).padStart(7, "0")}${"0".repeat(32)}`]
+            : [],
+        refs: index === 0 ? refs : [],
+      }));
+
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") {
+        const gitArgs = args as { count?: number; revision?: string } | undefined;
+        const count = gitArgs?.count ?? 50;
+        if (gitArgs?.revision === "origin/main") {
+          return createHistory(count, "Remote", ["origin/main"]);
+        }
+        return createHistory(count, "Current", ["HEAD", "main", "origin/main"]);
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    expect(await screen.findByText("Current Commit 1")).toBeInTheDocument();
+    mockInvoke.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "History refs: Auto" }));
+    fireEvent.click(screen.getByRole("button", { name: "origin/main" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", {
+        cwd: "C:/repo",
+        count: 50,
+        revision: "origin/main",
+      });
+    });
+    expect(await screen.findByText("Remote Commit 1")).toBeInTheDocument();
+
+    mockInvoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Load more history commits" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", {
+        cwd: "C:/repo",
+        count: 100,
+        revision: "origin/main",
+      });
+    });
+    expect(await screen.findByText("Remote Commit 100")).toBeInTheDocument();
+  });
+
   it("opens a changed file from an expanded history graph commit", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") {

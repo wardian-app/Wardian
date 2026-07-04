@@ -12,7 +12,7 @@ import {
 } from "../../types";
 import { GitFileList, type ResourceSortMode } from "./GitFileList";
 import { GitDiffView, type GitDiffAction, type GitDiffHunkAction } from "./GitDiffView";
-import { GitHistoryGraph } from "./GitHistoryGraph";
+import { GitHistoryGraph, loadRefFilter, saveRefFilter, type GraphRefFilter } from "./GitHistoryGraph";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { formatGitStatusError, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
@@ -189,6 +189,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [historyRefFilter, setHistoryRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(""));
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((a) => a.session_id === selectedAgentId) ?? null;
@@ -310,13 +311,30 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   useEffect(() => {
     setResourceDisplayMode(loadResourceDisplayMode(rootPath ?? ""));
     setResourceSortMode(loadResourceSortMode(rootPath ?? ""));
+    setHistoryRefFilter(loadRefFilter(rootPath ?? ""));
   }, [rootPath]);
 
   // Fetch commit history when root changes or after a commit
   const refreshHistory = useCallback(async () => {
     if (!rootPath) return;
     try {
-      const log = await invoke<GitLogEntry[]>("git_log", { cwd: rootPath, count: historyLimit });
+      const args: {
+        cwd: string;
+        count: number;
+        revision?: string;
+        all?: boolean;
+      } = { cwd: rootPath, count: historyLimit };
+      if (historyRefFilter === "all") {
+        args.all = true;
+      } else if (historyRefFilter === "current" && status?.branch) {
+        args.revision = status.branch;
+      } else if (historyRefFilter === "upstream" && status?.upstream) {
+        args.revision = status.upstream;
+      } else if (historyRefFilter.startsWith("ref:")) {
+        args.revision = historyRefFilter.slice("ref:".length);
+      }
+
+      const log = await invoke<GitLogEntry[]>("git_log", args);
       setHistory(log);
       setHistoryError(null);
     } catch (err) {
@@ -325,7 +343,16 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     } finally {
       setHistoryLoadingMore(false);
     }
-  }, [historyLimit, rootPath]);
+  }, [historyLimit, historyRefFilter, rootPath, status?.branch, status?.upstream]);
+
+  const handleHistoryRefFilterChange = useCallback((nextFilter: GraphRefFilter) => {
+    saveRefFilter(rootPath ?? "", nextFilter);
+    setHistory([]);
+    setHistoryError(null);
+    setHistoryLoadingMore(false);
+    setHistoryLimit(HISTORY_PAGE_SIZE);
+    setHistoryRefFilter(nextFilter);
+  }, [rootPath]);
 
   const loadMoreHistory = () => {
     if (!rootPath || historyLoadingMore) return;
@@ -2497,8 +2524,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
                     upstream={status.upstream}
                     ahead={status.ahead}
                     behind={status.behind}
+                    selectedRefFilter={historyRefFilter}
                     hasMoreHistory={history.length >= historyLimit}
                     isLoadingMoreHistory={historyLoadingMore}
+                    onRefFilterChange={handleHistoryRefFilterChange}
                     onLoadMoreHistory={loadMoreHistory}
                     onOpenHistoryFile={handleOpenHistoryFile}
                     onViewHistoryChanges={handleViewHistoryChanges}

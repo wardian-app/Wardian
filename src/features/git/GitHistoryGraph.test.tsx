@@ -359,7 +359,7 @@ describe("GitHistoryGraph", () => {
     expect(screen.queryByTestId("history-graph-change-row-aaaaaaaa-src/changed.ts")).not.toBeInTheDocument();
   });
 
-  it("filters graph rows by refs and persists the filter per root", () => {
+  it("persists history ref selection and notifies the parent without hiding loaded rows", () => {
     const entries = [
       {
         hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -386,9 +386,16 @@ describe("GitHistoryGraph", () => {
         refs: ["v1.0.0"],
       },
     ];
+    const onRefFilterChange = vi.fn();
 
     let view = render(
-      <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        entries={entries}
+        onRefFilterChange={onRefFilterChange}
+      />,
     );
 
     expect(screen.getByText("Current work")).toBeInTheDocument();
@@ -400,25 +407,26 @@ describe("GitHistoryGraph", () => {
     openHistoryRefPicker();
     fireEvent.click(screen.getByRole("button", { name: "Upstream" }));
 
-    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+    expect(onRefFilterChange).toHaveBeenLastCalledWith("upstream");
+    expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
-    expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
+    expect(screen.getByText("Release tag")).toBeInTheDocument();
 
     view.unmount();
 
     view = render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
 
-    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+    expect(screen.getByText("Current work")).toBeInTheDocument();
     expect(screen.getByText("Upstream base")).toBeInTheDocument();
-    expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
+    expect(screen.getByText("Release tag")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "History refs: Upstream" })).toBeInTheDocument();
 
     openHistoryRefPicker();
     fireEvent.click(screen.getByRole("button", { name: "Current Branch" }));
 
     expect(screen.getByText("Current work")).toBeInTheDocument();
-    expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
-    expect(screen.queryByText("Release tag")).not.toBeInTheDocument();
+    expect(screen.getByText("Upstream base")).toBeInTheDocument();
+    expect(screen.getByText("Release tag")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "History refs: Current Branch" })).toBeInTheDocument();
 
     openHistoryRefPicker();
@@ -431,11 +439,11 @@ describe("GitHistoryGraph", () => {
     openHistoryRefPicker();
     fireEvent.click(screen.getByRole("button", { name: "v1.0.0" }));
 
-    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
-    expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
+    expect(screen.getByText("Current work")).toBeInTheDocument();
+    expect(screen.getByText("Upstream base")).toBeInTheDocument();
     const taggedRows = screen.getAllByTestId(/history-graph-row-/);
-    expect(taggedRows).toHaveLength(1);
-    expect(taggedRows[0]).toHaveTextContent("Release tag");
+    expect(taggedRows).toHaveLength(3);
+    expect(taggedRows[2]).toHaveTextContent("Release tag");
     expect(screen.getByRole("button", { name: "History refs: v1.0.0" })).toBeInTheDocument();
     expect(window.localStorage.getItem("wardian:source-control:history-graph:C:/repo:ref-filter")).toBe("ref:v1.0.0");
 
@@ -443,11 +451,11 @@ describe("GitHistoryGraph", () => {
 
     render(<GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />);
 
-    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
-    expect(screen.queryByText("Upstream base")).not.toBeInTheDocument();
+    expect(screen.getByText("Current work")).toBeInTheDocument();
+    expect(screen.getByText("Upstream base")).toBeInTheDocument();
     const restoredTaggedRows = screen.getAllByTestId(/history-graph-row-/);
-    expect(restoredTaggedRows).toHaveLength(1);
-    expect(restoredTaggedRows[0]).toHaveTextContent("Release tag");
+    expect(restoredTaggedRows).toHaveLength(3);
+    expect(restoredTaggedRows[2]).toHaveTextContent("Release tag");
     expect(screen.getByRole("button", { name: "History refs: v1.0.0" })).toBeInTheDocument();
   });
 
@@ -538,8 +546,8 @@ describe("GitHistoryGraph", () => {
     openHistoryRefPicker();
     fireEvent.click(screen.getByRole("button", { name: "Upstream" }));
 
-    expect(revealButton).toBeDisabled();
-    expect(screen.queryByText("Current work")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go to Current History Item" })).toBeEnabled();
+    expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveTextContent("Current work");
   });
 
   it("renders a compact load-more row at the end of a paged history graph", () => {

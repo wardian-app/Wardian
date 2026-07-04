@@ -16,7 +16,7 @@ import {
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 
-type GraphRefFilter = "auto" | "all" | "current" | "upstream" | `ref:${string}`;
+export type GraphRefFilter = "auto" | "all" | "current" | "upstream" | `ref:${string}`;
 type GraphChangeViewMode = "tree" | "list";
 type GraphBadgeMode = "filter" | "all";
 
@@ -53,8 +53,10 @@ interface GitHistoryGraphProps {
   upstream?: string | null;
   ahead?: number;
   behind?: number;
+  selectedRefFilter?: GraphRefFilter;
   hasMoreHistory?: boolean;
   isLoadingMoreHistory?: boolean;
+  onRefFilterChange?: (filter: GraphRefFilter) => void;
   onLoadMoreHistory?: () => void;
   onOpenHistoryFile?: (entry: GitLogEntry, change: GitCommitChangeEntry) => void;
   onViewHistoryChanges?: (entry: GitLogEntry) => void;
@@ -115,14 +117,14 @@ const storageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") ||
 const storageKey = (rootPath: string, suffix: string) =>
   `wardian:source-control:history-graph:${storageRoot(rootPath)}:${suffix}`;
 
-const loadRefFilter = (rootPath: string): GraphRefFilter => {
+export const loadRefFilter = (rootPath: string): GraphRefFilter => {
   if (typeof window === "undefined") return "auto";
   const stored = window.localStorage.getItem(storageKey(rootPath, "ref-filter"));
   if (stored?.startsWith("ref:") && stored.length > "ref:".length) return stored as GraphRefFilter;
   return stored === "all" || stored === "current" || stored === "upstream" || stored === "auto" ? stored : "auto";
 };
 
-const saveRefFilter = (rootPath: string, filter: GraphRefFilter) => {
+export const saveRefFilter = (rootPath: string, filter: GraphRefFilter) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(storageKey(rootPath, "ref-filter"), filter);
 };
@@ -226,23 +228,6 @@ const uniqueRefsForEntry = (entry: GitLogEntry, index: number, branch: string) =
   return Array.from(new Set(refs));
 };
 
-const refsMatchFilter = (
-  entry: GitLogEntry,
-  index: number,
-  branch: string,
-  upstream: string | null | undefined,
-  filter: GraphRefFilter,
-) => {
-  if (filter === "all" || filter === "auto") return true;
-
-  const refs = uniqueRefsForEntry(entry, index, branch);
-  if (filter === "current") return refs.includes("HEAD") || (!!branch && refs.includes(branch));
-  if (filter === "upstream") return !!upstream && refs.includes(upstream);
-  if (filter.startsWith("ref:")) return refs.includes(filter.slice("ref:".length));
-
-  return true;
-};
-
 const refsForBadgeMode = (
   refs: string[],
   branch: string,
@@ -307,22 +292,21 @@ const buildVisibleHistoryEntries = (
   ahead: number,
   behind: number,
 ): HistoryGraphEntry[] => {
-  const visibleEntries: HistoryGraphEntry[] = entries
-    .filter((entry, index) => refsMatchFilter(entry, index, branch, upstream, refFilter))
-    .map((entry) => ({ ...entry, graphKind: "commit" }));
+  const visibleEntries: HistoryGraphEntry[] = entries.map((entry) => ({ ...entry, graphKind: "commit" }));
   const headEntry = entries[0];
   const upstreamEntry = upstream
     ? entries.find((entry, index) => uniqueRefsForEntry(entry, index, branch).includes(upstream))
     : undefined;
+  const showDivergenceNodes = refFilter === "auto" || refFilter === "all" || refFilter === "current";
 
-  if ((refFilter === "auto" || refFilter === "all" || refFilter === "current") && ahead > 0 && headEntry) {
+  if (showDivergenceNodes && ahead > 0 && headEntry) {
     const headIndex = visibleEntries.findIndex((entry) => entry.hash === headEntry.hash);
     if (headIndex !== -1) {
       visibleEntries.splice(headIndex, 0, syntheticEntry("outgoing-changes", ahead, headEntry.hash));
     }
   }
 
-  if ((refFilter === "auto" || refFilter === "all" || refFilter === "upstream") && behind > 0 && upstreamEntry) {
+  if (showDivergenceNodes && behind > 0 && upstreamEntry) {
     const upstreamIndex = visibleEntries.findIndex((entry) => entry.hash === upstreamEntry.hash);
     if (upstreamIndex !== -1) {
       visibleEntries.splice(upstreamIndex, 0, syntheticEntry("incoming-changes", behind, upstreamEntry.hash));
@@ -423,13 +407,15 @@ export function GitHistoryGraph({
   upstream,
   ahead = 0,
   behind = 0,
+  selectedRefFilter,
   hasMoreHistory = false,
   isLoadingMoreHistory = false,
+  onRefFilterChange,
   onLoadMoreHistory,
   onOpenHistoryFile,
   onViewHistoryChanges,
 }: GitHistoryGraphProps) {
-  const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
+  const [localRefFilter, setLocalRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
   const [badgeMode, setBadgeMode] = useState<GraphBadgeMode>(() => loadBadgeMode(rootPath));
   const [changeViewMode, setChangeViewMode] = useState<GraphChangeViewMode>(() => loadChangeViewMode(rootPath));
   const [expandedHashes, setExpandedHashes] = useState<Set<string>>(() => loadExpandedHashes(rootPath));
@@ -442,6 +428,7 @@ export function GitHistoryGraph({
     null,
   );
   const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const refFilter = selectedRefFilter ?? localRefFilter;
   const visibleEntries = useMemo(
     () => buildVisibleHistoryEntries(entries, branch, upstream, refFilter, ahead, behind),
     [ahead, behind, branch, entries, refFilter, upstream],
@@ -463,7 +450,7 @@ export function GitHistoryGraph({
   const metrics = GRAPH_METRICS;
 
   useEffect(() => {
-    setRefFilter(loadRefFilter(rootPath));
+    setLocalRefFilter(loadRefFilter(rootPath));
     setBadgeMode(loadBadgeMode(rootPath));
     setChangeViewMode(loadChangeViewMode(rootPath));
     setExpandedHashes(loadExpandedHashes(rootPath));
@@ -520,8 +507,9 @@ export function GitHistoryGraph({
   }, [changesByHash, errorByHash, expandedHashes, loadCommitChanges, loadingHashes, rows]);
 
   const updateRefFilter = (nextFilter: GraphRefFilter) => {
-    setRefFilter(nextFilter);
+    setLocalRefFilter(nextFilter);
     saveRefFilter(rootPath, nextFilter);
+    onRefFilterChange?.(nextFilter);
   };
 
   const updateBadgeMode = (nextMode: GraphBadgeMode) => {
@@ -883,7 +871,7 @@ export function GitHistoryGraph({
       </div>
       {rows.length === 0 && (
         <div role="status" className="px-2 py-2 text-[11px] text-[var(--color-wardian-text-muted)]">
-          No commits match this history ref filter.
+          No commits found for this history selection.
         </div>
       )}
       {rows.map((row, index) => {
