@@ -618,6 +618,15 @@ export function GitHistoryGraph({
     await loadCommitChanges(entry);
   };
 
+  const viewHistoryItemChanges = (entry: GitLogEntry) => {
+    if (onViewHistoryChanges) {
+      onViewHistoryChanges(entry);
+      return;
+    }
+
+    void viewCommitChanges(entry);
+  };
+
   const copyToClipboard = (text: string) => {
     void navigator.clipboard?.writeText(text);
   };
@@ -690,7 +699,7 @@ export function GitHistoryGraph({
         {
           label: "View Changes",
           icon: <Eye className="h-3.5 w-3.5" />,
-          onClick: () => (onViewHistoryChanges ? onViewHistoryChanges(row.entry) : void viewCommitChanges(row.entry)),
+          onClick: () => viewHistoryItemChanges(row.entry),
         },
         { divider: true },
         {
@@ -922,7 +931,7 @@ export function GitHistoryGraph({
         const refsSummary = refs.length > 0 ? refs.join(", ") : "None";
 
         return (
-          <div key={row.entry.hash} className="relative">
+          <div key={row.entry.hash} className="group relative">
             <button
               type="button"
               ref={(element) => {
@@ -953,7 +962,7 @@ export function GitHistoryGraph({
               onBlur={() => {
                 setActiveDetailRowId((current) => (current === rowId ? null : current));
               }}
-              className="group w-full flex items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded cursor-default min-w-0 text-left"
+              className="w-full flex items-center gap-2 px-1 pr-7 hover:bg-wardian-card-bg-muted rounded cursor-default min-w-0 text-left"
               style={{ height: `${metrics.rowHeight}px` }}
             >
               <svg
@@ -1030,6 +1039,21 @@ export function GitHistoryGraph({
                 </span>
               )}
             </button>
+            {!isSynthetic && (
+              <button
+                type="button"
+                aria-label={`View Changes for ${row.entry.message}`}
+                title="View Changes"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  viewHistoryItemChanges(row.entry);
+                }}
+                className="absolute right-1 top-1/2 hidden h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--color-wardian-text-muted)] opacity-0 hover:bg-wardian-card-bg-muted hover:text-primary focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] group-hover:inline-flex group-hover:opacity-100 group-focus-within:inline-flex group-focus-within:opacity-100"
+              >
+                <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            )}
             {showDetails && (
               <div
                 id={historyGraphTooltipId(rowId)}

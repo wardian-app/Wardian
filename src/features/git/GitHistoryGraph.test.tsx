@@ -656,4 +656,37 @@ describe("GitHistoryGraph", () => {
     );
     expect(mockInvoke).not.toHaveBeenCalledWith("git_commit_changes", expect.anything());
   });
+
+  it("exposes an inline history commit action without expanding the row", () => {
+    const onViewHistoryChanges = vi.fn();
+
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        upstream="origin/main"
+        onViewHistoryChanges={onViewHistoryChanges}
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Inline graph commit",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ]}
+      />,
+    );
+
+    const row = screen.getByTestId("history-graph-row-aaaaaaaa");
+
+    fireEvent.click(screen.getByRole("button", { name: "View Changes for Inline graph commit" }));
+
+    expect(onViewHistoryChanges).toHaveBeenCalledWith(
+      expect.objectContaining({ hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    );
+    expect(row).toHaveAttribute("aria-expanded", "false");
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_commit_changes", expect.anything());
+  });
 });

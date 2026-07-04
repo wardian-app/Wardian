@@ -264,10 +264,11 @@ Wardian parity backlog:
 73. History graph commit hover metadata.
 74. History graph compact reference picker.
 75. History graph concrete reference picker filters.
+76. History graph commit inline `View Changes` action.
 
 ## Current Slice
 
-Implemented the first seventy-five slices:
+Implemented the first seventy-six slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -365,6 +366,9 @@ Implemented the first seventy-five slices:
   with `View Changes`, `Copy Commit ID`, and `Copy Commit Message`. `View
   Changes` expands the commit without collapsing already-open history rows, and
   the copy actions use the browser clipboard for fast commit sharing.
+- History graph commit rows now expose a compact hover/focus inline `View
+  Changes` action, matching VS Code's `SCMHistoryItemContext` inline action
+  behavior without adding more title-row controls.
 - The history graph title controls now include a VS Code-like `Go to Current
   History Item` target action. It scrolls and focuses the current `HEAD` row
   when that row is visible, marks the row with `aria-current`, and disables the
@@ -622,6 +626,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph commit hover metadata coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph compact reference picker coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph concrete reference picker coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph inline commit action coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`
