@@ -5681,6 +5681,7 @@ dependencies = [
 name = "wardian-cli"
 version = "0.4.2"
 dependencies = [
+ "chrono",
  "clap",
  "rusqlite",
  "serde",
