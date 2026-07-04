@@ -79,7 +79,7 @@ Wardian maintains a communication topology that shapes which agents you see and 
 - `--scope workspace`: When you need to see all agents in your workspace regardless of edges.
 - `--scope all`: Only for orchestration tasks that genuinely span multiple neighbor sets or workspaces.
 
-When you create a team or add a team member, Wardian automatically wires up edges between all team members in the topology. These connections shape your default visibility and are completely editable through the Graph view. See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
+When you create a team or add a team member, Wardian automatically wires up edges between all team members in the topology. These connections shape your default visibility and are completely editable through the Graph view; deleted team-seeded pairs are recorded so later seed passes do not recreate them unless you draw the connection again. See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
 
 ## Graph
 

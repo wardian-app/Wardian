@@ -10,7 +10,7 @@ use wardian_core::topology::{
 pub struct TopologyEdgeDto {
     pub a: String,
     pub b: String,
-    /// Always "manual" in schema v2: team edges are seeded as manual edges at
+    /// Always "manual" in schema v3: team edges are seeded as manual edges at
     /// write time, never computed from rules at read time.
     pub origin: String,
 }
@@ -26,8 +26,7 @@ pub struct TopologySnapshot {
 }
 
 fn home() -> Result<std::path::PathBuf, String> {
-    crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| "WARDIAN_HOME not resolvable".to_string())
+    crate::utils::fs::get_wardian_home().ok_or_else(|| "WARDIAN_HOME not resolvable".to_string())
 }
 
 #[tauri::command]
@@ -64,10 +63,7 @@ pub async fn get_topology(
             .iter()
             .map(|p| [p.a.clone(), p.b.clone()])
             .collect(),
-        fallback_groups: groups
-            .into_values()
-            .filter(|g| g.len() > 1)
-            .collect(),
+        fallback_groups: groups.into_values().filter(|g| g.len() > 1).collect(),
     })
 }
 
@@ -93,7 +89,11 @@ pub async fn add_topology_edge(app: AppHandle, a: String, b: String) -> Result<b
 
 #[tauri::command]
 pub async fn remove_topology_edge(app: AppHandle, a: String, b: String) -> Result<bool, String> {
-    mutate(&app, |topology| topology.remove_edge(&a, &b))
+    let home = home()?;
+    let teams = wardian_core::topology::load_team_memberships(&home);
+    mutate(&app, |topology| {
+        topology.remove_edge_and_suppress_seed_if_team_pair(&a, &b, &teams)
+    })
 }
 
 #[tauri::command]
@@ -144,6 +144,7 @@ mod tests {
                 created_at: "2026-07-02T00:00:00Z".to_string(),
             }],
             ignored_pairs: vec![],
+            suppressed_seed_pairs: vec![],
         };
 
         let edges = snapshot_edges(&topology);

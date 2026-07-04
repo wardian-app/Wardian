@@ -55,23 +55,26 @@ The graph is backed by `<WARDIAN_HOME>/topology.json` (default: `~/.wardian/topo
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "edges": [
     { "a": "agent-uuid-1", "b": "agent-uuid-2", "created_at": "2026-07-02T14:30:00Z" }
   ],
   "ignored_pairs": [
     { "a": "agent-uuid-3", "b": "agent-uuid-4" }
+  ],
+  "suppressed_seed_pairs": [
+    { "a": "agent-uuid-5", "b": "agent-uuid-6" }
   ]
 }
 ```
 
-Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly — the backend watches it and an open Graph view refreshes live — or use the UI, or use the CLI (`wardian graph link/unlink/ignore`, see the [CLI guide](./cli.md#graph)). Edges are undirected and canonicalized (`a < b` lexicographically). When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the version advances to 2.
+Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly — the backend watches it and an open Graph view refreshes live — or use the UI, or use the CLI (`wardian graph link/unlink/ignore`, see the [CLI guide](./cli.md#graph)). Edges are undirected and canonicalized (`a < b` lexicographically). `suppressed_seed_pairs` records team-member pairs that should not be recreated by later team-seed passes after you delete a team-born edge. When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the file is saved at the current schema version.
 
 ## Teams and Topology Seeding
 
-When you create a team or add a member to an existing team, Wardian automatically draws manual edges connecting all members of that team (a clique). These are real edges saved to `topology.json` — after seeding, you're free to delete any team-born edge, and it stays deleted even if the team persists. Removing an agent from a team does not delete the edges; connections persist until you explicitly delete them.
+When you create a team or add a member to an existing team, Wardian automatically draws manual edges connecting all members of that team (a clique). These are real edges saved to `topology.json` — after seeding, you're free to delete any team-born edge, and it stays deleted even if the team persists. Wardian records that intent in `suppressed_seed_pairs`; drawing the edge again clears the suppression. Removing an agent from a team does not delete the edges; connections persist until you explicitly delete them.
 
-On first launch, Wardian seeds all existing team memberships as edges and upgrades `topology.json` to version 2. The CLI sees the same edges without needing the app to run first.
+On first launch, Wardian seeds all existing team memberships as edges and saves `topology.json` at the current schema version. Existing version 2 topology files are not reseeded only because version 3 exists, so prior deletes stay deleted. The CLI sees the same edges without needing the app to run first.
 
 ## Graph Layout
 

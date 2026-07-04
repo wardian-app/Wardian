@@ -181,23 +181,38 @@ pub fn run() {
         eprintln!("Failed to initialize database: {}", e);
     }
 
-    // One-time topology migration: seed team cliques as manual edges, upgrade to version 2.
+    // One-time topology migration: seed team cliques as manual edges.
     if let Some(home) = crate::utils::fs::get_wardian_home() {
         let mut topology = wardian_core::topology::load_topology(&home);
+        let teams = wardian_core::topology::load_team_memberships(&home);
         // Home-aware check: a missing topology.json loads as a default carrying
         // the CURRENT schema version, but machines with pre-existing teams and
         // no file still need their one-time seed.
         if wardian_core::topology::needs_team_seed_migration_for_home(&home, &topology) {
-            let teams = wardian_core::topology::load_team_memberships(&home);
             let now = chrono::Utc::now().to_rfc3339();
             for team in teams {
                 wardian_core::topology::seed_team_clique(&mut topology, &team.agent_ids, &now);
             }
-            topology.version = 2;
+            topology.version = wardian_core::topology::TOPOLOGY_SCHEMA_VERSION;
             if let Err(e) = wardian_core::topology::save_topology(&home, &topology) {
-                crate::manager::log_debug(&format!("[Wardian] topology migration save failed: {e}"));
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology migration save failed: {e}"
+                ));
             } else {
-                crate::manager::log_debug("[Wardian] topology migrated to version 2 with seeded team cliques");
+                crate::manager::log_debug("[Wardian] topology migrated with seeded team cliques");
+            }
+        } else if wardian_core::topology::needs_seed_suppression_migration(&topology) {
+            let suppressed =
+                wardian_core::topology::suppress_missing_team_seed_pairs(&mut topology, &teams);
+            topology.version = wardian_core::topology::TOPOLOGY_SCHEMA_VERSION;
+            if let Err(e) = wardian_core::topology::save_topology(&home, &topology) {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology seed-suppression migration save failed: {e}"
+                ));
+            } else {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology migrated with {suppressed} suppressed team-seed pair(s)"
+                ));
             }
         }
     }
