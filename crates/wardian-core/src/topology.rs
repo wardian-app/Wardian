@@ -127,7 +127,9 @@ fn canonicalize(topology: &mut Topology) {
 }
 
 impl Topology {
-    /// Returns true if the edge was added (false: invalid pair or duplicate).
+    /// Returns true if topology changed: edge added, or an existing edge's
+    /// seed suppression was cleared. Returns false for invalid pairs or a
+    /// duplicate edge with no suppression to clear.
     pub fn add_edge(&mut self, x: &str, y: &str, created_at: &str) -> bool {
         let Some((a, b)) = canonical_pair(x, y) else {
             return false;
@@ -409,6 +411,35 @@ pub fn needs_team_seed_migration(topology: &Topology) -> bool {
 /// machine that never wrote the file.
 pub fn needs_team_seed_migration_for_home(home: &Path, topology: &Topology) -> bool {
     needs_team_seed_migration(topology) || !crate::paths::topology_path_for_home(home).exists()
+}
+
+/// Version 2 topologies already completed the initial team-edge seed. If a
+/// current team pair is missing from such a file, preserve that absence as a
+/// user deletion before future seed passes can recreate it.
+pub fn needs_seed_suppression_migration(topology: &Topology) -> bool {
+    topology.version >= TEAM_SEED_MIGRATION_VERSION && topology.version < TOPOLOGY_SCHEMA_VERSION
+}
+
+pub fn suppress_missing_team_seed_pairs(
+    topology: &mut Topology,
+    teams: &[TeamMembership],
+) -> usize {
+    let mut added = 0;
+    for team in teams {
+        for i in 0..team.agent_ids.len() {
+            for j in (i + 1)..team.agent_ids.len() {
+                let a = &team.agent_ids[i];
+                let b = &team.agent_ids[j];
+                let has_edge = canonical_pair(a, b)
+                    .map(|(a, b)| topology.edges.iter().any(|edge| edge.a == a && edge.b == b))
+                    .unwrap_or(false);
+                if !has_edge && topology.suppress_seed_pair(a, b) {
+                    added += 1;
+                }
+            }
+        }
+    }
+    added
 }
 
 fn team_memberships_contain_pair(teams: &[TeamMembership], a: &str, b: &str) -> bool {
@@ -1003,6 +1034,41 @@ mod tests {
             suppressed_seed_pairs: vec![],
         };
         assert!(!needs_team_seed_migration(&topology));
+    }
+
+    #[test]
+    fn v2_seed_suppression_migration_tombstones_missing_team_pairs() {
+        let mut topology = Topology {
+            version: 2,
+            edges: vec![TopologyEdge {
+                a: "a".into(),
+                b: "c".into(),
+                created_at: "old".into(),
+            }],
+            ignored_pairs: vec![],
+            suppressed_seed_pairs: vec![],
+        };
+        let teams = vec![TeamMembership {
+            id: "team".to_string(),
+            agent_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        }];
+
+        assert!(needs_seed_suppression_migration(&topology));
+
+        let added = suppress_missing_team_seed_pairs(&mut topology, &teams);
+
+        assert_eq!(added, 2);
+        assert!(topology.is_seed_suppressed("a", "b"));
+        assert!(topology.is_seed_suppressed("b", "c"));
+        assert!(!topology.is_seed_suppressed("a", "c"));
+        assert_eq!(topology.edges.len(), 1);
+    }
+
+    #[test]
+    fn v3_topology_does_not_need_seed_suppression_migration() {
+        let topology = Topology::default();
+
+        assert!(!needs_seed_suppression_migration(&topology));
     }
 
     #[test]

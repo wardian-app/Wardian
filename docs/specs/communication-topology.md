@@ -65,7 +65,7 @@ One built-in rule remains:
 
 Each neighbor is tagged with *why* it is visible: `manual` or `rule:workspace-fallback`. The CLI shows reasons in verbose output.
 
-**Migration:** `topology.json` gained a `version: 2` marker for the one-time team seed, then `version: 3` for durable team-seed tombstones. On app startup, a pre-version-2 (or missing) file triggers a one-time seed of cliques for all current teams, then saves at the current schema version. Existing version-2 files are not reseeded merely because schema version 3 exists; this preserves any team-born edges the user already deleted. The CLI never migrates (read-only consumer); until the app has run once, team-born edges simply don't exist yet.
+**Migration:** `topology.json` gained a `version: 2` marker for the one-time team seed, then `version: 3` for durable team-seed tombstones. On app startup, a pre-version-2 (or missing) file triggers a one-time seed of cliques for all current teams, then saves at the current schema version. Existing version-2 files are not reseeded merely because schema version 3 exists; instead, current team pairs that are missing from the v2 edge list are recorded in `suppressed_seed_pairs` before the file is saved as v3. This preserves any team-born edges the user already deleted. The CLI never migrates (read-only consumer); until the app has run once, team-born edges simply don't exist yet.
 
 **Opt-in moment:** drawing an agent's first manual edge (including team-seeded ones) disengages `workspace-fallback` for that agent — its neighbors become exactly what the graph says. Per-agent, no global mode flag.
 
