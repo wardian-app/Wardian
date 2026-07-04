@@ -65,7 +65,7 @@ The graph is backed by `<WARDIAN_HOME>/topology.json` (default: `~/.wardian/topo
 }
 ```
 
-Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly (the app reloads on changes), or use the UI. Edges are undirected and canonicalized (`a < b` lexicographically). When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the version advances to 2.
+Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly — the backend watches it and an open Graph view refreshes live — or use the UI, or use the CLI (`wardian graph link/unlink/ignore`, see the [CLI guide](./cli.md#graph)). Edges are undirected and canonicalized (`a < b` lexicographically). When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the version advances to 2.
 
 ## Teams and Topology Seeding
 

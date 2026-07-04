@@ -81,6 +81,36 @@ Wardian maintains a communication topology that shapes which agents you see and 
 
 When you create a team or add a team member, Wardian automatically wires up edges between all team members in the topology. These connections shape your default visibility and are completely editable through the Graph view. See the [Graph](./graph.md) view for the visual control surface: create and delete connections, view your neighbors, and inspect the topology source at `<WARDIAN_HOME>/topology.json`.
 
+## Graph
+
+`wardian graph` is the CLI control surface for the communication topology — the same graph the app's Graph view edits. Agents can inspect their neighborhood and wire themselves into collaborations without the app running.
+
+Observe:
+
+```bash
+wardian graph show                 # whole graph: agents, edges, unmapped pairs, ignored pairs
+wardian graph neighbors            # my resolved neighbors with reasons (requires a session)
+wardian graph neighbors coder-a1   # any agent's neighbors
+wardian graph activity             # per-pair last message, open asks, unmapped flag
+```
+
+Mutate:
+
+```bash
+wardian graph link architect-a1    # inside a session: me <-> architect-a1
+wardian graph unlink architect-a1
+wardian graph ignore fork-coder    # durably dismiss an unmapped suggestion
+wardian graph unignore fork-coder
+```
+
+- **Self-serve rule**: inside a Wardian agent terminal (`WARDIAN_SESSION_ID` set), edits must involve the calling agent — `link <other>` connects you to `<other>`; `link <a> <b>` works only if one endpoint is you. Outside a session you are the operator: `link <a> <b>` connects any pair.
+- **Unmapped (ghost) pairs**: recent communication between unconnected agents. There is no separate approval verb — `link` formalizes, `ignore` dismisses.
+- Mutations are idempotent: re-running reports `"changed": false` and exits 0. Errors use the standard JSON error envelope (unknown agent → exit 2, no session where one is required → exit 3, ambiguous name → exit 5, permission/self-link → exit 1).
+- Targets accept agent names or UUIDs; duplicated names require a UUID.
+- Add `--pretty` to any subcommand for human-readable output instead of JSON.
+
+Edits are written to `<WARDIAN_HOME>/topology.json`; a running app picks them up immediately (the backend watches the file) and an open Graph view refreshes live. See the [Graph](./graph.md) guide for the visual surface.
+
 ## Commands
 
 ```bash
