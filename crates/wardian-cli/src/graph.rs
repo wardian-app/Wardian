@@ -1,7 +1,12 @@
+use std::collections::{BTreeSet, HashMap};
+
 use crate::args::{GraphArgs, GraphCommand};
 use crate::errors::{CliError, ExitCode};
 use crate::live;
 use wardian_core::identity::{self, AgentIdentity, ListFilters, Scope};
+use wardian_core::topology::{
+    load_topology, pair_activity_from_records, resolve_neighbors, AgentRef, PairActivity, Topology,
+};
 
 /// Full agent roster: live control endpoint when the app runs, DB fallback otherwise.
 /// Mirrors the fallback pattern in `handle_list`.
@@ -120,16 +125,241 @@ fn resolve_pair(
 
 pub fn handle_graph(args: GraphArgs) -> Result<String, CliError> {
     match args.command {
-        GraphCommand::Show
-        | GraphCommand::Neighbors { .. }
-        | GraphCommand::Activity
-        | GraphCommand::Link { .. }
+        GraphCommand::Show => render_graph_show(args.pretty),
+        GraphCommand::Neighbors { agent } => render_graph_neighbors(agent.as_deref(), args.pretty),
+        GraphCommand::Activity => render_graph_activity(args.pretty),
+        GraphCommand::Link { .. }
         | GraphCommand::Unlink { .. }
         | GraphCommand::Ignore { .. }
         | GraphCommand::Unignore { .. } => {
             Err(CliError::generic("graph command not implemented yet"))
         }
     }
+}
+
+fn render_graph_show(pretty: bool) -> Result<String, CliError> {
+    let agents = agent_snapshot()?;
+    let topology = load_topology(&wardian_home()?);
+    // Activity is best-effort here: structure must render even if interactions
+    // can't be read (e.g. table missing in an older DB).
+    let activity = load_pair_activity().unwrap_or_default();
+    let unmapped = unmapped_pairs(&topology, &activity, &agents);
+
+    if pretty {
+        return Ok(render_show_pretty(&agents, &topology, &unmapped));
+    }
+    let body = serde_json::json!({
+        "schema": 1,
+        "agents": agents.iter().map(|agent| serde_json::json!({
+            "uuid": agent.uuid,
+            "name": agent.name,
+            "status": agent.status,
+            "workspace": agent.workspace,
+        })).collect::<Vec<_>>(),
+        "edges": topology.edges,
+        "unmapped_pairs": unmapped,
+        "ignored_pairs": topology.ignored_pairs,
+    });
+    render_json(body)
+}
+
+fn render_graph_neighbors(target: Option<&str>, pretty: bool) -> Result<String, CliError> {
+    let agents = agent_snapshot()?;
+    let uuid = match target {
+        Some(target) => resolve_endpoint(&agents, target)?.uuid.clone(),
+        None => {
+            let session_id =
+                std::env::var("WARDIAN_SESSION_ID").map_err(|_| CliError::not_in_session())?;
+            // Fail closed on a stale session id.
+            resolve_endpoint(&agents, &session_id)?.uuid.clone()
+        }
+    };
+    let topology = load_topology(&wardian_home()?);
+    let refs: Vec<AgentRef> = agents
+        .iter()
+        .map(|agent| AgentRef {
+            uuid: agent.uuid.clone(),
+            workspace: agent.workspace.clone(),
+        })
+        .collect();
+    let view = resolve_neighbors(&uuid, &topology, &refs);
+    let names = name_index(&agents);
+
+    if pretty {
+        let mut out = format!("neighbors of {}:\n", display_name(&names, &view.agent_uuid));
+        if view.members.is_empty() {
+            out.push_str("  (none)\n");
+        }
+        for member in &view.members {
+            out.push_str(&format!(
+                "  {}  [{}]\n",
+                display_name(&names, &member.uuid),
+                member.reasons.join(", ")
+            ));
+        }
+        return Ok(out);
+    }
+    let body = serde_json::json!({
+        "schema": 1,
+        "agent_uuid": view.agent_uuid,
+        "members": view.members.iter().map(|member| serde_json::json!({
+            "uuid": member.uuid,
+            "name": names.get(member.uuid.as_str()),
+            "reasons": member.reasons,
+        })).collect::<Vec<_>>(),
+    });
+    render_json(body)
+}
+
+fn render_graph_activity(pretty: bool) -> Result<String, CliError> {
+    let agents = agent_snapshot()?;
+    let topology = load_topology(&wardian_home()?);
+    let activity = load_pair_activity().map_err(CliError::generic)?;
+    let unmapped: BTreeSet<(String, String)> = unmapped_key_set(&topology, &activity, &agents);
+    let names = name_index(&agents);
+
+    if pretty {
+        let mut out = String::new();
+        if activity.is_empty() {
+            out.push_str("(no recorded communication)\n");
+        }
+        for pair in &activity {
+            out.push_str(&format!(
+                "{} <-> {}  last={}  ask={}{}\n",
+                display_name(&names, &pair.a),
+                display_name(&names, &pair.b),
+                pair.last_message_at,
+                pair.active_ask,
+                if unmapped.contains(&(pair.a.clone(), pair.b.clone())) {
+                    "  [unmapped]"
+                } else {
+                    ""
+                },
+            ));
+        }
+        return Ok(out);
+    }
+    let body = serde_json::json!({
+        "schema": 1,
+        "pairs": activity.iter().map(|pair| serde_json::json!({
+            "a": pair.a,
+            "b": pair.b,
+            "last_message_at": pair.last_message_at,
+            "active_ask": pair.active_ask,
+            "awaiting_reply_from": pair.awaiting_reply_from,
+            "unmapped": unmapped.contains(&(pair.a.clone(), pair.b.clone())),
+        })).collect::<Vec<_>>(),
+    });
+    render_json(body)
+}
+
+/// Same aggregation the app's get_pair_activity command performs.
+fn load_pair_activity() -> Result<Vec<PairActivity>, String> {
+    let conn = crate::open_db().map_err(|error| error.message)?;
+    let records =
+        wardian_core::db::list_interaction_records_with_conn(&conn).map_err(|e| e.to_string())?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    Ok(pair_activity_from_records(&records, now_ms))
+}
+
+/// Activity pairs between known agents that have no manual edge and are not ignored -
+/// the same derivation the GraphView performs for ghost edges.
+fn unmapped_key_set(
+    topology: &Topology,
+    activity: &[PairActivity],
+    agents: &[AgentIdentity],
+) -> BTreeSet<(String, String)> {
+    let known: BTreeSet<&str> = agents.iter().map(|agent| agent.uuid.as_str()).collect();
+    let edges: BTreeSet<(&str, &str)> = topology
+        .edges
+        .iter()
+        .map(|edge| (edge.a.as_str(), edge.b.as_str()))
+        .collect();
+    activity
+        .iter()
+        .filter(|pair| known.contains(pair.a.as_str()) && known.contains(pair.b.as_str()))
+        .filter(|pair| !edges.contains(&(pair.a.as_str(), pair.b.as_str())))
+        .filter(|pair| !topology.is_ignored(&pair.a, &pair.b))
+        .map(|pair| (pair.a.clone(), pair.b.clone()))
+        .collect()
+}
+
+fn unmapped_pairs(
+    topology: &Topology,
+    activity: &[PairActivity],
+    agents: &[AgentIdentity],
+) -> Vec<serde_json::Value> {
+    let keys = unmapped_key_set(topology, activity, agents);
+    activity
+        .iter()
+        .filter(|pair| keys.contains(&(pair.a.clone(), pair.b.clone())))
+        .map(|pair| serde_json::json!({
+            "a": pair.a,
+            "b": pair.b,
+            "last_message_at": pair.last_message_at,
+        }))
+        .collect()
+}
+
+fn name_index(agents: &[AgentIdentity]) -> HashMap<&str, &str> {
+    agents
+        .iter()
+        .map(|agent| (agent.uuid.as_str(), agent.name.as_str()))
+        .collect()
+}
+
+fn display_name<'a>(names: &'a HashMap<&str, &str>, uuid: &'a str) -> &'a str {
+    names.get(uuid).copied().unwrap_or(uuid)
+}
+
+fn render_show_pretty(
+    agents: &[AgentIdentity],
+    topology: &Topology,
+    unmapped: &[serde_json::Value],
+) -> String {
+    let names = name_index(agents);
+    let mut out = format!("agents: {}\nedges:\n", agents.len());
+    if topology.edges.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for edge in &topology.edges {
+        out.push_str(&format!(
+            "  {} <-> {}  ({})\n",
+            display_name(&names, &edge.a),
+            display_name(&names, &edge.b),
+            edge.created_at
+        ));
+    }
+    out.push_str("unmapped:\n");
+    if unmapped.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for pair in unmapped {
+        out.push_str(&format!(
+            "  {} <-> {}  (last {})\n",
+            display_name(&names, pair["a"].as_str().unwrap_or("?")),
+            display_name(&names, pair["b"].as_str().unwrap_or("?")),
+            pair["last_message_at"].as_str().unwrap_or("?")
+        ));
+    }
+    out.push_str("ignored:\n");
+    if topology.ignored_pairs.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for pair in &topology.ignored_pairs {
+        out.push_str(&format!(
+            "  {} <-> {}\n",
+            display_name(&names, &pair.a),
+            display_name(&names, &pair.b)
+        ));
+    }
+    out
+}
+
+fn render_json(body: serde_json::Value) -> Result<String, CliError> {
+    serde_json::to_string_pretty(&body)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 #[cfg(test)]
