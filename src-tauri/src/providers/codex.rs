@@ -706,8 +706,10 @@ mod tests {
             folder: r#"D:\Development\Wardian.wt\wardian-3"#.into(),
             ..Default::default()
         };
-        let mut policy = CodexRuntimePolicy::default();
-        policy.trust_workspaces = true;
+        let policy = CodexRuntimePolicy {
+            trust_workspaces: true,
+            ..Default::default()
+        };
 
         let args = p.spawn_args_with_runtime_policy(&config, false, &policy);
 

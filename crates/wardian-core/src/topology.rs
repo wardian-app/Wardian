@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
-pub const TOPOLOGY_SCHEMA_VERSION: u8 = 2;
+pub const TOPOLOGY_SCHEMA_VERSION: u8 = 3;
+const TEAM_SEED_MIGRATION_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyEdge {
@@ -25,11 +26,18 @@ pub struct Topology {
     pub edges: Vec<TopologyEdge>,
     #[serde(default)]
     pub ignored_pairs: Vec<IgnoredPair>,
+    #[serde(default)]
+    pub suppressed_seed_pairs: Vec<IgnoredPair>,
 }
 
 impl Default for Topology {
     fn default() -> Self {
-        Self { version: TOPOLOGY_SCHEMA_VERSION, edges: Vec::new(), ignored_pairs: Vec::new() }
+        Self {
+            version: TOPOLOGY_SCHEMA_VERSION,
+            edges: Vec::new(),
+            ignored_pairs: Vec::new(),
+            suppressed_seed_pairs: Vec::new(),
+        }
     }
 }
 
@@ -77,9 +85,15 @@ fn canonicalize(topology: &mut Topology) {
     let mut seen = BTreeSet::new();
     let mut edges = Vec::new();
     for edge in topology.edges.drain(..) {
-        let Some((a, b)) = canonical_pair(&edge.a, &edge.b) else { continue };
+        let Some((a, b)) = canonical_pair(&edge.a, &edge.b) else {
+            continue;
+        };
         if seen.insert((a.clone(), b.clone())) {
-            edges.push(TopologyEdge { a, b, created_at: edge.created_at });
+            edges.push(TopologyEdge {
+                a,
+                b,
+                created_at: edge.created_at,
+            });
         }
     }
     edges.sort_by(|left, right| (&left.a, &left.b).cmp(&(&right.a, &right.b)));
@@ -88,37 +102,90 @@ fn canonicalize(topology: &mut Topology) {
     let mut seen = BTreeSet::new();
     let mut ignored = Vec::new();
     for pair in topology.ignored_pairs.drain(..) {
-        let Some((a, b)) = canonical_pair(&pair.a, &pair.b) else { continue };
+        let Some((a, b)) = canonical_pair(&pair.a, &pair.b) else {
+            continue;
+        };
         if seen.insert((a.clone(), b.clone())) {
             ignored.push(IgnoredPair { a, b });
         }
     }
     ignored.sort_by(|left, right| (&left.a, &left.b).cmp(&(&right.a, &right.b)));
     topology.ignored_pairs = ignored;
+
+    let mut seen = BTreeSet::new();
+    let mut suppressed = Vec::new();
+    for pair in topology.suppressed_seed_pairs.drain(..) {
+        let Some((a, b)) = canonical_pair(&pair.a, &pair.b) else {
+            continue;
+        };
+        if seen.insert((a.clone(), b.clone())) {
+            suppressed.push(IgnoredPair { a, b });
+        }
+    }
+    suppressed.sort_by(|left, right| (&left.a, &left.b).cmp(&(&right.a, &right.b)));
+    topology.suppressed_seed_pairs = suppressed;
 }
 
 impl Topology {
-    /// Returns true if the edge was added (false: invalid pair or duplicate).
+    /// Returns true if topology changed: edge added, or an existing edge's
+    /// seed suppression was cleared. Returns false for invalid pairs or a
+    /// duplicate edge with no suppression to clear.
     pub fn add_edge(&mut self, x: &str, y: &str, created_at: &str) -> bool {
-        let Some((a, b)) = canonical_pair(x, y) else { return false };
-        if self.edges.iter().any(|edge| edge.a == a && edge.b == b) {
+        let Some((a, b)) = canonical_pair(x, y) else {
             return false;
+        };
+        let before_suppressed = self.suppressed_seed_pairs.len();
+        self.suppressed_seed_pairs
+            .retain(|pair| !(pair.a == a && pair.b == b));
+        let suppression_cleared = self.suppressed_seed_pairs.len() != before_suppressed;
+        if self.edges.iter().any(|edge| edge.a == a && edge.b == b) {
+            return suppression_cleared;
         }
-        self.edges.push(TopologyEdge { a, b, created_at: created_at.to_string() });
+        self.edges.push(TopologyEdge {
+            a,
+            b,
+            created_at: created_at.to_string(),
+        });
         true
     }
 
     /// Returns true if an edge was removed.
     pub fn remove_edge(&mut self, x: &str, y: &str) -> bool {
-        let Some((a, b)) = canonical_pair(x, y) else { return false };
+        let Some((a, b)) = canonical_pair(x, y) else {
+            return false;
+        };
         let before = self.edges.len();
         self.edges.retain(|edge| !(edge.a == a && edge.b == b));
         self.edges.len() != before
     }
 
+    /// Remove an edge and, when that pair is still produced by team
+    /// membership, remember not to recreate it during team-seed migration.
+    pub fn remove_edge_and_suppress_seed_if_team_pair(
+        &mut self,
+        x: &str,
+        y: &str,
+        teams: &[TeamMembership],
+    ) -> bool {
+        let Some((a, b)) = canonical_pair(x, y) else {
+            return false;
+        };
+        let removed = self.remove_edge(&a, &b);
+        if removed && team_memberships_contain_pair(teams, &a, &b) {
+            self.suppress_seed_pair(&a, &b);
+        }
+        removed
+    }
+
     pub fn ignore_pair(&mut self, x: &str, y: &str) -> bool {
-        let Some((a, b)) = canonical_pair(x, y) else { return false };
-        if self.ignored_pairs.iter().any(|pair| pair.a == a && pair.b == b) {
+        let Some((a, b)) = canonical_pair(x, y) else {
+            return false;
+        };
+        if self
+            .ignored_pairs
+            .iter()
+            .any(|pair| pair.a == a && pair.b == b)
+        {
             return false;
         }
         self.ignored_pairs.push(IgnoredPair { a, b });
@@ -126,22 +193,58 @@ impl Topology {
     }
 
     pub fn unignore_pair(&mut self, x: &str, y: &str) -> bool {
-        let Some((a, b)) = canonical_pair(x, y) else { return false };
+        let Some((a, b)) = canonical_pair(x, y) else {
+            return false;
+        };
         let before = self.ignored_pairs.len();
-        self.ignored_pairs.retain(|pair| !(pair.a == a && pair.b == b));
+        self.ignored_pairs
+            .retain(|pair| !(pair.a == a && pair.b == b));
         self.ignored_pairs.len() != before
     }
 
     pub fn is_ignored(&self, x: &str, y: &str) -> bool {
         canonical_pair(x, y)
-            .map(|(a, b)| self.ignored_pairs.iter().any(|pair| pair.a == a && pair.b == b))
+            .map(|(a, b)| {
+                self.ignored_pairs
+                    .iter()
+                    .any(|pair| pair.a == a && pair.b == b)
+            })
             .unwrap_or(false)
+    }
+
+    pub fn is_seed_suppressed(&self, x: &str, y: &str) -> bool {
+        canonical_pair(x, y)
+            .map(|(a, b)| {
+                self.suppressed_seed_pairs
+                    .iter()
+                    .any(|pair| pair.a == a && pair.b == b)
+            })
+            .unwrap_or(false)
+    }
+
+    fn suppress_seed_pair(&mut self, x: &str, y: &str) -> bool {
+        let Some((a, b)) = canonical_pair(x, y) else {
+            return false;
+        };
+        if self
+            .suppressed_seed_pairs
+            .iter()
+            .any(|pair| pair.a == a && pair.b == b)
+        {
+            return false;
+        }
+        self.suppressed_seed_pairs.push(IgnoredPair { a, b });
+        true
     }
 
     /// Drop edges/ignores referencing agents not in `known` (deleted-agent GC).
     pub fn retain_agents(&mut self, known: &BTreeSet<String>) {
-        self.edges.retain(|edge| known.contains(&edge.a) && known.contains(&edge.b));
-        self.ignored_pairs.retain(|pair| known.contains(&pair.a) && known.contains(&pair.b));
+        self.edges
+            .retain(|edge| known.contains(&edge.a) && known.contains(&edge.b));
+        self.ignored_pairs
+            .retain(|pair| known.contains(&pair.a) && known.contains(&pair.b));
+        self.suppressed_seed_pairs
+            .retain(|pair| known.contains(&pair.a) && known.contains(&pair.b));
     }
 
     /// Manual neighbors of `uuid`, sorted, deduped.
@@ -150,9 +253,13 @@ impl Topology {
             .edges
             .iter()
             .filter_map(|edge| {
-                if edge.a == uuid { Some(edge.b.clone()) }
-                else if edge.b == uuid { Some(edge.a.clone()) }
-                else { None }
+                if edge.a == uuid {
+                    Some(edge.b.clone())
+                } else if edge.b == uuid {
+                    Some(edge.a.clone())
+                } else {
+                    None
+                }
             })
             .collect();
         result.sort();
@@ -198,7 +305,10 @@ pub struct NeighborsView {
 
 impl NeighborsView {
     pub fn member_uuids(&self) -> BTreeSet<String> {
-        self.members.iter().map(|member| member.uuid.clone()).collect()
+        self.members
+            .iter()
+            .map(|member| member.uuid.clone())
+            .collect()
     }
 }
 
@@ -217,8 +327,10 @@ pub fn resolve_neighbors(
 ) -> NeighborsView {
     use std::collections::BTreeMap;
 
-    let known: BTreeMap<&str, &AgentRef> =
-        agents.iter().map(|agent| (agent.uuid.as_str(), agent)).collect();
+    let known: BTreeMap<&str, &AgentRef> = agents
+        .iter()
+        .map(|agent| (agent.uuid.as_str(), agent))
+        .collect();
     let mut reasons_by_member: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let push_reason = |uuid: &str, reason: String, map: &mut BTreeMap<String, Vec<String>>| {
         if uuid == agent_uuid || !known.contains_key(uuid) {
@@ -269,10 +381,17 @@ pub fn resolve_neighbors(
 /// Seed team cliques: add pairwise edges among member UUIDs.
 /// Returns the number of edges actually added (excluding pre-existing duplicates).
 /// Uses the existing `add_edge` method (idempotent, canonicalized, dedupes).
-pub fn seed_team_clique(topology: &mut Topology, member_uuids: &[String], created_at: &str) -> usize {
+pub fn seed_team_clique(
+    topology: &mut Topology,
+    member_uuids: &[String],
+    created_at: &str,
+) -> usize {
     let mut added = 0;
     for i in 0..member_uuids.len() {
         for j in (i + 1)..member_uuids.len() {
+            if topology.is_seed_suppressed(&member_uuids[i], &member_uuids[j]) {
+                continue;
+            }
             if topology.add_edge(&member_uuids[i], &member_uuids[j], created_at) {
                 added += 1;
             }
@@ -283,7 +402,7 @@ pub fn seed_team_clique(topology: &mut Topology, member_uuids: &[String], create
 
 /// Check if topology needs one-time migration from version 1.
 pub fn needs_team_seed_migration(topology: &Topology) -> bool {
-    topology.version < 2
+    topology.version < TEAM_SEED_MIGRATION_VERSION
 }
 
 /// Home-aware migration check: a MISSING topology.json also needs migration,
@@ -294,11 +413,52 @@ pub fn needs_team_seed_migration_for_home(home: &Path, topology: &Topology) -> b
     needs_team_seed_migration(topology) || !crate::paths::topology_path_for_home(home).exists()
 }
 
+/// Version 2 topologies already completed the initial team-edge seed. If a
+/// current team pair is missing from such a file, preserve that absence as a
+/// user deletion before future seed passes can recreate it.
+pub fn needs_seed_suppression_migration(topology: &Topology) -> bool {
+    topology.version >= TEAM_SEED_MIGRATION_VERSION && topology.version < TOPOLOGY_SCHEMA_VERSION
+}
+
+pub fn suppress_missing_team_seed_pairs(
+    topology: &mut Topology,
+    teams: &[TeamMembership],
+) -> usize {
+    let mut added = 0;
+    for team in teams {
+        for i in 0..team.agent_ids.len() {
+            for j in (i + 1)..team.agent_ids.len() {
+                let a = &team.agent_ids[i];
+                let b = &team.agent_ids[j];
+                let has_edge = canonical_pair(a, b)
+                    .map(|(a, b)| topology.edges.iter().any(|edge| edge.a == a && edge.b == b))
+                    .unwrap_or(false);
+                if !has_edge && topology.suppress_seed_pair(a, b) {
+                    added += 1;
+                }
+            }
+        }
+    }
+    added
+}
+
+fn team_memberships_contain_pair(teams: &[TeamMembership], a: &str, b: &str) -> bool {
+    teams.iter().any(|team| {
+        let has_a = team.agent_ids.iter().any(|id| id == a);
+        let has_b = team.agent_ids.iter().any(|id| id == b);
+        has_a && has_b
+    })
+}
+
 /// Read team memberships from `<home>/watchlists/index.json`. Missing/corrupt → empty.
 pub fn load_team_memberships(home: &Path) -> Vec<TeamMembership> {
     let path = home.join("watchlists").join("index.json");
-    let Ok(content) = std::fs::read_to_string(path) else { return Vec::new() };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
     value
         .get("teams")
         .and_then(|teams| teams.as_array())
@@ -351,16 +511,22 @@ pub fn pair_activity_from_records(
 
     let mut by_pair: BTreeMap<(String, String), PairActivity> = BTreeMap::new();
     for record in records {
-        let Some(sender) = record.sender_session_id.as_deref() else { continue };
+        let Some(sender) = record.sender_session_id.as_deref() else {
+            continue;
+        };
         for target in &record.target_session_ids {
-            let Some((a, b)) = canonical_pair(sender, target) else { continue };
-            let entry = by_pair.entry((a.clone(), b.clone())).or_insert(PairActivity {
-                a,
-                b,
-                last_message_at: record.created_at.clone(),
-                active_ask: false,
-                awaiting_reply_from: None,
-            });
+            let Some((a, b)) = canonical_pair(sender, target) else {
+                continue;
+            };
+            let entry = by_pair
+                .entry((a.clone(), b.clone()))
+                .or_insert(PairActivity {
+                    a,
+                    b,
+                    last_message_at: record.created_at.clone(),
+                    active_ask: false,
+                    awaiting_reply_from: None,
+                });
             if record.created_at > entry.last_message_at {
                 entry.last_message_at = record.created_at.clone();
             }
@@ -458,8 +624,16 @@ mod tests {
     fn save_and_load_roundtrip_canonicalizes() {
         let temp = tempfile::tempdir().unwrap();
         let mut topology = Topology::default();
-        topology.edges.push(TopologyEdge { a: "z".into(), b: "a".into(), created_at: "t".into() });
-        topology.edges.push(TopologyEdge { a: "a".into(), b: "z".into(), created_at: "t2".into() });
+        topology.edges.push(TopologyEdge {
+            a: "z".into(),
+            b: "a".into(),
+            created_at: "t".into(),
+        });
+        topology.edges.push(TopologyEdge {
+            a: "a".into(),
+            b: "z".into(),
+            created_at: "t2".into(),
+        });
         save_topology(temp.path(), &topology).unwrap();
         let loaded = load_topology(temp.path());
         assert_eq!(loaded.edges.len(), 1);
@@ -469,14 +643,21 @@ mod tests {
     }
 
     fn agent(uuid: &str, workspace: Option<&str>) -> AgentRef {
-        AgentRef { uuid: uuid.to_string(), workspace: workspace.map(str::to_string) }
+        AgentRef {
+            uuid: uuid.to_string(),
+            workspace: workspace.map(str::to_string),
+        }
     }
 
     #[test]
     fn neighbors_returns_manual_edges_only() {
         let mut topology = Topology::default();
         topology.add_edge("me", "friend", "t");
-        let agents = vec![agent("me", None), agent("friend", None), agent("mate", None)];
+        let agents = vec![
+            agent("me", None),
+            agent("friend", None),
+            agent("mate", None),
+        ];
 
         let view = resolve_neighbors("me", &topology, &agents);
 
@@ -579,9 +760,27 @@ mod tests {
         use crate::control::{InteractionKind, InteractionStatus};
         let now_ms = 1782990000000i64; // 2026-07-02T11:00:00Z in epoch ms
         let records = vec![
-            record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "2026-07-02T10:00:00Z"),
-            record(InteractionKind::Message, "b", "a", InteractionStatus::Completed, "2026-07-02T11:00:00Z"),
-            record(InteractionKind::Task, "a", "c", InteractionStatus::AwaitingReply, "2026-07-02T10:30:00Z"),
+            record(
+                InteractionKind::Message,
+                "a",
+                "b",
+                InteractionStatus::Completed,
+                "2026-07-02T10:00:00Z",
+            ),
+            record(
+                InteractionKind::Message,
+                "b",
+                "a",
+                InteractionStatus::Completed,
+                "2026-07-02T11:00:00Z",
+            ),
+            record(
+                InteractionKind::Task,
+                "a",
+                "c",
+                InteractionStatus::AwaitingReply,
+                "2026-07-02T10:30:00Z",
+            ),
         ];
 
         let mut activity = pair_activity_from_records(&records, now_ms);
@@ -593,7 +792,10 @@ mod tests {
         assert_eq!(ab.last_message_at, "2026-07-02T11:00:00Z");
         assert!(!ab.active_ask);
         let ac = &activity[1];
-        assert!(ac.active_ask, "Task from 10:30:00 should be active as it's within 1 hour of 11:00:00");
+        assert!(
+            ac.active_ask,
+            "Task from 10:30:00 should be active as it's within 1 hour of 11:00:00"
+        );
         assert_eq!(ac.awaiting_reply_from.as_deref(), Some("c"));
     }
 
@@ -601,7 +803,13 @@ mod tests {
     fn pair_activity_skips_senderless_records() {
         use crate::control::{InteractionKind, InteractionStatus};
         let now_ms = 1782990000000i64;
-        let mut senderless = record(InteractionKind::Message, "a", "b", InteractionStatus::Completed, "2026-07-02T11:00:00Z");
+        let mut senderless = record(
+            InteractionKind::Message,
+            "a",
+            "b",
+            InteractionStatus::Completed,
+            "2026-07-02T11:00:00Z",
+        );
         senderless.sender_session_id = None;
         assert!(pair_activity_from_records(&[senderless], now_ms).is_empty());
     }
@@ -642,10 +850,7 @@ mod tests {
     fn ignored_pairs_do_not_affect_fallback_engagement() {
         let mut topology = Topology::default();
         topology.ignore_pair("me", "mate");
-        let agents = vec![
-            agent("me", Some("D:/ws")),
-            agent("mate", Some("D:/ws")),
-        ];
+        let agents = vec![agent("me", Some("D:/ws")), agent("mate", Some("D:/ws"))];
 
         let view = resolve_neighbors("me", &topology, &agents);
 
@@ -654,7 +859,10 @@ mod tests {
         // This tests that engagement is determined from raw input, not filtered by ignores.
         // With only 1 agent in workspace, fallback engagement is determined by emptiness of manual/teams,
         // but members might be empty due to ignores. The key is: fallback_engaged computed correctly.
-        assert!(view.members.is_empty(), "mate is the only fallback candidate, but ignored");
+        assert!(
+            view.members.is_empty(),
+            "mate is the only fallback candidate, but ignored"
+        );
     }
 
     #[test]
@@ -668,19 +876,29 @@ mod tests {
 
         // Convert epoch ms to RFC3339
         let old_dt = chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(old_timestamp)
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(old_timestamp),
         );
         let old_timestamp_rfc3339 = old_dt.to_rfc3339();
 
-        let records = vec![
-            record(InteractionKind::Task, "a", "b", InteractionStatus::AwaitingReply, &old_timestamp_rfc3339),
-        ];
+        let records = vec![record(
+            InteractionKind::Task,
+            "a",
+            "b",
+            InteractionStatus::AwaitingReply,
+            &old_timestamp_rfc3339,
+        )];
 
         let activity = pair_activity_from_records(&records, now_ms);
 
         assert_eq!(activity.len(), 1);
-        assert!(!activity[0].active_ask, "old awaiting_reply should not be active_ask");
-        assert_eq!(activity[0].last_message_at, old_timestamp_rfc3339, "last_message_at should still be set");
+        assert!(
+            !activity[0].active_ask,
+            "old awaiting_reply should not be active_ask"
+        );
+        assert_eq!(
+            activity[0].last_message_at, old_timestamp_rfc3339,
+            "last_message_at should still be set"
+        );
     }
 
     #[test]
@@ -690,18 +908,25 @@ mod tests {
         let now_ms = 1782990000000i64; // 2026-07-02T11:00:00Z
         let thirty_min_ago = (now_ms - 30 * 60 * 1000) as u64;
         let dt = chrono::DateTime::<chrono::Utc>::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_millis(thirty_min_ago)
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(thirty_min_ago),
         );
         let fresh_timestamp_rfc3339 = dt.to_rfc3339();
 
-        let records = vec![
-            record(InteractionKind::Task, "a", "b", InteractionStatus::AwaitingReply, &fresh_timestamp_rfc3339),
-        ];
+        let records = vec![record(
+            InteractionKind::Task,
+            "a",
+            "b",
+            InteractionStatus::AwaitingReply,
+            &fresh_timestamp_rfc3339,
+        )];
 
         let activity = pair_activity_from_records(&records, now_ms);
 
         assert_eq!(activity.len(), 1);
-        assert!(activity[0].active_ask, "fresh awaiting_reply should be active_ask");
+        assert!(
+            activity[0].active_ask,
+            "fresh awaiting_reply should be active_ask"
+        );
         assert_eq!(activity[0].awaiting_reply_from.as_deref(), Some("b"));
     }
 
@@ -733,15 +958,117 @@ mod tests {
     }
 
     #[test]
+    fn seed_team_clique_skips_suppressed_pairs() {
+        let mut topology: Topology = serde_json::from_str(
+            r#"{
+                "version": 3,
+                "edges": [],
+                "ignored_pairs": [],
+                "suppressed_seed_pairs": [{"a": "a", "b": "b"}]
+            }"#,
+        )
+        .unwrap();
+        let members = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let added = seed_team_clique(&mut topology, &members, "2026-07-03T00:00:00Z");
+
+        assert_eq!(added, 2);
+        assert!(!topology.neighbors("a").contains(&"b".to_string()));
+        assert!(topology.neighbors("a").contains(&"c".to_string()));
+        assert!(topology.neighbors("b").contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn removing_team_seeded_edge_suppresses_future_seed() {
+        let mut topology = Topology::default();
+        topology.add_edge("a", "b", "old");
+        let teams = vec![TeamMembership {
+            id: "team".to_string(),
+            agent_ids: vec!["b".to_string(), "a".to_string()],
+        }];
+
+        assert!(topology.remove_edge_and_suppress_seed_if_team_pair("a", "b", &teams));
+        assert!(topology.is_seed_suppressed("b", "a"));
+
+        let added = seed_team_clique(&mut topology, &teams[0].agent_ids, "2026-07-03T00:00:00Z");
+
+        assert_eq!(added, 0);
+        assert!(topology.edges.is_empty());
+    }
+
+    #[test]
+    fn manual_edge_add_clears_seed_suppression() {
+        let mut topology = Topology::default();
+        let teams = vec![TeamMembership {
+            id: "team".to_string(),
+            agent_ids: vec!["a".to_string(), "b".to_string()],
+        }];
+        topology.add_edge("a", "b", "old");
+        topology.remove_edge_and_suppress_seed_if_team_pair("a", "b", &teams);
+
+        assert!(topology.is_seed_suppressed("a", "b"));
+
+        assert!(topology.add_edge("a", "b", "manual"));
+
+        assert!(!topology.is_seed_suppressed("a", "b"));
+        assert_eq!(topology.neighbors("a"), vec!["b".to_string()]);
+    }
+
+    #[test]
     fn needs_team_seed_migration_detects_version_1() {
-        let topology = Topology { version: 1, edges: vec![], ignored_pairs: vec![] };
+        let topology = Topology {
+            version: 1,
+            edges: vec![],
+            ignored_pairs: vec![],
+            suppressed_seed_pairs: vec![],
+        };
         assert!(needs_team_seed_migration(&topology));
     }
 
     #[test]
     fn needs_team_seed_migration_false_for_version_2() {
-        let topology = Topology { version: 2, edges: vec![], ignored_pairs: vec![] };
+        let topology = Topology {
+            version: 2,
+            edges: vec![],
+            ignored_pairs: vec![],
+            suppressed_seed_pairs: vec![],
+        };
         assert!(!needs_team_seed_migration(&topology));
+    }
+
+    #[test]
+    fn v2_seed_suppression_migration_tombstones_missing_team_pairs() {
+        let mut topology = Topology {
+            version: 2,
+            edges: vec![TopologyEdge {
+                a: "a".into(),
+                b: "c".into(),
+                created_at: "old".into(),
+            }],
+            ignored_pairs: vec![],
+            suppressed_seed_pairs: vec![],
+        };
+        let teams = vec![TeamMembership {
+            id: "team".to_string(),
+            agent_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        }];
+
+        assert!(needs_seed_suppression_migration(&topology));
+
+        let added = suppress_missing_team_seed_pairs(&mut topology, &teams);
+
+        assert_eq!(added, 2);
+        assert!(topology.is_seed_suppressed("a", "b"));
+        assert!(topology.is_seed_suppressed("b", "c"));
+        assert!(!topology.is_seed_suppressed("a", "c"));
+        assert_eq!(topology.edges.len(), 1);
+    }
+
+    #[test]
+    fn v3_topology_does_not_need_seed_suppression_migration() {
+        let topology = Topology::default();
+
+        assert!(!needs_seed_suppression_migration(&topology));
     }
 
     #[test]
