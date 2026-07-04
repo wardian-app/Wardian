@@ -56,6 +56,10 @@ edges, or your workspace-mates if you have no manual edges). This shapes your de
 attention without restricting capability. Bare-name agent sends resolve within your
 neighbors first, then fall back to global exact match.
 
+Team-seeded edges are ordinary editable topology edges. If you delete one in the
+Graph view, Wardian records that suppression so later team-seed passes do not
+recreate it unless you draw the connection again.
+
 **Scope modes:**
 - `--scope auto` (default): neighbors when inside a Wardian-managed session, else workspace.
 - `--scope neighbors`: self + direct topology neighbors (manual edges or workspace fallback when isolated).

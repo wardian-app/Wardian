@@ -26,15 +26,19 @@ The topology shapes **default visibility and target resolution, never permission
   ],
   "ignored_pairs": [
     { "a": "<agent-uuid>", "b": "<agent-uuid>" }
+  ],
+  "suppressed_seed_pairs": [
+    { "a": "<agent-uuid>", "b": "<agent-uuid>" }
   ]
 }
 ```
 
 - Edges are **undirected and canonical**: `a < b` lexicographically; deduped on save (same canonicalization as `graphProjection.ts` edge keys).
 - Written atomically (temp file + rename), like the watchlist state file.
-- Only **manual** edges are stored. Rule-derived edges are computed at read time — nothing to sync when team membership changes.
+- Only **manual** edges are stored. Workspace fallback is resolved at read time, but team membership seeds ordinary manual edges instead of producing read-time rule edges.
 - Edges reference agent UUIDs. Edges naming deleted agents are ignored at read time and garbage-collected on the next save.
 - `ignored_pairs` holds ghost-edge dismissals (see UI section) so they are durable and inspectable on disk. (rev. 2026-07-03: with team edges seeded as manual, ignores no longer apply to anything but ghosts.)
+- `suppressed_seed_pairs` holds team-seed tombstones. Removing a team-backed edge while both agents remain on a team records the pair here so later seed passes do not recreate it; manually adding the edge clears the tombstone.
 - A missing or corrupt file resolves to an empty topology — it must never block agent listing.
 
 ### Neighbor-set resolution (formerly "community", in `wardian-core`)
@@ -51,7 +55,7 @@ New module `crates/wardian-core/src/topology.rs`:
 neighbors(agent) = manual neighbors, with workspace-fallback when the agent has none
 ```
 
-Teams are no longer a read-time rule. Instead, **teams seed ordinary manual edges**: when a team is created or a member is added, clique edges among its members are written to `topology.json` as plain manual edges (idempotent; existing edges untouched). After seeding, the graph is user-owned — deleting a team-born edge is a real delete and nothing resurrects it, because seeding happens only on membership-change events, never at read time or startup. Removing an agent from a team leaves its edges in place; connections persist until explicitly deleted.
+Teams are no longer a read-time rule. Instead, **teams seed ordinary manual edges**: when a team is created or a member is added, clique edges among its members are written to `topology.json` as plain manual edges (idempotent; existing edges untouched). After seeding, the graph is user-owned — deleting a team-born edge is a real delete and later seed passes skip the pair via `suppressed_seed_pairs`. Removing an agent from a team leaves its edges in place; connections persist until explicitly deleted.
 
 One built-in rule remains:
 
@@ -61,7 +65,7 @@ One built-in rule remains:
 
 Each neighbor is tagged with *why* it is visible: `manual` or `rule:workspace-fallback`. The CLI shows reasons in verbose output.
 
-**Migration:** `topology.json` gains a `version: 2` marker. On app startup, a version-1 (or missing) file triggers a one-time seed of cliques for all current teams, then saves as version 2. The CLI never migrates (read-only consumer); until the app has run once, team-born edges simply don't exist yet.
+**Migration:** `topology.json` gained a `version: 2` marker for the one-time team seed, then `version: 3` for durable team-seed tombstones. On app startup, a pre-version-2 (or missing) file triggers a one-time seed of cliques for all current teams, then saves at the current schema version. Existing version-2 files are not reseeded merely because schema version 3 exists; this preserves any team-born edges the user already deleted. The CLI never migrates (read-only consumer); until the app has run once, team-born edges simply don't exist yet.
 
 **Opt-in moment:** drawing an agent's first manual edge (including team-seeded ones) disengages `workspace-fallback` for that agent — its neighbors become exactly what the graph says. Per-agent, no global mode flag.
 
@@ -104,7 +108,7 @@ Because enforcement is soft, agent-facing documentation is half the feature:
 New commands, thin wrappers over `wardian-core::topology`:
 
 - `get_topology()` → manual edges + ignored pairs. (rev. 2026-07-03: no rule-derived edges in the snapshot; teams seed manual edges instead.)
-- `add_topology_edge(a, b)` / `remove_topology_edge(a, b)` — canonicalize, save atomically, emit `topology_changed`.
+- `add_topology_edge(a, b)` / `remove_topology_edge(a, b)` — canonicalize, save atomically, emit `topology_changed`. Removing a pair that is still produced by team membership writes a `suppressed_seed_pairs` tombstone; adding the pair manually clears that tombstone.
 - `ignore_pair(a, b)` / `unignore_pair(a, b)` — ghost dismissal. `resolve_neighbors` skips workspace-fallback reasons for ignored pairs; manual edges are unaffected (creating one implies intent).
 - `get_pair_activity()` → `[{ pair, last_message_at, active_ask, direction }]`, derived from the conversation store; updated incrementally over the existing conversation event stream (no polling). `active_ask` is **time-bounded**: an unresolved ask older than the recency window (1 hour) no longer counts as ongoing — stale asks must not animate forever.
 
@@ -181,7 +185,7 @@ Per the E2E layer boundary rules, lowest layer that proves each behavior:
 | Team edge visuals | Generic "rule-derived" texture, rule named in inspector | Team-specific styling (rejected: blocks future rule-based relations) |
 | Ghost attention cue | Texture + inspector badge, standard state palette | Amber color (rejected: violated two-channel encoding) |
 | Team edges (rev. 2026-07-02) | Connected by default, deletable via `ignored_pairs` override | Managed/undeletable with deep-link to team editor (rejected after use: users expect direct edge control) |
-| Team edges (rev. 2026-07-03, supersedes above) | Teams **seed** plain manual edges on membership-change events; delete is a real delete; edges persist on team leave | Rule-derived with overrides (rejected after use: resolver/snapshot divergence bugs, dim dual-texture rendering, override UI without visible effect); no team edges at all (rejected: teams would lose topological meaning) |
+| Team edges (rev. 2026-07-03, supersedes above) | Teams **seed** plain manual edges on membership-change events and first migration; delete is a real delete recorded in `suppressed_seed_pairs`; edges persist on team leave | Rule-derived with overrides (rejected after use: resolver/snapshot divergence bugs, dim dual-texture rendering, override UI without visible effect); no team edges at all (rejected: teams would lose topological meaning) |
 | Graph layout (rev. 2026-07-03) | Force-directed over communication edges, re-run on topology change | Team-cluster layout (rejected: manual edges had no visible effect on arrangement) |
 | Dormant edge rendering (rev. 2026-07-03) | Full-legibility neutral color; only activity varies with recency | Heavy alpha fade (rejected: structure was nearly invisible) |
 | Activity animation (rev. 2026-07-02) | Time-bounded `active_ask`; single rAF only while ongoing | Unbounded asks + always-on loop (rejected: stale asks animated forever, parallel rAF chains lagged the view) |

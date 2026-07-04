@@ -2270,7 +2270,8 @@ mod tests {
 
     #[test]
     fn neighbors_scope_without_session_id_yields_not_in_session_error() {
-        let _guard = TestWardianHome::new(&tempfile::tempdir().unwrap().path().to_path_buf());
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = TestWardianHome::new(temp.path());
         std::env::remove_var("WARDIAN_SESSION_ID");
 
         // Simulate what handle_list does when scope is Neighbors

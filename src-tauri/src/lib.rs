@@ -180,7 +180,7 @@ pub fn run() {
         eprintln!("Failed to initialize database: {}", e);
     }
 
-    // One-time topology migration: seed team cliques as manual edges, upgrade to version 2.
+    // One-time topology migration: seed team cliques as manual edges.
     if let Some(home) = crate::utils::fs::get_wardian_home() {
         let mut topology = wardian_core::topology::load_topology(&home);
         // Home-aware check: a missing topology.json loads as a default carrying
@@ -192,11 +192,13 @@ pub fn run() {
             for team in teams {
                 wardian_core::topology::seed_team_clique(&mut topology, &team.agent_ids, &now);
             }
-            topology.version = 2;
+            topology.version = wardian_core::topology::TOPOLOGY_SCHEMA_VERSION;
             if let Err(e) = wardian_core::topology::save_topology(&home, &topology) {
-                crate::manager::log_debug(&format!("[Wardian] topology migration save failed: {e}"));
+                crate::manager::log_debug(&format!(
+                    "[Wardian] topology migration save failed: {e}"
+                ));
             } else {
-                crate::manager::log_debug("[Wardian] topology migrated to version 2 with seeded team cliques");
+                crate::manager::log_debug("[Wardian] topology migrated with seeded team cliques");
             }
         }
     }
