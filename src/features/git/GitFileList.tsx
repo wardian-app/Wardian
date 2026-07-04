@@ -295,8 +295,8 @@ export const GitFileList: React.FC<GitFileListProps> = ({
     return (
       <li
         key={`${file.path}-${file.is_staged}-${index}`}
-        className="flex items-center gap-1.5 px-1.5 py-1 rounded hover:bg-wardian-card-bg-muted group text-xs"
-        style={{ paddingLeft: `${6 + depth * 14}px` }}
+        className="flex h-[18px] items-center gap-1 rounded px-1 py-0 hover:bg-wardian-card-bg-muted group text-[11px]"
+        style={{ paddingLeft: `${4 + depth * 12}px` }}
         onContextMenu={(event) => openFileContextMenu(event, file)}
       >
         <button
@@ -313,36 +313,36 @@ export const GitFileList: React.FC<GitFileListProps> = ({
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
           {file.is_staged && onUnstage && (
             <button
-              className="p-0.5 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
+              className="p-0 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
               aria-label={`Unstage ${file.path}`}
               title="Unstage"
               onClick={() => onUnstage(file.path)}
             >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 12H4" />
               </svg>
             </button>
           )}
           {!file.is_staged && onStage && (
             <button
-              className="p-0.5 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
+              className="p-0 rounded hover:bg-wardian-card text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors"
               aria-label={`Stage ${file.path}`}
               title="Stage"
               onClick={() => onStage(file.path)}
             >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
               </svg>
             </button>
           )}
           {!file.is_staged && onDiscard && (
             <button
-              className="p-0.5 rounded hover:bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_80%)] text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] transition-colors"
+              className="p-0 rounded hover:bg-[color-mix(in_srgb,var(--color-wardian-error),transparent_80%)] text-[var(--color-wardian-text-muted)] hover:text-[var(--color-wardian-error)] transition-colors"
               aria-label={`Discard changes to ${file.path}`}
               title="Discard Changes"
               onClick={() => onDiscard(file.path)}
             >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
               </svg>
             </button>
@@ -383,8 +383,8 @@ export const GitFileList: React.FC<GitFileListProps> = ({
                 return next;
               })
             }
-            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted hover:text-primary"
-            style={{ paddingLeft: `${6 + depth * 14}px` }}
+            className="flex h-[18px] w-full items-center gap-1 rounded px-1 py-0 text-left text-[11px] text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted hover:text-primary"
+            style={{ paddingLeft: `${4 + depth * 12}px` }}
           >
             <svg
               className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
@@ -397,14 +397,14 @@ export const GitFileList: React.FC<GitFileListProps> = ({
             </svg>
             <span className="truncate">{node.name}</span>
           </button>
-          {isOpen && <ul className="flex flex-col gap-0.5">{renderTreeNodes(node.children, depth + 1)}</ul>}
+          {isOpen && <ul className="flex flex-col">{renderTreeNodes(node.children, depth + 1)}</ul>}
         </li>
       );
     });
 
   return (
     <>
-      <ul className="flex flex-col gap-0.5">
+      <ul className="flex flex-col">
         {displayMode === "tree"
           ? renderTreeNodes(buildFileTree(sortedFiles, sortMode))
           : sortedFiles.map((file, index) => renderFileRow(file, index, 0, true))}

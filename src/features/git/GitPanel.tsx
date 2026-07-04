@@ -137,7 +137,6 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     status,
     error: statusError,
     loading: statusLoading,
-    refreshing: statusRefreshing,
     changeEventRevision,
     refreshStatus,
   } = sourceControlStatus;
@@ -149,6 +148,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [diffActions, setDiffActions] = useState<GitDiffAction[]>([]);
   const [diffHunkActions, setDiffHunkActions] = useState<GitDiffHunkAction[]>([]);
   const [loading, setLoading] = useState(false);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [initializingRepository, setInitializingRepository] = useState(false);
   const [isCloneRepositoryFormOpen, setIsCloneRepositoryFormOpen] = useState(false);
@@ -1795,7 +1795,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
       ? "Syncing source control..."
       : worktreeLoading
         ? "Updating worktree..."
-        : statusRefreshing
+        : manualRefreshing
           ? "Refreshing source control..."
           : statusLoading
             ? "Loading source control..."
@@ -1965,9 +1965,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
 
   const handleRefreshSourceControl = async () => {
     setOperationError(null);
-    const refreshed = await refreshStatus();
-    if (refreshed) {
-      await refreshHistory();
+    setManualRefreshing(true);
+    try {
+      const refreshed = await refreshStatus();
+      if (refreshed) {
+        await refreshHistory();
+      }
+    } finally {
+      setManualRefreshing(false);
     }
   };
 
@@ -1994,12 +1999,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         <button
           type="button"
           onClick={() => void handleRefreshSourceControl()}
-          disabled={statusLoading || statusRefreshing}
+          disabled={statusLoading || manualRefreshing}
           aria-label="Refresh Source Control"
           title="Refresh Source Control"
           className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${statusRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
+          <RefreshCw className={`h-3.5 w-3.5 ${manualRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
         </button>
         <button
           type="button"

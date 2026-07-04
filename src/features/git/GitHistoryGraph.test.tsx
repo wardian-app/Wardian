@@ -14,7 +14,7 @@ describe("GitHistoryGraph", () => {
     window.localStorage.clear();
   });
 
-  it("renders compact graph rows with refs, fixed swimlane metrics, and commit metadata", () => {
+  it("renders compact graph rows with refs while keeping commit metadata out of the row", () => {
     render(
       <GitHistoryGraph
         rootPath="C:/repo"
@@ -47,12 +47,13 @@ describe("GitHistoryGraph", () => {
     const row = screen.getByTestId("history-graph-row-aaaaaaaa");
     expect(row).toHaveStyle({ height: "22px" });
     expect(within(row).getByTestId("history-graph-svg-aaaaaaaa")).toHaveAttribute("width", "33");
-    expect(within(row).getByText("HEAD")).toBeInTheDocument();
-    expect(within(row).getByText("main")).toBeInTheDocument();
+    expect(within(row).queryByText("HEAD")).not.toBeInTheDocument();
+    expect(within(row).queryByText("main")).not.toBeInTheDocument();
     expect(within(row).getByText("origin/main")).toBeInTheDocument();
     expect(within(row).getByText("Merge feature branch")).toBeInTheDocument();
-    expect(within(row).getByText("aaaaaaaa")).toBeInTheDocument();
-    expect(within(row).getByText(/Ada Lovelace/)).toBeInTheDocument();
+    expect(within(row).queryByText("aaaaaaaa")).not.toBeInTheDocument();
+    expect(within(row).queryByText(/Ada Lovelace/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/2026-06-25/)).not.toBeInTheDocument();
   });
 
   it("shows detailed commit metadata in a history row hover", () => {
@@ -482,8 +483,8 @@ describe("GitHistoryGraph", () => {
     fireEvent.click(screen.getByRole("button", { name: "Current Branch" }));
 
     const currentRow = screen.getByTestId("history-graph-row-aaaaaaaa");
-    expect(within(currentRow).getByText("HEAD")).toBeInTheDocument();
-    expect(within(currentRow).getByText("main")).toBeInTheDocument();
+    expect(within(currentRow).queryByText("HEAD")).not.toBeInTheDocument();
+    expect(within(currentRow).queryByText("main")).not.toBeInTheDocument();
     expect(within(currentRow).queryByText("origin/main")).not.toBeInTheDocument();
     expect(within(currentRow).queryByText("v1.0.0")).not.toBeInTheDocument();
 

@@ -112,6 +112,21 @@ describe('GitFileList', () => {
     expect(screen.getByRole('button', { name: 'View diff for src/main.ts' })).toBeInTheDocument();
   });
 
+  it('uses compact source-control tree row density', () => {
+    render(
+      <GitFileList
+        displayMode="tree"
+        files={[
+          { path: 'packages/wardian-core/src/topology.rs', status: 'M', is_staged: true },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'packages' })).toHaveClass('h-[18px]');
+    expect(screen.getByRole('button', { name: 'wardian-core' })).toHaveClass('h-[18px]');
+    expect(screen.getByRole('button', { name: 'View diff for packages/wardian-core/src/topology.rs' }).closest('li')).toHaveClass('h-[18px]');
+  });
+
   it('orders resources by VS Code-style status priority before path while preserving tree hierarchy', () => {
     const priorityFiles: GitFileEntry[] = [
       { path: 'zeta/new-file.ts', status: '?', is_staged: false },

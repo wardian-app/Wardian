@@ -260,7 +260,6 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toHaveClass("text-sm");
-    expect(await screen.findByText("main")).toBeInTheDocument();
     expect(screen.getByText("Staged changes")).toBeInTheDocument();
     expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("changed.ts")).toBeInTheDocument();
@@ -354,7 +353,7 @@ describe("GitPanel", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("git_watch", expect.anything());
   });
 
-  it("shows source-control refresh progress without hiding loaded files", async () => {
+  it("keeps routine source-control background refresh silent without hiding loaded files", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
       if (command === "list_agent_worktrees") return [];
@@ -377,7 +376,8 @@ describe("GitPanel", () => {
     });
 
     expect(await screen.findByText("shared.ts")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Refreshing source control...");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Source Control" })).not.toBeDisabled();
   });
 
   it("refreshes status and history from the source-control header", async () => {

@@ -1891,6 +1891,84 @@ describe("Sidebar Navigation", () => {
 
     expect(await screen.findByTestId("sidebar-tab-git-badge")).toHaveTextContent("2");
   });
+
+  it("does not show the activity rail source-control progress marker for routine polling", async () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    try {
+      setupDefaultMocks(sampleAgents, defaultClasses);
+      const defaultInvoke = mockInvoke.getMockImplementation();
+      let gitStatusCalls = 0;
+      let resolvePolledStatus!: (value: {
+        branch: string;
+        upstream: string;
+        has_upstream: boolean;
+        ahead: number;
+        behind: number;
+        files: { path: string; status: string; is_staged: boolean }[];
+      }) => void;
+      const polledStatus = new Promise<{
+        branch: string;
+        upstream: string;
+        has_upstream: boolean;
+        ahead: number;
+        behind: number;
+        files: { path: string; status: string; is_staged: boolean }[];
+      }>((resolve) => {
+        resolvePolledStatus = resolve;
+      });
+
+      mockInvoke.mockImplementation((cmd, args) => {
+        if (cmd === "get_explorer_root") return Promise.resolve("C:/project");
+        if (cmd === "git_status") {
+          gitStatusCalls += 1;
+          if (gitStatusCalls === 1) {
+            return Promise.resolve({
+              branch: "main",
+              upstream: "origin/main",
+              has_upstream: true,
+              ahead: 0,
+              behind: 0,
+              files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+            });
+          }
+          return polledStatus;
+        }
+        return defaultInvoke?.(cmd, args) ?? Promise.resolve(null);
+      });
+
+      render(<App />);
+
+      fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+      expect(await screen.findByTestId("sidebar-tab-git-badge")).toHaveTextContent("1");
+      expect(screen.queryByTestId("sidebar-tab-git-progress")).not.toBeInTheDocument();
+
+      const pollCall = setIntervalSpy.mock.calls.find(([, timeout]) => timeout === 3000);
+      const pollCallback = pollCall?.[0];
+      expect(typeof pollCallback).toBe("function");
+      await act(async () => {
+        if (typeof pollCallback === "function") {
+          pollCallback();
+        }
+      });
+
+      await waitFor(() => expect(gitStatusCalls).toBe(2));
+      expect(screen.queryByTestId("sidebar-tab-git-progress")).not.toBeInTheDocument();
+
+      await act(async () => {
+        resolvePolledStatus({
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        });
+        await polledStatus;
+      });
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
 });
 
 // ── Agent Off State Tests ──────────────────────────────────────────────

@@ -192,11 +192,6 @@ const saveExpandedHashes = (rootPath: string, hashes: Set<string>) => {
   window.localStorage.setItem(storageKey(rootPath, "expanded"), JSON.stringify([...hashes]));
 };
 
-const formatDate = (date: string) => {
-  const match = date.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match?.[1] ?? date;
-};
-
 const changeStatusClassName = (status: string) => {
   const base = "w-4 shrink-0 text-center text-[9px] font-mono leading-[14px]";
   if (status === "A" || status === "C") return `${base} text-[var(--color-wardian-success)]`;
@@ -296,6 +291,12 @@ const refsForBadgeMode = (
 
   return refs.filter((ref) => ref === "HEAD" || (!!branch && ref === branch) || (!!upstream && ref === upstream));
 };
+
+const meaningfulRowRefs = (refs: string[], branch: string) =>
+  refs.filter((ref) => ref !== "HEAD" && ref !== branch);
+
+const refsForRowBadges = (refs: string[], branch: string) =>
+  refs.filter((ref) => ref !== "HEAD" && ref !== branch).slice(0, 1);
 
 const historyGraphTooltipId = (rowId: string) => `history-graph-tooltip-${rowId}`;
 
@@ -927,7 +928,10 @@ export function GitHistoryGraph({
       )}
       {rows.map((row, index) => {
         const refs = uniqueRefsForEntry(row.entry, originalIndexByHash.get(row.entry.hash) ?? index, branch);
-        const badgeRefs = refsForBadgeMode(refs, branch, upstream, refFilter, badgeMode);
+        const badgeModeRefs = refsForBadgeMode(refs, branch, upstream, refFilter, badgeMode);
+        const badgeRefs = badgeMode === "all"
+          ? meaningfulRowRefs(badgeModeRefs, branch)
+          : refsForRowBadges(badgeModeRefs, branch);
         const maxLaneCount = Math.max(row.inputLanes.length, row.outputLanes.length, 1);
         const width = metrics.swimlaneWidth * (maxLaneCount + 1);
         const circleX = metrics.swimlaneWidth * (row.circleIndex + 1);
@@ -1031,7 +1035,7 @@ export function GitHistoryGraph({
                   {row.entry.message}
                 </span>
                 {!isTiny && !isSynthetic && badgeRefs.length > 0 && (
-                  <span className="min-w-0 flex items-center gap-1 overflow-hidden">
+                  <span className="min-w-0 max-w-[112px] flex items-center gap-1 overflow-hidden">
                     {badgeRefs.map((ref) => (
                       <span key={ref} className={refClassName(ref, branch, upstream)} title={ref}>
                         {ref}
@@ -1040,20 +1044,11 @@ export function GitHistoryGraph({
                   </span>
                 )}
               </div>
-              {!isTiny && !isSynthetic && (
-                <span className="hidden min-[360px]:inline text-[9px] text-[var(--color-wardian-text-muted)] truncate max-w-[96px]">
-                  {row.entry.author} · {formatDate(row.entry.date)}
-                </span>
-              )}
               {isSynthetic ? (
                 <span className="text-[9px] text-[var(--color-wardian-text-muted)] shrink-0 opacity-80">
                   {commitCountLabel(row.entry.syntheticCount ?? 0)}
                 </span>
-              ) : (
-                <span className="text-[9px] font-mono text-[var(--color-wardian-text-muted)] shrink-0 opacity-70 group-hover:opacity-100">
-                  {short}
-                </span>
-              )}
+              ) : null}
             </button>
             {!isSynthetic && (
               <button

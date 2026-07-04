@@ -1030,7 +1030,7 @@ function AppBody() {
           userTerminalOpen={userTerminalOpen}
           settingsOpen={settingsOpen}
           sourceControlChangeCount={sourceControlStatus.changeCount}
-          sourceControlBusy={sourceControlStatus.loading || sourceControlStatus.refreshing}
+          sourceControlBusy={sourceControlStatus.loading}
           onToggleUserTerminal={toggleUserTerminal}
           onToggleSettings={toggleSettings}
         />
