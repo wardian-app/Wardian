@@ -265,10 +265,11 @@ Wardian parity backlog:
 74. History graph compact reference picker.
 75. History graph concrete reference picker filters.
 76. History graph commit inline `View Changes` action.
+77. History graph changed-file inline `Open File` action.
 
 ## Current Slice
 
-Implemented the first seventy-six slices:
+Implemented the first seventy-seven slices:
 
 - `useSourceControlBadge` resolves the selected agent root, observes
   `git_status`, listens for `git-changed`, polls as a fallback, and returns a
@@ -377,6 +378,9 @@ Implemented the first seventy-six slices:
   action. Wardian reads the selected path at the expanded commit hash and opens
   it in the existing read-only diff modal with a short-hash label, matching the
   stable history-file inspection path without adding Monaco-backed editing.
+- Expanded history graph file rows now expose a compact hover/focus inline
+  `Open File` action, matching VS Code's `SCMHistoryItemChangeContext` inline
+  action behavior while preserving the existing row-click shortcut.
 - Expanded history graph file rows now expose the same `Open File` action from
   a right-click context menu, matching VS Code's separate history item change
   context menu without adding another visible graph toolbar control.
@@ -627,6 +631,7 @@ Focused tests:
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph compact reference picker coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph concrete reference picker coverage)
 - `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph inline commit action coverage)
+- `npm run test -- src/features/git/GitHistoryGraph.test.tsx` (history graph changed-file inline action coverage)
 - `npm run test -- src/features/git/useSelectedAgentGitStatus.test.ts src/features/git/GitPanel.test.tsx src/layout/SidebarIconRail.test.tsx src/views/App.test.tsx`
 - `npm run test -- src/features/git/GitFileList.test.tsx src/features/git/GitPanel.test.tsx`
 - `npm run test -- src/features/git/GitPanel.test.tsx`

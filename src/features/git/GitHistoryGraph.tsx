@@ -747,33 +747,49 @@ export function GitHistoryGraph({
     displayPath: string,
     depth = 0,
   ) => (
-    <button
-      type="button"
-      key={`${row.entry.hash}-${change.path}`}
-      aria-label={`Open ${change.path} from ${short}`}
-      data-testid={`history-graph-change-row-${short}-${change.path}`}
-      disabled={!onOpenHistoryFile}
-      onClick={() => onOpenHistoryFile?.(row.entry, change)}
-      onContextMenu={(event) => openHistoryChangeContextMenu(event, row.entry, change)}
-      className="flex w-full items-center gap-2 px-1 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
-      style={{ height: `${metrics.rowHeight}px` }}
-    >
-      <GraphPlaceholder
-        testId={`history-graph-change-placeholder-${short}-${change.path}`}
-        width={width}
-        lanes={row.outputLanes}
-        highlightIndex={row.circleIndex}
-        metrics={metrics}
-      />
-      <span aria-hidden="true" style={{ width: `${depth * 12}px` }} className="shrink-0" />
-      <span className={changeStatusClassName(change.status)}>{change.status}</span>
-      <span
-        className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-wardian-text-muted)]"
-        title={change.path}
+    <div key={`${row.entry.hash}-${change.path}`} className="group relative">
+      <button
+        type="button"
+        aria-label={`Open ${change.path} from ${short}`}
+        data-testid={`history-graph-change-row-${short}-${change.path}`}
+        disabled={!onOpenHistoryFile}
+        onClick={() => onOpenHistoryFile?.(row.entry, change)}
+        onContextMenu={(event) => openHistoryChangeContextMenu(event, row.entry, change)}
+        className="flex w-full items-center gap-2 px-1 pr-7 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
+        style={{ height: `${metrics.rowHeight}px` }}
       >
-        {displayPath}
-      </span>
-    </button>
+        <GraphPlaceholder
+          testId={`history-graph-change-placeholder-${short}-${change.path}`}
+          width={width}
+          lanes={row.outputLanes}
+          highlightIndex={row.circleIndex}
+          metrics={metrics}
+        />
+        <span aria-hidden="true" style={{ width: `${depth * 12}px` }} className="shrink-0" />
+        <span className={changeStatusClassName(change.status)}>{change.status}</span>
+        <span
+          className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-wardian-text-muted)]"
+          title={change.path}
+        >
+          {displayPath}
+        </span>
+      </button>
+      {onOpenHistoryFile && (
+        <button
+          type="button"
+          aria-label={`Open File for ${change.path} from ${short}`}
+          title="Open File"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenHistoryFile(row.entry, change);
+          }}
+          className="absolute right-1 top-1/2 hidden h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--color-wardian-text-muted)] opacity-0 hover:bg-wardian-card-bg-muted hover:text-primary focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] group-hover:inline-flex group-hover:opacity-100 group-focus-within:inline-flex group-focus-within:opacity-100"
+        >
+          <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      )}
+    </div>
   );
 
   const renderChangeTreeNodes = (
