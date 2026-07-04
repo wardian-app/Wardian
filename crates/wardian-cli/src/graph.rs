@@ -5,12 +5,12 @@ use crate::errors::{CliError, ExitCode};
 use crate::live;
 use wardian_core::identity::{self, AgentIdentity, ListFilters, Scope};
 use wardian_core::topology::{
-    load_topology, pair_activity_from_records, resolve_neighbors, AgentRef, PairActivity, Topology,
+    load_topology, pair_activity_from_records, resolve_neighbors, save_topology, AgentRef,
+    PairActivity, Topology,
 };
 
 /// Full agent roster: live control endpoint when the app runs, DB fallback otherwise.
 /// Mirrors the fallback pattern in `handle_list`.
-#[allow(dead_code)]
 fn agent_snapshot() -> Result<Vec<AgentIdentity>, CliError> {
     if let Ok(agents) = live::list_agents() {
         return Ok(agents);
@@ -29,14 +29,12 @@ fn agent_snapshot() -> Result<Vec<AgentIdentity>, CliError> {
     .map_err(crate::identity_error)
 }
 
-#[allow(dead_code)]
 fn wardian_home() -> Result<std::path::PathBuf, CliError> {
     wardian_core::paths::wardian_home()
         .ok_or_else(|| CliError::generic("Could not determine Wardian home"))
 }
 
 /// UUID match wins; otherwise a unique name match. Duplicated names are ambiguous.
-#[allow(dead_code)]
 fn resolve_endpoint<'a>(
     agents: &'a [AgentIdentity],
     target: &str,
@@ -44,8 +42,7 @@ fn resolve_endpoint<'a>(
     if let Some(agent) = agents.iter().find(|agent| agent.uuid == target) {
         return Ok(agent);
     }
-    let matches: Vec<&AgentIdentity> =
-        agents.iter().filter(|agent| agent.name == target).collect();
+    let matches: Vec<&AgentIdentity> = agents.iter().filter(|agent| agent.name == target).collect();
     match matches.as_slice() {
         [] => Err(CliError::not_found(target)),
         [single] => Ok(*single),
@@ -58,20 +55,17 @@ fn resolve_endpoint<'a>(
 }
 
 /// Some(uuid) inside a session (mutations restricted to self); None = operator.
-#[allow(dead_code)]
 #[derive(Debug)]
 struct CallerContext {
     self_uuid: Option<String>,
 }
 
-#[allow(dead_code)]
 fn caller_context(agents: &[AgentIdentity]) -> Result<CallerContext, CliError> {
     caller_context_from(std::env::var("WARDIAN_SESSION_ID").ok().as_deref(), agents)
 }
 
 /// Fail closed on a stale session: an unknown WARDIAN_SESSION_ID must not
 /// silently acquire operator (unrestricted) powers.
-#[allow(dead_code)]
 fn caller_context_from(
     session: Option<&str>,
     agents: &[AgentIdentity],
@@ -91,7 +85,6 @@ fn caller_context_from(
 }
 
 /// Resolve a mutation's endpoints and enforce the self-serve rule.
-#[allow(dead_code)]
 fn resolve_pair(
     agents: &[AgentIdentity],
     ctx: &CallerContext,
@@ -128,13 +121,83 @@ pub fn handle_graph(args: GraphArgs) -> Result<String, CliError> {
         GraphCommand::Show => render_graph_show(args.pretty),
         GraphCommand::Neighbors { agent } => render_graph_neighbors(agent.as_deref(), args.pretty),
         GraphCommand::Activity => render_graph_activity(args.pretty),
-        GraphCommand::Link { .. }
-        | GraphCommand::Unlink { .. }
-        | GraphCommand::Ignore { .. }
-        | GraphCommand::Unignore { .. } => {
-            Err(CliError::generic("graph command not implemented yet"))
+        GraphCommand::Link { a, b } => {
+            handle_mutation(Mutation::Link, &a, b.as_deref(), args.pretty)
+        }
+        GraphCommand::Unlink { a, b } => {
+            handle_mutation(Mutation::Unlink, &a, b.as_deref(), args.pretty)
+        }
+        GraphCommand::Ignore { a, b } => {
+            handle_mutation(Mutation::Ignore, &a, b.as_deref(), args.pretty)
+        }
+        GraphCommand::Unignore { a, b } => {
+            handle_mutation(Mutation::Unignore, &a, b.as_deref(), args.pretty)
         }
     }
+}
+
+enum Mutation {
+    Link,
+    Unlink,
+    Ignore,
+    Unignore,
+}
+
+impl Mutation {
+    fn action(&self) -> &'static str {
+        match self {
+            Mutation::Link => "link",
+            Mutation::Unlink => "unlink",
+            Mutation::Ignore => "ignore",
+            Mutation::Unignore => "unignore",
+        }
+    }
+}
+
+/// Idempotent read-modify-write on topology.json. Saves only when something
+/// changed; the file write is atomic (temp + rename) inside save_topology.
+fn handle_mutation(
+    kind: Mutation,
+    a: &str,
+    b: Option<&str>,
+    pretty: bool,
+) -> Result<String, CliError> {
+    let agents = agent_snapshot()?;
+    let ctx = caller_context(&agents)?;
+    let (x, y) = resolve_pair(&agents, &ctx, a, b)?;
+
+    let home = wardian_home()?;
+    let mut topology = load_topology(&home);
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let changed = match kind {
+        Mutation::Link => topology.add_edge(&x, &y, &created_at),
+        Mutation::Unlink => topology.remove_edge(&x, &y),
+        Mutation::Ignore => topology.ignore_pair(&x, &y),
+        Mutation::Unignore => topology.unignore_pair(&x, &y),
+    };
+    if changed {
+        save_topology(&home, &topology).map_err(|error| CliError::generic(error.to_string()))?;
+    }
+
+    // Report the canonical (sorted) pair, matching what topology.json stores.
+    let (a_out, b_out) = wardian_core::topology::canonical_pair(&x, &y)
+        .expect("resolve_pair rejects self/empty pairs");
+    if pretty {
+        let names = name_index(&agents);
+        return Ok(format!(
+            "{} {} <-> {}  (changed: {changed})\n",
+            kind.action(),
+            display_name(&names, &a_out),
+            display_name(&names, &b_out),
+        ));
+    }
+    render_json(serde_json::json!({
+        "schema": 1,
+        "action": kind.action(),
+        "a": a_out,
+        "b": b_out,
+        "changed": changed,
+    }))
 }
 
 fn render_graph_show(pretty: bool) -> Result<String, CliError> {
@@ -293,11 +356,13 @@ fn unmapped_pairs(
     activity
         .iter()
         .filter(|pair| keys.contains(&(pair.a.clone(), pair.b.clone())))
-        .map(|pair| serde_json::json!({
-            "a": pair.a,
-            "b": pair.b,
-            "last_message_at": pair.last_message_at,
-        }))
+        .map(|pair| {
+            serde_json::json!({
+                "a": pair.a,
+                "b": pair.b,
+                "last_message_at": pair.last_message_at,
+            })
+        })
         .collect()
 }
 
