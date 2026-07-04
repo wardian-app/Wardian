@@ -214,7 +214,10 @@ describe("GitHistoryGraph", () => {
     );
 
     onOpenHistoryFile.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Open File for src/changed.ts from aaaaaaaa" }));
+    const openFileButton = screen.getByRole("button", { name: "Open File for src/changed.ts from aaaaaaaa" });
+    expect(openFileButton).not.toHaveClass("absolute");
+    expect(openFileButton).toHaveClass("shrink-0");
+    fireEvent.click(openFileButton);
 
     expect(onOpenHistoryFile).toHaveBeenCalledWith(
       expect.objectContaining({ hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
@@ -256,6 +259,9 @@ describe("GitHistoryGraph", () => {
       />,
     );
 
+    expect(screen.queryByRole("button", { name: "View history changes as tree" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "View history changes as list" })).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /Expand Structure graph changes/ }));
 
     const srcFolder = await screen.findByRole("button", { name: "src" });
@@ -283,7 +289,7 @@ describe("GitHistoryGraph", () => {
     expect(window.localStorage.getItem("wardian:source-control:history-graph:C:/repo:change-view-mode")).toBe("list");
   });
 
-  it("switches to tiny density and persists the presentation per root", () => {
+  it("does not expose custom history density controls", () => {
     const entries = [
       {
         hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -298,31 +304,13 @@ describe("GitHistoryGraph", () => {
       },
     ];
 
-    const { unmount } = render(
+    render(
       <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
     );
 
     expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveStyle({ height: "22px" });
-
-    fireEvent.click(screen.getByRole("button", { name: "Use tiny history density" }));
-
-    expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveStyle({ height: "16px" });
-    expect(screen.getByTestId("history-graph-svg-aaaaaaaa")).toHaveAttribute("width", "24");
-    expect(screen.queryByText(/Ada Lovelace/)).not.toBeInTheDocument();
-
-    unmount();
-
-    const persisted = render(
-      <GitHistoryGraph rootPath="C:/repo" branch="main" upstream="origin/main" entries={entries} />,
-    );
-
-    expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveStyle({ height: "16px" });
-
-    persisted.unmount();
-
-    render(<GitHistoryGraph rootPath="C:/other-repo" branch="main" upstream="origin/main" entries={entries} />);
-
-    expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveStyle({ height: "22px" });
+    expect(screen.queryByRole("button", { name: "Use detailed history density" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use tiny history density" })).not.toBeInTheDocument();
   });
 
   it("persists expanded rows per root and collapses them all", async () => {

@@ -11,14 +11,11 @@ import {
   GitBranch,
   List,
   ListTree,
-  Maximize2,
-  Minimize2,
   Target,
 } from "lucide-react";
 import type { GitCommitChangeEntry, GitLogEntry } from "../../types";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 
-type GraphDensity = "detailed" | "tiny";
 type GraphRefFilter = "auto" | "all" | "current" | "upstream" | `ref:${string}`;
 type GraphChangeViewMode = "tree" | "list";
 type GraphBadgeMode = "filter" | "all";
@@ -32,23 +29,13 @@ interface GraphMetrics {
   innerRadius: number;
 }
 
-const GRAPH_DENSITY_METRICS: Record<GraphDensity, GraphMetrics> = {
-  detailed: {
-    rowHeight: 22,
-    swimlaneWidth: 11,
-    headRadius: 6,
-    mergeRadius: 5,
-    nodeRadius: 4,
-    innerRadius: 2,
-  },
-  tiny: {
-    rowHeight: 16,
-    swimlaneWidth: 8,
-    headRadius: 4.5,
-    mergeRadius: 3.5,
-    nodeRadius: 3,
-    innerRadius: 1.5,
-  },
+const GRAPH_METRICS: GraphMetrics = {
+  rowHeight: 22,
+  swimlaneWidth: 11,
+  headRadius: 6,
+  mergeRadius: 5,
+  nodeRadius: 4,
+  innerRadius: 2,
 };
 
 const GRAPH_COLORS = [
@@ -127,17 +114,6 @@ const storageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") ||
 
 const storageKey = (rootPath: string, suffix: string) =>
   `wardian:source-control:history-graph:${storageRoot(rootPath)}:${suffix}`;
-
-const loadDensity = (rootPath: string): GraphDensity => {
-  if (typeof window === "undefined") return "detailed";
-  const stored = window.localStorage.getItem(storageKey(rootPath, "density"));
-  return stored === "tiny" || stored === "detailed" ? stored : "detailed";
-};
-
-const saveDensity = (rootPath: string, density: GraphDensity) => {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(storageKey(rootPath, "density"), density);
-};
 
 const loadRefFilter = (rootPath: string): GraphRefFilter => {
   if (typeof window === "undefined") return "auto";
@@ -453,7 +429,6 @@ export function GitHistoryGraph({
   onOpenHistoryFile,
   onViewHistoryChanges,
 }: GitHistoryGraphProps) {
-  const [density, setDensity] = useState<GraphDensity>(() => loadDensity(rootPath));
   const [refFilter, setRefFilter] = useState<GraphRefFilter>(() => loadRefFilter(rootPath));
   const [badgeMode, setBadgeMode] = useState<GraphBadgeMode>(() => loadBadgeMode(rootPath));
   const [changeViewMode, setChangeViewMode] = useState<GraphChangeViewMode>(() => loadChangeViewMode(rootPath));
@@ -485,10 +460,9 @@ export function GitHistoryGraph({
       ).filter((ref) => ref !== "HEAD"),
     [branch, entries],
   );
-  const metrics = GRAPH_DENSITY_METRICS[density];
+  const metrics = GRAPH_METRICS;
 
   useEffect(() => {
-    setDensity(loadDensity(rootPath));
     setRefFilter(loadRefFilter(rootPath));
     setBadgeMode(loadBadgeMode(rootPath));
     setChangeViewMode(loadChangeViewMode(rootPath));
@@ -544,11 +518,6 @@ export function GitHistoryGraph({
       void loadCommitChanges(row.entry);
     });
   }, [changesByHash, errorByHash, expandedHashes, loadCommitChanges, loadingHashes, rows]);
-
-  const updateDensity = (nextDensity: GraphDensity) => {
-    setDensity(nextDensity);
-    saveDensity(rootPath, nextDensity);
-  };
 
   const updateRefFilter = (nextFilter: GraphRefFilter) => {
     setRefFilter(nextFilter);
@@ -748,16 +717,19 @@ export function GitHistoryGraph({
     displayPath: string,
     depth = 0,
   ) => (
-    <div key={`${row.entry.hash}-${change.path}`} className="group relative">
+    <div
+      key={`${row.entry.hash}-${change.path}`}
+      data-testid={`history-graph-change-row-${short}-${change.path}`}
+      className="group/history-change flex w-full items-center gap-1 rounded px-1 hover:bg-wardian-card-bg-muted"
+      style={{ height: `${metrics.rowHeight}px` }}
+      onContextMenu={(event) => openHistoryChangeContextMenu(event, row.entry, change)}
+    >
       <button
         type="button"
         aria-label={`Open ${change.path} from ${short}`}
-        data-testid={`history-graph-change-row-${short}-${change.path}`}
         disabled={!onOpenHistoryFile}
         onClick={() => onOpenHistoryFile?.(row.entry, change)}
-        onContextMenu={(event) => openHistoryChangeContextMenu(event, row.entry, change)}
-        className="flex w-full items-center gap-2 px-1 pr-7 hover:bg-wardian-card-bg-muted rounded min-w-0 text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
-        style={{ height: `${metrics.rowHeight}px` }}
+        className="flex min-w-0 flex-1 items-center gap-2 rounded text-left disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-wardian-accent)]"
       >
         <GraphPlaceholder
           testId={`history-graph-change-placeholder-${short}-${change.path}`}
@@ -785,7 +757,7 @@ export function GitHistoryGraph({
             event.stopPropagation();
             onOpenHistoryFile(row.entry, change);
           }}
-          className="absolute right-1 top-1/2 hidden h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--color-wardian-text-muted)] opacity-0 hover:bg-wardian-card-bg-muted hover:text-primary focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] group-hover:inline-flex group-hover:opacity-100 group-focus-within:inline-flex group-focus-within:opacity-100"
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-wardian-text-muted)] opacity-0 hover:bg-wardian-card-bg-muted hover:text-primary focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] group-hover/history-change:opacity-100 group-focus-within/history-change:opacity-100"
         >
           <FileText className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
@@ -839,6 +811,36 @@ export function GitHistoryGraph({
       );
     });
 
+  const renderChangeViewControls = (row: HistoryGraphRow, width: number) => (
+    <div
+      className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-wardian-text-muted)]"
+      style={{ height: `${metrics.rowHeight}px` }}
+    >
+      <GraphPlaceholder width={width} lanes={row.outputLanes} highlightIndex={row.circleIndex} metrics={metrics} />
+      <span className="min-w-0 flex-1 truncate">Changed files</span>
+      <button
+        type="button"
+        aria-label="View history changes as tree"
+        aria-pressed={changeViewMode === "tree"}
+        title="View history changes as tree"
+        onClick={() => updateChangeViewMode("tree")}
+        className="h-5 w-5 shrink-0 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+      >
+        <ListTree className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        aria-label="View history changes as list"
+        aria-pressed={changeViewMode === "list"}
+        title="View history changes as list"
+        onClick={() => updateChangeViewMode("list")}
+        className="h-5 w-5 shrink-0 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
+      >
+        <List className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+    </div>
+  );
+
   return (
     <div className="flex flex-col" aria-label="Git history graph">
       <div
@@ -867,48 +869,6 @@ export function GitHistoryGraph({
           disabled={!currentRow}
         >
           <Target className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
-        <button
-          type="button"
-          aria-label="View history changes as tree"
-          aria-pressed={changeViewMode === "tree"}
-          title="View history changes as tree"
-          onClick={() => updateChangeViewMode("tree")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <ListTree className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="View history changes as list"
-          aria-pressed={changeViewMode === "list"}
-          title="View history changes as list"
-          onClick={() => updateChangeViewMode("list")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <List className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <span className="mx-1 h-4 w-px bg-[var(--color-wardian-border-subtle)]" aria-hidden="true" />
-        <button
-          type="button"
-          aria-label="Use detailed history density"
-          aria-pressed={density === "detailed"}
-          title="Use detailed history density"
-          onClick={() => updateDensity("detailed")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          aria-label="Use tiny history density"
-          aria-pressed={density === "tiny"}
-          title="Use tiny history density"
-          onClick={() => updateDensity("tiny")}
-          className="h-6 w-6 inline-flex items-center justify-center rounded text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted aria-pressed:text-[var(--color-wardian-accent)]"
-        >
-          <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -943,7 +903,6 @@ export function GitHistoryGraph({
         const showDetails = !isSynthetic && activeDetailRowId === rowId;
         const changes = changesByHash[row.entry.hash] ?? [];
         const isLoading = loadingHashes.has(row.entry.hash);
-        const isTiny = density === "tiny";
         const isDivergenceNode = row.kind === "incoming-changes" || row.kind === "outgoing-changes";
         const parentSummary = row.entry.parent_hashes?.length
           ? row.entry.parent_hashes.map(shortHash).join(", ")
@@ -1031,10 +990,10 @@ export function GitHistoryGraph({
                 )}
               </svg>
               <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                <span className={`${isTiny ? "text-[10px] leading-[14px]" : "text-[11px] leading-[18px]"} ${isSynthetic ? "font-medium text-[var(--color-wardian-text-muted)]" : "text-primary"} truncate`}>
+                <span className={`text-[11px] leading-[18px] ${isSynthetic ? "font-medium text-[var(--color-wardian-text-muted)]" : "text-primary"} truncate`}>
                   {row.entry.message}
                 </span>
-                {!isTiny && !isSynthetic && badgeRefs.length > 0 && (
+                {!isSynthetic && badgeRefs.length > 0 && (
                   <span className="min-w-0 max-w-[112px] flex items-center gap-1 overflow-hidden">
                     {badgeRefs.map((ref) => (
                       <span key={ref} className={refClassName(ref, branch, upstream)} title={ref}>
@@ -1100,6 +1059,7 @@ export function GitHistoryGraph({
                     {errorByHash[row.entry.hash]}
                   </div>
                 )}
+                {!isLoading && !errorByHash[row.entry.hash] && changes.length > 0 && renderChangeViewControls(row, width)}
                 {changeViewMode === "tree"
                   ? renderChangeTreeNodes(row, width, short, buildChangeTree(changes))
                   : changes.map((change) => renderChangeRow(row, width, short, change, change.path))}
