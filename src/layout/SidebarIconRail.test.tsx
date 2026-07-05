@@ -54,4 +54,57 @@ describe("SidebarIconRail density", () => {
 
     expect(screen.queryByTitle("Remote Connections")).not.toBeInTheDocument();
   });
+
+  it("shows a source control pending-change badge only when changes exist", () => {
+    const { rerender } = render(
+      <SidebarIconRail
+        activeTab="explorer"
+        setActiveTab={vi.fn()}
+        setCollapsed={vi.fn()}
+        userTerminalOpen={false}
+        settingsOpen={false}
+        sourceControlChangeCount={12}
+        onToggleUserTerminal={vi.fn()}
+        onToggleSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("sidebar-tab-git-badge")).toHaveTextContent("12");
+    expect(screen.getByTestId("sidebar-tab-git-badge")).toHaveAttribute("aria-label", "12 pending source control changes");
+
+    rerender(
+      <SidebarIconRail
+        activeTab="explorer"
+        setActiveTab={vi.fn()}
+        setCollapsed={vi.fn()}
+        userTerminalOpen={false}
+        settingsOpen={false}
+        sourceControlChangeCount={0}
+        onToggleUserTerminal={vi.fn()}
+        onToggleSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("sidebar-tab-git-badge")).not.toBeInTheDocument();
+  });
+
+  it("shows a source control progress marker while git is refreshing", () => {
+    render(
+      <SidebarIconRail
+        activeTab="explorer"
+        setActiveTab={vi.fn()}
+        setCollapsed={vi.fn()}
+        userTerminalOpen={false}
+        settingsOpen={false}
+        sourceControlBusy={true}
+        onToggleUserTerminal={vi.fn()}
+        onToggleSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("sidebar-tab-git-progress")).toHaveAttribute(
+      "aria-label",
+      "Source control is refreshing",
+    );
+  });
 });

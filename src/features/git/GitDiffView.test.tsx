@@ -38,4 +38,78 @@ describe('GitDiffView', () => {
 
     expect(screen.getByText('No differences to display.')).toBeInTheDocument();
   });
+
+  it('renders review actions for the opened diff', async () => {
+    const user = userEvent.setup();
+    const onStage = vi.fn();
+    const onUnstage = vi.fn();
+
+    render(
+      <GitDiffView
+        filePath="src/app.tsx"
+        diff="+new"
+        onClose={() => {}}
+        actions={[
+          { label: 'Stage Changes', onClick: onStage },
+          { label: 'Unstage Changes', onClick: onUnstage },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Stage Changes' }));
+    await user.click(screen.getByRole('button', { name: 'Unstage Changes' }));
+
+    expect(onStage).toHaveBeenCalledTimes(1);
+    expect(onUnstage).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders hunk review actions with a single-hunk patch', async () => {
+    const user = userEvent.setup();
+    const onStageHunk = vi.fn();
+
+    render(
+      <GitDiffView
+        filePath="src/app.tsx"
+        onClose={() => {}}
+        diff={[
+          'diff --git a/src/app.tsx b/src/app.tsx',
+          'index 1111111..2222222 100644',
+          '--- a/src/app.tsx',
+          '+++ b/src/app.tsx',
+          '@@ -1,3 +1,3 @@',
+          ' one',
+          '-two',
+          '+TWO',
+          ' three',
+          '@@ -10,3 +10,3 @@',
+          ' ten',
+          '-eleven',
+          '+ELEVEN',
+          ' twelve',
+        ].join('\n')}
+        hunkActions={[{ label: 'Stage Hunk', onClick: onStageHunk }]}
+      />,
+    );
+
+    const stageHunkButtons = screen.getAllByRole('button', { name: 'Stage Hunk' });
+    expect(stageHunkButtons).toHaveLength(2);
+
+    await user.click(stageHunkButtons[0]);
+
+    expect(onStageHunk).toHaveBeenCalledTimes(1);
+    expect(onStageHunk).toHaveBeenCalledWith(
+      [
+        'diff --git a/src/app.tsx b/src/app.tsx',
+        'index 1111111..2222222 100644',
+        '--- a/src/app.tsx',
+        '+++ b/src/app.tsx',
+        '@@ -1,3 +1,3 @@',
+        ' one',
+        '-two',
+        '+TWO',
+        ' three',
+        '',
+      ].join('\n'),
+    );
+  });
 });
