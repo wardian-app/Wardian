@@ -77,7 +77,7 @@ evidence or queue the interaction.
 - `load_agent_interactions`
 - `save_agent_interactions`
 
-The CLI read-only `team` and `watchlist` commands read `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays but do not use a separate persistence format.
+The CLI `team` and `watchlist` commands read and write `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays for reads, write canonical v2 JSON for mutations, and best-effort notify the running app when the local control endpoint is available. Team create/add/split operations also seed communication-topology edges while preserving existing seed-suppression tombstones.
 
 Queue commands persist the frontend Queue projection and preferences for the active Wardian home. Queue items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
 

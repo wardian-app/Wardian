@@ -134,8 +134,21 @@ wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include transcript,
 wardian agent watch reviewer-a1 --include raw_output --raw
 wardian team list
 wardian team show <team-name-or-id>
+wardian team create <name> --agent <name-or-uuid> [--agent <name-or-uuid>...]
+wardian team rename <team-name-or-id> <new-name>
+wardian team add <team-name-or-id> <agent-name-or-uuid> [...]
+wardian team remove <team-name-or-id> <agent-name-or-uuid> [...]
+wardian team split <team-name-or-id> --name <new-team-name> --agent <name-or-uuid> [...]
+wardian team delete <team-name-or-id>
 wardian watchlist list
 wardian watchlist show <watchlist-name-or-id>
+wardian watchlist create <name>
+wardian watchlist rename <watchlist-name-or-id> <new-name>
+wardian watchlist add-team <watchlist-name-or-id> <team-name-or-id>
+wardian watchlist remove-team <watchlist-name-or-id> <team-name-or-id>
+wardian watchlist add-agent <watchlist-name-or-id> <agent-name-or-uuid>
+wardian watchlist remove-agent <watchlist-name-or-id> <agent-name-or-uuid>
+wardian watchlist delete <watchlist-name-or-id>
 wardian workflow node-types
 wardian workflow validate <path-to-workflow.md>
 wardian workflow exec <path-to-library-workflow.md> --provider codex --workspace <absolute-workspace-path>
@@ -246,13 +259,15 @@ Use `conversation list` and `conversation show <conversation-id>` to inspect dur
 
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
 
-`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `conversation list`, and `conversation show` can run from disk without the desktop app.
+`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `conversation list`, `conversation show`, `team`, and `watchlist` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 
 `agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel and force a fresh agent session after changing the runtime workspace. `disable` removes the assignment only; it does not delete the physical worktree folder.
 
-`team list/show` and `watchlist list/show` read the existing watchlist state file. They accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Team mutation and `send --to team:<name>` are not implemented yet.
+`team` and `watchlist` read and write `<wardian-home>/watchlists/index.json`. Read commands accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Mutation commands write canonical v2 JSON with camelCase storage keys, resolve agent names or UUIDs through the same roster state as `agent list`, and update `topology.json` when team creation, add, or split operations seed new team clique edges. If the desktop app is running for the same `WARDIAN_HOME`, the CLI sends a best-effort reload notification so the roster picks up the change. `send --to team:<name>` is still not implemented.
+
+Team mutation validation rejects duplicate team names, unknown agents, ambiguous names, and operations that would leave a team empty. Deleting a team removes dangling team entries from watchlists. Removing or splitting team members does not remove existing topology edges; the communication graph remains user-owned after a team has seeded edges.
 
 `agent wait <target> --until <status>` blocks inside the CLI process until a single agent name or UUID reaches a normalized status such as `idle`, `processing`, `action_required`, `off`, or `error`. Plain `wait` returns immediately when the target is already in the requested status. Add `--next` to wait for a newer matching observation. Use `--timeout` with `ms`, `s`, or `m` units.
 
@@ -314,7 +329,7 @@ Default JSON is indented for terminal readability. It includes `schema: 1` and a
 
 - The desktop app must be running for live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, and default `workflow exec`.
 - `WARDIAN_HOME` must match between the app and CLI when you expect shared live state.
-- Team mutation and `send --to team:<name>` are not implemented yet.
+- Team and watchlist mutation commands write disk state directly and best-effort notify the running app. `send --to team:<name>` is not implemented yet.
 - Raw terminal output can include escape sequences; prefer transcript or sanitized output unless debugging PTY behavior.
 
 ## Exit Codes

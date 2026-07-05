@@ -58,16 +58,29 @@ app or with `wardian agent spawn` at the bottom instead. This setting affects
 explicit new spawns only; existing roster order, manual drag order, clone
 placement, teams, and custom watchlist entries keep their own ordering rules.
 
-The CLI can inspect persisted watchlist and team state without starting the desktop app:
+The CLI can inspect and update persisted watchlist and team state without starting the desktop app:
 
 ```bash
 wardian team list
 wardian team show <team-name-or-id>
+wardian team create <name> --agent <name-or-uuid> [--agent <name-or-uuid>...]
+wardian team rename <team-name-or-id> <new-name>
+wardian team add <team-name-or-id> <agent-name-or-uuid> [...]
+wardian team remove <team-name-or-id> <agent-name-or-uuid> [...]
+wardian team split <team-name-or-id> --name <new-team-name> --agent <name-or-uuid> [...]
+wardian team delete <team-name-or-id>
 wardian watchlist list
 wardian watchlist show <watchlist-name-or-id>
+wardian watchlist create <name>
+wardian watchlist rename <watchlist-name-or-id> <new-name>
+wardian watchlist add-team <watchlist-name-or-id> <team-name-or-id>
+wardian watchlist remove-team <watchlist-name-or-id> <team-name-or-id>
+wardian watchlist add-agent <watchlist-name-or-id> <agent-name-or-uuid>
+wardian watchlist remove-agent <watchlist-name-or-id> <agent-name-or-uuid>
+wardian watchlist delete <watchlist-name-or-id>
 ```
 
-These commands read the same `watchlists/index.json` file as the GUI and accept both the current v2 state shape with global teams and legacy flat watchlist arrays. They are read-only; team mutation and team send targeting are planned as separate CLI slices.
+These commands use the same `<wardian-home>/watchlists/index.json` file as the GUI. Reads accept both the current v2 state shape with global teams and legacy flat watchlist arrays. Writes normalize the file to canonical v2 JSON, seed team communication edges into `topology.json` when team membership creates new pairs, and notify a running desktop app for the same `WARDIAN_HOME` so the roster reloads. Team send targeting remains separate; use explicit agent names, UUIDs, class selectors, or `all` for `wardian send`.
 
 ## Organizing with Watchlists
 As your swarm grows, a single list becomes difficult to manage. Wardian allows you to group agents into custom **Watchlists**.
@@ -104,7 +117,7 @@ Hover over any agent in the Roster to access instant control icons:
 ## Important Limits
 
 - The roster is the targeting surface for many tools. Check selection before broadcasting or running prompts.
-- CLI team and watchlist commands are currently read-only for persisted state.
+- CLI team and watchlist commands mutate persisted state directly; use an isolated `WARDIAN_HOME` for tests and scripts that should not affect your normal roster.
 - Status and thought snippets are compact summaries. Use Grid or the CLI watch command for detailed output.
 
 ## Related Links

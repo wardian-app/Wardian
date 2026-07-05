@@ -77,6 +77,7 @@ enum ControlOperation {
     AgentWorktreeDisable,
     ConversationList,
     ConversationShow,
+    WatchlistsChanged,
     WorkflowRun,
     SendMessage,
     Ask {
@@ -402,6 +403,16 @@ pub fn conversation_show(conversation_id: &str) -> io::Result<ConversationShowRe
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+pub fn notify_watchlists_changed() -> io::Result<()> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::WatchlistsChanged,
+        send_request(ControlRequest::WatchlistsChanged),
+    )
+    .map(|_| ())
 }
 
 pub fn workflow_run(request: WorkflowRunRequest) -> io::Result<WorkflowRunResponse> {
@@ -758,7 +769,9 @@ fn timeout_block(
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
         ControlOperation::AgentList => CONTROL_TIMEOUT,
-        ControlOperation::ConversationList | ControlOperation::ConversationShow => CONTROL_TIMEOUT,
+        ControlOperation::ConversationList
+        | ControlOperation::ConversationShow
+        | ControlOperation::WatchlistsChanged => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
