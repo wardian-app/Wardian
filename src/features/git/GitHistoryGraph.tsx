@@ -141,9 +141,9 @@ const saveBadgeMode = (rootPath: string, mode: GraphBadgeMode) => {
 };
 
 const loadChangeViewMode = (rootPath: string): GraphChangeViewMode => {
-  if (typeof window === "undefined") return "tree";
+  if (typeof window === "undefined") return "list";
   const stored = window.localStorage.getItem(storageKey(rootPath, "change-view-mode"));
-  return stored === "list" || stored === "tree" ? stored : "tree";
+  return stored === "list" || stored === "tree" ? stored : "list";
 };
 
 const saveChangeViewMode = (rootPath: string, mode: GraphChangeViewMode) => {
@@ -848,9 +848,9 @@ export function GitHistoryGraph({
   );
 
   return (
-    <div className="flex flex-col" aria-label="Git history graph">
+    <div className="relative flex flex-col" aria-label="Git history graph">
       <div
-        className="flex items-center justify-end gap-1 px-1 py-1 border-b border-[var(--color-wardian-border-subtle)]"
+        className="absolute -top-7 right-0 z-10 flex h-7 items-center justify-end gap-1 px-1"
         role="toolbar"
         aria-label="History graph controls"
       >

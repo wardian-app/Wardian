@@ -246,8 +246,8 @@ describe("GitHistoryGraph", () => {
 
     const changeRow = await screen.findByTestId("history-graph-change-row-aaaaaaaa-src/changed.ts");
     expect(changeRow).toHaveStyle({ height: "22px" });
-    expect(screen.getByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
-    expect(within(changeRow).getByText("changed.ts")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+    expect(within(changeRow).getByText("src/changed.ts")).toBeInTheDocument();
     expect(within(changeRow).getByText("M")).toBeInTheDocument();
     expect(within(changeRow).getByTestId("history-graph-change-placeholder-aaaaaaaa-src/changed.ts")).toHaveAttribute(
       "width",
@@ -282,7 +282,7 @@ describe("GitHistoryGraph", () => {
     );
   });
 
-  it("renders expanded commit changes as a collapsible tree and can switch to flat list mode", async () => {
+  it("renders expanded commit changes as a flat list by default and can switch to tree mode", async () => {
     mockInvoke.mockResolvedValue([
       { path: "README.md", status: "M" },
       { path: "src/components/Button.tsx", status: "M" },
@@ -311,6 +311,12 @@ describe("GitHistoryGraph", () => {
     expect(screen.queryByRole("button", { name: "View history changes as list" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Expand Structure graph changes/ }));
+
+    const nestedListChange = await screen.findByTestId("history-graph-change-row-aaaaaaaa-src/features/git/GitHistoryGraph.tsx");
+    expect(within(nestedListChange).getByText("src/features/git/GitHistoryGraph.tsx")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View history changes as tree" }));
 
     const srcFolder = await screen.findByRole("button", { name: "src" });
     expect(srcFolder).toHaveAttribute("aria-expanded", "true");
@@ -359,6 +365,28 @@ describe("GitHistoryGraph", () => {
     expect(screen.getByTestId("history-graph-row-aaaaaaaa")).toHaveStyle({ height: "22px" });
     expect(screen.queryByRole("button", { name: "Use detailed history density" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Use tiny history density" })).not.toBeInTheDocument();
+  });
+
+  it("places history graph controls in the compact history header slot", () => {
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Merge feature branch",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: [],
+            refs: ["HEAD", "main"],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("toolbar", { name: "History graph controls" })).toHaveClass("absolute");
+    expect(screen.getByRole("toolbar", { name: "History graph controls" })).toHaveClass("-top-7");
   });
 
   it("persists expanded rows per root and collapses them all", async () => {
