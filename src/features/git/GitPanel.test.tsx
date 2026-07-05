@@ -595,6 +595,13 @@ describe("GitPanel", () => {
       sourceControlStatus: createSourceControlStatus({ rootPath: "C:/repo-a", status, changeCount: 1 }),
     });
 
+    expect(await screen.findByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use Tree View" }));
+
     expect(await screen.findByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
 
     fireEvent.click(screen.getByTitle("More Source Control Actions"));
@@ -1437,6 +1444,7 @@ describe("GitPanel", () => {
 
   it("opens folder context actions that only affect files under that tree folder", async () => {
     const refreshStatus = vi.fn(async () => true);
+    window.localStorage.setItem("wardian:source-control:resources:display-mode", "tree");
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
       if (command === "list_agent_worktrees") return [];
@@ -1479,6 +1487,7 @@ describe("GitPanel", () => {
 
   it("adds source-control tree folders to gitignore from the folder context menu", async () => {
     const refreshStatus = vi.fn(async () => true);
+    window.localStorage.setItem("wardian:source-control:resources:display-mode", "tree");
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
       if (command === "list_agent_worktrees") return [];

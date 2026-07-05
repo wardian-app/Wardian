@@ -75,12 +75,12 @@ const resourceSortModeKey = (rootPath: string) =>
 const commitActionStorageKey = "wardian:source-control:commit:last-action";
 
 const loadResourceDisplayMode = (rootPath: string): ResourceDisplayMode => {
-  if (typeof window === "undefined") return "tree";
+  if (typeof window === "undefined") return "list";
   const stored = window.localStorage.getItem(resourceDisplayModeKey);
   if (stored === "list" || stored === "tree") return stored;
 
   const legacyStored = window.localStorage.getItem(legacyResourceDisplayModeKey(rootPath));
-  return legacyStored === "list" || legacyStored === "tree" ? legacyStored : "tree";
+  return legacyStored === "list" || legacyStored === "tree" ? legacyStored : "list";
 };
 
 const saveResourceDisplayMode = (rootPath: string, mode: ResourceDisplayMode) => {

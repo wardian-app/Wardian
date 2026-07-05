@@ -157,6 +157,54 @@ describe("GitHistoryGraph", () => {
     expect(mockInvoke).not.toHaveBeenCalled();
   });
 
+  it("draws merge parent lanes from the merge point without full-height introduced branches", () => {
+    render(
+      <GitHistoryGraph
+        rootPath="C:/repo"
+        branch="main"
+        entries={[
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Merge feature branch",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "cccccccccccccccccccccccccccccccccccccccc",
+            ],
+            refs: ["HEAD", "main"],
+          },
+          {
+            hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            message: "First parent",
+            author: "Grace Hopper",
+            date: "2026-06-24 07:00:00 -0400",
+            parent_hashes: ["cccccccccccccccccccccccccccccccccccccccc"],
+            refs: [],
+          },
+          {
+            hash: "cccccccccccccccccccccccccccccccccccccccc",
+            message: "Second parent",
+            author: "Katherine Johnson",
+            date: "2026-06-23 06:00:00 -0400",
+            parent_hashes: [],
+            refs: [],
+          },
+        ]}
+      />,
+    );
+
+    const mergeSvg = within(screen.getByTestId("history-graph-row-aaaaaaaa")).getByTestId("history-graph-svg-aaaaaaaa");
+    const mergePaths = Array.from(mergeSvg.querySelectorAll("path")).map((path) => path.getAttribute("d"));
+    expect(mergePaths).not.toContain("M 22 0 V 22");
+    expect(mergePaths).toContain("M 22 11 V 22");
+
+    const firstParentSvg = within(screen.getByTestId("history-graph-row-bbbbbbbb")).getByTestId("history-graph-svg-bbbbbbbb");
+    const firstParentPaths = Array.from(firstParentSvg.querySelectorAll("path")).map((path) => path.getAttribute("d"));
+    expect(firstParentPaths).toContain("M 22 0 V 11");
+    expect(firstParentPaths).not.toContain("M 22 11 V 22");
+  });
+
   it("expands a commit into changed files using the first parent and aligned graph placeholders", async () => {
     const onOpenHistoryFile = vi.fn();
     mockInvoke.mockResolvedValue([

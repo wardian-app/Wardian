@@ -336,17 +336,19 @@ const buildRows = (entries: HistoryGraphEntry[]): HistoryGraphRow[] => {
     const existingIndex = inputLanes.findIndex((lane) => lane.hash === entry.hash);
     const circleIndex = existingIndex >= 0 ? existingIndex : 0;
     const circleColor = inputLanes[circleIndex]?.color ?? GRAPH_COLORS[0];
-    const retainedLanes = inputLanes.filter((lane) => lane.hash !== entry.hash);
-    const parentLanes = parents.map((hash, parentIndex) => ({
-      hash,
-      color: parentIndex === 0 ? circleColor : GRAPH_COLORS[(parentIndex + circleIndex + 1) % GRAPH_COLORS.length],
-    }));
+    const outputLanes = inputLanes.filter((lane) => lane.hash !== entry.hash);
 
-    const outputLanes = [
-      ...retainedLanes.slice(0, circleIndex),
-      ...parentLanes,
-      ...retainedLanes.slice(circleIndex),
-    ];
+    parents.forEach((hash, parentIndex) => {
+      const existingParentIndex = outputLanes.findIndex((lane) => lane.hash === hash);
+      const parentLane = existingParentIndex >= 0
+        ? outputLanes.splice(existingParentIndex, 1)[0]
+        : {
+          hash,
+          color: parentIndex === 0 ? circleColor : GRAPH_COLORS[(parentIndex + circleIndex + 1) % GRAPH_COLORS.length],
+        };
+      const insertIndex = Math.min(circleIndex + parentIndex, outputLanes.length);
+      outputLanes.splice(insertIndex, 0, parentLane);
+    });
     lanes = outputLanes;
 
     return {
@@ -361,17 +363,15 @@ const buildRows = (entries: HistoryGraphEntry[]): HistoryGraphRow[] => {
 };
 
 const renderGraphPaths = (row: HistoryGraphRow, metrics: GraphMetrics) => {
-  const paths = [];
-  const maxLaneCount = Math.max(row.inputLanes.length, row.outputLanes.length, 1);
+  const paths: ReactNode[] = [];
+  const centerY = metrics.rowHeight / 2;
 
-  for (let index = 0; index < maxLaneCount; index++) {
-    const lane = row.inputLanes[index] ?? row.outputLanes[index];
-    if (!lane) continue;
+  row.inputLanes.forEach((lane, index) => {
     const x = metrics.swimlaneWidth * (index + 1);
     paths.push(
       <path
-        key={`lane-${index}-${lane.hash}`}
-        d={`M ${x} 0 V ${metrics.rowHeight}`}
+        key={`lane-in-${index}-${lane.hash}`}
+        d={`M ${x} 0 V ${centerY}`}
         fill="none"
         stroke={lane.color}
         strokeWidth="1"
@@ -379,16 +379,34 @@ const renderGraphPaths = (row: HistoryGraphRow, metrics: GraphMetrics) => {
         opacity={lane.hash === row.entry.hash ? 1 : 0.5}
       />,
     );
-  }
+  });
 
   row.outputLanes.forEach((lane, index) => {
+    const x = metrics.swimlaneWidth * (index + 1);
+    paths.push(
+      <path
+        key={`lane-out-${index}-${lane.hash}`}
+        d={`M ${x} ${centerY} V ${metrics.rowHeight}`}
+        fill="none"
+        stroke={lane.color}
+        strokeWidth="1"
+        strokeLinecap="round"
+        opacity={lane.hash === row.entry.hash ? 1 : 0.5}
+      />,
+    );
+  });
+
+  Array.from(new Set(row.entry.parent_hashes ?? [])).forEach((parentHash) => {
+    const index = row.outputLanes.findIndex((lane) => lane.hash === parentHash);
     if (index === row.circleIndex) return;
+    const lane = row.outputLanes[index];
+    if (!lane) return;
     const x = metrics.swimlaneWidth * (index + 1);
     const centerX = metrics.swimlaneWidth * (row.circleIndex + 1);
     paths.push(
       <path
         key={`parent-${index}-${lane.hash}`}
-        d={`M ${centerX} ${metrics.rowHeight / 2} H ${x} V ${metrics.rowHeight}`}
+        d={`M ${centerX} ${centerY} H ${x}`}
         fill="none"
         stroke={lane.color}
         strokeWidth="1"
