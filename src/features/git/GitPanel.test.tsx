@@ -576,7 +576,7 @@ describe("GitPanel", () => {
     expect(screen.getByText("diff --git a/src/changed.ts b/src/changed.ts")).toBeInTheDocument();
   });
 
-  it("switches source-control resources between tree and list mode per root", async () => {
+  it("persists source-control resource list mode across selected agent roots", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "git_log") return [];
       if (command === "list_agent_worktrees") return [];
@@ -592,7 +592,7 @@ describe("GitPanel", () => {
     };
 
     const { unmount } = renderGitPanel({
-      sourceControlStatus: createSourceControlStatus({ status, changeCount: 1 }),
+      sourceControlStatus: createSourceControlStatus({ rootPath: "C:/repo-a", status, changeCount: 1 }),
     });
 
     expect(await screen.findByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
@@ -607,11 +607,12 @@ describe("GitPanel", () => {
     unmount();
 
     renderGitPanel({
-      sourceControlStatus: createSourceControlStatus({ status, changeCount: 1 }),
+      sourceControlStatus: createSourceControlStatus({ rootPath: "C:/repo-b", status, changeCount: 1 }),
     });
 
     expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("wardian:source-control:resources:display-mode")).toBe("list");
   });
 
   it("sorts source-control resources from the overflow menu and persists the sort mode per root", async () => {

@@ -67,7 +67,8 @@ interface CommitMessageValidation {
 }
 
 const sourceControlStorageRoot = (rootPath: string) => rootPath.trim().replace(/\\/g, "/") || "unknown-root";
-const resourceDisplayModeKey = (rootPath: string) =>
+const resourceDisplayModeKey = "wardian:source-control:resources:display-mode";
+const legacyResourceDisplayModeKey = (rootPath: string) =>
   `wardian:source-control:resources:${sourceControlStorageRoot(rootPath)}:display-mode`;
 const resourceSortModeKey = (rootPath: string) =>
   `wardian:source-control:resources:${sourceControlStorageRoot(rootPath)}:sort-mode`;
@@ -75,13 +76,17 @@ const commitActionStorageKey = "wardian:source-control:commit:last-action";
 
 const loadResourceDisplayMode = (rootPath: string): ResourceDisplayMode => {
   if (typeof window === "undefined") return "tree";
-  const stored = window.localStorage.getItem(resourceDisplayModeKey(rootPath));
-  return stored === "list" || stored === "tree" ? stored : "tree";
+  const stored = window.localStorage.getItem(resourceDisplayModeKey);
+  if (stored === "list" || stored === "tree") return stored;
+
+  const legacyStored = window.localStorage.getItem(legacyResourceDisplayModeKey(rootPath));
+  return legacyStored === "list" || legacyStored === "tree" ? legacyStored : "tree";
 };
 
 const saveResourceDisplayMode = (rootPath: string, mode: ResourceDisplayMode) => {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(resourceDisplayModeKey(rootPath), mode);
+  window.localStorage.setItem(resourceDisplayModeKey, mode);
+  window.localStorage.removeItem(legacyResourceDisplayModeKey(rootPath));
 };
 
 const loadResourceSortMode = (rootPath: string): ResourceSortMode => {
