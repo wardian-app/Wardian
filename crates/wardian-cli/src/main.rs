@@ -1,6 +1,7 @@
 mod args;
 mod disk;
 mod errors;
+mod graph;
 mod live;
 mod output;
 
@@ -49,6 +50,7 @@ fn run() -> i32 {
         Command::Workflow(args) => handle_workflow(args),
         Command::Team(args) => handle_team(args),
         Command::Watchlist(args) => handle_watchlist(args),
+        Command::Graph(args) => graph::handle_graph(args),
         Command::Send(args) => handle_send(args),
         Command::Ask(args) => handle_ask(args),
         Command::Reply(args) => handle_reply(args),

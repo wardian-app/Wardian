@@ -14,6 +14,7 @@ pub enum Command {
     Workflow(WorkflowArgs),
     Team(TeamArgs),
     Watchlist(WatchlistArgs),
+    Graph(GraphArgs),
     Send(SendArgs),
     Ask(AskArgs),
     Reply(ReplyArgs),
@@ -329,6 +330,37 @@ pub enum ReplyStatusArg {
     Done,
     Blocked,
     Failed,
+}
+
+// ---------------------------------------------------------------------------
+// wardian graph
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct GraphArgs {
+    #[command(subcommand)]
+    pub command: GraphCommand,
+
+    #[arg(long, global = true)]
+    pub pretty: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GraphCommand {
+    /// Whole-graph snapshot: agents, manual edges, unmapped pairs, ignored pairs.
+    Show,
+    /// Resolved neighbor view for one agent (defaults to self inside a session).
+    Neighbors { agent: Option<String> },
+    /// Per-pair communication activity with an unmapped flag.
+    Activity,
+    /// Create a manual edge. In a session: `link <other>` means me <-> other.
+    Link { a: String, b: Option<String> },
+    /// Delete a manual edge. Same identity rules as link.
+    Unlink { a: String, b: Option<String> },
+    /// Durably dismiss an unmapped suggestion. Same identity rules as link.
+    Ignore { a: String, b: Option<String> },
+    /// Remove a dismissal. Same identity rules as link.
+    Unignore { a: String, b: Option<String> },
 }
 
 #[derive(Debug, Args)]
@@ -1289,5 +1321,79 @@ mod tests {
         };
         assert_eq!(args.fields.as_deref(), Some("name,status"));
         assert!(args.pretty);
+    }
+
+    #[test]
+    fn parses_graph_show() {
+        let cli = Cli::try_parse_from(["wardian", "graph", "show"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(args.command, GraphCommand::Show));
+        assert!(!args.pretty);
+    }
+
+    #[test]
+    fn parses_graph_neighbors_with_optional_agent() {
+        let cli = Cli::try_parse_from(["wardian", "graph", "neighbors"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(args.command, GraphCommand::Neighbors { agent: None }));
+
+        let cli = Cli::try_parse_from(["wardian", "graph", "neighbors", "coder-a1"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(
+            args.command,
+            GraphCommand::Neighbors { ref agent } if agent.as_deref() == Some("coder-a1")
+        ));
+    }
+
+    #[test]
+    fn parses_graph_activity_with_pretty() {
+        let cli = Cli::try_parse_from(["wardian", "graph", "activity", "--pretty"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(args.command, GraphCommand::Activity));
+        assert!(args.pretty);
+    }
+
+    #[test]
+    fn parses_graph_link_one_and_two_args() {
+        let cli = Cli::try_parse_from(["wardian", "graph", "link", "architect-a1"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(
+            args.command,
+            GraphCommand::Link { ref a, b: None } if a == "architect-a1"
+        ));
+
+        let cli = Cli::try_parse_from(["wardian", "graph", "link", "uuid-1", "uuid-2"]).unwrap();
+        let Command::Graph(args) = cli.command else {
+            panic!("expected Graph command")
+        };
+        assert!(matches!(
+            args.command,
+            GraphCommand::Link { ref a, ref b } if a == "uuid-1" && b.as_deref() == Some("uuid-2")
+        ));
+    }
+
+    #[test]
+    fn parses_graph_unlink_ignore_unignore() {
+        let cli = Cli::try_parse_from(["wardian", "graph", "unlink", "x", "y"]).unwrap();
+        let Command::Graph(args) = cli.command else { panic!() };
+        assert!(matches!(args.command, GraphCommand::Unlink { .. }));
+
+        let cli = Cli::try_parse_from(["wardian", "graph", "ignore", "x"]).unwrap();
+        let Command::Graph(args) = cli.command else { panic!() };
+        assert!(matches!(args.command, GraphCommand::Ignore { .. }));
+
+        let cli = Cli::try_parse_from(["wardian", "graph", "unignore", "x"]).unwrap();
+        let Command::Graph(args) = cli.command else { panic!() };
+        assert!(matches!(args.command, GraphCommand::Unignore { .. }));
     }
 }
