@@ -160,8 +160,10 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 failed');
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 running');
+    expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('2 scheduled');
+    expect(screen.getByTestId('workflow-monitor-stats')).not.toHaveTextContent('due soon');
     expect(screen.getByRole('heading', { name: /activity/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /needs attention/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /needs attention/i })).toBeNull();
     expect(screen.getByRole('heading', { name: /running now/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /^history$/i })).toBeNull();
@@ -204,8 +206,8 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     fireEvent.click(screen.getByRole('button', { name: /needs attention/i }));
-    expect(screen.getByText('Audit')).toBeInTheDocument();
-    expect(screen.getByText('crashed')).toBeInTheDocument();
+    expect(screen.queryByText('Audit')).toBeNull();
+    expect(screen.queryByText('crashed')).toBeNull();
     expect(screen.queryByText('Routine Check')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /running/i }));
@@ -497,8 +499,30 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByTestId('workflow-activity-row-routine-check')).toHaveTextContent('Routine Check');
+    expect(screen.getByTestId('workflow-activity-row-routine-check')).toHaveClass('grid');
     expect(screen.queryByRole('columnheader', { name: /actions/i })).toBeNull();
     expect(screen.getByRole('button', { name: /pause routine check/i })).toBeInTheDocument();
+  });
+
+  it('keeps activity columns aligned when workflow names are long', () => {
+    scheduleState.schedules = [{
+      id: 'schedule-1',
+      blueprint_id: 'evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name',
+      name: 'Evolver Weekly SkillOpt Batch With An Exceptionally Long Display Name',
+      input: {},
+      bindings: {},
+      schedule: { schedule_type: 'weekly', days_of_week: ['Sun'], time_of_day: '01:10', active: true },
+      is_paused: false,
+      next_run_epoch_ms: Date.UTC(2026, 6, 26, 5, 10, 0),
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    const row = screen.getByTestId('workflow-activity-row-evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name');
+    expect(row.className).toContain(
+      'md:grid-cols-[minmax(0,220px)_minmax(0,150px)_minmax(0,170px)_minmax(0,170px)_minmax(0,220px)_112px]',
+    );
+    expect(row.firstElementChild).toHaveClass('min-w-0');
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -532,8 +556,9 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 failed');
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
     expect(screen.getByText('run-current-failed')).toBeInTheDocument();
-    expect(screen.queryByText('run-old-failed')).toBeNull();
+    expect(screen.getByText('run-old-failed')).toBeInTheDocument();
   });
 
   it('shows short history runs without requiring expansion', () => {
@@ -624,7 +649,7 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByTestId('workflow-history-run-run-contained')).toHaveStyle({
       contentVisibility: 'auto',
-      containIntrinsicSize: '128px',
+      containIntrinsicSize: '72px',
     });
   });
 
@@ -649,7 +674,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
 
     fireEvent.scroll(screen.getByTestId('workflow-history-scroll'), {
-      target: { scrollTop: 40 * 128 },
+      target: { scrollTop: 40 * 72 },
     });
 
     await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
@@ -674,7 +699,7 @@ describe('WorkflowMonitor', () => {
     }
 
     const scroller = screen.getByTestId('workflow-history-scroll');
-    fireEvent.scroll(scroller, { target: { scrollTop: 40 * 128 } });
+    fireEvent.scroll(scroller, { target: { scrollTop: 40 * 72 } });
 
     expect(screen.queryByText('run-041')).toBeNull();
     await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
@@ -722,6 +747,36 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(await screen.findAllByText('reasoning_gate: Assistant - Gemini')).toHaveLength(1);
+  });
+
+  it('renders multiple scheduled assignments in stable role order', () => {
+    scheduleState.schedules = [{
+      id: 'schedule-1',
+      blueprint_id: 'routine-check',
+      name: 'Routine Check',
+      input: {},
+      bindings: {},
+      assignments: {
+        reviewer: {
+          target_type: 'temporary_provider',
+          provider: 'codex',
+        },
+        assistant: {
+          target_type: 'agent',
+          agent_id: 'agent-assistant',
+          conversation: 'current',
+          busy_policy: 'skip',
+        },
+      },
+      schedule: { schedule_type: 'interval', interval_minutes: 360, active: true },
+      is_paused: false,
+      next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    const rowText = screen.getByTestId('workflow-activity-row-routine-check').textContent ?? '';
+    expect(rowText.indexOf('assistant: agent-assistant')).toBeLessThan(rowText.indexOf('reviewer: temp codex'));
   });
 
   it('builds schedule activities without rescanning the full run array per schedule', () => {
@@ -848,6 +903,65 @@ describe('WorkflowMonitor', () => {
       runningCount: 1,
       awaitingCount: 0,
       pausedCount: 1,
+    });
+  });
+
+  it('keeps completed failed runs out of the needs-attention activity section', () => {
+    const model = buildMonitorModel([
+      {
+        run_id: 'run-failed',
+        blueprint_id: 'audit',
+        status: 'failed',
+        node_count: 2,
+        path: '/runs/failed',
+        failure: 'Provider crashed',
+        updated_at: '2026-06-01T18:00:00Z',
+      },
+      {
+        run_id: 'run-approval',
+        blueprint_id: 'approval-gate',
+        status: 'awaiting_approval',
+        node_count: 2,
+        path: '/runs/approval',
+        updated_at: '2026-06-01T19:00:00Z',
+      },
+    ], []);
+
+    expect(model.stats.failedCount).toBe(1);
+    expect(model.activities.find((activity) => activity.blueprintId === 'audit')).toMatchObject({
+      section: 'history',
+      statusLabel: 'Failed',
+      tone: 'error',
+      issue: 'Provider crashed',
+    });
+    expect(model.activities.find((activity) => activity.blueprintId === 'approval-gate')).toMatchObject({
+      section: 'attention',
+      statusLabel: 'Awaiting approval',
+    });
+  });
+
+  it('keeps failed scheduled runs in the schedule flow instead of needs attention', () => {
+    const model = buildMonitorModel([], [
+      {
+        id: 'schedule-failed',
+        blueprint_id: 'audit',
+        name: 'Audit',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 20, 0, 0),
+        last_run_status: 'failed',
+        last_run_error: 'Provider crashed',
+      },
+    ]);
+
+    expect(model.stats.failedCount).toBe(1);
+    expect(model.activities[0]).toMatchObject({
+      section: 'scheduled',
+      statusLabel: 'Scheduled',
+      tone: 'accent',
+      issue: 'Provider crashed',
     });
   });
 });

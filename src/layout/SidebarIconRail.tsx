@@ -9,6 +9,8 @@ interface SidebarIconRailProps {
   setCollapsed: (collapsed: boolean) => void;
   userTerminalOpen: boolean;
   settingsOpen: boolean;
+  sourceControlChangeCount?: number;
+  sourceControlBusy?: boolean;
   onToggleUserTerminal: () => void;
   onToggleSettings: () => void;
 }
@@ -19,6 +21,8 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
   setCollapsed,
   userTerminalOpen,
   settingsOpen,
+  sourceControlChangeCount = 0,
+  sourceControlBusy = false,
   onToggleUserTerminal,
   onToggleSettings,
 }) => {
@@ -26,6 +30,8 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
     setActiveTab(tab);
     setCollapsed(false);
   };
+  const sourceControlBadgeLabel =
+    sourceControlChangeCount > 99 ? "99+" : String(sourceControlChangeCount);
 
   return (
     <aside data-testid="sidebar-icon-rail" className="w-[var(--sidebar-primary-width)] h-full bg-[var(--color-wardian-sidebar-primary)] border-r border-wardian-border flex flex-col items-center py-4 gap-3 z-30">
@@ -53,6 +59,22 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
           <line x1="7" y1="7" x2="7" y2="17" />
           <path style={{fill:'none'}} d="M7 17 C7 13 17 13 17 12" />
         </svg>
+        {sourceControlChangeCount > 0 && (
+          <span
+            data-testid="sidebar-tab-git-badge"
+            aria-label={`${sourceControlChangeCount} pending source control changes`}
+            className="absolute -right-1 -top-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--color-wardian-accent)] text-[10px] leading-[18px] font-mono font-bold text-black text-center shadow-sm"
+          >
+            {sourceControlBadgeLabel}
+          </span>
+        )}
+        {sourceControlBusy && (
+          <span
+            data-testid="sidebar-tab-git-progress"
+            aria-label="Source control is refreshing"
+            className="absolute -right-0.5 bottom-0.5 h-2.5 w-2.5 rounded-full border border-[var(--color-wardian-sidebar-primary)] bg-[var(--color-wardian-processing)] animate-pulse"
+          />
+        )}
       </button>
 
       <button

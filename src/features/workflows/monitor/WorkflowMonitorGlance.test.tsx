@@ -54,6 +54,14 @@ const approvalRun: RunSummary = {
   path: '/approval',
 };
 
+const failedRun: RunSummary = {
+  run_id: 'run-failed',
+  blueprint_id: 'failed-audit',
+  status: 'failed',
+  node_count: 4,
+  path: '/failed',
+};
+
 describe('WorkflowMonitorGlance', () => {
   it('shows active and scheduled counts', () => {
     render(
@@ -84,9 +92,9 @@ describe('WorkflowMonitorGlance', () => {
       />,
     );
 
-    expect(screen.getByText(/2 need/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 need/i)).toBeInTheDocument();
     expect(screen.getByText(/1 running/i)).toBeInTheDocument();
-    expect(screen.getByText(/2 next/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 next/i)).toBeInTheDocument();
 
     const heartbeatRow = screen.getByTestId('workflow-glance-row-schedule-heartbeat');
     expect(heartbeatRow).toHaveClass('min-w-0');
@@ -99,7 +107,7 @@ describe('WorkflowMonitorGlance', () => {
     render(
       <WorkflowMonitorGlance
         schedules={[heartbeatSchedule, failedSchedule]}
-        activeRuns={[run, approvalRun]}
+        activeRuns={[run, approvalRun, failedRun]}
         onOpenRun={() => {}}
         onOpenMonitor={() => {}}
         onPauseSchedule={() => {}}
@@ -110,9 +118,10 @@ describe('WorkflowMonitorGlance', () => {
 
     const sections = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
     expect(sections).toEqual(['Needs attention', 'Running', 'Next']);
-    expect(screen.getByText('Broken Audit')).toBeInTheDocument();
     expect(screen.getByText('approval-gate')).toBeInTheDocument();
-    expect(screen.getByText(/2 need/i)).toBeInTheDocument();
+    expect(screen.queryByText('failed-audit')).toBeNull();
+    expect(screen.queryByText('Broken Audit')).toBeInTheDocument();
+    expect(screen.getByText(/1 need/i)).toBeInTheDocument();
   });
 
   it('filters runs and schedules from one search field', () => {

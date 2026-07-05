@@ -33,6 +33,7 @@ import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
 import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
 import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
+import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { DashboardView } from "./DashboardView";
 import { GridView } from "./GridView";
 import { GraphView } from "./GraphView";
@@ -289,6 +290,7 @@ function AppBody() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
+  const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
@@ -1037,6 +1039,8 @@ function AppBody() {
           setCollapsed={setLeftCollapsed}
           userTerminalOpen={userTerminalOpen}
           settingsOpen={settingsOpen}
+          sourceControlChangeCount={sourceControlStatus.changeCount}
+          sourceControlBusy={sourceControlStatus.loading}
           onToggleUserTerminal={toggleUserTerminal}
           onToggleSettings={toggleSettings}
         />
@@ -1048,6 +1052,7 @@ function AppBody() {
           agents={agents}
           agentClasses={agentClasses}
           telemetry={telemetry}
+          sourceControlStatus={sourceControlStatus}
           onAgentsUpdated={fetchAgents}
           onClassesUpdated={fetchAgentClasses}
           broadcastMessage={broadcastMessage}

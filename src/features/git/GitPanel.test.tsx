@@ -1,8 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitPanel } from "./GitPanel";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
-import type { AgentConfig, AgentTelemetry } from "../../types";
+import type { AgentConfig, AgentTelemetry, GitStatusResult } from "../../types";
+import { useSelectedAgentGitStatus, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -27,20 +29,103 @@ const telemetry: Record<string, AgentTelemetry> = {
   },
 };
 
+function createSourceControlStatus(overrides?: Partial<SelectedAgentGitStatus>): SelectedAgentGitStatus {
+  const status: GitStatusResult = overrides?.status ?? {
+    branch: "main",
+    upstream: "origin/main",
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    files: [],
+  };
+  return {
+    rootPath: "C:/repo",
+    status,
+    error: null,
+    loading: false,
+    refreshing: false,
+    statusRevision: 1,
+    changeEventRevision: 0,
+    changeCount: status.files.length,
+    refreshStatus: vi.fn(async () => true),
+    ...overrides,
+  };
+}
+
+function ObservedGitPanelHarness({
+  selectedAgentIds,
+  agents,
+  onAgentsUpdated,
+  telemetry,
+}: {
+  selectedAgentIds: Set<string>;
+  agents: AgentConfig[];
+  onAgentsUpdated: () => void;
+  telemetry: Record<string, AgentTelemetry>;
+}) {
+  const observedStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
+  return (
+    <GitPanel
+      selectedAgentIds={selectedAgentIds}
+      agents={agents}
+      onAgentsUpdated={onAgentsUpdated}
+      telemetry={telemetry}
+      sourceControlStatus={observedStatus}
+    />
+  );
+}
+
+function GitPanelHarness({
+  selectedAgentIds,
+  agents,
+  onAgentsUpdated,
+  telemetry,
+  sourceControlStatus,
+}: {
+  selectedAgentIds: Set<string>;
+  agents: AgentConfig[];
+  onAgentsUpdated: () => void;
+  telemetry: Record<string, AgentTelemetry>;
+  sourceControlStatus?: SelectedAgentGitStatus;
+}) {
+  if (!sourceControlStatus) {
+    return (
+      <ObservedGitPanelHarness
+        selectedAgentIds={selectedAgentIds}
+        agents={agents}
+        onAgentsUpdated={onAgentsUpdated}
+        telemetry={telemetry}
+      />
+    );
+  }
+  return (
+    <GitPanel
+      selectedAgentIds={selectedAgentIds}
+      agents={agents}
+      onAgentsUpdated={onAgentsUpdated}
+      telemetry={telemetry}
+      sourceControlStatus={sourceControlStatus}
+    />
+  );
+}
+
 function renderGitPanel(options?: {
   agentOverride?: Partial<AgentConfig>;
   telemetryOverride?: Record<string, AgentTelemetry>;
+  sourceControlStatus?: SelectedAgentGitStatus;
+  onAgentsUpdated?: () => void;
 }) {
   const renderedAgent = { ...agent, ...options?.agentOverride };
   const renderedTelemetry = options?.telemetryOverride ?? telemetry;
 
   return render(
     <ConfirmProvider>
-      <GitPanel
+      <GitPanelHarness
         selectedAgentIds={new Set(["agent-1"])}
         agents={[renderedAgent]}
-        onAgentsUpdated={vi.fn()}
+        onAgentsUpdated={options?.onAgentsUpdated ?? vi.fn()}
         telemetry={renderedTelemetry}
+        sourceControlStatus={options?.sourceControlStatus}
       />
     </ConfirmProvider>,
   );
@@ -66,6 +151,11 @@ function mockLoadedRepository(statusBranch = "main") {
 describe("GitPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    useSettingsStore.setState({
+      externalEditor: "system",
+      externalEditorCustomExecutable: "",
+    });
   });
 
   afterEach(() => {
@@ -170,12 +260,1307 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toHaveClass("text-sm");
-    expect(await screen.findByText("main")).toBeInTheDocument();
     expect(screen.getByText("Staged changes")).toBeInTheDocument();
     expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("changed.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
-    expect(screen.getByText("Initial commit")).toBeInTheDocument();
+    expect(await screen.findByText("Initial commit")).toBeInTheDocument();
+  });
+
+  it("keeps the source control header compact and moves secondary actions into overflow", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "feature/compact-header",
+          upstream: "origin/feature/compact-header",
+          has_upstream: true,
+          ahead: 2,
+          behind: 1,
+          files: [{ path: "src/changed.ts", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toBeInTheDocument();
+    expect(screen.getByTitle("Refresh Source Control")).toBeInTheDocument();
+    expect(screen.getByTitle("More Source Control Actions")).toBeInTheDocument();
+
+    expect(screen.queryByTitle("Use source control tree view")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Use source control list view")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Checkout to...")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Fetch")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Pull")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Push")).not.toBeInTheDocument();
+    expect(screen.queryByText("↑2")).not.toBeInTheDocument();
+    expect(screen.queryByText("↓1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+
+    expect(await screen.findByRole("button", { name: "Branch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stash" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Checkout to..." })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fetch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use Tree View" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Branch" }));
+    expect(await screen.findByRole("button", { name: "Checkout to..." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Branch..." })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sync" }));
+    expect(await screen.findByRole("button", { name: "Fetch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pull" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Push" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    expect(await screen.findByRole("button", { name: "Use Tree View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use List View" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sort by Path" })).toBeInTheDocument();
+  });
+
+  it("uses a supplied source-control observer without resolving or watching git itself", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/shared.ts", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    expect(await screen.findByText("shared.ts")).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_explorer_root", expect.anything());
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_status", expect.anything());
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_watch", expect.anything());
+  });
+
+  it("keeps routine source-control background refresh silent without hiding loaded files", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshing: true,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/shared.ts", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    expect(await screen.findByText("shared.ts")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Source Control" })).not.toBeDisabled();
+  });
+
+  it("refreshes status and history from the source-control header", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ refreshStatus }),
+    });
+
+    expect(await screen.findByText("Working tree clean")).toBeInTheDocument();
+    mockInvoke.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Source Control" }));
+
+    await waitFor(() => {
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("loads the next history page from the graph load-more row", async () => {
+    const createHistory = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        hash: `${index.toString(16).padStart(8, "0")}${"0".repeat(32)}`,
+        message: `Commit ${index + 1}`,
+        author: "Tester",
+        date: "2026-06-25 08:00:00 -0400",
+        parent_hashes:
+          index < count - 1 ? [`${(index + 1).toString(16).padStart(8, "0")}${"0".repeat(32)}`] : [],
+        refs: index === 0 ? ["HEAD", "main"] : [],
+      }));
+
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") {
+        const count = (args as { count?: number } | undefined)?.count ?? 50;
+        return createHistory(count);
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    expect(await screen.findByText("Commit 1")).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more history commits" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 100 });
+    });
+    expect(await screen.findByText("Commit 100")).toBeInTheDocument();
+  });
+
+  it("reloads history from the selected ref and keeps it while loading more", async () => {
+    const createHistory = (count: number, prefix: string, refs: string[]) =>
+      Array.from({ length: count }, (_, index) => ({
+        hash: `${prefix === "Remote" ? "a" : "b"}${index.toString(16).padStart(7, "0")}${"0".repeat(32)}`,
+        message: `${prefix} Commit ${index + 1}`,
+        author: "Tester",
+        date: "2026-06-25 08:00:00 -0400",
+        parent_hashes:
+          index < count - 1
+            ? [`${prefix === "Remote" ? "a" : "b"}${(index + 1).toString(16).padStart(7, "0")}${"0".repeat(32)}`]
+            : [],
+        refs: index === 0 ? refs : [],
+      }));
+
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") {
+        const gitArgs = args as { count?: number; revision?: string } | undefined;
+        const count = gitArgs?.count ?? 50;
+        if (gitArgs?.revision === "origin/main") {
+          return createHistory(count, "Remote", ["origin/main"]);
+        }
+        return createHistory(count, "Current", ["HEAD", "main", "origin/main"]);
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    expect(await screen.findByText("Current Commit 1")).toBeInTheDocument();
+    mockInvoke.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "History refs: Auto" }));
+    fireEvent.click(screen.getByRole("button", { name: "origin/main" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", {
+        cwd: "C:/repo",
+        count: 50,
+        revision: "origin/main",
+      });
+    });
+    expect(await screen.findByText("Remote Commit 1")).toBeInTheDocument();
+
+    mockInvoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Load more history commits" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", {
+        cwd: "C:/repo",
+        count: 100,
+        revision: "origin/main",
+      });
+    });
+    expect(await screen.findByText("Remote Commit 100")).toBeInTheDocument();
+  });
+
+  it("opens a changed file from an expanded history graph commit", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Inspect history file",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ];
+      }
+      if (command === "git_commit_changes") return [{ path: "src/changed.ts", status: "M" }];
+      if (command === "git_show_file_revision") return "historical version\n";
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /Expand Inspect history file/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open src/changed.ts from aaaaaaaa" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_show_file_revision", {
+        cwd: "C:/repo",
+        path: "src/changed.ts",
+        revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      });
+    });
+    expect(await screen.findByText("aaaaaaaa: src/changed.ts")).toBeInTheDocument();
+    expect(screen.getByText("historical version")).toBeInTheDocument();
+  });
+
+  it("opens a commit patch from the history graph context menu", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            message: "Inspect commit patch",
+            author: "Ada Lovelace",
+            date: "2026-06-25 08:00:00 -0400",
+            parent_hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            refs: ["HEAD", "main"],
+          },
+        ];
+      }
+      if (command === "git_commit_diff") {
+        return "diff --git a/src/changed.ts b/src/changed.ts\n-old\n+new\n";
+      }
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus(),
+    });
+
+    const row = await screen.findByRole("button", { name: /Expand Inspect commit patch/ });
+    fireEvent.contextMenu(row, { clientX: 12, clientY: 24 });
+    fireEvent.click(await screen.findByRole("button", { name: "View Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_diff", {
+        cwd: "C:/repo",
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        parentHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      });
+    });
+    expect(await screen.findByText("aaaaaaaa: Inspect commit patch")).toBeInTheDocument();
+    expect(screen.getByText("diff --git a/src/changed.ts b/src/changed.ts")).toBeInTheDocument();
+  });
+
+  it("persists source-control resource list mode across selected agent roots", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    const status = {
+      branch: "main",
+      upstream: "origin/main",
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      files: [{ path: "src/features/git/GitPanel.tsx", status: "M", is_staged: false }],
+    };
+
+    const { unmount } = renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ rootPath: "C:/repo-a", status, changeCount: 1 }),
+    });
+
+    expect(await screen.findByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use Tree View" }));
+
+    expect(await screen.findByRole("button", { name: "src" })).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
+
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
+
+    unmount();
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ rootPath: "C:/repo-b", status, changeCount: 1 }),
+    });
+
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View diff for src/features/git/GitPanel.tsx" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("wardian:source-control:resources:display-mode")).toBe("list");
+  });
+
+  it("sorts source-control resources from the overflow menu and persists the sort mode per root", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    const status = {
+      branch: "main",
+      upstream: "origin/main",
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      files: [
+        { path: "beta/zeta.ts", status: "M", is_staged: false },
+        { path: "alpha/readme.md", status: "M", is_staged: false },
+        { path: "gamma/app.ts", status: "M", is_staged: false },
+      ],
+    };
+    const labels = () =>
+      screen.getAllByRole("button", { name: /View diff for/ }).map((button) => button.getAttribute("aria-label"));
+
+    const { unmount } = renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ status, changeCount: 3 }),
+    });
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use List View" }));
+
+    expect(labels()).toEqual([
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+      "View diff for gamma/app.ts",
+    ]);
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sort by Name" }));
+
+    expect(labels()).toEqual([
+      "View diff for gamma/app.ts",
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+    ]);
+
+    unmount();
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ status, changeCount: 3 }),
+    });
+
+    expect(labels()).toEqual([
+      "View diff for gamma/app.ts",
+      "View diff for alpha/readme.md",
+      "View diff for beta/zeta.ts",
+    ]);
+  });
+
+  it("stages the opened working-tree diff from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return "diff --git a/src/app.tsx b/src/app.tsx\n-old\n+new\n";
+      if (command === "git_stage") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stage Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", { cwd: "C:/repo", paths: ["src/app.tsx"] });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("stages a single opened working-tree diff hunk from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    const diff = [
+      "diff --git a/src/app.tsx b/src/app.tsx",
+      "index 1111111..2222222 100644",
+      "--- a/src/app.tsx",
+      "+++ b/src/app.tsx",
+      "@@ -1,3 +1,3 @@",
+      " one",
+      "-two",
+      "+TWO",
+      " three",
+      "@@ -10,3 +10,3 @@",
+      " ten",
+      "-eleven",
+      "+ELEVEN",
+      " twelve",
+    ].join("\n");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return diff;
+      if (command === "git_apply_diff_hunk") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Stage Hunk" }))[0]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_apply_diff_hunk", {
+        cwd: "C:/repo",
+        patch: [
+          "diff --git a/src/app.tsx b/src/app.tsx",
+          "index 1111111..2222222 100644",
+          "--- a/src/app.tsx",
+          "+++ b/src/app.tsx",
+          "@@ -1,3 +1,3 @@",
+          " one",
+          "-two",
+          "+TWO",
+          " three",
+          "",
+        ].join("\n"),
+        reverse: false,
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("unstages the opened staged diff from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return "diff --git a/src/app.tsx b/src/app.tsx\n-old\n+new\n";
+      if (command === "git_unstage") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unstage Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_unstage", { cwd: "C:/repo", paths: ["src/app.tsx"] });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("unstages a single opened staged diff hunk from the diff review action", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    const diff = [
+      "diff --git a/src/app.tsx b/src/app.tsx",
+      "index 1111111..2222222 100644",
+      "--- a/src/app.tsx",
+      "+++ b/src/app.tsx",
+      "@@ -1,3 +1,3 @@",
+      " one",
+      "-two",
+      "+TWO",
+      " three",
+      "@@ -10,3 +10,3 @@",
+      " ten",
+      "-eleven",
+      "+ELEVEN",
+      " twelve",
+    ].join("\n");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") return diff;
+      if (command === "git_apply_diff_hunk") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "View diff for src/app.tsx" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "Unstage Hunk" }))[0]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_apply_diff_hunk", {
+        cwd: "C:/repo",
+        patch: [
+          "diff --git a/src/app.tsx b/src/app.tsx",
+          "index 1111111..2222222 100644",
+          "--- a/src/app.tsx",
+          "+++ b/src/app.tsx",
+          "@@ -1,3 +1,3 @@",
+          " one",
+          "-two",
+          "+TWO",
+          " three",
+          "",
+        ].join("\n"),
+        reverse: true,
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("shows the non-git workspace path and reveal action", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "reveal_in_explorer") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        rootPath: "C:/not-a-repo",
+        status: null,
+        error: "fatal: not a git repository (or any of the parent directories): .git",
+        changeCount: 0,
+      }),
+    });
+
+    expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
+    expect(screen.getByText("C:/not-a-repo")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal Workspace" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("reveal_in_explorer", { path: "C:/not-a-repo" });
+    });
+  });
+
+  it("initializes a non-git workspace and refreshes source control", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_init") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        rootPath: "C:/not-a-repo",
+        status: null,
+        error: "fatal: not a git repository (or any of the parent directories): .git",
+        changeCount: 0,
+        refreshStatus,
+      }),
+    });
+
+    expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Initialize Repository" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_init", { cwd: "C:/not-a-repo" });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("clones a repository into a non-git workspace and refreshes source control", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_clone_repository") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        rootPath: "C:/not-a-repo",
+        status: null,
+        error: "fatal: not a git repository (or any of the parent directories): .git",
+        changeCount: 0,
+        refreshStatus,
+      }),
+    });
+
+    expect(await screen.findByText("Not a Git Repository")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clone Repository..." }));
+    fireEvent.change(screen.getByLabelText("Repository URL"), {
+      target: { value: "https://example.com/team/project.git" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_clone_repository", {
+        cwd: "C:/not-a-repo",
+        repository: "https://example.com/team/project.git",
+      });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("separates unresolved merge changes from ordinary working tree changes", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/conflicted.ts", status: "UU", is_staged: false },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "src/staged.ts", status: "A", is_staged: true },
+            { path: "notes.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 4,
+      }),
+    });
+
+    expect(await screen.findByText("Merge Changes")).toBeInTheDocument();
+    const mergeSection = screen.getByText("Merge Changes").closest("section");
+    expect(mergeSection).not.toBeNull();
+    expect(mergeSection).toHaveTextContent("conflicted.ts");
+    expect(mergeSection).toHaveTextContent("UU");
+
+    const changesSection = screen.getByText("Changes").closest("section");
+    expect(changesSection).not.toBeNull();
+    expect(changesSection).toHaveTextContent("changed.ts");
+    expect(changesSection).not.toHaveTextContent("conflicted.ts");
+    expect(screen.getByText("Staged changes")).toBeInTheDocument();
+    expect(screen.getByText("Untracked")).toBeInTheDocument();
+  });
+
+  it("opens merge group context actions from the group header", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/conflicted.ts", status: "UU", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByText("Merge Changes"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Stage All Merge Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Stage All Merge Changes" })[1]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/conflicted.ts"],
+      });
+    });
+  });
+
+  it("opens scoped resource group context actions for staged, tracked, and untracked files", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByText("Staged changes"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Unstage All Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Unstage All Changes" })[1]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_unstage", {
+        cwd: "C:/repo",
+        paths: ["README.md"],
+      });
+    });
+
+    fireEvent.contextMenu(screen.getByText("Changes"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Stage All Tracked Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Stage All Tracked Changes" })[1]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts"],
+      });
+    });
+
+    fireEvent.contextMenu(screen.getByText("Untracked"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Stage All Untracked Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Stage All Untracked Changes" })[1]);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["notes.txt"],
+      });
+    });
+  });
+
+  it("discards all untracked resources from the untracked group context menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_discard_changes") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "scratch.txt", status: "?", is_staged: false },
+            { path: "logs/debug.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByText("Untracked"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Discard All Untracked Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard All Untracked Changes" })[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_discard_changes", {
+        cwd: "C:/repo",
+        paths: ["scratch.txt", "logs/debug.txt"],
+      });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards all tracked resources from the changes group context menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_discard_changes") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "src/deleted.ts", status: "D", is_staged: false },
+            { path: "scratch.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByText("Changes"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "Discard All Tracked Changes" })).toHaveLength(2);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard All Tracked Changes" })[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_discard_changes", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts", "src/deleted.ts"],
+      });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes inline discard actions on tracked and untracked group headers", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_discard_changes") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "scratch.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 2,
+      }),
+    });
+
+    fireEvent.click(await screen.findByTitle("Discard All Tracked Changes"));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    fireEvent.click(await screen.findByTitle("Discard All Untracked Changes"));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_discard_changes", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts"],
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("git_discard_changes", {
+        cwd: "C:/repo",
+        paths: ["scratch.txt"],
+      });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a scoped diff for tracked changes from the resource group context menu", async () => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file") {
+        const path = (args as { path: string }).path;
+        return `diff --git a/${path} b/${path}\n+${path}`;
+      }
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "src/other.ts", status: "M", is_staged: false },
+            { path: "notes.txt", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 4,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByText("Changes"));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_diff_file", {
+        cwd: "C:/repo",
+        path: "src/changed.ts",
+        staged: false,
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("git_diff_file", {
+        cwd: "C:/repo",
+        path: "src/other.ts",
+        staged: false,
+      });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_diff_file", {
+      cwd: "C:/repo",
+      path: "README.md",
+      staged: true,
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_diff_file", {
+      cwd: "C:/repo",
+      path: "notes.txt",
+      staged: false,
+    });
+    expect(await screen.findByText("+src/changed.ts")).toBeInTheDocument();
+    expect(screen.getByText("+src/other.ts")).toBeInTheDocument();
+  });
+
+  it("opens and reveals file resources from the file context menu", async () => {
+    useSettingsStore.setState({
+      externalEditor: "vscode",
+      externalEditorCustomExecutable: "",
+    });
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "open_in_external_editor") return null;
+      if (command === "reveal_in_explorer") return null;
+      if (command === "git_show_file_revision") return "committed version\n";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/app.tsx", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    const fileRow = await screen.findByRole("button", { name: "View diff for src/app.tsx" });
+    fireEvent.contextMenu(fileRow);
+    fireEvent.click(await screen.findByRole("button", { name: "Open File" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("open_in_external_editor", {
+        path: "C:/repo/src/app.tsx",
+        editor: {
+          external_editor: "vscode",
+          external_editor_custom_executable: null,
+        },
+      });
+    });
+
+    fireEvent.contextMenu(fileRow);
+    fireEvent.click(await screen.findByRole("button", { name: "Reveal in Explorer View" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("reveal_in_explorer", {
+        path: "C:/repo/src/app.tsx",
+      });
+    });
+
+    fireEvent.contextMenu(fileRow);
+    fireEvent.click(await screen.findByRole("button", { name: "Open File (HEAD)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_show_file_revision", {
+        cwd: "C:/repo",
+        path: "src/app.tsx",
+        revision: "HEAD",
+      });
+    });
+    expect(await screen.findByText("HEAD: src/app.tsx")).toBeInTheDocument();
+    expect(screen.getByText("committed version")).toBeInTheDocument();
+  });
+
+  it("compares a staged resource with the workspace from the file context menu", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_diff_file_against_workspace") {
+        return "diff --git a/src/app.tsx b/src/app.tsx\n-staged version\n+workspace version\n";
+      }
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/app.tsx", status: "M", is_staged: true },
+            { path: "src/app.tsx", status: "M", is_staged: false },
+          ],
+        },
+        changeCount: 2,
+      }),
+    });
+
+    const fileRows = await screen.findAllByRole("button", { name: "View diff for src/app.tsx" });
+    fireEvent.contextMenu(fileRows[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "Compare with Workspace" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_diff_file_against_workspace", {
+        cwd: "C:/repo",
+        path: "src/app.tsx",
+      });
+    });
+    expect(await screen.findByText("Workspace: src/app.tsx")).toBeInTheDocument();
+    expect(screen.getByText("-staged version")).toBeInTheDocument();
+    expect(screen.getByText("+workspace version")).toBeInTheDocument();
+  });
+
+  it("discards an untracked resource from the file context menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_discard_changes") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "scratch.txt", status: "?", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "View diff for scratch.txt" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Discard Changes" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_discard_changes", {
+        cwd: "C:/repo",
+        paths: ["scratch.txt"],
+      });
+    });
+    expect(refreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens folder context actions that only affect files under that tree folder", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    window.localStorage.setItem("wardian:source-control:resources:display-mode", "tree");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "src/app.tsx", status: "M", is_staged: false },
+            { path: "src/components/Button.tsx", status: "M", is_staged: false },
+            { path: "README.md", status: "M", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "src" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stage Changes" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/app.tsx", "src/components/Button.tsx"],
+      });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_stage", {
+      cwd: "C:/repo",
+      paths: expect.arrayContaining(["README.md"]),
+    });
+  });
+
+  it("adds source-control tree folders to gitignore from the folder context menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    window.localStorage.setItem("wardian:source-control:resources:display-mode", "tree");
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_ignore") return "";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "logs/debug/output.log", status: "?", is_staged: false },
+            { path: "logs/raw/input.log", status: "?", is_staged: false },
+            { path: "src/app.tsx", status: "M", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "logs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add to .gitignore" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_ignore", {
+        cwd: "C:/repo",
+        paths: ["logs/"],
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("adds source-control file resources to gitignore from the file context menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_ignore") return "";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "logs/debug/output.log", status: "?", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "View diff for logs/debug/output.log" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add to .gitignore" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_ignore", {
+        cwd: "C:/repo",
+        paths: ["logs/debug/output.log"],
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+    });
   });
 
   it("polls git status so working tree edits appear without a git-changed event", async () => {
@@ -241,7 +1626,7 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.change(await screen.findByPlaceholderText("Message (Ctrl+Enter to commit)"), {
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
       target: { value: "save changes" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commit/i }));
@@ -258,6 +1643,1039 @@ describe("GitPanel", () => {
         message: "save changes",
       });
     });
+  });
+
+  it("shows a non-blocking SCM input warning for long commit summaries", async () => {
+    const longSummary = "A".repeat(73);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/changed.ts", status: "M", is_staged: false }],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: longSummary },
+    });
+
+    expect(screen.getByRole("status", { name: "Commit message validation" })).toHaveTextContent(
+      "Summary line is 73 characters; VS Code marks commit subjects past 50 and body lines past 72 for review.",
+    );
+    expect(screen.getByText("73/50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /commit/i }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit", {
+        cwd: "C:/repo",
+        message: longSummary,
+      });
+    });
+  });
+
+  it("offers an SCM input action menu for committing all pending files", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "get_explorer_root") return "C:/repo";
+      if (command === "git_status") {
+        return {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+          ],
+        };
+      }
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+    renderGitPanel();
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "ship all changes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+
+    expect(screen.getByRole("button", { name: "Commit Staged" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Commit All" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts"],
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit", {
+        cwd: "C:/repo",
+        message: "ship all changes",
+      });
+    });
+  });
+
+  it("amends the last commit from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-26 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_amend") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amended subject" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit (Amend)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_amend", {
+        cwd: "C:/repo",
+        message: "amended subject",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("amends the last commit with all pending changes from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-27 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_all_amend") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amend everything" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit All (Amend)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_all_amend", {
+        cwd: "C:/repo",
+        message: "amend everything",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("amends the last commit with staged changes from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-27 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_staged_amend") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amend staged work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Staged (Amend)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_staged_amend", {
+        cwd: "C:/repo",
+        message: "amend staged work",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("amends the last commit with no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-27 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_amend_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amend bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit (Amend, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_amend_no_verify", {
+        cwd: "C:/repo",
+        message: "amend bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("amends the last commit with staged changes and no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-27 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_staged_amend_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amend staged bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Staged (Amend, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_staged_amend_no_verify", {
+        cwd: "C:/repo",
+        message: "amend staged bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("amends the last commit with all changes and no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "previous subject",
+            author: "Wardian",
+            date: "2026-06-27 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_all_amend_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "amend all bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit All (Amend, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_all_amend_no_verify", {
+        cwd: "C:/repo",
+        message: "amend all bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits with no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: true }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "bypass local hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit (No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_no_verify", {
+        cwd: "C:/repo",
+        message: "bypass local hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits with signoff from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_stage") return null;
+      if (command === "git_commit_signed") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit (Signed Off)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["README.md"],
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_signed", {
+        cwd: "C:/repo",
+        message: "signed off work",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits staged changes with signoff from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_staged_signed") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off staged work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Staged (Signed Off)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_staged_signed", {
+        cwd: "C:/repo",
+        message: "signed off staged work",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_stage", expect.anything());
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits all pending changes with signoff from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_all_signed") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off all work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit All (Signed Off)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_all_signed", {
+        cwd: "C:/repo",
+        message: "signed off all work",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits with signoff and no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_stage") return null;
+      if (command === "git_commit_signed_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "README.md", status: "M", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit (Signed Off, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["README.md"],
+      });
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_signed_no_verify", {
+        cwd: "C:/repo",
+        message: "signed off bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits staged changes with signoff and no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_staged_signed_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off staged bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Staged (Signed Off, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_staged_signed_no_verify", {
+        cwd: "C:/repo",
+        message: "signed off staged bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("git_stage", expect.anything());
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits all pending changes with signoff and no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_all_signed_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "signed off all bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit All (Signed Off, No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_all_signed_no_verify", {
+        cwd: "C:/repo",
+        message: "signed off all bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("aborts an in-progress rebase from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_rebase_abort") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "feature",
+          upstream: "origin/feature",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          rebase_in_progress: true,
+          files: [{ path: "README.md", status: "U", is_staged: false }],
+        },
+        changeCount: 1,
+      }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Abort Rebase" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_rebase_abort", { cwd: "C:/repo" });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("commits staged changes with no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_staged_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "bypass hook for staged work" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Staged (No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_staged_no_verify", {
+        cwd: "C:/repo",
+        message: "bypass hook for staged work",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("commits all pending changes with no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_all_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "README.md", status: "M", is_staged: true },
+            { path: "src/changed.ts", status: "M", is_staged: false },
+            { path: "notes.md", status: "?", is_staged: false },
+          ],
+        },
+        changeCount: 3,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "bypass hook for everything" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit All (No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_all_no_verify", {
+        cwd: "C:/repo",
+        message: "bypass hook for everything",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("creates an empty commit from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_empty") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [],
+        },
+        changeCount: 0,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "empty marker" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Empty" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_empty", {
+        cwd: "C:/repo",
+        message: "empty marker",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("creates an empty commit with no verification from the SCM input action menu", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_commit_empty_no_verify") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [],
+        },
+        changeCount: 0,
+      }),
+    });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "empty bypass hook" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit Empty (No Verify)" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit_empty_no_verify", {
+        cwd: "C:/repo",
+        message: "empty bypass hook",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(screen.getByPlaceholderText("Message on main (Ctrl+Enter to commit)")).toHaveValue("");
+  });
+
+  it("remembers the last SCM input commit action as the next primary action", async () => {
+    const status: GitStatusResult = {
+      branch: "main",
+      upstream: "origin/main",
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      files: [
+        { path: "README.md", status: "M", is_staged: true },
+        { path: "src/changed.ts", status: "M", is_staged: false },
+      ],
+    };
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    const firstRender = renderGitPanel({ sourceControlStatus: createSourceControlStatus({ status, changeCount: 2 }) });
+
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "ship all changes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More Actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Commit All" }));
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem("wardian:source-control:commit:last-action")).toBe("all");
+    });
+
+    firstRender.unmount();
+    vi.clearAllMocks();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      return null;
+    });
+
+    renderGitPanel({ sourceControlStatus: createSourceControlStatus({ status, changeCount: 2 }) });
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
+      target: { value: "ship all changes again" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit All" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stage", {
+        cwd: "C:/repo",
+        paths: ["src/changed.ts"],
+      });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_commit", {
+        cwd: "C:/repo",
+        message: "ship all changes again",
+      });
+    });
+  });
+
+  it("undoes the last commit from the commit action menu and restores its message", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") {
+        return [
+          {
+            hash: "abc123",
+            parent_hashes: ["def456"],
+            refs: ["HEAD", "main"],
+            message: "undo me",
+            author: "Wardian",
+            date: "2026-06-26 00:00:00 +0000",
+          },
+        ];
+      }
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_undo_last_commit") return "undo me";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ refreshStatus }),
+    });
+
+    const commitInput = await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)");
+    const actionRow = commitInput.closest("div");
+    if (!actionRow) throw new Error("Expected commit action row");
+
+    fireEvent.click(within(actionRow).getByRole("button", { name: "More Actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Undo Last Commit" }));
+    expect(await screen.findByText("Undo last commit and keep its changes in the working tree?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_undo_last_commit", { cwd: "C:/repo" });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+    expect(commitInput).toHaveValue("undo me");
   });
 
   it("surfaces commit failures in the panel", async () => {
@@ -280,7 +2698,7 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.change(await screen.findByPlaceholderText("Message (Ctrl+Enter to commit)"), {
+    fireEvent.change(await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)"), {
       target: { value: "save changes" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commit/i }));
@@ -307,7 +2725,72 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    expect(await screen.findByTitle("Publish Branch")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Publish Branch" })).toBeInTheDocument();
+  });
+
+  it("shows publish branch as the primary action for clean branches without upstream", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_push") return "published";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "feature/unpublished",
+          upstream: null,
+          has_upstream: false,
+          ahead: 0,
+          behind: 0,
+          files: [],
+        },
+      }),
+    });
+
+    const actionRow = (await screen.findByPlaceholderText("Message on feature/unpublished (Ctrl+Enter to commit)"))
+      .closest("div");
+    if (!actionRow) throw new Error("Expected commit action row");
+
+    fireEvent.click(within(actionRow).getByRole("button", { name: "Publish Branch" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_push", { cwd: "C:/repo" });
+    });
+  });
+
+  it("shows sync changes as the primary action for clean diverged branches", async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_pull") return "pulled";
+      if (command === "git_push") return "pushed";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 2,
+          behind: 1,
+          files: [],
+        },
+      }),
+    });
+
+    const actionRow = (await screen.findByPlaceholderText("Message on main (Ctrl+Enter to commit)")).closest("div");
+    if (!actionRow) throw new Error("Expected commit action row");
+
+    fireEvent.click(within(actionRow).getByRole("button", { name: "Sync Changes ↓1 ↑2" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_pull", { cwd: "C:/repo" });
+      expect(mockInvoke).toHaveBeenCalledWith("git_push", { cwd: "C:/repo" });
+    });
   });
 
   it("surfaces push failures in the panel", async () => {
@@ -330,7 +2813,9 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.click(await screen.findByTitle("Push"));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
 
     expect(await screen.findByText("remote rejected")).toBeInTheDocument();
   });
@@ -355,10 +2840,288 @@ describe("GitPanel", () => {
     });
     renderGitPanel();
 
-    fireEvent.click(await screen.findByTitle("Pull"));
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pull" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("git_pull", { cwd: "C:/repo" });
+    });
+  });
+
+  it("fetches remote updates from the selected source control root", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_fetch") return "fetched";
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ refreshStatus }),
+    });
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Sync" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Fetch" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_fetch", { cwd: "C:/repo" });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("checks out a local branch from the source control overflow", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_list_branches") {
+        return [
+          { name: "main", current: true },
+          { name: "feature/source-control", current: false },
+        ];
+      }
+      if (command === "git_checkout_branch") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ refreshStatus }),
+    });
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Branch" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "feature/source-control" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_list_branches", { cwd: "C:/repo" });
+      expect(mockInvoke).toHaveBeenCalledWith("git_checkout_branch", {
+        cwd: "C:/repo",
+        branch: "feature/source-control",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("creates a local branch from the source control overflow", async () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_list_branches") {
+        return [{ name: "main", current: true }];
+      }
+      if (command === "git_create_branch") return null;
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({ refreshStatus }),
+    });
+
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    fireEvent.click(await screen.findByRole("button", { name: "Branch" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout to..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create Branch..." }));
+    const input = await screen.findByPlaceholderText("branch-name");
+    fireEvent.change(input, { target: { value: "feature/new-branch" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_create_branch", {
+        cwd: "C:/repo",
+        branch: "feature/new-branch",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  const setupStashActionsPanel = () => {
+    const refreshStatus = vi.fn(async () => true);
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "git_log") return [];
+      if (command === "list_agent_worktrees") return [];
+      if (command === "git_stash_push") return "";
+      if (command === "git_stash_staged") return "";
+      if (command === "git_stash_apply_latest") return "";
+      if (command === "git_stash_apply") return "";
+      if (command === "git_stash_pop_latest") return "";
+      if (command === "git_stash_pop") return "";
+      if (command === "git_stash_drop") return "";
+      if (command === "git_stash_drop_all") return "";
+      if (command === "git_list_stashes") {
+        return [
+          { selector: "stash@{0}", message: "WIP on main: second stash" },
+          { selector: "stash@{1}", message: "WIP on main: first stash" },
+        ];
+      }
+      if (command === "git_show_stash") {
+        expect(args).toEqual({ cwd: "C:/repo", stash: "stash@{0}" });
+        return "diff --git a/src/App.tsx b/src/App.tsx\n+stash preview\n";
+      }
+      return null;
+    });
+
+    renderGitPanel({
+      sourceControlStatus: createSourceControlStatus({
+        refreshStatus,
+        status: {
+          branch: "main",
+          upstream: "origin/main",
+          has_upstream: true,
+          ahead: 0,
+          behind: 0,
+          files: [{ path: "src/App.tsx", status: "M", is_staged: false }],
+        },
+      }),
+    });
+
+    return { refreshStatus };
+  };
+
+  const openSourceControlActionMenu = async (section?: string) => {
+    fireEvent.click(await screen.findByTitle("More Source Control Actions"));
+    if (section) {
+      fireEvent.click(await screen.findByRole("button", { name: section }));
+    }
+  };
+
+  it("stashes changes including untracked files from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Stash Changes Including Untracked" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_push", {
+        cwd: "C:/repo",
+        includeUntracked: true,
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("stashes staged changes from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Stash Staged" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_staged", { cwd: "C:/repo" });
+    });
+  });
+
+  it("applies the latest stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Apply Latest Stash" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_apply_latest", { cwd: "C:/repo" });
+    });
+  });
+
+  it("applies a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Apply Stash..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_apply", {
+        cwd: "C:/repo",
+        stash: "stash@{1}",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("pops the latest stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Pop Latest Stash" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_pop_latest", { cwd: "C:/repo" });
+    });
+  });
+
+  it("pops a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Pop Stash..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_pop", {
+        cwd: "C:/repo",
+        stash: "stash@{0}",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("previews a selected stash from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "View Stash..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "stash@{0} WIP on main: second stash" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_show_stash", {
+        cwd: "C:/repo",
+        stash: "stash@{0}",
+      });
+      expect(screen.getByText("Stash stash@{0}")).toBeInTheDocument();
+      expect(screen.getByText("+stash preview")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTitle("Close diff"));
+  });
+
+  it("drops a selected stash from the source control header menu", async () => {
+    const { refreshStatus } = setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Drop Stash..." }));
+    fireEvent.click(await screen.findByRole("button", { name: "stash@{1} WIP on main: first stash" }));
+    expect(await screen.findByText("Drop stash stash@{1}? This cannot be undone.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_drop", {
+        cwd: "C:/repo",
+        stash: "stash@{1}",
+      });
+      expect(refreshStatus).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith("git_log", { cwd: "C:/repo", count: 50 });
+    });
+  });
+
+  it("drops all stashes from the source control header menu", async () => {
+    setupStashActionsPanel();
+
+    await openSourceControlActionMenu("Stash");
+    fireEvent.click(await screen.findByRole("button", { name: "Drop All Stashes..." }));
+    expect(await screen.findByText("Drop all stashes for this workspace? This cannot be undone.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("git_stash_drop_all", { cwd: "C:/repo" });
     });
   });
 
@@ -380,7 +3143,7 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     expect(await screen.findByText("changed.ts")).toBeInTheDocument();
-    expect(screen.getByText("History unavailable")).toBeInTheDocument();
+    expect(await screen.findByText("History unavailable")).toBeInTheDocument();
   });
 
   it("re-resolves source control root when the selected agent worktree assignment changes", async () => {
@@ -400,7 +3163,7 @@ describe("GitPanel", () => {
 
     const { rerender } = render(
       <ConfirmProvider>
-        <GitPanel
+        <GitPanelHarness
           selectedAgentIds={new Set(["agent-1"])}
           agents={[agent]}
           onAgentsUpdated={vi.fn()}
@@ -409,13 +3172,11 @@ describe("GitPanel", () => {
       </ConfirmProvider>,
     );
 
-    await waitFor(() => {
-      expect(screen.getAllByText("wardian/repo-agent").length).toBeGreaterThan(0);
-    });
+    await screen.findByPlaceholderText("Message on wardian/repo-agent (Ctrl+Enter to commit)");
 
     rerender(
       <ConfirmProvider>
-        <GitPanel
+        <GitPanelHarness
           selectedAgentIds={new Set(["agent-1"])}
           agents={[{ ...agent, git_worktree: true, git_worktree_folder: "C:/repo-worktree" }]}
           onAgentsUpdated={vi.fn()}
@@ -566,7 +3327,7 @@ describe("GitPanel", () => {
 
     render(
       <ConfirmProvider>
-        <GitPanel
+        <GitPanelHarness
           selectedAgentIds={new Set(["agent-1"])}
           agents={[agent]}
           onAgentsUpdated={onAgentsUpdated}
