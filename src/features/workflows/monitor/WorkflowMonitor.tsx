@@ -62,7 +62,7 @@ const SECTION_LABELS: Record<ActivitySection, string> = {
 
 const SECTION_ORDER: ActivitySection[] = ['attention', 'running', 'scheduled', 'history'];
 const HISTORY_PAGE_SIZE = 10;
-const HISTORY_ROW_ESTIMATE_PX = 128;
+const HISTORY_ROW_ESTIMATE_PX = 72;
 const HISTORY_OVERSCAN_ROWS = 6;
 const HISTORY_MAX_RENDERED_ROWS = 32;
 const HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX = 720;
@@ -89,7 +89,7 @@ const actionClass =
   'inline-flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]';
 const activityRowScrollStyle = {
   contentVisibility: 'auto',
-  containIntrinsicSize: '128px',
+  containIntrinsicSize: '72px',
 } satisfies CSSProperties;
 
 export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorProps) {
@@ -164,7 +164,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         <MonitorStat label="failed" value={failedCount} tone={failedCount > 0 ? 'error' : 'muted'} />
         <MonitorStat label="running" value={runningCount} tone={runningCount > 0 ? 'active' : 'muted'} />
         <MonitorStat label="awaiting" value={awaitingCount} tone={awaitingCount > 0 ? 'warning' : 'muted'} />
-        <MonitorStat label="due soon" value={upcomingSchedules.length} tone={upcomingSchedules.length > 0 ? 'accent' : 'muted'} />
+        <MonitorStat label="scheduled" value={upcomingSchedules.length} tone={upcomingSchedules.length > 0 ? 'accent' : 'muted'} />
         <MonitorStat label="paused" value={pausedCount} tone={pausedCount > 0 ? 'warning' : 'muted'} />
       </div>
       {error ? <div className="shrink-0 text-[11px] text-[var(--color-wardian-error)]">{error}</div> : null}
@@ -468,10 +468,10 @@ function ActivityRow({
   return (
     <div
       data-testid={testId ?? `workflow-activity-row-${activity.blueprintId}`}
-      className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] p-3 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
+      className="grid grid-cols-1 items-start gap-x-4 gap-y-1 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)] md:grid-cols-[minmax(0,220px)_minmax(0,150px)_minmax(0,170px)_minmax(0,170px)_minmax(0,220px)_112px]"
       style={activityRowScrollStyle}
     >
-      <div className="min-w-[180px] flex-[1.4_1_220px]">
+      <div className="min-w-0">
         <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
         {activity.blueprintId !== activity.name ? (
           <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.blueprintId}>{activity.blueprintId}</div>
@@ -482,7 +482,7 @@ function ActivityRow({
         </div>
         {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
       </div>
-      <div className="min-w-[140px] flex-[1_1_150px]">
+      <div className="min-w-0">
         <div className="mb-0.5 text-[9px] font-bold text-muted">Run</div>
         {activity.latestRun ? (
           <>
@@ -495,7 +495,7 @@ function ActivityRow({
           <span className="text-[10px] text-muted">No runs yet</span>
         )}
       </div>
-      <div className="min-w-[150px] flex-[1_1_170px]">
+      <div className="min-w-0">
         <div className="mb-0.5 text-[9px] font-bold text-muted">Time</div>
         {runTimestampLabel ? (
           <div className="truncate text-[10px] text-muted" title={runTimestamp ?? undefined}>{runTimestampLabel}</div>
@@ -503,7 +503,7 @@ function ActivityRow({
           <span className="text-[10px] text-muted">Unknown</span>
         )}
       </div>
-      <div className="min-w-[150px] flex-[1_1_170px]">
+      <div className="min-w-0">
         <div className="mb-0.5 text-[9px] font-bold text-muted">Schedule</div>
         {schedule ? (
           <>
@@ -514,10 +514,10 @@ function ActivityRow({
           <span className="text-[10px] text-muted">Manual only</span>
         )}
       </div>
-      <div className="min-w-[130px] flex-[1_1_150px]">
+      <div className="min-w-0">
         <div className="mb-0.5 text-[9px] font-bold text-muted">Assignment</div>
         {labels.length > 0 ? (
-          <div className="flex max-w-[320px] flex-wrap gap-1">
+          <div className="flex min-w-0 max-w-full flex-wrap gap-1">
             {labels.slice(0, 2).map((label) => (
               <span
                 key={label}
@@ -537,7 +537,7 @@ function ActivityRow({
           <span className="text-[10px] text-muted">Default</span>
         )}
       </div>
-      <div className="ml-auto flex min-w-[112px] shrink-0 items-center justify-end gap-1.5 pr-1 pt-0.5">
+      <div className="flex w-[112px] items-center justify-end gap-1.5 pr-1 pt-0.5 md:justify-self-end">
           {activity.latestRun ? (
             <button
               type="button"
@@ -771,23 +771,8 @@ function activityState(
   schedules: WorkflowSchedule[],
   nextSchedule: WorkflowSchedule | null,
 ): Pick<WorkflowActivity, 'statusLabel' | 'tone' | 'section' | 'issue'> {
-  const failedSchedule = schedules.find((schedule) => schedule.last_run_status === 'failed' || schedule.last_run_error);
-  if (failedSchedule) {
-    return {
-      statusLabel: 'Needs attention',
-      tone: 'error',
-      section: 'attention',
-      issue: failedSchedule.last_run_error ?? 'Last scheduled run failed',
-    };
-  }
-  if (latestRun?.status === 'failed') {
-    return {
-      statusLabel: 'Needs attention',
-      tone: 'error',
-      section: 'attention',
-      issue: latestRun.failure ?? 'Latest run failed',
-    };
-  }
+  const scheduleIssue = schedules.find((schedule) => schedule.last_run_status === 'failed' || schedule.last_run_error)?.last_run_error
+    ?? (schedules.some((schedule) => schedule.last_run_status === 'failed') ? 'Last scheduled run failed' : null);
   if (activeRun?.status === 'awaiting_approval') {
     return { statusLabel: 'Awaiting approval', tone: 'warning', section: 'attention', issue: null };
   }
@@ -795,10 +780,18 @@ function activityState(
     return { statusLabel: 'Running', tone: 'active', section: 'running', issue: null };
   }
   if (nextSchedule && !nextSchedule.is_paused && nextSchedule.next_run_epoch_ms) {
-    return { statusLabel: 'Scheduled', tone: 'accent', section: 'scheduled', issue: null };
+    return { statusLabel: 'Scheduled', tone: 'accent', section: 'scheduled', issue: scheduleIssue };
   }
   if (nextSchedule?.is_paused) {
-    return { statusLabel: 'Paused', tone: 'warning', section: 'scheduled', issue: null };
+    return { statusLabel: 'Paused', tone: 'warning', section: 'scheduled', issue: scheduleIssue };
+  }
+  if (latestRun?.status === 'failed') {
+    return {
+      statusLabel: formatRunStatus(latestRun.status),
+      tone: 'error',
+      section: 'history',
+      issue: latestRun.failure ?? scheduleIssue ?? 'Latest run failed',
+    };
   }
   if (latestRun?.status === 'completed') {
     return { statusLabel: 'Completed', tone: 'success', section: 'history', issue: null };
@@ -910,16 +903,22 @@ function assignmentLabels(
   agentLabels: Record<string, string> = {},
 ) {
   if (assignments && Object.keys(assignments).length > 0) {
-    return Object.entries(assignments).map(([role, assignment]) => {
+    return Object.entries(assignments).sort(compareRoleEntries).map(([role, assignment]) => {
       if (assignment.target_type === 'agent') {
         return `${role}: ${agentLabels[assignment.agent_id] ?? assignment.agent_id}`;
       }
       return `${role}: temp ${assignment.provider}`;
     });
   }
-  const bindingLabels = Object.entries(bindings ?? {}).map(([role, target]) => `${role}: ${agentLabels[target] ?? target}`);
+  const bindingLabels = Object.entries(bindings ?? {})
+    .sort(compareRoleEntries)
+    .map(([role, target]) => `${role}: ${agentLabels[target] ?? target}`);
   if (bindingLabels.length > 0) return bindingLabels;
   return provider ? [`temp ${provider}`] : [];
+}
+
+function compareRoleEntries(left: [string, unknown], right: [string, unknown]) {
+  return left[0].localeCompare(right[0]);
 }
 
 function MonitorStat({

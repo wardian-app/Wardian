@@ -131,6 +131,33 @@ describe('SchedulesTable', () => {
     expect(screen.getByText('reviewer: temp codex')).toBeInTheDocument();
   });
 
+  it('renders schedule assignments in stable role order', () => {
+    render(
+      <SchedulesTable
+        schedules={[sched({
+          assignments: {
+            reviewer: {
+              target_type: 'temporary_provider',
+              provider: 'codex',
+            },
+            assistant: {
+              target_type: 'temporary_provider',
+              provider: 'antigravity',
+            },
+          },
+        })]}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onRunNow={vi.fn()}
+        onRemove={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    const rowText = screen.getByText('Heartbeat').closest('tr')?.textContent ?? '';
+    expect(rowText.indexOf('assistant: temp antigravity')).toBeLessThan(rowText.indexOf('reviewer: temp codex'));
+  });
+
   it('resolves legacy binding ids through the same agent labels', () => {
     render(
       <SchedulesTable
