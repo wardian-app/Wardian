@@ -44,14 +44,12 @@ export function WorkflowMonitorGlance({
     [schedules, normalizedQuery],
   );
 
-  const attentionRuns = visibleRuns.filter((run) => run.status === 'awaiting_approval' || run.status === 'failed');
+  const attentionRuns = visibleRuns.filter((run) => run.status === 'awaiting_approval');
   const activeOnlyRuns = visibleRuns.filter((run) => run.status === 'running');
-  const attentionSchedules = visibleSchedules.filter((schedule) => schedule.last_run_status === 'failed');
   const upcoming = [...visibleSchedules]
-    .filter((schedule) => schedule.last_run_status !== 'failed')
     .sort((left, right) => sortScheduleForSidebar(left) - sortScheduleForSidebar(right))
     .slice(0, 6);
-  const attentionCount = attentionRuns.length + attentionSchedules.length;
+  const attentionCount = attentionRuns.length;
 
   return (
     <div className="flex min-h-0 flex-col gap-3">
@@ -86,16 +84,6 @@ export function WorkflowMonitorGlance({
           <EmptyState label={normalizedQuery ? 'No matching attention items.' : 'No attention items.'} />
         ) : (
           <div className="grid gap-1.5">
-            {attentionSchedules.map((schedule) => (
-              <ScheduleCard
-                key={schedule.id}
-                schedule={schedule}
-                tone="attention"
-                onPauseSchedule={onPauseSchedule}
-                onResumeSchedule={onResumeSchedule}
-                onRunScheduleNow={onRunScheduleNow}
-              />
-            ))}
             {attentionRuns.map((run) => (
               <RunCard key={`${run.blueprint_id}:${run.run_id}:attention`} run={run} onOpenRun={onOpenRun} />
             ))}

@@ -144,14 +144,20 @@ function assignmentLabels(
   agentLabels: Record<string, string> = {},
 ) {
   if (assignments && Object.keys(assignments).length > 0) {
-    return Object.entries(assignments).map(([role, assignment]) => {
+    return Object.entries(assignments).sort(compareRoleEntries).map(([role, assignment]) => {
       if (assignment.target_type === 'agent') {
         return `${role}: ${agentLabels[assignment.agent_id] ?? assignment.agent_id}`;
       }
       return `${role}: temp ${assignment.provider}`;
     });
   }
-  const bindingLabels = Object.entries(bindings ?? {}).map(([role, target]) => `${role}: ${agentLabels[target] ?? target}`);
+  const bindingLabels = Object.entries(bindings ?? {})
+    .sort(compareRoleEntries)
+    .map(([role, target]) => `${role}: ${agentLabels[target] ?? target}`);
   if (bindingLabels.length > 0) return bindingLabels;
   return provider ? [`temp ${provider}`] : [];
+}
+
+function compareRoleEntries(left: [string, unknown], right: [string, unknown]) {
+  return left[0].localeCompare(right[0]);
 }
