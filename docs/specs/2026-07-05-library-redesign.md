@@ -85,7 +85,29 @@ LibraryIndex {
   section flagged `stubbed`. No `library/mcps` directory is created until the real
   feature lands (its own future spec).
 
-### 2. Backend commands and deployment performance
+### 2. Backend layering: library engine lives in `wardian-core`
+
+A follow-up phase will expose library manipulation through `wardian-cli` so
+agents can manage the library themselves. To make that a thin adapter rather
+than a rewrite, all library logic introduced by this redesign lands in a new
+`library` module in `crates/wardian-core`, not in the Tauri app crate:
+
+- **In `wardian-core`:** index building, frontmatter parsing, metadata
+  read/migrate/write, the one-pass deployment map, junction/symlink creation
+  with copy fallback, `set_skill_deployments` diffing, and all CRUD operations.
+  Everything operates on `WARDIAN_HOME`-derived paths (via `wardian_core::paths`)
+  with no Tauri types.
+- **In the Tauri layer:** thin `#[command]` wrappers, event emission
+  (`library-changed`), the filesystem watcher, and the Antigravity projection
+  refresh (it needs live agent state, which only the app has).
+- **CLI-readiness consequence:** a future `wardian-cli library ...` command set
+  calls the same core functions. Because the app's watcher observes the
+  filesystem rather than in-process mutations, CLI- or agent-driven changes
+  appear in the UI automatically — Markdown-as-Truth doing the synchronization.
+  Existing `commands/library.rs` logic migrates into core as part of this PR
+  rather than being duplicated later.
+
+### 3. Backend commands and deployment performance
 
 - **Junction creation goes native.** `link_skill_dir` and `create_directory_link`
   replace `cmd.exe /C mklink /J` with the `junction` crate
@@ -96,7 +118,8 @@ LibraryIndex {
   targets[])` diffs desired vs. current targets, creates/removes links
   accordingly, and runs the Antigravity projection refresh once at the end, with
   an early exit when no live Antigravity agents exist. `deploy_skill` and
-  `remove_deployed_skill` remain for the CLI.
+  `remove_deployed_skill` remain as thin wrappers over the same core
+  single-target operations for existing callers.
 - **CRUD completed.** New commands: `create_library_folder`,
   `rename_library_entry` (rename and move are the same operation),
   `delete_library_entry`. Deleting or renaming a deployed skill first
@@ -113,7 +136,7 @@ LibraryIndex {
   `library-changed { section }`. The debounced handler rebuilds the (cheap,
   metadata-only) index.
 
-### 3. Frontend architecture
+### 4. Frontend architecture
 
 All components live under `src/features/library/`; the shell stays
 `src/views/LibraryView.tsx`.
@@ -156,7 +179,7 @@ LibraryView
   standard status colors: emerald for deployed and healthy, amber for
   drift/orphan/copied states.
 
-### 4. Error handling and edge cases
+### 5. Error handling and edge cases
 
 - Link failure falls back to copy + marker (unchanged) but reports
   `linked: false` so the UI shows "copied — edits won't sync".
@@ -171,7 +194,7 @@ LibraryView
 - Mutation errors surface inline where the action happened (deploy control,
   editor save bar); new paths do not swallow errors with `let _ =`.
 
-### 5. Testing and verification
+### 6. Testing and verification
 
 - **Rust unit tests:** index building (sections, frontmatter parsing and
   fallback, class adaptation, metadata migration); one-pass deployment map
@@ -202,6 +225,10 @@ LibraryView
   and deployment badges become viable because lookups no longer scan per skill.
 - **Positive:** Orphaned and copied deployments become visible drift instead of
   silent state.
+- **Positive:** With the engine in `wardian-core`, the planned
+  `wardian-cli library` phase becomes thin argument-parsing over existing,
+  tested functions, and CLI/agent-driven edits surface in the UI via the
+  filesystem watcher with no extra plumbing.
 - **Negative:** Large single PR: view rewrite, sidebar panel removal, backend
   index, and perf fix land together; revert is coarse.
 - **Negative:** Existing commands (`get_library_tree`, per-skill deployment
