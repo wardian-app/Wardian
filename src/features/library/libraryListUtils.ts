@@ -2,8 +2,10 @@ import { LibraryEntry, LibraryIndexFolder, LibrarySectionId, isLibraryEntry } fr
 
 /**
  * One renderable row of the library list. Browse mode interleaves
- * folder-header and entry rows with indentation depth; search mode emits a
- * flat list of entry rows carrying a `pathSubtitle` (the parent folder).
+ * folder-header and entry rows with indentation depth; search mode and the
+ * starred filter (both queries rather than browse modes — see
+ * `flattenAllEntries`) emit a flat list of entry rows carrying a
+ * `pathSubtitle` (the parent folder), since folder-header rows may be absent.
  */
 export interface ListRow {
     type: 'folder-header' | 'entry';
@@ -44,6 +46,27 @@ export function flattenTree(
     return rows;
 }
 
+/**
+ * Flat entry rows (no folder headers) with `pathSubtitle` set to the parent
+ * folder path, for every entry in the tree — ignoring collapse state
+ * entirely. Shared by search mode and the starred filter: both are queries
+ * over the whole tree, not a browse of the user's current expansion state.
+ */
+export function flattenAllEntries(tree: LibraryIndexFolder): ListRow[] {
+    const rows: ListRow[] = [];
+    const walk = (folder: LibraryIndexFolder, parentPath: string) => {
+        for (const child of folder.children) {
+            if (isLibraryEntry(child)) {
+                rows.push({ type: 'entry', depth: 0, entry: child, pathSubtitle: parentPath });
+            } else {
+                walk(child, child.path);
+            }
+        }
+    };
+    walk(tree, '');
+    return rows;
+}
+
 /** Match rank: lower sorts first. -1 = no match. */
 function rankEntry(entry: LibraryEntry, query: string): number {
     if (entry.name.toLowerCase().includes(query)) return 0;
@@ -57,23 +80,12 @@ export function searchEntries(tree: LibraryIndexFolder, query: string): ListRow[
     const q = query.trim().toLowerCase();
     if (!q) return [];
     const matches: { row: ListRow; rank: number; name: string }[] = [];
-    const walk = (folder: LibraryIndexFolder, parentPath: string) => {
-        for (const child of folder.children) {
-            if (isLibraryEntry(child)) {
-                const rank = rankEntry(child, q);
-                if (rank >= 0) {
-                    matches.push({
-                        row: { type: 'entry', depth: 0, entry: child, pathSubtitle: parentPath },
-                        rank,
-                        name: child.name,
-                    });
-                }
-            } else {
-                walk(child, child.path);
-            }
+    for (const row of flattenAllEntries(tree)) {
+        const rank = row.entry ? rankEntry(row.entry, q) : -1;
+        if (rank >= 0 && row.entry) {
+            matches.push({ row, rank, name: row.entry.name });
         }
-    };
-    walk(tree, '');
+    }
     matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
     return matches.map((m) => m.row);
 }

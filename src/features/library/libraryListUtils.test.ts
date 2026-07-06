@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterStarred, flattenTree, folderKey, searchEntries, ListRow } from './libraryListUtils';
+import { filterStarred, flattenAllEntries, flattenTree, folderKey, searchEntries, ListRow } from './libraryListUtils';
 import { LibraryEntry, LibraryIndexFolder } from '../../types';
 
 function entry(overrides: Partial<LibraryEntry> & Pick<LibraryEntry, 'name' | 'path' | 'entry_ref'>): LibraryEntry {
@@ -71,6 +71,21 @@ describe('flattenTree', () => {
   });
 });
 
+describe('flattenAllEntries', () => {
+  it('emits every entry regardless of folder collapse state, with parent path as pathSubtitle', () => {
+    const rows = flattenAllEntries(tree);
+    expect(rows.every((r) => r.type === 'entry')).toBe(true);
+    expect(rows.map((r) => r.entry?.name)).toEqual(['linter', 'planner', 'reviewer']);
+    expect(rows.find((r) => r.entry?.name === 'linter')).toMatchObject({ pathSubtitle: 'dev/tools' });
+    expect(rows.find((r) => r.entry?.name === 'reviewer')).toMatchObject({ pathSubtitle: '' });
+  });
+
+  it('never emits folder-header rows', () => {
+    const rows = flattenAllEntries(tree);
+    expect(rows.some((r) => r.type === 'folder-header')).toBe(false);
+  });
+});
+
 describe('searchEntries', () => {
   it('returns no rows for an empty or whitespace query', () => {
     expect(searchEntries(tree, '')).toEqual([]);
@@ -127,5 +142,16 @@ describe('filterStarred', () => {
     // no starred entry row exists in the flattened output.
     const collapsed = flattenTree(tree, 'skills', new Set());
     expect(filterStarred(collapsed)).toEqual([]);
+  });
+
+  it('surfaces a starred entry from a collapsed folder when composed with flattenAllEntries', () => {
+    // Unlike flattenTree (above), flattenAllEntries ignores collapse state
+    // entirely, so the starred filter finds linter even though its folders
+    // were never expanded. This is the traversal LibraryList uses for the
+    // starred filter instead of flattenTree.
+    const rows = filterStarred(flattenAllEntries(tree));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: 'entry', pathSubtitle: 'dev/tools' });
+    expect(rows[0].entry?.name).toBe('linter');
   });
 });

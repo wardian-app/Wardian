@@ -3,7 +3,7 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryItemMetadata, LibrarySectionId, OrphanDeployment } from '../../types';
 import { ListToolbar } from './ListToolbar';
 import { LIBRARY_SECTIONS } from './SectionRail';
-import { filterStarred, flattenTree, folderKey, searchEntries, ListRow } from './libraryListUtils';
+import { filterStarred, flattenAllEntries, flattenTree, folderKey, searchEntries, ListRow } from './libraryListUtils';
 
 const ENTRY_REF_MIME = 'text/wardian-entry-ref';
 
@@ -156,10 +156,17 @@ export const LibraryList: React.FC = () => {
 
     const tree = index?.sections[activeSection]?.tree ?? null;
     const searching = searchQuery.trim() !== '';
+    // Starred filtering is a query over the whole tree, not a browse of the
+    // user's current expansion state — folders default to collapsed, and a
+    // collapsed folder emits no rows at all in flattenTree, which would hide
+    // starred entries inside it. Fall back to the same fully-flat traversal
+    // search mode uses so collapse state can't hide a starred entry.
     let rows: ListRow[] = tree
         ? searching
             ? searchEntries(tree, searchQuery)
-            : flattenTree(tree, activeSection, expandedFolders)
+            : showStarredOnly
+              ? flattenAllEntries(tree)
+              : flattenTree(tree, activeSection, expandedFolders)
         : [];
     if (showStarredOnly) rows = filterStarred(rows);
 

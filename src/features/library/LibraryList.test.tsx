@@ -115,13 +115,75 @@ describe('LibraryList', () => {
     expect(screen.queryByTestId('library-row-skills/reviewer')).not.toBeInTheDocument();
   });
 
-  it('filters to starred entries keeping ancestor folder headers', () => {
-    useLibraryStore.setState({ expandedFolders: new Set(['skills/dev']) });
+  it('surfaces a starred entry inside a collapsed (default-state) folder as a flat row with a path subtitle', () => {
+    // expandedFolders defaults to empty (all folders collapsed) via beforeEach.
+    // Before the fix, flattenTree emitted no rows at all for "dev" while
+    // collapsed, so the starred "planner" entry inside it was unreachable.
+    render(<LibraryList />);
+
+    expect(screen.queryByTestId('library-row-skills/dev/planner')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-star-filter'));
+
+    expect(screen.getByTestId('library-row-skills/dev/planner')).toBeInTheDocument();
+    expect(screen.getByTestId('library-row-subtitle-skills/dev/planner')).toHaveTextContent('dev');
+    expect(screen.queryByTestId('library-row-skills/reviewer')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('library-list-empty')).not.toBeInTheDocument();
+  });
+
+  it('shows the empty starred state only when genuinely nothing is starred', () => {
+    // Same tree as `index`, but the only starred entry ("planner") is un-starred.
+    const noStarredIndex: LibraryIndex = {
+      ...index,
+      sections: {
+        ...index.sections,
+        skills: {
+          stubbed: false,
+          tree: {
+            path: '',
+            name: 'Root',
+            children: [
+              {
+                path: 'dev',
+                name: 'dev',
+                children: [
+                  entry({
+                    name: 'planner',
+                    path: 'dev/planner',
+                    entry_ref: 'skills/dev/planner',
+                    description: 'Plans work ahead',
+                    tags: ['strategy'],
+                    is_starred: false,
+                    deployment_count: 2,
+                  }),
+                ],
+              },
+              entry({ name: 'reviewer', path: 'reviewer', entry_ref: 'skills/reviewer', error: 'unreadable' }),
+              entry({ name: 'ghost', path: 'ghost', entry_ref: 'skills/ghost' }),
+            ],
+          },
+        },
+      },
+    };
+    useLibraryStore.setState({ index: noStarredIndex });
     render(<LibraryList />);
 
     fireEvent.click(screen.getByTestId('library-star-filter'));
 
-    expect(screen.getByTestId('library-folder-dev')).toBeInTheDocument();
+    expect(screen.getByTestId('library-list-empty')).toHaveTextContent('No starred skills.');
+    expect(screen.queryByTestId('library-row-skills/dev/planner')).not.toBeInTheDocument();
+  });
+
+  it('combines the star filter with an active search', () => {
+    render(<LibraryList />);
+
+    fireEvent.change(screen.getByTestId('library-search'), { target: { value: 'e' } });
+    // "reviewer" and "planner" both match "e"; only planner is starred.
+    expect(screen.getByTestId('library-row-skills/dev/planner')).toBeInTheDocument();
+    expect(screen.getByTestId('library-row-skills/reviewer')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-star-filter'));
+
     expect(screen.getByTestId('library-row-skills/dev/planner')).toBeInTheDocument();
     expect(screen.queryByTestId('library-row-skills/reviewer')).not.toBeInTheDocument();
   });
