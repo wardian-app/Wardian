@@ -75,7 +75,7 @@ pub fn resolve_entry_path(
         match component {
             Component::Normal(part) => {
                 let text = part.to_string_lossy();
-                if text == DEPLOYED_SKILL_SOURCE_FILE {
+                if text.eq_ignore_ascii_case(DEPLOYED_SKILL_SOURCE_FILE) {
                     return Err(format!("Reserved name in entry path: {text}"));
                 }
             }
@@ -121,6 +121,7 @@ mod tests {
     fn resolve_entry_path_rejects_reserved_names() {
         let home = Path::new("/tmp/wh");
         assert!(resolve_entry_path(home, LibrarySectionId::Skills, "dev/.wardian-skill-source").is_err());
+        assert!(resolve_entry_path(home, LibrarySectionId::Skills, "dev/.Wardian-Skill-Source").is_err());
         assert!(resolve_entry_path(home, LibrarySectionId::Mcps, "anything").is_err()); // stubbed section: no paths
     }
 }
