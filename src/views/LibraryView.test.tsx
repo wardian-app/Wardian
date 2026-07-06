@@ -59,4 +59,43 @@ describe('LibraryView', () => {
 
     expect(useLibraryStore.getState().activeSection).toBe('prompts');
   });
+
+  it('shows a loading state when fetching with no index yet', () => {
+    useLibraryStore.setState({ index: null, isLoading: true, error: null });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-section-rail')).not.toBeInTheDocument();
+  });
+
+  it('shows an error state with retry when the initial fetch fails', () => {
+    const fetchIndex = vi.fn();
+    useLibraryStore.setState({ index: null, isLoading: false, error: 'boom', fetchIndex });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-error')).toHaveTextContent('boom');
+    expect(screen.queryByTestId('library-section-rail')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-retry'));
+
+    expect(fetchIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the loaded content visible and shows a banner when a background refetch fails', () => {
+    const fetchIndex = vi.fn();
+    useLibraryStore.setState({ index: emptyIndex, isLoading: false, error: 'refresh failed', fetchIndex });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-error-banner')).toHaveTextContent('refresh failed');
+    expect(screen.getByTestId('library-section-rail')).toBeInTheDocument();
+    expect(screen.getByTestId('library-list')).toBeInTheDocument();
+    expect(screen.getByTestId('library-detail')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-error-banner-retry'));
+
+    expect(fetchIndex).toHaveBeenCalledTimes(1);
+  });
 });
