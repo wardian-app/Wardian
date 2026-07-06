@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::library::links::{deploy_skill_dir, remove_existing_deployment};
 use crate::library::section::{
     is_single_normal_component, resolve_entry_path, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE,
@@ -260,7 +262,7 @@ pub fn remove_deployed_skill(
 }
 
 /// Result of reconciling a skill's deployed targets against a desired set.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetDeploymentsOutcome {
     pub added: u32,
     pub removed: u32,
@@ -272,6 +274,16 @@ pub struct SetDeploymentsOutcome {
 /// remove every currently-deployed target that isn't in `desired`.
 /// Targets are compared as `(target_type, target_id)` pairs, so this is
 /// idempotent when the desired set already matches reality.
+///
+/// Best-effort semantics (mirroring `rename_entry` in `mutations.rs`):
+/// every add and every remove is attempted independently, a failure on one
+/// target does not stop the others, and every change that does succeed is
+/// left applied on disk (nothing is rolled back). If one or more targets
+/// fail, this returns a single aggregate `Err` naming how many targets
+/// failed and the per-target error details; the accumulated `outcome` for
+/// the run is otherwise discarded by the `Result<_, String>` signature, but
+/// a follow-up call will see the already-applied changes reflected in a
+/// fresh scan.
 pub fn set_skill_deployments(
     home: &Path,
     source_rel: &str,
@@ -298,24 +310,45 @@ pub fn set_skill_deployments(
         .collect();
 
     let mut outcome = SetDeploymentsOutcome::default();
+    let mut errors: Vec<String> = Vec::new();
 
     for target in &current {
         let key = (target.target_type.clone(), target.target_id.clone());
         if !desired_set.contains(&key) {
-            remove_deployed_skill(home, &target.target_type, &target.target_id, &skill_name)?;
-            outcome.removed += 1;
+            match remove_deployed_skill(home, &target.target_type, &target.target_id, &skill_name) {
+                Ok(()) => outcome.removed += 1,
+                Err(e) => errors.push(format!(
+                    "remove {}/{}: {e}",
+                    target.target_type, target.target_id
+                )),
+            }
         }
     }
 
     for target in desired {
         let key = (target.target_type.clone(), target.target_id.clone());
         if !current_set.contains(&key) {
-            let copied = deploy_skill(home, &rel_norm, &target.target_type, &target.target_id)?;
-            outcome.added += 1;
-            if copied {
-                outcome.copied_fallbacks += 1;
+            match deploy_skill(home, &rel_norm, &target.target_type, &target.target_id) {
+                Ok(copied) => {
+                    outcome.added += 1;
+                    if copied {
+                        outcome.copied_fallbacks += 1;
+                    }
+                }
+                Err(e) => errors.push(format!(
+                    "add {}/{}: {e}",
+                    target.target_type, target.target_id
+                )),
             }
         }
+    }
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "{} target(s) could not be updated: {}",
+            errors.len(),
+            errors.join("; ")
+        ));
     }
 
     Ok(outcome)
@@ -415,5 +448,66 @@ mod tests {
         // Idempotent.
         let outcome = set_skill_deployments(home, "planner", &narrowed).unwrap();
         assert_eq!((outcome.added, outcome.removed), (0, 0));
+    }
+
+    #[test]
+    fn set_deployments_outcome_serializes_snake_case() {
+        let outcome = SetDeploymentsOutcome {
+            added: 2,
+            removed: 1,
+            copied_fallbacks: 1,
+        };
+        let value = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "added": 2,
+                "removed": 1,
+                "copied_fallbacks": 1,
+            })
+        );
+
+        let round_tripped: SetDeploymentsOutcome =
+            serde_json::from_value(value).expect("deserialize");
+        assert_eq!(round_tripped, outcome);
+    }
+
+    #[test]
+    fn set_deployments_partial_failure_keeps_successful_target_and_reports_error() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        let src = home.join("library/skills/planner");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("SKILL.md"), "v1").unwrap();
+
+        // One valid target, one target whose id fails `is_single_normal_component`
+        // validation (path traversal component) and can never succeed.
+        let desired = vec![
+            SkillDeployment {
+                target_type: "class".into(),
+                target_id: "Architect".into(),
+            },
+            SkillDeployment {
+                target_type: "class".into(),
+                target_id: "../evil".into(),
+            },
+        ];
+
+        let err = set_skill_deployments(home, "planner", &desired)
+            .expect_err("one target should fail validation");
+        assert!(
+            err.contains("../evil"),
+            "error should mention the failing target: {err}"
+        );
+        assert!(
+            err.contains("1 target(s)"),
+            "error should report the failure count: {err}"
+        );
+
+        // The valid target was still deployed on disk despite the other failure.
+        assert!(home
+            .join("classes/Architect/.agents/skills/planner")
+            .join("SKILL.md")
+            .exists());
     }
 }
