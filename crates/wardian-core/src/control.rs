@@ -51,6 +51,7 @@ pub enum ControlRequest {
     ConversationShow {
         conversation_id: String,
     },
+    WatchlistsChanged,
     SendMessage {
         target: String,
         message: String,

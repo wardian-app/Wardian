@@ -37,7 +37,6 @@ pub enum WatchlistEntry {
 }
 
 impl WatchlistEntry {
-    #[cfg(test)]
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             Self::Agent { agent_id } => Some(agent_id),
@@ -45,7 +44,6 @@ impl WatchlistEntry {
         }
     }
 
-    #[cfg(test)]
     pub fn team_id(&self) -> Option<&str> {
         match self {
             Self::Agent { .. } => None,

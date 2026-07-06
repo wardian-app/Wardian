@@ -299,6 +299,11 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             ok_json(&response)
         }
 
+        ControlRequest::WatchlistsChanged => {
+            let _ = app.emit("watchlists-updated", ());
+            ok_json(&OkResponse::new())
+        }
+
         request @ ControlRequest::WorkflowRun { .. } => {
             handle_workflow_run_control(app, workflow_run_control_launch(request)?).await
         }

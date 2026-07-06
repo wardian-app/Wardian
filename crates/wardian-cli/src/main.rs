@@ -4,6 +4,7 @@ mod errors;
 mod graph;
 mod live;
 mod output;
+mod watchlist;
 
 use std::{
     collections::HashMap,
@@ -16,8 +17,7 @@ use std::{
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
     ConversationArgs, ConversationCommand, QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs,
-    TeamArgs, TeamCommand, WatchlistArgs, WatchlistCommand, WorkflowArgs, WorkflowCommand,
-    WorkflowScheduleCommand,
+    WorkflowArgs, WorkflowCommand, WorkflowScheduleCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
@@ -48,8 +48,8 @@ fn run() -> i32 {
         Command::Agent(args) => handle_agent(args),
         Command::Conversation(args) => handle_conversation(args),
         Command::Workflow(args) => handle_workflow(args),
-        Command::Team(args) => handle_team(args),
-        Command::Watchlist(args) => handle_watchlist(args),
+        Command::Team(args) => watchlist::handle_team(args),
+        Command::Watchlist(args) => watchlist::handle_watchlist(args),
         Command::Graph(args) => graph::handle_graph(args),
         Command::Send(args) => handle_send(args),
         Command::Ask(args) => handle_ask(args),
@@ -158,60 +158,6 @@ fn resolve_conversation_agent_target(target: &str) -> String {
         .and_then(|conn| identity::resolve_by_name_or_uuid(&conn, trimmed).ok())
         .map(|agent| agent.uuid)
         .unwrap_or_else(|| trimmed.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// wardian team / watchlist
-// ---------------------------------------------------------------------------
-
-fn handle_team(args: TeamArgs) -> Result<String, CliError> {
-    let state = disk::load_watchlist_state().map_err(|e| CliError::generic(e.to_string()))?;
-    match args.command {
-        TeamCommand::List => serde_json::to_string_pretty(&serde_json::json!({
-            "schema": 1,
-            "teams": state.teams,
-        }))
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| CliError::generic(e.to_string())),
-        TeamCommand::Show { target } => {
-            let team = state
-                .teams
-                .into_iter()
-                .find(|team| team.id == target || team.name == target)
-                .ok_or_else(|| CliError::not_found_entity("Team", &target))?;
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema": 1,
-                "team": team,
-            }))
-            .map(|json| format!("{json}\n"))
-            .map_err(|e| CliError::generic(e.to_string()))
-        }
-    }
-}
-
-fn handle_watchlist(args: WatchlistArgs) -> Result<String, CliError> {
-    let state = disk::load_watchlist_state().map_err(|e| CliError::generic(e.to_string()))?;
-    match args.command {
-        WatchlistCommand::List => serde_json::to_string_pretty(&serde_json::json!({
-            "schema": 1,
-            "watchlists": state.watchlists,
-        }))
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| CliError::generic(e.to_string())),
-        WatchlistCommand::Show { target } => {
-            let watchlist = state
-                .watchlists
-                .into_iter()
-                .find(|watchlist| watchlist.id == target || watchlist.name == target)
-                .ok_or_else(|| CliError::not_found_entity("Watchlist", &target))?;
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema": 1,
-                "watchlist": watchlist,
-            }))
-            .map(|json| format!("{json}\n"))
-            .map_err(|e| CliError::generic(e.to_string()))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,7 +1305,11 @@ enum ScopeChoice {
 
 fn decide_scope(scope: &str, in_session: bool) -> Result<ScopeChoice, CliError> {
     match scope {
-        "auto" => Ok(if in_session { ScopeChoice::Neighbors } else { ScopeChoice::Workspace }),
+        "auto" => Ok(if in_session {
+            ScopeChoice::Neighbors
+        } else {
+            ScopeChoice::Workspace
+        }),
         "neighbors" => Ok(ScopeChoice::Neighbors),
         "workspace" => Ok(ScopeChoice::Workspace),
         "all" => Ok(ScopeChoice::All),
@@ -1378,7 +1328,10 @@ fn filter_to_neighbors(
     let topology = load_topology(home);
     let refs: Vec<AgentRef> = agents
         .iter()
-        .map(|agent| AgentRef { uuid: agent.uuid.clone(), workspace: agent.workspace.clone() })
+        .map(|agent| AgentRef {
+            uuid: agent.uuid.clone(),
+            workspace: agent.workspace.clone(),
+        })
         .collect();
     let view = resolve_neighbors(self_uuid, &topology, &refs);
     let reasons: std::collections::HashMap<String, String> = view
@@ -1445,11 +1398,12 @@ fn handle_list(
         } else {
             None
         };
-        let effective_scope = if scope_choice == ScopeChoice::Workspace && caller_workspace.is_none() {
-            Scope::All
-        } else {
-            requested_scope
-        };
+        let effective_scope =
+            if scope_choice == ScopeChoice::Workspace && caller_workspace.is_none() {
+                Scope::All
+            } else {
+                requested_scope
+            };
         let mut agents = identity::filter_agents(
             live_agents,
             &ListFilters {
@@ -1463,10 +1417,11 @@ fn handle_list(
 
         // Apply neighbors filter if requested
         if scope_choice == ScopeChoice::Neighbors {
-            let session_id = std::env::var("WARDIAN_SESSION_ID")
-                .map_err(|_| CliError::not_in_session())?;
-            let home = wardian_core::paths::wardian_home()
-                .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for neighbors scope)"))?;
+            let session_id =
+                std::env::var("WARDIAN_SESSION_ID").map_err(|_| CliError::not_in_session())?;
+            let home = wardian_core::paths::wardian_home().ok_or_else(|| {
+                CliError::generic("Could not determine Wardian home (required for neighbors scope)")
+            })?;
             agents = filter_to_neighbors(agents, &session_id, &home);
         }
 
@@ -1494,10 +1449,11 @@ fn handle_list(
 
     // Apply neighbors filter if requested
     if scope_choice == ScopeChoice::Neighbors {
-        let session_id = std::env::var("WARDIAN_SESSION_ID")
-            .map_err(|_| CliError::not_in_session())?;
-        let home = wardian_core::paths::wardian_home()
-            .ok_or_else(|| CliError::generic("Could not determine Wardian home (required for neighbors scope)"))?;
+        let session_id =
+            std::env::var("WARDIAN_SESSION_ID").map_err(|_| CliError::not_in_session())?;
+        let home = wardian_core::paths::wardian_home().ok_or_else(|| {
+            CliError::generic("Could not determine Wardian home (required for neighbors scope)")
+        })?;
         agents = filter_to_neighbors(agents, &session_id, &home);
     }
 
@@ -2205,8 +2161,14 @@ mod tests {
     fn effective_default_scope_prefers_neighbors_in_session() {
         assert_eq!(decide_scope("auto", true).unwrap(), ScopeChoice::Neighbors);
         assert_eq!(decide_scope("auto", false).unwrap(), ScopeChoice::Workspace);
-        assert_eq!(decide_scope("neighbors", false).unwrap(), ScopeChoice::Neighbors);
-        assert_eq!(decide_scope("workspace", true).unwrap(), ScopeChoice::Workspace);
+        assert_eq!(
+            decide_scope("neighbors", false).unwrap(),
+            ScopeChoice::Neighbors
+        );
+        assert_eq!(
+            decide_scope("workspace", true).unwrap(),
+            ScopeChoice::Workspace
+        );
         assert_eq!(decide_scope("all", true).unwrap(), ScopeChoice::All);
         assert!(decide_scope("bogus", true).is_err());
     }
@@ -2277,8 +2239,8 @@ mod tests {
         std::env::remove_var("WARDIAN_SESSION_ID");
 
         // Simulate what handle_list does when scope is Neighbors
-        let result: Result<String, CliError> = std::env::var("WARDIAN_SESSION_ID")
-            .map_err(|_| CliError::not_in_session());
+        let result: Result<String, CliError> =
+            std::env::var("WARDIAN_SESSION_ID").map_err(|_| CliError::not_in_session());
 
         assert!(result.is_err());
         let error = result.unwrap_err();

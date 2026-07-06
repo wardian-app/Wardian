@@ -56,7 +56,36 @@ pub struct TeamArgs {
 #[derive(Debug, Subcommand)]
 pub enum TeamCommand {
     List,
-    Show { target: String },
+    Show {
+        target: String,
+    },
+    Create {
+        name: String,
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+    },
+    Rename {
+        target: String,
+        new_name: String,
+    },
+    Add {
+        target: String,
+        agents: Vec<String>,
+    },
+    Remove {
+        target: String,
+        agents: Vec<String>,
+    },
+    Split {
+        target: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+    },
+    Delete {
+        target: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -69,6 +98,13 @@ pub struct WatchlistArgs {
 pub enum WatchlistCommand {
     List,
     Show { target: String },
+    Create { name: String },
+    Rename { target: String, new_name: String },
+    AddTeam { target: String, team: String },
+    RemoveTeam { target: String, team: String },
+    AddAgent { target: String, agent: String },
+    RemoveAgent { target: String, agent: String },
+    Delete { target: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -794,16 +830,8 @@ mod tests {
 
     #[test]
     fn parses_send_scope_all() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "hi",
-            "--to",
-            "all",
-            "--scope",
-            "all",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "all", "--scope", "all"])
+            .unwrap();
         let Command::Send(args) = cli.command else {
             panic!("expected Send command")
         };
@@ -1339,7 +1367,10 @@ mod tests {
         let Command::Graph(args) = cli.command else {
             panic!("expected Graph command")
         };
-        assert!(matches!(args.command, GraphCommand::Neighbors { agent: None }));
+        assert!(matches!(
+            args.command,
+            GraphCommand::Neighbors { agent: None }
+        ));
 
         let cli = Cli::try_parse_from(["wardian", "graph", "neighbors", "coder-a1"]).unwrap();
         let Command::Graph(args) = cli.command else {
@@ -1385,15 +1416,21 @@ mod tests {
     #[test]
     fn parses_graph_unlink_ignore_unignore() {
         let cli = Cli::try_parse_from(["wardian", "graph", "unlink", "x", "y"]).unwrap();
-        let Command::Graph(args) = cli.command else { panic!() };
+        let Command::Graph(args) = cli.command else {
+            panic!()
+        };
         assert!(matches!(args.command, GraphCommand::Unlink { .. }));
 
         let cli = Cli::try_parse_from(["wardian", "graph", "ignore", "x"]).unwrap();
-        let Command::Graph(args) = cli.command else { panic!() };
+        let Command::Graph(args) = cli.command else {
+            panic!()
+        };
         assert!(matches!(args.command, GraphCommand::Ignore { .. }));
 
         let cli = Cli::try_parse_from(["wardian", "graph", "unignore", "x"]).unwrap();
-        let Command::Graph(args) = cli.command else { panic!() };
+        let Command::Graph(args) = cli.command else {
+            panic!()
+        };
         assert!(matches!(args.command, GraphCommand::Unignore { .. }));
     }
 }
