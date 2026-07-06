@@ -3,6 +3,7 @@ use crate::providers::ProviderFactory;
 use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
@@ -158,6 +159,35 @@ fn detach_agent_for_kill(
     }
     order.retain(|id| id != session_id);
     Some(agent)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeletedAgentReferenceCleanup {
+    watchlists_changed: bool,
+    topology_changed: bool,
+}
+
+impl DeletedAgentReferenceCleanup {
+    fn run(home: &Path, remaining_agent_ids: &BTreeSet<String>) -> Result<Self, String> {
+        let watchlists_changed =
+            crate::commands::watchlist::retain_known_agent_references_in_home(
+                home,
+                remaining_agent_ids,
+            )?;
+
+        let mut topology = wardian_core::topology::load_topology(home);
+        let before_topology = topology.clone();
+        topology.retain_agents(remaining_agent_ids);
+        let topology_changed = topology != before_topology;
+        if topology_changed {
+            wardian_core::topology::save_topology(home, &topology).map_err(|e| e.to_string())?;
+        }
+
+        Ok(Self {
+            watchlists_changed,
+            topology_changed,
+        })
+    }
 }
 
 async fn lock_agent_lifecycle(
@@ -2339,7 +2369,7 @@ pub async fn kill_agent(
         session_id
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    let (agent, state_snapshot) = {
+    let (agent, state_snapshot, remaining_agent_ids) = {
         let mut agents = state.agents.lock().await;
         let mut order = state.agent_order.lock().await;
         let agent =
@@ -2347,7 +2377,10 @@ pub async fn kill_agent(
         let state_snapshot = agent
             .is_some()
             .then(|| manager::state_configs_snapshot(&agents, &order));
-        (agent, state_snapshot)
+        let remaining_agent_ids = agent
+            .is_some()
+            .then(|| agents.keys().cloned().collect::<BTreeSet<_>>());
+        (agent, state_snapshot, remaining_agent_ids)
     };
     if let Some(snapshot) = state_snapshot {
         manager::save_state_snapshot(&app, &snapshot);
@@ -2364,8 +2397,25 @@ pub async fn kill_agent(
         let _ = wardian_core::db::delete_agent(&session_id);
         let _ = app.emit("agents-updated", ());
 
-        // Cleanup: remove the agent's private directory
+        // Cleanup: remove persisted references and the agent's private directory.
         if let Some(home) = crate::utils::fs::get_wardian_home() {
+            if let Some(remaining_agent_ids) = remaining_agent_ids.as_ref() {
+                match DeletedAgentReferenceCleanup::run(&home, remaining_agent_ids) {
+                    Ok(cleanup) => {
+                        if cleanup.watchlists_changed {
+                            let _ = app.emit("watchlists-updated", ());
+                        }
+                        if cleanup.topology_changed {
+                            let _ = app.emit("topology-changed", ());
+                        }
+                    }
+                    Err(error) => manager::log_debug(&format!(
+                        "[WARDIAN] Failed to clean deleted agent references for {}: {}",
+                        session_id, error
+                    )),
+                }
+            }
+
             let agent_dir = home.join("agents").join(&session_id);
             if agent_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
@@ -3442,7 +3492,8 @@ mod tests {
         take_agent_runtime_for_termination, terminal_cleared_payload,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
-        CloneProfileSelection, DiscoveredGitWorktree, GIT_WORKTREE_DISCOVERY_CONCURRENCY,
+        CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
+        GIT_WORKTREE_DISCOVERY_CONCURRENCY,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -6615,6 +6666,72 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             conversation_boundary_for_clear_reason(Some("worktree_switch")),
             wardian_core::conversations::ConversationBoundaryReason::WorktreeSwitch
         );
+    }
+
+    #[test]
+    fn deleted_agent_reference_cleanup_prunes_watchlists_and_topology() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let watchlists_dir = temp.path().join("watchlists");
+        std::fs::create_dir_all(&watchlists_dir).expect("watchlists dir");
+        std::fs::write(
+            watchlists_dir.join("index.json"),
+            serde_json::json!({
+                "version": 2,
+                "teams": [{ "id": "team-a", "name": "Core", "agentIds": ["deleted", "kept", "stale"] }],
+                "watchlists": [{
+                    "id": "main",
+                    "name": "Main",
+                    "entries": [
+                        { "type": "agent", "agentId": "deleted" },
+                        { "type": "agent", "agentId": "stale" },
+                        { "type": "agent", "agentId": "kept" },
+                        { "type": "team", "teamId": "team-a" }
+                    ]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("seed watchlist");
+
+        let mut topology = wardian_core::topology::Topology::default();
+        topology.add_edge("deleted", "kept", "2026-07-05T00:00:00Z");
+        topology.add_edge("kept", "other-kept", "2026-07-05T00:00:01Z");
+        topology.ignore_pair("deleted", "other-kept");
+        topology.ignore_pair("kept", "other-kept");
+        wardian_core::topology::save_topology(temp.path(), &topology).expect("save topology");
+        let remaining_agent_ids =
+            std::collections::BTreeSet::from(["kept".to_string(), "other-kept".to_string()]);
+
+        let cleanup = DeletedAgentReferenceCleanup::run(temp.path(), &remaining_agent_ids)
+            .expect("cleanup");
+
+        assert!(cleanup.watchlists_changed);
+        assert!(cleanup.topology_changed);
+
+        let saved_watchlists =
+            std::fs::read_to_string(watchlists_dir.join("index.json")).expect("watchlists saved");
+        let watchlist_state: serde_json::Value =
+            serde_json::from_str(&saved_watchlists).expect("watchlist json");
+        assert_eq!(
+            watchlist_state["teams"][0]["agentIds"],
+            serde_json::json!(["kept"])
+        );
+        assert_eq!(
+            watchlist_state["watchlists"][0]["entries"],
+            serde_json::json!([
+                { "type": "agent", "agentId": "kept" },
+                { "type": "team", "teamId": "team-a" }
+            ])
+        );
+
+        let saved_topology = wardian_core::topology::load_topology(temp.path());
+        assert_eq!(saved_topology.neighbors("deleted"), Vec::<String>::new());
+        assert_eq!(
+            saved_topology.neighbors("kept"),
+            vec!["other-kept".to_string()]
+        );
+        assert!(saved_topology.is_ignored("kept", "other-kept"));
+        assert!(!saved_topology.is_ignored("deleted", "other-kept"));
     }
 
     #[tokio::test]
