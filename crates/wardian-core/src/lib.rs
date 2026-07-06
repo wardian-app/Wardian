@@ -4,6 +4,7 @@ pub mod conversations;
 pub mod db;
 pub mod engine;
 pub mod identity;
+pub mod library;
 pub mod models;
 pub mod paths;
 pub mod schedule;
