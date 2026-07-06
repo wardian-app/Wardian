@@ -2,21 +2,23 @@ import React, { useEffect } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { SectionRail } from '../features/library/SectionRail';
 import { LibraryList } from '../features/library/LibraryList';
+import { DetailPane } from '../features/library/DetailPane';
 import { LibrarySectionId } from '../types';
 
 interface LibraryViewProps {
     selectedAgentIds: Set<string>;
+    /** Threaded through to the workflow detail panel's "Open in Workflows
+     * view" link. Optional and no-op when absent — App.tsx wiring lands in
+     * a later task. */
+    onOpenWorkflowsView?: () => void;
 }
 
 /**
  * Library view shell: SectionRail (section switcher) | LibraryList (rows for
- * the active section) | DetailPane (selected entry). DetailPane is a stubbed
- * placeholder here — it lands in Task 15. `selectedAgentIds` is threaded
- * through unused for now; it feeds prompt-run wiring in the detail pane.
+ * the active section) | DetailPane (selected entry, with the inline editor
+ * and per-kind panels).
  */
-export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
-    void selectedAgentIds;
-
+export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOpenWorkflowsView }) => {
     const index = useLibraryStore((s) => s.index);
     const isLoading = useLibraryStore((s) => s.isLoading);
     const error = useLibraryStore((s) => s.error);
@@ -115,7 +117,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                     data-testid="library-detail"
                     className="w-[380px] flex-shrink-0 border-l border-wardian-border overflow-y-auto"
                 >
-                    {/* DetailPane lands in Task 15. */}
+                    <DetailPane selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={onOpenWorkflowsView} />
                 </div>
             </div>
         </div>
