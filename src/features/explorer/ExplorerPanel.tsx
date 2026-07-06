@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { FolderOpen } from 'lucide-react';
+import { ExternalLink, FolderOpen } from 'lucide-react';
 import { FileTree, FileNode } from './FileTree';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { AgentConfig, GitStatusResult } from '../../types';
@@ -177,10 +177,10 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     setMenuPos(null);
   };
 
-  const openExternalEditor = async (node: FileNode) => {
+  const openExternalPath = async (path: string) => {
     try {
       await invoke('open_in_external_editor', {
-        path: node.path,
+        path,
         editor: {
           external_editor: externalEditor,
           external_editor_custom_executable: externalEditorCustomExecutable.trim() || null,
@@ -193,6 +193,10 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
         `External app open failed for ${externalEditorLabel(externalEditor)}: ${String(err)}`,
       );
     }
+  };
+
+  const openExternalEditor = async (node: FileNode) => {
+    await openExternalPath(node.path);
   };
 
   const handleOpenExternalEditor = async () => {
@@ -209,6 +213,11 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     } catch (err) {
       console.error("Open explorer root failed:", err);
     }
+  };
+
+  const handleOpenRootExternal = async () => {
+    if (!rootPath) return;
+    await openExternalPath(rootPath);
   };
 
   const openPreview = async (node: FileNode) => {
@@ -265,26 +274,44 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     setMenuPos(null);
   };
 
+  const showRootExternalAction = externalEditor !== 'system';
+  const rootExternalLabel = `Open root in ${externalEditorLabel(externalEditor)}`;
+
   return (
     <div data-testid="explorer-panel" className="flex flex-col h-full w-full relative">
-      <div className="flex flex-col mb-2">
-        <h2 className="text-sm font-bold text-primary tracking-tight">Explorer</h2>
+      <div className="mb-2 flex min-h-7 items-center gap-1">
+        <h2 className="min-w-0 flex-1 truncate text-sm font-bold text-primary tracking-tight">Explorer</h2>
+        {rootPath && (
+          <>
+            <button
+              type="button"
+              aria-label="Open in local file system"
+              title="Open in local file system"
+              onClick={handleOpenRoot}
+              className="rounded p-1 text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted hover:text-primary transition-colors"
+            >
+              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+            {showRootExternalAction && (
+              <button
+                type="button"
+                aria-label={rootExternalLabel}
+                title={rootExternalLabel}
+                onClick={handleOpenRootExternal}
+                className="rounded p-1 text-[var(--color-wardian-text-muted)] hover:bg-wardian-card-bg-muted hover:text-primary transition-colors"
+              >
+                <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </>
+        )}
       </div>
       
       {rootPath && (
-        <div className="flex items-center gap-1.5 py-1 mb-2 border-b border-wardian-border/30 w-full group">
-          <span className="label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors flex-1 min-w-0" title={rootPath}>
+        <div className="py-1 mb-2 border-b border-wardian-border/30 w-full group">
+          <span className="block label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={rootPath}>
             {rootPath}
           </span>
-          <button
-            type="button"
-            aria-label="Open in local file system"
-            title="Open in local file system"
-            onClick={handleOpenRoot}
-            className="shrink-0 rounded-md border border-wardian-border p-1 text-muted hover:text-primary hover:bg-wardian-card-bg-muted transition-colors"
-          >
-            <FolderOpen aria-hidden="true" size={14} strokeWidth={2} />
-          </button>
         </div>
       )}
 

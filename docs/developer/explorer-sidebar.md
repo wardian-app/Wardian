@@ -12,6 +12,7 @@ This is the main container component for the file explorer tab.
 - **Root Resolution**: It queries the backend command `get_explorer_root(sessionId)` to identify which path to render.
 - **File Click Action**: It receives file selections from `FileTree` and routes them through the Settings-backed `explorerFileClickAction` preference. Preview mode uses `read_file_preview`; external mode reuses `open_in_external_editor`.
 - **Filesystem Watch Refresh**: While mounted, the panel subscribes to `explorer-changed`, starts `explorer_watch` for the current root after the listener is ready, and calls `explorer_unwatch` on cleanup. Matching events increment a refresh token and carry changed paths down to `FileTree`.
+- **Root Actions**: The Explorer title header can reveal the current Explorer root through `reveal_in_explorer` or open the entire root through the Settings-backed `open_in_external_editor` path.
 - **Context Menu Context**: Provides right-click operations tailored to `FileTree` items (Open Preview, Open in External App, Reveal in OS, Copy Absolute Path, Delete).
 - **Preview Modal**: Implements a themed modal overlay to securely display raw text file contents queried from the OS.
 
@@ -28,7 +29,7 @@ The file system operations strictly enforce security and platform agnosticism:
 - `get_directory_tree`: Non-recursive listing of immediate children of a given path. Sorts directories first, then alphabetical.
 - `read_file_preview`: Simple text reader.
 - `reveal_in_explorer`: OS-specific `std::process::Command` routing to invoke `explorer`, `open`, or `xdg-open`.
-- `open_in_external_editor`: Opens a path with the Settings-selected external app mode (`system`, `vscode`, or `custom`) by spawning the platform command in Rust.
+- `open_in_external_editor`: Opens folders and editor-friendly files with the Settings-selected external app mode (`system`, `vscode`, or `custom`) by spawning the platform command in Rust. Known binary, media, archive, executable, and document files fall back to the system default handler so VS Code/custom editors are not used for non-editor file types.
 - `delete_file`: Recursively deletes a directory or permanently removes a file string.
 - `explorer_watch` / `explorer_unwatch`: Manage debounced recursive filesystem watchers for active explorer roots. Watchers are reference-counted by root and exclude high-churn folders such as `.git`, `node_modules`, `target`, `.venv`, `dist`, `build`, `.next`, `.turbo`, `.cache`, and `.wardian/tmp`.
 

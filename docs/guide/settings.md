@@ -143,19 +143,23 @@ in terminal output:
   selected file or folder. This is Wardian's default because it respects file
   type associations and works without extra editor setup.
 - **VS Code (code command)** launches the `code` command-line entry point with
-  the selected path.
+  the selected folder or editor-friendly file.
 - **Custom executable** launches the configured executable with the selected
-  path as its argument.
+  folder or editor-friendly file as its argument.
+
+Binary, media, archive, executable, and document files still use the operating
+system's default handler even when VS Code or a custom executable is selected.
+Folders always follow the selected External editor preference.
 
 If VS Code does not open, Wardian shows the launch error in Explorer. Verify the
 `code` command is available on Wardian's app process PATH or use Custom
 executable to point directly at your editor.
 
 Terminal URLs open as URLs, including OSC hyperlinks emitted by provider TUIs.
-Terminal file paths use this External editor preference so agent terminals and
-the bottom user terminal match Explorer's external-open behavior. Terminal file
-paths are validated before they become clickable, which keeps command names such
-as `/model` from being treated as files unless they resolve to a real target.
+Terminal file paths use the same type-sensitive external-open behavior so agent
+terminals and the bottom user terminal match Explorer. Terminal file paths are
+validated before they become clickable, which keeps command names such as
+`/model` from being treated as files unless they resolve to a real target.
 
 ## Watchlist
 

@@ -20,8 +20,9 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 2. Open the **Explorer** tab in the left sidebar.
 3. Expand folders to inspect files.
 4. Click a file to preview it, or change the click behavior in [Settings](./settings.md).
-5. Use preview, open externally, reveal, copy path, or delete from the file context menu.
-6. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
+5. Use the Explorer title actions to reveal the current root in your system file manager or open the entire root in your configured external app.
+6. Use preview, open externally, reveal, copy path, or delete from the file context menu.
+7. Move to [Source Control](./source-control.md) when the selected root is a Git workspace and you need to review changes.
 
 ## Root Behavior
 
@@ -43,24 +44,25 @@ Clicking a folder expands or collapses it. Clicking a file uses the configured
 **File click action** from Settings:
 
 - **Preview in Wardian** opens the read-only preview modal. This is the default.
-- **Open in external app** opens the file using the configured Explorer external
-  editor preference.
+- **Open in external app** opens editor-friendly files through the configured
+  Explorer external editor preference. Binary, media, archive, executable, and
+  document files use the operating system's default handler.
 
 The Explorer also supports standard right-click actions for rapid file
 management:
 
 - **Open Preview**: Opens a read-only plaintext viewer within Wardian for quick inspection of markdown, JSON, or log files.
-- **Open in External App**: Opens the selected file or folder using the configured Explorer editor preference. The default is the operating system's default app for that path. You can switch to VS Code or a custom executable in [Settings](./settings.md).
+- **Open in External App**: Opens the selected folder, or an editor-friendly file, using the configured Explorer editor preference. Binary, media, archive, executable, and document files use the operating system's default handler. You can switch editor-friendly paths to VS Code or a custom executable in [Settings](./settings.md).
 - **Reveal in System Explorer**: Opens your OS file manager (Windows Explorer or macOS Finder) directly to the selected file or folder.
 - **Copy Path**: Copies the absolute path of the file to your clipboard.
 - **Delete**: Permanently removes the file or directory from your disk (requires confirmation).
 
 Agent terminals and the bottom user terminal also make recognized file paths and
 URLs clickable, including links that wrap across terminal rows. File paths use
-the same Explorer external editor preference as **Open in External App**; URLs
-open as URLs. Wardian validates terminal file links before showing them, so
-slash-looking command names or prose fragments are ignored unless they resolve
-to a real file or folder.
+the same type-sensitive behavior as **Open in External App**; URLs open as URLs.
+Wardian validates terminal file links before showing them, so slash-looking
+command names or prose fragments are ignored unless they resolve to a real file
+or folder.
 
 ## Git Status Markers
 
