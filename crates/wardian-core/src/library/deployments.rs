@@ -1,9 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::library::section::{LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE};
-use crate::models::{DeploymentTarget, OrphanDeployment};
+use crate::library::links::{deploy_skill_dir, remove_existing_deployment};
+use crate::library::section::{
+    is_single_normal_component, resolve_entry_path, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE,
+};
+use crate::models::{DeploymentTarget, OrphanDeployment, SkillDeployment};
 
 /// A discovered skill in `library/skills`, keyed by its section-relative
 /// path (e.g. `dev/planner`) so deployed copies/links can be matched back
@@ -197,6 +200,127 @@ pub fn scan_deployments(home: &Path, sources: &[SkillSource]) -> DeploymentScan 
     DeploymentScan { deployments, orphans }
 }
 
+/// The final path component of a section-relative skill path, used as the
+/// deployed skill directory's name (e.g. `dev/planner` -> `planner`).
+fn skill_name_from_rel(rel: &str) -> String {
+    Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Deploy a single library skill to a single target. Port of
+/// `deploy_skill_from_library` from `src-tauri/src/commands/library.rs`,
+/// minus the Tauri plumbing. Returns `true` when the deployment fell back
+/// to a copy (and wrote the `.wardian-skill-source` marker) rather than a
+/// live link.
+pub fn deploy_skill(
+    home: &Path,
+    source_rel: &str,
+    target_type: &str,
+    target_id: &str,
+) -> Result<bool, String> {
+    if !is_single_normal_component(target_id) {
+        return Err(format!("Invalid target id: {target_id}"));
+    }
+
+    let src_dir = resolve_entry_path(home, LibrarySectionId::Skills, source_rel)?;
+    if !src_dir.exists() || !src_dir.is_dir() {
+        return Err(format!(
+            "Skill source not found or is not a directory: {src_dir:?}"
+        ));
+    }
+
+    let rel_norm = source_rel.replace('\\', "/");
+    let target_skills_dir = get_target_skills_dir(home, target_type, target_id)?;
+    let dst_dir = target_skills_dir.join(skill_name_from_rel(&rel_norm));
+
+    let copied = deploy_skill_dir(&src_dir, &dst_dir).map_err(|e| e.to_string())?;
+    if copied {
+        fs::write(dst_dir.join(DEPLOYED_SKILL_SOURCE_FILE), &rel_norm).map_err(|e| e.to_string())?;
+    }
+    Ok(copied)
+}
+
+/// Remove one deployed skill directory from one target.
+pub fn remove_deployed_skill(
+    home: &Path,
+    target_type: &str,
+    target_id: &str,
+    skill_name: &str,
+) -> Result<(), String> {
+    if !is_single_normal_component(target_id) {
+        return Err(format!("Invalid target id: {target_id}"));
+    }
+    if !is_single_normal_component(skill_name) {
+        return Err(format!("Invalid skill name: {skill_name}"));
+    }
+    let skills_dir = get_target_skills_dir(home, target_type, target_id)?;
+    remove_existing_deployment(&skills_dir.join(skill_name)).map_err(|e| e.to_string())
+}
+
+/// Result of reconciling a skill's deployed targets against a desired set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetDeploymentsOutcome {
+    pub added: u32,
+    pub removed: u32,
+    pub copied_fallbacks: u32,
+}
+
+/// Reconcile a single skill's deployments against a desired target set:
+/// deploy to every target in `desired` that isn't already deployed, and
+/// remove every currently-deployed target that isn't in `desired`.
+/// Targets are compared as `(target_type, target_id)` pairs, so this is
+/// idempotent when the desired set already matches reality.
+pub fn set_skill_deployments(
+    home: &Path,
+    source_rel: &str,
+    desired: &[SkillDeployment],
+) -> Result<SetDeploymentsOutcome, String> {
+    let rel_norm = source_rel.replace('\\', "/");
+    let skill_name = skill_name_from_rel(&rel_norm);
+
+    let sources = collect_skill_sources(home);
+    let scan = scan_deployments(home, &sources);
+    let current = scan
+        .deployments
+        .get(rel_norm.as_str())
+        .cloned()
+        .unwrap_or_default();
+
+    let desired_set: HashSet<(String, String)> = desired
+        .iter()
+        .map(|d| (d.target_type.clone(), d.target_id.clone()))
+        .collect();
+    let current_set: HashSet<(String, String)> = current
+        .iter()
+        .map(|t| (t.target_type.clone(), t.target_id.clone()))
+        .collect();
+
+    let mut outcome = SetDeploymentsOutcome::default();
+
+    for target in &current {
+        let key = (target.target_type.clone(), target.target_id.clone());
+        if !desired_set.contains(&key) {
+            remove_deployed_skill(home, &target.target_type, &target.target_id, &skill_name)?;
+            outcome.removed += 1;
+        }
+    }
+
+    for target in desired {
+        let key = (target.target_type.clone(), target.target_id.clone());
+        if !current_set.contains(&key) {
+            let copied = deploy_skill(home, &rel_norm, &target.target_type, &target.target_id)?;
+            outcome.added += 1;
+            if copied {
+                outcome.copied_fallbacks += 1;
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +385,35 @@ mod tests {
         assert!(!scan.deployments.contains_key("group-a/planner"));
         assert!(!scan.deployments.contains_key("group-b/planner"));
         assert_eq!(scan.orphans.len(), 1, "ambiguous copy stays orphaned");
+    }
+
+    #[test]
+    fn set_deployments_diffs_adds_and_removes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        let src = home.join("library/skills/planner");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("SKILL.md"), "v1").unwrap();
+
+        let desired = vec![
+            SkillDeployment { target_type: "class".into(), target_id: "Architect".into() },
+            SkillDeployment { target_type: "user".into(), target_id: "global".into() },
+        ];
+        let outcome = set_skill_deployments(home, "planner", &desired).unwrap();
+        assert_eq!(outcome.added, 2);
+        assert!(home.join("classes/Architect/.agents/skills/planner").join("SKILL.md").exists());
+        assert!(home.join("common/.agents/skills/planner").join("SKILL.md").exists());
+
+        // Narrow to just the class: user deployment is removed, class untouched.
+        let narrowed = vec![SkillDeployment { target_type: "class".into(), target_id: "Architect".into() }];
+        let outcome = set_skill_deployments(home, "planner", &narrowed).unwrap();
+        assert_eq!(outcome.added, 0);
+        assert_eq!(outcome.removed, 1);
+        assert!(!home.join("common/.agents/skills/planner").exists());
+        assert!(home.join("classes/Architect/.agents/skills/planner").exists());
+
+        // Idempotent.
+        let outcome = set_skill_deployments(home, "planner", &narrowed).unwrap();
+        assert_eq!((outcome.added, outcome.removed), (0, 0));
     }
 }

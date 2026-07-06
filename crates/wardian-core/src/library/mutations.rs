@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::library::deployments::{collect_skill_sources, get_target_skills_dir, scan_deployments};
 use crate::library::links::{create_directory_link, remove_existing_deployment};
 use crate::library::metadata::MetadataStore;
-use crate::library::section::{resolve_entry_path, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE};
+use crate::library::section::{
+    is_single_normal_component, resolve_entry_path, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE,
+};
 use crate::models::LibraryItemMetadata;
 
 /// Maps section + relative path to the actual content file path.
@@ -220,24 +222,6 @@ pub fn delete_entry(home: &Path, section: LibrarySectionId, rel: &str) -> Result
     let mut store = MetadataStore::load(home);
     store.remove(&format!("{}/{rel_norm}", section.as_str()));
     store.save(home)
-}
-
-/// True if `name` is exactly one normal path component: no empty string,
-/// no `.`/`..`, no separators, no root/prefix (e.g. Windows `C:`), and no
-/// trailing-separator padding that would otherwise normalize away.
-///
-/// This is deliberately structural rather than character-based: a
-/// character blocklist (rejecting `/`, `\`, `.`, `..`) still lets strings
-/// like `"C:"` or `"C:evil"` through, and on Windows `PathBuf::join`
-/// treats a joined path with a drive prefix as an absolute replacement of
-/// the base rather than a sub-path, letting the join escape the intended
-/// directory entirely.
-fn is_single_normal_component(name: &str) -> bool {
-    let mut components = std::path::Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
-    )
 }
 
 /// Remove a deployed skill directory that no longer resolves to any

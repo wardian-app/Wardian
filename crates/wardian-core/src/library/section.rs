@@ -53,6 +53,24 @@ impl LibrarySectionId {
     }
 }
 
+/// True if `name` is exactly one normal path component: no empty string,
+/// no `.`/`..`, no separators, no root/prefix (e.g. Windows `C:`), and no
+/// trailing-separator padding that would otherwise normalize away.
+///
+/// This is deliberately structural rather than character-based: a
+/// character blocklist (rejecting `/`, `\`, `.`, `..`) still lets strings
+/// like `"C:"` or `"C:evil"` through, and on Windows `PathBuf::join`
+/// treats a joined path with a drive prefix as an absolute replacement of
+/// the base rather than a sub-path, letting the join escape the intended
+/// directory entirely.
+pub fn is_single_normal_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
+    )
+}
+
 /// Resolve a section-relative entry path, rejecting traversal, absolute
 /// paths, empty paths, reserved file names, and the stubbed MCP section.
 pub fn resolve_entry_path(
