@@ -146,6 +146,88 @@ describe('useLibraryStore', () => {
     expect(invoke).toHaveBeenNthCalledWith(2, 'get_library_index');
   });
 
+  it('markEditorDirty sets _editorDirty without touching selectedContent', () => {
+    useLibraryStore.getState().markEditorDirty(true);
+    expect(useLibraryStore.getState()._editorDirty).toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+    useLibraryStore.getState().markEditorDirty(false);
+    expect(useLibraryStore.getState()._editorDirty).toBe(false);
+  });
+
+  describe('mutation error handling', () => {
+    it('saveItem sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('save failed'));
+      await expect(
+        useLibraryStore.getState().saveItem('skills', 'dev/planner', 'body'),
+      ).rejects.toThrow('save failed');
+      expect(useLibraryStore.getState().error).toBe('save failed');
+    });
+
+    it('updateMetadata sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('update failed'));
+      await expect(
+        useLibraryStore.getState().updateMetadata('skills/dev/planner', {
+          id: 'uuid-1',
+          tags: [],
+          is_starred: false,
+        }),
+      ).rejects.toThrow('update failed');
+      expect(useLibraryStore.getState().error).toBe('update failed');
+    });
+
+    it('createFolder sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('create failed'));
+      await expect(
+        useLibraryStore.getState().createFolder('prompts', 'dev/new-folder'),
+      ).rejects.toThrow('create failed');
+      expect(useLibraryStore.getState().error).toBe('create failed');
+    });
+
+    it('renameEntry sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('rename failed'));
+      await expect(
+        useLibraryStore.getState().renameEntry('skills', 'dev/planner', 'dev/planner-2'),
+      ).rejects.toThrow('rename failed');
+      expect(useLibraryStore.getState().error).toBe('rename failed');
+    });
+
+    it('deleteEntry sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('delete failed'));
+      await expect(
+        useLibraryStore.getState().deleteEntry('skills', 'dev/planner'),
+      ).rejects.toThrow('delete failed');
+      expect(useLibraryStore.getState().error).toBe('delete failed');
+    });
+
+    it('setSkillDeployments sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('deploy failed'));
+      await expect(
+        useLibraryStore
+          .getState()
+          .setSkillDeployments('dev/planner', [{ target_type: 'class', target_id: 'Architect' }]),
+      ).rejects.toThrow('deploy failed');
+      expect(useLibraryStore.getState().error).toBe('deploy failed');
+    });
+
+    it('removeOrphan sets error state and rejects on failure', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('remove failed'));
+      await expect(
+        useLibraryStore
+          .getState()
+          .removeOrphan({ target_type: 'agent', target_id: 'agent-1', skill_name: 'planner' }),
+      ).rejects.toThrow('remove failed');
+      expect(useLibraryStore.getState().error).toBe('remove failed');
+    });
+
+    it('does not refetch the index when the mutation itself fails', async () => {
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('save failed'));
+      await expect(
+        useLibraryStore.getState().saveItem('skills', 'dev/planner', 'body'),
+      ).rejects.toThrow('save failed');
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('external change with dirty editor sets contentStale instead of reloading content', async () => {
     let handler: ((event: { payload: { library_type: string } }) => void) | undefined;
     mockListen.mockImplementation(async (_event, cb) => {

@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { LibraryIndex, LibraryItemMetadata, LibrarySectionId, OrphanDeployment } from '../types';
+import {
+  LibraryIndex,
+  LibraryItemMetadata,
+  LibrarySectionId,
+  OrphanDeployment,
+  SkillDeployment,
+} from '../types';
 
 // The backend only exposes a single logical watch type, `"library"`, which
 // covers everything under `library/` (skills, prompts, workflows) plus
@@ -74,6 +80,9 @@ interface LibraryState {
   _editorDirty: boolean;
   setActiveSection: (s: LibrarySectionId) => void;
   select: (entryRef: string | null, opts?: { editorDirty?: boolean }) => Promise<void>;
+  /** Cheap way for a future editor to flag dirty state without forcing a
+   * redundant `read_library_item` round-trip via `select()`. */
+  markEditorDirty: (dirty: boolean) => void;
   toggleFolder: (key: string) => void;
   setSearchQuery: (q: string) => void;
   setShowStarredOnly: (v: boolean) => void;
@@ -85,10 +94,7 @@ interface LibraryState {
   createFolder: (section: LibrarySectionId, path: string) => Promise<void>;
   renameEntry: (section: LibrarySectionId, fromPath: string, toPath: string) => Promise<void>;
   deleteEntry: (section: LibrarySectionId, path: string) => Promise<void>;
-  setSkillDeployments: (
-    sourcePath: string,
-    targets: { target_type: string; target_id: string }[],
-  ) => Promise<void>;
+  setSkillDeployments: (sourcePath: string, targets: SkillDeployment[]) => Promise<void>;
   removeOrphan: (o: OrphanDeployment) => Promise<void>;
   openLibraryFolder: (section: LibrarySectionId, path?: string) => Promise<void>;
 }
@@ -126,6 +132,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       set({ error: errorMessage(e) });
     }
   },
+
+  markEditorDirty: (dirty) => set({ _editorDirty: dirty }),
 
   toggleFolder: (key) => {
     set((s) => {
@@ -216,42 +224,84 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   saveItem: async (section, path, content) => {
-    await invoke('save_library_item', { section, path, content });
-    await get().fetchIndex();
+    try {
+      await invoke('save_library_item', { section, path, content });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to save library item:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   updateMetadata: async (entryRef, metadata) => {
-    await invoke('update_library_metadata', { entryRef, metadata });
-    await get().fetchIndex();
+    try {
+      await invoke('update_library_metadata', { entryRef, metadata });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to update library metadata:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   createFolder: async (section, path) => {
-    await invoke('create_library_folder', { section, path });
-    await get().fetchIndex();
+    try {
+      await invoke('create_library_folder', { section, path });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to create library folder:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   renameEntry: async (section, fromPath, toPath) => {
-    await invoke('rename_library_entry', { section, fromPath, toPath });
-    await get().fetchIndex();
+    try {
+      await invoke('rename_library_entry', { section, fromPath, toPath });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to rename library entry:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   deleteEntry: async (section, path) => {
-    await invoke('delete_library_entry', { section, path });
-    await get().fetchIndex();
+    try {
+      await invoke('delete_library_entry', { section, path });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to delete library entry:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   setSkillDeployments: async (sourcePath, targets) => {
-    await invoke('set_skill_deployments', { sourcePath, targets });
-    await get().fetchIndex();
+    try {
+      await invoke('set_skill_deployments', { sourcePath, targets });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to set skill deployments:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   removeOrphan: async (o) => {
-    await invoke('remove_orphan_deployment', {
-      targetType: o.target_type,
-      targetId: o.target_id,
-      skillName: o.skill_name,
-    });
-    await get().fetchIndex();
+    try {
+      await invoke('remove_orphan_deployment', {
+        targetType: o.target_type,
+        targetId: o.target_id,
+        skillName: o.skill_name,
+      });
+      await get().fetchIndex();
+    } catch (e) {
+      console.error('Failed to remove orphan deployment:', e);
+      set({ error: errorMessage(e) });
+      throw e;
+    }
   },
 
   openLibraryFolder: async (section, path) => {

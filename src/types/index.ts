@@ -388,6 +388,11 @@ export interface OrphanDeployment {
     skill_name: string;
 }
 
+export interface SkillDeployment {
+    target_type: string;
+    target_id: string;
+}
+
 export interface LibraryIndex {
     sections: Record<LibrarySectionId, LibrarySection>;
     deployments: Record<string, DeploymentTarget[]>;
