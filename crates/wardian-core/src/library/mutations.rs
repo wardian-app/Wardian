@@ -45,20 +45,31 @@ pub fn save_item(home: &Path, section: LibrarySectionId, rel: &str, content: &st
 }
 
 /// Create a folder for a library item.
-/// Errors for Classes (flat) and Mcps (stubbed).
+/// Errors for Classes (flat) and Mcps (stubbed, via `resolve_entry_path`).
 pub fn create_folder(home: &Path, section: LibrarySectionId, rel: &str) -> Result<(), String> {
     if section == LibrarySectionId::Classes {
         return Err("Classes section is flat; cannot create folders".to_string());
-    }
-    if section == LibrarySectionId::Mcps {
-        return Err("The MCP section is not yet writable".to_string());
     }
     let path = resolve_entry_path(home, section, rel)?;
     fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
 
 /// Update metadata for a library item.
-pub fn update_metadata(home: &Path, entry_ref: &str, metadata: LibraryItemMetadata) -> Result<(), String> {
+/// `entry_ref` must be section-qualified (e.g. `skills/dev/planner`) and
+/// resolve to a valid, non-traversing path within that section; this keeps
+/// `MetadataStore`'s legacy-key migration from having to guess at malformed
+/// or unqualified keys on the next load.
+pub fn update_metadata(
+    home: &Path,
+    entry_ref: &str,
+    metadata: LibraryItemMetadata,
+) -> Result<(), String> {
+    let (section_name, rel) = entry_ref
+        .split_once('/')
+        .ok_or_else(|| format!("Entry ref must be section-qualified: {entry_ref}"))?;
+    let section = LibrarySectionId::parse(section_name)
+        .ok_or_else(|| format!("Unknown library section in entry ref: {entry_ref}"))?;
+    resolve_entry_path(home, section, rel)?;
     let mut store = MetadataStore::load(home);
     store.set(entry_ref.to_string(), metadata);
     store.save(home)
@@ -90,6 +101,7 @@ mod tests {
         create_folder(temp.path(), LibrarySectionId::Skills, "dev/tools").unwrap();
         assert!(temp.path().join("library/skills/dev/tools").is_dir());
         assert!(create_folder(temp.path(), LibrarySectionId::Classes, "sub").is_err());
+        assert!(create_folder(temp.path(), LibrarySectionId::Mcps, "sub").is_err());
     }
 
     #[test]
@@ -97,5 +109,36 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp");
         assert!(save_item(temp.path(), LibrarySectionId::Prompts, "../evil.md", "x").is_err());
         assert!(read_item(temp.path(), LibrarySectionId::Prompts, "../../etc/passwd").is_err());
+    }
+
+    fn meta(id: &str) -> LibraryItemMetadata {
+        LibraryItemMetadata { id: id.to_string(), tags: vec![], is_starred: true, last_used: None }
+    }
+
+    #[test]
+    fn update_metadata_round_trips() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        update_metadata(home, "skills/dev/planner", meta("m1")).unwrap();
+        let store = MetadataStore::load(home);
+        assert_eq!(store.get("skills/dev/planner").expect("stored").id, "m1");
+    }
+
+    #[test]
+    fn update_metadata_rejects_unqualified_ref() {
+        let temp = tempfile::tempdir().expect("temp");
+        assert!(update_metadata(temp.path(), "planner", meta("m1")).is_err());
+    }
+
+    #[test]
+    fn update_metadata_rejects_unknown_section() {
+        let temp = tempfile::tempdir().expect("temp");
+        assert!(update_metadata(temp.path(), "plugins/x", meta("m1")).is_err());
+    }
+
+    #[test]
+    fn update_metadata_rejects_traversal() {
+        let temp = tempfile::tempdir().expect("temp");
+        assert!(update_metadata(temp.path(), "skills/../evil", meta("m1")).is_err());
     }
 }
