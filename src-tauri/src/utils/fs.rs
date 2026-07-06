@@ -121,7 +121,7 @@ pub fn prepare_provider_habitat(
 
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
-        ensure_codex_home_projection(&habitat_root)?;
+        ensure_codex_home_projection(&habitat_root, workspace_root)?;
     }
 
     Ok(Some(habitat_root))
@@ -510,13 +510,25 @@ fn projected_link_matches_target(link: &std::path::Path, target: &std::path::Pat
     }
 }
 
-fn ensure_codex_home_projection(habitat_root: &std::path::Path) -> Result<(), String> {
+fn ensure_codex_home_projection(
+    habitat_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> Result<(), String> {
     let real_codex_home = dirs::home_dir()
         .ok_or("Could not find user home directory")?
         .join(".codex");
     let projected_home = habitat_codex_home(habitat_root);
     let wardian_skills = habitat_root.join(".agents").join("skills");
-    sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)
+    sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
+
+    if crate::utils::load_codex_runtime_policy()
+        .map(|policy| policy.trust_workspaces)
+        .unwrap_or(false)
+    {
+        trust_codex_workspace_in_home(&projected_home, workspace_root)?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn sync_codex_agent_home(
@@ -529,8 +541,11 @@ pub(crate) fn sync_codex_agent_home(
 
     for shared_name in CODEX_SHARED_HOME_FILES {
         let source = real_codex_home.join(shared_name);
+        let target = projected_home.join(shared_name);
         if source.exists() && source.is_file() {
-            project_file(&source, &projected_home.join(shared_name))?;
+            project_file(&source, &target)?;
+        } else if *shared_name == "config.toml" {
+            remove_existing_projection_path(&target)?;
         }
     }
 
@@ -560,6 +575,51 @@ pub(crate) fn sync_codex_agent_home(
 }
 
 const CODEX_SHARED_HOME_FILES: &[&str] = &["auth.json", "config.toml", "cap_sid"];
+
+pub(crate) fn trust_codex_workspace_in_home(
+    codex_home: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(codex_home).map_err(|e| e.to_string())?;
+    let config_path = codex_home.join("config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut document = content
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("Could not parse Codex config.toml: {error}"))?;
+    let project_key = codex_trusted_project_key(workspace_root);
+    document["projects"][project_key.as_str()]["trust_level"] = toml_edit::value("trusted");
+    std::fs::write(config_path, document.to_string()).map_err(|e| e.to_string())
+}
+
+pub(crate) fn codex_trusted_project_key(folder: &std::path::Path) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path_text = folder
+            .canonicalize()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| folder.to_string_lossy().into_owned());
+
+        strip_windows_verbatim_prefix(&path_text).replace('/', "\\")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        folder.to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{stripped}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+}
 
 #[cfg(windows)]
 const CODEX_WINDOWS_SHARED_SANDBOX_DIRS: &[&str] = &[".sandbox-secrets", ".sandbox-bin"];
@@ -1052,12 +1112,12 @@ pub fn validate_workspace_path(path: &std::path::Path) -> Result<std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        build_habitat_skill_projection, build_opencode_runtime_config, create_directory_link,
-        ensure_claude_permission_hook, habitat_root_for_session,
-        project_antigravity_include_directories, projected_link_matches_target,
-        provider_uses_projected_workspace, resolve_opencode_runtime_roots,
-        resolve_system_include_directories, sync_codex_agent_home, sync_opencode_config_dir,
-        write_habitat_instruction_files,
+        build_habitat_skill_projection, build_opencode_runtime_config, codex_trusted_project_key,
+        create_directory_link, ensure_claude_permission_hook, habitat_root_for_session,
+        prepare_provider_habitat, project_antigravity_include_directories,
+        projected_link_matches_target, provider_uses_projected_workspace,
+        resolve_opencode_runtime_roots, resolve_system_include_directories, sync_codex_agent_home,
+        sync_opencode_config_dir, write_habitat_instruction_files,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1186,6 +1246,73 @@ mod tests {
         assert!(!projected_home.join("logs_2.sqlite-wal").exists());
         assert!(!projected_home.join("sandbox.log").exists());
         assert!(!projected_home.join("sessions").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_habitat_projection_writes_trusted_workspace_when_policy_enabled() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let root = unique_temp_dir("codex-home-trusted-workspace");
+        let wardian_home = root.join(".wardian");
+        let user_home = root.join("user-home");
+        let workspace = root.join("RestTrace");
+        let previous_wardian_home = std::env::var_os("WARDIAN_HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        let previous_home = std::env::var_os("HOME");
+
+        std::fs::create_dir_all(wardian_home.join("settings")).expect("create settings");
+        std::fs::create_dir_all(user_home.join(".codex")).expect("create real codex home");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(
+            user_home.join(".codex").join("config.toml"),
+            "model = \"gpt-5\"\n",
+        )
+        .expect("write config");
+        std::fs::write(
+            wardian_home.join("settings").join("shell.json"),
+            r#"{"schema_version":2,"overrides":{"codex_runtime_policy":{"trust_workspaces":true}}}"#,
+        )
+        .expect("write shell settings");
+
+        unsafe {
+            std::env::set_var("WARDIAN_HOME", &wardian_home);
+            std::env::set_var("USERPROFILE", &user_home);
+            std::env::set_var("HOME", &user_home);
+        }
+
+        let habitat_root = prepare_provider_habitat("codex", &workspace, "Coder", Some("agent-1"))
+            .expect("prepare codex habitat")
+            .expect("codex habitat root");
+        let projected_config =
+            std::fs::read_to_string(habitat_root.join(".codex").join("config.toml"))
+                .expect("read projected codex config");
+        let trusted_key = codex_trusted_project_key(&workspace);
+        let projected_document = projected_config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse projected config");
+
+        unsafe {
+            match previous_wardian_home {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+            match previous_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(
+            projected_document["projects"][trusted_key.as_str()]["trust_level"].as_str(),
+            Some("trusted"),
+            "projected Codex config should contain a trusted project table: {projected_config}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1326,6 +1453,28 @@ mod tests {
             std::fs::read_to_string(projected_home.join("auth.json")).expect("read projected auth"),
             "projected auth"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_removes_stale_projected_config_when_real_config_is_absent() {
+        let root = unique_temp_dir("codex-home-stale-config");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_home).expect("create projected codex home");
+        std::fs::write(
+            projected_home.join("config.toml"),
+            "[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n",
+        )
+        .expect("write stale projected config");
+
+        sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
+            .expect("sync codex agent home");
+
+        assert!(!projected_home.join("config.toml").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
