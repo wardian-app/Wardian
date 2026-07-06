@@ -14,4 +14,7 @@ pub use index::build_library_index;
 pub use section::{resolve_entry_path, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE};
 pub use links::{create_directory_link, copy_dir_all, deploy_skill_dir, remove_existing_deployment};
 pub use metadata::MetadataStore;
-pub use mutations::{read_item, save_item, create_folder, update_metadata};
+pub use mutations::{
+    create_folder, delete_entry, read_item, remove_orphan_deployment, rename_entry, save_item,
+    update_metadata,
+};
