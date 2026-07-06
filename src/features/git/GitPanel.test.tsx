@@ -260,7 +260,7 @@ describe("GitPanel", () => {
     renderGitPanel();
 
     expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toHaveClass("text-sm");
-    expect(screen.getByText("Staged changes")).toBeInTheDocument();
+    expect(await screen.findByText("Staged changes")).toBeInTheDocument();
     expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("changed.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();

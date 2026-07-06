@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -88,6 +88,77 @@ describe('ExplorerPanel', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('reveal_in_explorer', {
         path: 'C:\\Users\\test\\.wardian',
+      });
+    });
+  });
+
+  it('places root action buttons in the Explorer title row', async () => {
+    useSettingsStore.setState({
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    const heading = screen.getByRole('heading', { name: 'Explorer', level: 2 });
+    const titleRow = heading.parentElement;
+    expect(titleRow).not.toBeNull();
+
+    await waitFor(() => {
+      expect(within(titleRow as HTMLElement).getByRole('button', { name: 'Open in local file system' })).toBeInTheDocument();
+      expect(within(titleRow as HTMLElement).getByRole('button', { name: 'Open root in VS Code' })).toBeInTheDocument();
+    });
+
+    const pathRow = screen.getByTitle('C:\\Users\\test\\repo').parentElement;
+    expect(pathRow).not.toBeNull();
+    expect(within(pathRow as HTMLElement).queryByRole('button', { name: 'Open in local file system' })).not.toBeInTheDocument();
+    expect(within(pathRow as HTMLElement).queryByRole('button', { name: 'Open root in VS Code' })).not.toBeInTheDocument();
+  });
+
+  it('hides the root external action when it would duplicate system file manager behavior', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    await screen.findByRole('button', { name: 'Open in local file system' });
+    expect(screen.queryByRole('button', {
+      name: 'Choose VS Code or a custom external app in Settings to open the root externally',
+    })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open root in/i })).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith('open_in_external_editor', expect.anything());
+  });
+
+  it('opens the current explorer root in the configured external editor', async () => {
+    useSettingsStore.setState({
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Open root in VS Code' }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_external_editor', {
+        path: 'C:\\Users\\test\\repo',
+        editor: {
+          external_editor: 'vscode',
+          external_editor_custom_executable: null,
+        },
       });
     });
   });

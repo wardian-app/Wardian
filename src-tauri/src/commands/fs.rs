@@ -357,13 +357,14 @@ fn external_editor_launch(
     editor: &ExternalEditorLaunchSettings,
 ) -> Result<ExternalEditorLaunchSpec, String> {
     let path_arg = path.to_string_lossy().into_owned();
+    let use_configured_editor = should_use_configured_external_editor(path);
     match editor.external_editor.trim() {
-        "vscode" => Ok(ExternalEditorLaunchSpec {
+        "vscode" if use_configured_editor => Ok(ExternalEditorLaunchSpec {
             program: vscode_command().to_string(),
             args: vec![path_arg],
             use_silent_process_policy: cfg!(target_os = "windows"),
         }),
-        "custom" => {
+        "custom" if use_configured_editor => {
             let program = editor
                 .external_editor_custom_executable
                 .as_deref()
@@ -378,6 +379,74 @@ fn external_editor_launch(
         }
         _ => Ok(system_default_open_launch(path_arg)),
     }
+}
+
+fn should_use_configured_external_editor(path: &Path) -> bool {
+    if path.is_dir() {
+        return true;
+    }
+
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return true;
+    };
+
+    !is_system_default_file_extension(extension)
+}
+
+fn is_system_default_file_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "7z" | "app"
+            | "avi"
+            | "bin"
+            | "bmp"
+            | "bz2"
+            | "class"
+            | "db"
+            | "deb"
+            | "dll"
+            | "dmg"
+            | "doc"
+            | "docx"
+            | "dylib"
+            | "exe"
+            | "flac"
+            | "gif"
+            | "gz"
+            | "icns"
+            | "ico"
+            | "jar"
+            | "jpeg"
+            | "jpg"
+            | "m4a"
+            | "mkv"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "msi"
+            | "ogg"
+            | "pdf"
+            | "pkg"
+            | "png"
+            | "ppt"
+            | "pptx"
+            | "rar"
+            | "rpm"
+            | "sqlite"
+            | "so"
+            | "tar"
+            | "tgz"
+            | "tif"
+            | "tiff"
+            | "wasm"
+            | "wav"
+            | "webm"
+            | "webp"
+            | "xls"
+            | "xlsx"
+            | "xz"
+            | "zip"
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -594,6 +663,54 @@ mod tests {
 
         assert!(launch.program == "code" || launch.program == "code.cmd");
         assert_eq!(launch.args, vec!["/tmp/project/notes.md".to_string()]);
+    }
+
+    #[test]
+    fn external_editor_launch_uses_system_default_for_executable_files() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/tool.exe"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "vscode".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert!(launch.program != "code" && launch.program != "code.cmd");
+        assert!(launch.args.contains(&"/tmp/project/tool.exe".to_string()));
+    }
+
+    #[test]
+    fn external_editor_launch_uses_system_default_for_binary_files_without_custom_editor() {
+        let launch = external_editor_launch(
+            Path::new("/tmp/project/archive.zip"),
+            &ExternalEditorLaunchSettings {
+                external_editor: "custom".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert_ne!(launch.program, "");
+        assert!(launch
+            .args
+            .contains(&"/tmp/project/archive.zip".to_string()));
+    }
+
+    #[test]
+    fn external_editor_launch_keeps_configured_editor_for_directories() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let launch = external_editor_launch(
+            temp.path(),
+            &ExternalEditorLaunchSettings {
+                external_editor: "vscode".to_string(),
+                external_editor_custom_executable: None,
+            },
+        )
+        .expect("launch spec");
+
+        assert!(launch.program == "code" || launch.program == "code.cmd");
+        assert_eq!(launch.args, vec![temp.path().to_string_lossy().to_string()]);
     }
 
     #[test]
