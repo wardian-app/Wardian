@@ -91,6 +91,16 @@ fn last_component(rel: &str) -> String {
 ///
 /// Renaming Classes is rejected: class identity is referenced by agents
 /// elsewhere, so it's out of scope here.
+///
+/// Recovery semantics: the source rename and metadata key migration happen
+/// first and atomically-in-effect from the caller's perspective — once
+/// either has happened, both have. Re-linking/re-marking deployed copies is
+/// best-effort after that: each target is attempted independently, and a
+/// failure on one target does not stop the others. On partial failure this
+/// returns `Err` describing which targets failed, but the source has
+/// already moved and metadata already points at the new location; failed
+/// targets are left as stale deployments of the old name and can be
+/// repaired by re-deploying the skill to those targets.
 pub fn rename_entry(
     home: &Path,
     section: LibrarySectionId,
@@ -124,38 +134,58 @@ pub fn rename_entry(
     }
     fs::rename(&from_path, &to_path).map_err(|e| e.to_string())?;
 
+    // Metadata migration happens immediately after the source actually
+    // moves, so it always tracks reality even if re-linking deployments
+    // below partially fails.
+    let mut store = MetadataStore::load(home);
+    store.rename(
+        &format!("{}/{from_norm}", section.as_str()),
+        &format!("{}/{to_norm}", section.as_str()),
+    );
+    store.save(home)?;
+
     if section == LibrarySectionId::Skills {
         // The deployed directory name always mirrors the source's own
         // file_name: `planner` -> `dev/planner` keeps the name `planner`,
         // but `planner` -> `strategist` changes it.
         let old_name = last_component(&from_norm);
         let new_name = last_component(&to_norm);
+        let mut errors: Vec<String> = Vec::new();
         for target in &deployment_targets {
-            let skills_dir = get_target_skills_dir(home, &target.target_type, &target.target_id)?;
-            let old_target_path = skills_dir.join(&old_name);
-            let new_target_path = skills_dir.join(&new_name);
-            if target.linked {
-                remove_existing_deployment(&old_target_path).map_err(|e| e.to_string())?;
-                create_directory_link(&to_path, &new_target_path).map_err(|e| e.to_string())?;
-            } else {
-                if old_target_path != new_target_path {
-                    if let Some(parent) = new_target_path.parent() {
-                        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let result = (|| -> Result<(), String> {
+                let skills_dir =
+                    get_target_skills_dir(home, &target.target_type, &target.target_id)?;
+                let old_target_path = skills_dir.join(&old_name);
+                let new_target_path = skills_dir.join(&new_name);
+                if target.linked {
+                    remove_existing_deployment(&old_target_path).map_err(|e| e.to_string())?;
+                    create_directory_link(&to_path, &new_target_path).map_err(|e| e.to_string())?;
+                } else {
+                    if old_target_path != new_target_path {
+                        if let Some(parent) = new_target_path.parent() {
+                            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                        }
+                        fs::rename(&old_target_path, &new_target_path).map_err(|e| e.to_string())?;
                     }
-                    fs::rename(&old_target_path, &new_target_path).map_err(|e| e.to_string())?;
+                    fs::write(new_target_path.join(DEPLOYED_SKILL_SOURCE_FILE), &to_norm)
+                        .map_err(|e| e.to_string())?;
                 }
-                fs::write(new_target_path.join(DEPLOYED_SKILL_SOURCE_FILE), &to_norm)
-                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                errors.push(format!("{}/{}: {e}", target.target_type, target.target_id));
             }
+        }
+        if !errors.is_empty() {
+            return Err(format!(
+                "Skill moved, but {} deployment(s) could not be updated: {}",
+                errors.len(),
+                errors.join("; ")
+            ));
         }
     }
 
-    let mut store = MetadataStore::load(home);
-    store.rename(
-        &format!("{}/{from_norm}", section.as_str()),
-        &format!("{}/{to_norm}", section.as_str()),
-    );
-    store.save(home)
+    Ok(())
 }
 
 /// Delete a library entry. For skills, every deployment target is removed
@@ -192,6 +222,24 @@ pub fn delete_entry(home: &Path, section: LibrarySectionId, rel: &str) -> Result
     store.save(home)
 }
 
+/// True if `name` is exactly one normal path component: no empty string,
+/// no `.`/`..`, no separators, no root/prefix (e.g. Windows `C:`), and no
+/// trailing-separator padding that would otherwise normalize away.
+///
+/// This is deliberately structural rather than character-based: a
+/// character blocklist (rejecting `/`, `\`, `.`, `..`) still lets strings
+/// like `"C:"` or `"C:evil"` through, and on Windows `PathBuf::join`
+/// treats a joined path with a drive prefix as an absolute replacement of
+/// the base rather than a sub-path, letting the join escape the intended
+/// directory entirely.
+fn is_single_normal_component(name: &str) -> bool {
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
+    )
+}
+
 /// Remove a deployed skill directory that no longer resolves to any
 /// library source (an orphan reported by `scan_deployments`).
 pub fn remove_orphan_deployment(
@@ -200,12 +248,7 @@ pub fn remove_orphan_deployment(
     target_id: &str,
     skill_name: &str,
 ) -> Result<(), String> {
-    if skill_name.is_empty()
-        || skill_name == "."
-        || skill_name == ".."
-        || skill_name.contains('/')
-        || skill_name.contains('\\')
-    {
+    if !is_single_normal_component(skill_name) {
         return Err(format!("Invalid skill name: {skill_name}"));
     }
     let skills_dir = get_target_skills_dir(home, target_type, target_id)?;
@@ -322,5 +365,43 @@ mod tests {
         delete_entry(home, LibrarySectionId::Skills, "planner").unwrap();
         assert!(!src.exists());
         assert!(!linked.exists(), "no dangling deployment");
+    }
+
+    #[test]
+    fn remove_orphan_deployment_deletes_the_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        let orphan = home.join("common/.agents/skills/ghost");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("SKILL.md"), "stale").unwrap();
+
+        remove_orphan_deployment(home, "user", "global", "ghost").unwrap();
+
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn remove_orphan_deployment_rejects_invalid_names() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+
+        assert!(remove_orphan_deployment(home, "user", "global", "").is_err());
+        assert!(remove_orphan_deployment(home, "user", "global", ".").is_err());
+        assert!(remove_orphan_deployment(home, "user", "global", "..").is_err());
+        assert!(remove_orphan_deployment(home, "user", "global", "a/b").is_err());
+        assert!(remove_orphan_deployment(home, "user", "global", "a\\b").is_err());
+    }
+
+    // On Windows, `Path::components()` parses a leading `C:` as a `Prefix`
+    // component distinct from the rest, so `"C:evil"` fails the single
+    // `Normal` component check and is rejected. On Unix there is no drive
+    // prefix concept, so `"C:evil"` is just an ordinary (if odd) file name
+    // and is a valid single component — this assertion is Windows-only.
+    #[cfg(windows)]
+    #[test]
+    fn remove_orphan_deployment_rejects_windows_drive_prefix() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        assert!(remove_orphan_deployment(home, "user", "global", "C:evil").is_err());
     }
 }
