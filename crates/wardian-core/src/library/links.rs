@@ -89,10 +89,15 @@ where
     }
     match linker(src_dir, dst_dir) {
         Ok(()) => Ok(false),
-        Err(_) => {
-            copy_dir_all(src_dir, dst_dir)?;
-            Ok(true)
-        }
+        Err(link_error) => match copy_dir_all(src_dir, dst_dir) {
+            Ok(()) => Ok(true),
+            Err(copy_error) => {
+                let _ = remove_existing_deployment(dst_dir);
+                Err(io::Error::other(format!(
+                    "link failed ({link_error}); copy fallback failed ({copy_error})"
+                )))
+            }
+        },
     }
 }
 
@@ -161,5 +166,18 @@ mod tests {
         let copied = deploy_skill_dir(&src, &dst).expect("deploy");
         assert!(!copied);
         assert_eq!(fs::read_to_string(dst.join("SKILL.md")).expect("read"), "new");
+    }
+
+    #[test]
+    fn deploy_skill_dir_cleans_up_when_copy_fallback_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let src = temp.path().join("missing-src");
+        let dst = temp.path().join("dst");
+        let err = deploy_skill_dir_with_linker(&src, &dst, |_, _| {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "link denied"))
+        })
+        .expect_err("copy of missing source must fail");
+        assert!(err.to_string().contains("link denied"), "link error preserved: {err}");
+        assert!(!dst.exists(), "partial copy cleaned up");
     }
 }
