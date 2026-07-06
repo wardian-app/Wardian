@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { SectionRail } from '../features/library/SectionRail';
+import { LibraryList } from '../features/library/LibraryList';
 import { LibrarySectionId } from '../types';
 
 interface LibraryViewProps {
@@ -9,10 +10,9 @@ interface LibraryViewProps {
 
 /**
  * Library view shell: SectionRail (section switcher) | LibraryList (rows for
- * the active section) | DetailPane (selected entry). LibraryList and
- * DetailPane are stubbed placeholders here — they land in Tasks 14 and 15.
- * `selectedAgentIds` is threaded through unused for now; it feeds prompt-run
- * wiring in Task 14.
+ * the active section) | DetailPane (selected entry). DetailPane is a stubbed
+ * placeholder here — it lands in Task 15. `selectedAgentIds` is threaded
+ * through unused for now; it feeds prompt-run wiring in the detail pane.
  */
 export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) => {
     void selectedAgentIds;
@@ -108,8 +108,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds }) =>
                     sections={index?.sections ?? null}
                     onSelect={handleSelectSection}
                 />
-                <div data-testid="library-list" className="flex-1 min-w-0 overflow-y-auto">
-                    {/* LibraryList lands in Task 14. */}
+                <div data-testid="library-list" className="flex-1 min-w-0 min-h-0 overflow-hidden">
+                    <LibraryList />
                 </div>
                 <div
                     data-testid="library-detail"

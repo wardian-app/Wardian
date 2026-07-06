@@ -44,6 +44,7 @@ export const SectionRail: React.FC<SectionRailProps> = ({ activeSection, section
                         data-testid={`library-section-${section.id}`}
                         onClick={() => onSelect(section.id)}
                         title={section.label}
+                        aria-current={activeSection === section.id ? 'true' : undefined}
                         className={`flex flex-col items-center gap-1 py-3 w-full border-l-2 transition-colors ${
                             activeSection === section.id
                                 ? 'border-[var(--color-wardian-accent)] text-primary bg-wardian-sidebar-primary'

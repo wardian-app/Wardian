@@ -89,4 +89,11 @@ describe('SectionRail', () => {
     );
     expect(screen.getByTestId('library-section-skills').className).toContain('border-transparent');
   });
+
+  it('marks only the active section with aria-current', () => {
+    render(<SectionRail activeSection="prompts" sections={sections} onSelect={vi.fn()} />);
+
+    expect(screen.getByTestId('library-section-prompts')).toHaveAttribute('aria-current', 'true');
+    expect(screen.getByTestId('library-section-skills')).not.toHaveAttribute('aria-current');
+  });
 });
