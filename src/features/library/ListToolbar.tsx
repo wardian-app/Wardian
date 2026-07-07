@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { FolderOpen } from 'lucide-react';
 
 interface ListToolbarProps {
     /** Singular label of the active section's entry kind, e.g. "skill". */
@@ -18,8 +19,9 @@ interface ListToolbarProps {
 
 /**
  * Toolbar above the library list: search input, starred filter toggle, a
- * "New" split-button (new item / new folder via an inline name input), and a
- * Reveal-in-Explorer shortcut.
+ * "New" split-button (new item / new folder via an inline name input), and an
+ * "Open in local file system" shortcut matching the icon/wording used for the
+ * same action elsewhere in the app (see ExplorerPanel's root-reveal button).
  */
 export const ListToolbar: React.FC<ListToolbarProps> = ({
     kindLabel,
@@ -132,11 +134,11 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                     type="button"
                     data-testid="library-reveal"
                     onClick={onReveal}
-                    title="Reveal in Explorer"
-                    aria-label="Reveal in Explorer"
-                    className="px-2 py-1 rounded border border-wardian-border text-xs text-muted-neutral transition-colors hover:text-primary hover:bg-wardian-card-bg-muted"
+                    title="Open in local file system"
+                    aria-label="Open in local file system"
+                    className="shrink-0 rounded-md border border-wardian-border p-1 text-muted-neutral transition-colors hover:text-primary hover:bg-wardian-card-bg-muted"
                 >
-                    ⌖
+                    <FolderOpen aria-hidden="true" size={14} strokeWidth={2} />
                 </button>
             </div>
             {creating && (
