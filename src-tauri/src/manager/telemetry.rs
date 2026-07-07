@@ -224,6 +224,27 @@ fn should_run_provider_log_telemetry(
         && process_alive != Some(true))
 }
 
+fn reconcile_live_opencode_log_status(
+    provider: &str,
+    current_status: &str,
+    log_status: String,
+    process_alive: Option<bool>,
+    last_output_at: Option<std::time::SystemTime>,
+) -> String {
+    if provider != "opencode"
+        || wardian_core::identity::normalize_status(&log_status) != "error"
+        || process_alive != Some(true)
+        || last_output_at.is_none()
+    {
+        return log_status;
+    }
+
+    match wardian_core::identity::normalize_status(current_status).as_str() {
+        "idle" | "processing" | "action_required" => current_status.to_string(),
+        _ => log_status,
+    }
+}
+
 fn normalize_cpu_usage(raw_cpu_usage: f32, logical_cpu_count: usize) -> f32 {
     let divisor = logical_cpu_count.max(1) as f32;
     (raw_cpu_usage / divisor).clamp(0.0, 100.0)
@@ -1294,6 +1315,13 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                             &mut i_ts,
                                             &mut status,
                                         );
+                                        status = reconcile_live_opencode_log_status(
+                                            &snap.provider,
+                                            &status_before_log_work,
+                                            status,
+                                            process_alive,
+                                            *snap.last_output_at.lock().unwrap(),
+                                        );
                                         if wardian_core::identity::normalize_status(&status)
                                             == "idle"
                                         {
@@ -1785,6 +1813,46 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("idle")
         );
+    }
+
+    #[test]
+    fn live_opencode_tui_output_prevents_log_error_from_masking_running_status() {
+        let current_status = "Processing...";
+        let log_status = "Error".to_string();
+        let last_output_at = Some(std::time::SystemTime::now());
+
+        let status = super::reconcile_live_opencode_log_status(
+            "opencode",
+            current_status,
+            log_status,
+            Some(true),
+            last_output_at,
+        );
+
+        assert_eq!(status, current_status);
+    }
+
+    #[test]
+    fn opencode_log_error_still_applies_without_live_tui_evidence() {
+        let status = super::reconcile_live_opencode_log_status(
+            "opencode",
+            "Processing...",
+            "Error".to_string(),
+            Some(true),
+            None,
+        );
+
+        assert_eq!(status, "Error");
+
+        let status = super::reconcile_live_opencode_log_status(
+            "opencode",
+            "Processing...",
+            "Error".to_string(),
+            Some(false),
+            Some(std::time::SystemTime::now()),
+        );
+
+        assert_eq!(status, "Error");
     }
 
     #[test]
