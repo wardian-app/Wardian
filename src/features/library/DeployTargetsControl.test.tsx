@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { DeployTargetsControl } from './DeployTargetsControl';
 import { useLibraryStore } from '../../store/useLibraryStore';
-import { DeploymentTarget, LibraryEntry, LibraryIndex } from '../../types';
+import { DeploymentTarget, LibraryEntry, LibraryIndex, SkillDeployment } from '../../types';
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -114,6 +114,52 @@ describe('DeployTargetsControl', () => {
     fireEvent.click(screen.getByTestId('deploy-targets-apply'));
 
     expect(onApply).toHaveBeenCalledWith([{ target_type: 'user', target_id: 'global' }]);
+  });
+
+  // FIX-NOW 2: `targets` (the rendered checklist) only covers the global
+  // user profile, classes, and currently-live agents from `list_agents` —
+  // a deployment can exist for a persisted-but-not-live agent (or ANY agent
+  // if `list_agents` rejected, per the catch below). Such a target has no
+  // checklist row, so Apply must not silently drop it from the desired set.
+  it('preserves an existing deployment to a target with no rendered checklist row when Apply toggles an unrelated target', async () => {
+    const onApply = vi.fn();
+    const deployments: DeploymentTarget[] = [
+      { target_type: 'class', target_id: 'Architect', linked: true },
+      { target_type: 'agent', target_id: 'agent-stale', linked: true }, // persisted, not in list_agents
+    ];
+    render(<DeployTargetsControl entry={skillEntry()} deployments={deployments} onApply={onApply} />);
+
+    await screen.findByText('Coder One');
+
+    // Toggle a rendered target (User global) without touching Architect.
+    fireEvent.click(screen.getByTestId('deploy-target-user:global').querySelector('input[type="checkbox"]')!);
+    fireEvent.click(screen.getByTestId('deploy-targets-apply'));
+
+    expect(onApply).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        { target_type: 'agent', target_id: 'agent-stale' },
+        { target_type: 'class', target_id: 'Architect' },
+        { target_type: 'user', target_id: 'global' },
+      ]),
+    );
+    const applied = onApply.mock.calls[0][0] as SkillDeployment[];
+    expect(applied).toHaveLength(3);
+  });
+
+  it('preserves every deployment when list_agents fails and no agents render at all', async () => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'list_agents') throw new Error('boom');
+      return undefined;
+    });
+    const onApply = vi.fn();
+    const deployments: DeploymentTarget[] = [{ target_type: 'agent', target_id: 'agent-1', linked: false }];
+    render(<DeployTargetsControl entry={skillEntry()} deployments={deployments} onApply={onApply} />);
+
+    await waitFor(() => expect(screen.getByTestId('deploy-target-user:global')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('deploy-targets-apply'));
+
+    expect(onApply).toHaveBeenCalledWith([{ target_type: 'agent', target_id: 'agent-1' }]);
   });
 
   it('shows the "copied" note for unlinked deployments', async () => {

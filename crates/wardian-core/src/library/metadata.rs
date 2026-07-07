@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -10,18 +10,18 @@ const SECTION_PREFIXES: [&str; 4] = ["skills/", "prompts/", "workflows/", "class
 
 #[derive(Debug, Default)]
 pub struct MetadataStore {
-    items: HashMap<String, LibraryItemMetadata>,
+    items: BTreeMap<String, LibraryItemMetadata>,
 }
 
 impl MetadataStore {
     pub fn load(home: &Path) -> MetadataStore {
         let path = library_metadata_path_for_home(home);
-        let raw: HashMap<String, LibraryItemMetadata> = fs::read_to_string(&path)
+        let raw: BTreeMap<String, LibraryItemMetadata> = fs::read_to_string(&path)
             .ok()
             .and_then(|data| serde_json::from_str(&data).ok())
             .unwrap_or_default();
 
-        let mut items = HashMap::new();
+        let mut items = BTreeMap::new();
         let mut migrated = false;
         for (key, value) in raw {
             if SECTION_PREFIXES.iter().any(|prefix| key.starts_with(prefix)) {

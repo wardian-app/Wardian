@@ -108,7 +108,20 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
         const desired: SkillDeployment[] = targets
             .filter((t) => checked.has(targetKey(t)))
             .map((t) => ({ target_type: t.target_type, target_id: t.target_id }));
-        onApply(desired);
+        // `targets` only covers the global user profile, classes, and
+        // currently-live agents (`list_agents` returns only agents in
+        // AppState). A deployment can exist for a persisted-but-not-live
+        // agent, or for any agent at all if `list_agents` rejected (the
+        // catch above falls back to []) — such a target has no rendered
+        // checklist row, so it can never appear in `desired`. Preserve any
+        // existing deployment whose target isn't among the rendered options
+        // so Apply can't silently undeploy something it can't see
+        // (final-review FIX-NOW 2).
+        const known = new Set(targets.map(targetKey));
+        const preserved: SkillDeployment[] = deployments
+            .filter((d) => !known.has(targetKey(d)))
+            .map((d) => ({ target_type: d.target_type, target_id: d.target_id }));
+        onApply([...preserved, ...desired]);
     };
 
     const handleDrop = (e: React.DragEvent) => {

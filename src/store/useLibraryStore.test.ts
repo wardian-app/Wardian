@@ -226,6 +226,80 @@ describe('useLibraryStore', () => {
       ).rejects.toThrow('save failed');
       expect(invoke).toHaveBeenCalledTimes(1);
     });
+
+    // renameEntry/deleteEntry/setSkillDeployments wrap core mutations that
+    // are deliberately best-effort: disk can have partially changed even
+    // though the call rejected (e.g. a rename's source move + metadata
+    // migration succeed but a re-link to one deployment target fails), and
+    // the watcher doesn't cover agents/*  or common/ deployment directories
+    // to rescue the stale index another way. Unlike saveItem/updateMetadata/
+    // createFolder (which fail atomically with nothing on disk to refetch),
+    // these three must refetch on failure too (final-review FIX-NOW 3).
+    describe('best-effort mutations refetch the index even when they fail', () => {
+      it('renameEntry refetches on failure', async () => {
+        vi.mocked(invoke).mockRejectedValueOnce(new Error('rename failed')).mockResolvedValueOnce(emptyIndex);
+        await expect(
+          useLibraryStore.getState().renameEntry('skills', 'dev/planner', 'dev/planner-2'),
+        ).rejects.toThrow('rename failed');
+        expect(invoke).toHaveBeenCalledTimes(2);
+        expect(invoke).toHaveBeenNthCalledWith(2, 'get_library_index');
+        expect(useLibraryStore.getState().error).toBe('rename failed');
+        expect(useLibraryStore.getState().index).toEqual(emptyIndex);
+      });
+
+      it('deleteEntry refetches on failure', async () => {
+        vi.mocked(invoke).mockRejectedValueOnce(new Error('delete failed')).mockResolvedValueOnce(emptyIndex);
+        await expect(
+          useLibraryStore.getState().deleteEntry('skills', 'dev/planner'),
+        ).rejects.toThrow('delete failed');
+        expect(invoke).toHaveBeenCalledTimes(2);
+        expect(invoke).toHaveBeenNthCalledWith(2, 'get_library_index');
+        expect(useLibraryStore.getState().error).toBe('delete failed');
+        expect(useLibraryStore.getState().index).toEqual(emptyIndex);
+      });
+
+      it('setSkillDeployments refetches on failure', async () => {
+        vi.mocked(invoke).mockRejectedValueOnce(new Error('deploy failed')).mockResolvedValueOnce(emptyIndex);
+        await expect(
+          useLibraryStore
+            .getState()
+            .setSkillDeployments('dev/planner', [{ target_type: 'class', target_id: 'Architect' }]),
+        ).rejects.toThrow('deploy failed');
+        expect(invoke).toHaveBeenCalledTimes(2);
+        expect(invoke).toHaveBeenNthCalledWith(2, 'get_library_index');
+        expect(useLibraryStore.getState().error).toBe('deploy failed');
+        expect(useLibraryStore.getState().index).toEqual(emptyIndex);
+      });
+    });
+  });
+
+  describe('renameEntry follows the current selection to its new ref', () => {
+    it('re-selects the renamed entry under its new entry_ref when it was selected', async () => {
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(undefined) // rename_library_entry
+        .mockResolvedValueOnce(emptyIndex) // get_library_index (fetchIndex)
+        .mockResolvedValueOnce('# body'); // read_library_item (select)
+      useLibraryStore.setState({ selection: { section: 'skills', entryRef: 'skills/dev/planner' } });
+
+      await useLibraryStore.getState().renameEntry('skills', 'dev/planner', 'dev/planner-2');
+
+      expect(useLibraryStore.getState().selection).toEqual({
+        section: 'skills',
+        entryRef: 'skills/dev/planner-2',
+      });
+      expect(invoke).toHaveBeenNthCalledWith(3, 'read_library_item', { section: 'skills', path: 'dev/planner-2' });
+      expect(useLibraryStore.getState().selectedContent).toBe('# body');
+    });
+
+    it('leaves selection untouched when a different entry is selected', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce(undefined).mockResolvedValueOnce(emptyIndex);
+      useLibraryStore.setState({ selection: { section: 'skills', entryRef: 'skills/other' } });
+
+      await useLibraryStore.getState().renameEntry('skills', 'dev/planner', 'dev/planner-2');
+
+      expect(useLibraryStore.getState().selection).toEqual({ section: 'skills', entryRef: 'skills/other' });
+      expect(invoke).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('external change with dirty editor sets contentStale instead of reloading content', async () => {

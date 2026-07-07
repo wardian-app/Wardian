@@ -287,8 +287,28 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     try {
       await invoke('rename_library_entry', { section, fromPath, toPath });
       await get().fetchIndex();
+      // If the entry being renamed is the one currently selected, follow it
+      // to its new entry_ref — otherwise `selection.entryRef` still points
+      // at the pre-rename ref, which no longer resolves in the refreshed
+      // index, and the detail pane blanks to "Select an item…" (final-review
+      // FIX-NOW 5). Content is unchanged by a rename, so re-selecting is
+      // just a ref update; carry the current `_editorDirty` flag through
+      // unchanged rather than letting `select()`'s default reset it, since
+      // that flag governs how the NEXT `library-changed` event is handled.
+      const fromRef = `${section}/${fromPath}`;
+      const toRef = `${section}/${toPath}`;
+      if (get().selection?.entryRef === fromRef) {
+        await get().select(toRef, { editorDirty: get()._editorDirty });
+      }
     } catch (e) {
       console.error('Failed to rename library entry:', e);
+      // Core's rename is best-effort past the point the source itself moves
+      // (see mutations.rs::rename_entry doc comment): a partial re-link
+      // failure still leaves disk changed even though this call rejects,
+      // and the watcher doesn't cover agents/*  or common/ deployment
+      // directories, so nothing else will refresh the now-stale index.
+      // Refetch before recording the error so the UI reflects reality.
+      await get().fetchIndex();
       set({ error: errorMessage(e) });
       throw e;
     }
@@ -300,6 +320,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       await get().fetchIndex();
     } catch (e) {
       console.error('Failed to delete library entry:', e);
+      // Best-effort core mutation (see renameEntry above): refetch before
+      // recording the error so stale deployment/index state doesn't linger
+      // unrescued by the watcher.
+      await get().fetchIndex();
       set({ error: errorMessage(e) });
       throw e;
     }
@@ -311,6 +335,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       await get().fetchIndex();
     } catch (e) {
       console.error('Failed to set skill deployments:', e);
+      // Best-effort core mutation (see renameEntry above): a partial
+      // failure still reconciles the targets it could reach, so refetch
+      // before recording the error to pick up whatever actually changed.
+      await get().fetchIndex();
       set({ error: errorMessage(e) });
       throw e;
     }

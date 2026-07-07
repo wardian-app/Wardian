@@ -100,9 +100,12 @@ fn last_component(rel: &str) -> String {
 /// best-effort after that: each target is attempted independently, and a
 /// failure on one target does not stop the others. On partial failure this
 /// returns `Err` describing which targets failed, but the source has
-/// already moved and metadata already points at the new location; failed
-/// targets are left as stale deployments of the old name and can be
-/// repaired by re-deploying the skill to those targets.
+/// already moved and metadata already points at the new location. For a
+/// linked target, `remove_existing_deployment` may succeed and the
+/// subsequent `create_directory_link` then fail — in that case NO
+/// deployment remains at the target at all (the old link was removed, and
+/// no new one took its place), not a stale deployment of the old name. This
+/// can be repaired by re-deploying the skill to those targets.
 pub fn rename_entry(
     home: &Path,
     section: LibrarySectionId,

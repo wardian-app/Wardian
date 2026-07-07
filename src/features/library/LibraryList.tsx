@@ -1,4 +1,5 @@
 import React from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryItemMetadata, LibrarySectionId, OrphanDeployment } from '../../types';
 import { ListToolbar } from './ListToolbar';
@@ -45,7 +46,14 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
             aria-current={selected ? 'true' : undefined}
             onDragStart={(e) => onDragStart(e, entry)}
             onClick={() => onSelect(entry)}
-            onKeyDown={(e) => e.key === 'Enter' && onSelect(entry)}
+            onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                // Space's default action is page/list scroll on a focused
+                // role="button" element; suppress it so activating a row
+                // doesn't also scroll the list.
+                e.preventDefault();
+                onSelect(entry);
+            }}
             style={{ paddingLeft: `${12 + row.depth * 16}px` }}
             className={`flex items-center gap-2 pr-3 py-1.5 border-b border-wardian-border cursor-pointer transition-colors ${
                 selected ? 'bg-wardian-card-bg-muted' : 'hover:bg-wardian-card-bg-muted'
@@ -139,6 +147,7 @@ export const LibraryList: React.FC = () => {
     const saveItem = useLibraryStore((s) => s.saveItem);
     const createFolder = useLibraryStore((s) => s.createFolder);
     const openLibraryFolder = useLibraryStore((s) => s.openLibraryFolder);
+    const fetchIndex = useLibraryStore((s) => s.fetchIndex);
 
     const sectionMeta = LIBRARY_SECTIONS.find((s) => s.id === activeSection);
     const kindLabel = sectionMeta?.kindLabel ?? 'item';
@@ -180,7 +189,10 @@ export const LibraryList: React.FC = () => {
             tags: entry.tags,
             is_starred: !entry.is_starred,
         };
-        void updateMetadata(entry.entry_ref, metadata);
+        // The store already surfaces the error via its `error` state; this
+        // call site fires-and-forgets, so swallow the rejection here to
+        // avoid an unhandled promise rejection.
+        void updateMetadata(entry.entry_ref, metadata).catch(() => {});
     };
 
     const handleDragStart = (e: React.DragEvent, entry: LibraryEntry) => {
@@ -198,12 +210,36 @@ export const LibraryList: React.FC = () => {
         const name = fromPath.split('/').pop() ?? fromPath;
         const toPath = folderPath ? `${folderPath}/${name}` : name;
         if (toPath === fromPath) return; // same-folder drop is a no-op
-        void renameEntry(activeSection, fromPath, toPath);
+        // The store already surfaces the error via its `error` state; this
+        // call site fires-and-forgets, so swallow the rejection here to
+        // avoid an unhandled promise rejection.
+        void renameEntry(activeSection, fromPath, toPath).catch(() => {});
     };
 
     const handleCreateItem = (name: string) => {
+        if (activeSection === 'classes') {
+            // Classes must be created through `create_agent_class` — it
+            // registers the class in classes.json and writes the provider
+            // stubs (GEMINI.md/CLAUDE.md). The generic `saveItem` write only
+            // creates `classes/<name>/AGENTS.md` on disk, producing a
+            // "phantom" class the rest of the app can never see (absent from
+            // the spawn dropdown) or delete (final-review FIX-NOW 1).
+            void invoke('create_agent_class', {
+                name,
+                description: '',
+                instructionContent: newItemTemplate(name, kindLabel),
+            })
+                .then(() => fetchIndex())
+                .catch((e) => {
+                    useLibraryStore.setState({ error: e instanceof Error ? e.message : String(e) });
+                });
+            return;
+        }
         const path = MD_FILE_SECTIONS.includes(activeSection) ? `${name}.md` : name;
-        void saveItem(activeSection, path, newItemTemplate(name, kindLabel));
+        // The store already surfaces the error via its `error` state; this
+        // call site fires-and-forgets, so swallow the rejection here to
+        // avoid an unhandled promise rejection.
+        void saveItem(activeSection, path, newItemTemplate(name, kindLabel)).catch(() => {});
     };
 
     return (
@@ -217,7 +253,13 @@ export const LibraryList: React.FC = () => {
                 onSearchChange={setSearchQuery}
                 onToggleStarredOnly={() => setShowStarredOnly(!showStarredOnly)}
                 onCreateItem={handleCreateItem}
-                onCreateFolder={(name) => void createFolder(activeSection, name)}
+                onCreateFolder={(name) => {
+                    // The store already surfaces the error via its `error`
+                    // state; this call site fires-and-forgets, so swallow
+                    // the rejection here to avoid an unhandled promise
+                    // rejection.
+                    void createFolder(activeSection, name).catch(() => {});
+                }}
                 onReveal={() => void openLibraryFolder(activeSection)}
             />
             <div className="flex-1 overflow-y-auto">

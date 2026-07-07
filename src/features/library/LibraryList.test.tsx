@@ -1,8 +1,13 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { LibraryList } from './LibraryList';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryIndex } from '../../types';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
+const mockInvoke = vi.mocked(invoke);
 
 function entry(overrides: Partial<LibraryEntry> & Pick<LibraryEntry, 'name' | 'path' | 'entry_ref'>): LibraryEntry {
   return {
@@ -57,6 +62,8 @@ const index: LibraryIndex = {
 
 describe('LibraryList', () => {
   beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
     useLibraryStore.setState({
       index,
       activeSection: 'skills',
@@ -70,6 +77,7 @@ describe('LibraryList', () => {
       saveItem: vi.fn().mockResolvedValue(undefined),
       createFolder: vi.fn().mockResolvedValue(undefined),
       openLibraryFolder: vi.fn().mockResolvedValue(undefined),
+      fetchIndex: vi.fn().mockResolvedValue(undefined),
     });
   });
 
@@ -250,6 +258,33 @@ describe('LibraryList', () => {
     expect(useLibraryStore.getState().select).toHaveBeenCalledWith('skills/reviewer');
   });
 
+  it('activates a row via Enter or Space on the keyboard, preventing the default Space scroll', () => {
+    render(<LibraryList />);
+    const row = screen.getByTestId('library-row-skills/reviewer');
+
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(useLibraryStore.getState().select).toHaveBeenCalledWith('skills/reviewer');
+
+    vi.mocked(useLibraryStore.getState().select).mockClear();
+
+    // fireEvent returns false when preventDefault() was called during
+    // dispatch — Space's native default action on a focused role="button"
+    // element is to scroll the nearest scrollable ancestor, so activation
+    // must suppress it.
+    const spaceEvent = fireEvent.keyDown(row, { key: ' ' });
+    expect(useLibraryStore.getState().select).toHaveBeenCalledWith('skills/reviewer');
+    expect(spaceEvent).toBe(false);
+  });
+
+  it('ignores keys other than Enter and Space', () => {
+    render(<LibraryList />);
+    const row = screen.getByTestId('library-row-skills/reviewer');
+
+    fireEvent.keyDown(row, { key: 'Tab' });
+
+    expect(useLibraryStore.getState().select).not.toHaveBeenCalled();
+  });
+
   it('creates a new item with template content through the New menu', () => {
     render(<LibraryList />);
 
@@ -280,6 +315,31 @@ describe('LibraryList', () => {
     fireEvent.change(screen.getByTestId('library-new-name'), { target: { value: 'greetings' } });
     fireEvent.keyDown(screen.getByTestId('library-new-name'), { key: 'Enter' });
     expect(useLibraryStore.getState().createFolder).toHaveBeenCalledWith('prompts', 'greetings');
+  });
+
+  // FIX-NOW 1: the classes section's New flow must register the class via
+  // `create_agent_class` (classes.json + provider stubs), never the generic
+  // `save_library_item` write, which produced an unregistered "phantom"
+  // class invisible to the spawn dropdown and undeletable from the UI.
+  it('creates a new class through create_agent_class, not save_library_item, and refreshes the index', async () => {
+    useLibraryStore.setState({ activeSection: 'classes' });
+    render(<LibraryList />);
+
+    fireEvent.click(screen.getByTestId('library-new'));
+    fireEvent.click(screen.getByTestId('library-new-item'));
+    fireEvent.change(screen.getByTestId('library-new-name'), { target: { value: 'Strategist' } });
+    fireEvent.keyDown(screen.getByTestId('library-new-name'), { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('create_agent_class', {
+        name: 'Strategist',
+        description: '',
+        instructionContent: expect.stringContaining('Strategist'),
+      }),
+    );
+    expect(useLibraryStore.getState().saveItem).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith('save_library_item', expect.anything());
+    await waitFor(() => expect(useLibraryStore.getState().fetchIndex).toHaveBeenCalled());
   });
 
   it('hides the new-folder action for the flat classes section', () => {

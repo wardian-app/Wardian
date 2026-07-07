@@ -107,11 +107,14 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
             .split(',')
             .map((t) => t.trim())
             .filter((t) => t.length > 0);
+        // The store already surfaces the error via its `error` state; this
+        // call site fires-and-forgets, so swallow the rejection here to
+        // avoid an unhandled promise rejection.
         void updateMetadata(entry.entry_ref, {
             id: entry.entry_ref,
             tags,
             is_starred: entry.is_starred,
-        } satisfies LibraryItemMetadata);
+        } satisfies LibraryItemMetadata).catch(() => {});
     };
 
     return (
@@ -353,11 +356,14 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     };
 
     const handleToggleStar = () => {
+        // The store already surfaces the error via its `error` state; this
+        // call site fires-and-forgets, so swallow the rejection here to
+        // avoid an unhandled promise rejection.
         void updateMetadata(currentEntry.entry_ref, {
             id: currentEntry.entry_ref,
             tags: currentEntry.tags,
             is_starred: !currentEntry.is_starred,
-        });
+        }).catch(() => {});
     };
 
     const handleDelete = async () => {
@@ -406,7 +412,11 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
                         {...common}
                         deployments={index?.deployments[currentEntry.entry_ref] ?? []}
                         onApplyDeployments={(targets: SkillDeployment[]) => {
-                            void setSkillDeployments(currentEntry.path, targets);
+                            // The store already surfaces the error via its
+                            // `error` state; this call site fires-and-forgets,
+                            // so swallow the rejection here to avoid an
+                            // unhandled promise rejection.
+                            void setSkillDeployments(currentEntry.path, targets).catch(() => {});
                         }}
                     />
                 );
@@ -425,7 +435,11 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
                             const remaining: SkillDeployment[] = currentTargets
                                 .filter((t) => !(t.target_type === 'class' && t.target_id === currentEntry.path))
                                 .map((t) => ({ target_type: t.target_type, target_id: t.target_id }));
-                            void setSkillDeployments(sourcePath, remaining);
+                            // The store already surfaces the error via its
+                            // `error` state; this call site fires-and-forgets,
+                            // so swallow the rejection here to avoid an
+                            // unhandled promise rejection.
+                            void setSkillDeployments(sourcePath, remaining).catch(() => {});
                         }}
                         onDeleted={() => void select(null)}
                     />
