@@ -83,6 +83,17 @@ interface LibraryState {
   /** Cheap way for a future editor to flag dirty state without forcing a
    * redundant `read_library_item` round-trip via `select()`. */
   markEditorDirty: (dirty: boolean) => void;
+  /** Reverts `selection` back to a previously-tracked entry WITHOUT
+   * re-reading its content from disk (unlike `select()`), and marks the
+   * editor dirty again. Used when the caller declines a discard-changes
+   * prompt: the in-progress draft for that entry must survive untouched, so
+   * `selectedContent` is intentionally left alone. */
+  revertSelection: (entryRef: string) => void;
+  /** Clears `contentStale` without touching `selectedContent`/the draft.
+   * Used when the user resolves a stale-content conflict in favor of their
+   * local draft ("Keep mine"), and again after a successful save so the
+   * store doesn't linger in a stale state once the draft matches disk. */
+  resolveStale: () => void;
   toggleFolder: (key: string) => void;
   setSearchQuery: (q: string) => void;
   setShowStarredOnly: (v: boolean) => void;
@@ -134,6 +145,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   markEditorDirty: (dirty) => set({ _editorDirty: dirty }),
+
+  revertSelection: (entryRef) => {
+    const { section } = parseEntryRef(entryRef);
+    set({ selection: { section, entryRef }, _editorDirty: true });
+  },
+
+  resolveStale: () => set({ contentStale: false }),
 
   toggleFolder: (key) => {
     set((s) => {

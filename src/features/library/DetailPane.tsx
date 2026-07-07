@@ -30,6 +30,10 @@ export interface DetailPanelCommonProps {
     onChange: (value: string) => void;
     onSave: () => void;
     onReloadExternal: () => void;
+    /** Resolves a stale-content conflict in favor of the local draft
+     * ("Keep mine"): clears the store's `contentStale` so a subsequent save
+     * is no longer blocked. */
+    onKeepMine: () => void;
 }
 
 function findEntry(folder: LibraryIndexFolder, entryRef: string): LibraryEntry | null {
@@ -61,7 +65,10 @@ interface DetailHeaderProps {
     /** Undefined hides the rename control (e.g. classes, whose identity is
      * referenced elsewhere and cannot be renamed from here). */
     onRename?: (newName: string) => Promise<void>;
-    onDelete: () => void;
+    /** Undefined hides the generic delete control (classes: `delete_entry`
+     * always rejects Classes-section deletes on the backend, and
+     * `ClassDetail` already owns a correct `delete_agent_class` flow). */
+    onDelete?: () => void;
 }
 
 /**
@@ -169,15 +176,17 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                 >
                     {entry.is_starred ? '★' : '☆'}
                 </button>
-                <button
-                    type="button"
-                    data-testid="detail-delete-button"
-                    title="Delete"
-                    onClick={onDelete}
-                    className="shrink-0 text-muted-neutral hover:text-[var(--color-wardian-error)]"
-                >
-                    Delete
-                </button>
+                {onDelete && (
+                    <button
+                        type="button"
+                        data-testid="detail-delete-button"
+                        title="Delete"
+                        onClick={onDelete}
+                        className="shrink-0 text-muted-neutral hover:text-[var(--color-wardian-error)]"
+                    >
+                        Delete
+                    </button>
+                )}
             </div>
             <input
                 type="text"
@@ -215,6 +224,8 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     const contentStale = useLibraryStore((s) => s.contentStale);
     const markEditorDirty = useLibraryStore((s) => s.markEditorDirty);
     const select = useLibraryStore((s) => s.select);
+    const revertSelection = useLibraryStore((s) => s.revertSelection);
+    const resolveStale = useLibraryStore((s) => s.resolveStale);
     const reloadSelectedContent = useLibraryStore((s) => s.reloadSelectedContent);
     const saveItem = useLibraryStore((s) => s.saveItem);
     const updateMetadata = useLibraryStore((s) => s.updateMetadata);
@@ -227,6 +238,12 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     const [baseline, setBaseline] = useState('');
     const dirty = draft !== baseline;
     const trackedEntryRef = useRef<string | null>(null);
+    // Set right before a discard-confirm decline reverts `selection` back to
+    // the still-dirty entry. The adopt-effect below must skip exactly the
+    // resulting `selectedContent` change (it holds the OTHER entry's disk
+    // content, fetched when the user first attempted to switch away) so the
+    // reverted-to draft is never clobbered. See the guard effect below.
+    const suppressNextAdoptRef = useRef(false);
 
     const currentEntry = useMemo(() => {
         if (!selection || !index) return null;
@@ -248,17 +265,28 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
         if (wasDirty && previousRef) {
             void confirm('Discard changes?').then((ok) => {
                 if (ok) {
+                    suppressNextAdoptRef.current = false;
                     trackedEntryRef.current = nextRef;
                     setDraft('');
                     setBaseline('');
                 } else {
+                    // Keep the dirty draft: revert the store's selection
+                    // back to the previous entry WITHOUT re-reading it from
+                    // disk (unlike `select()`). `selectedContent` still
+                    // holds whatever was fetched for the entry the user
+                    // tried (and declined) to switch to, so the adopt-effect
+                    // below must not treat that as fresh content for
+                    // `previousRef` — otherwise it would silently overwrite
+                    // the very draft the user just chose to keep.
+                    suppressNextAdoptRef.current = true;
                     trackedEntryRef.current = previousRef;
-                    void select(previousRef, { editorDirty: true });
+                    revertSelection(previousRef);
                 }
             });
             return;
         }
 
+        suppressNextAdoptRef.current = false;
         trackedEntryRef.current = nextRef;
         setDraft('');
         setBaseline('');
@@ -269,9 +297,16 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     // (a deliberate load or an explicit Reload — the store only updates
     // `selectedContent` in those cases; a background change while dirty
     // sets `contentStale` instead, see useLibraryStore.subscribeToLibraryChanges).
+    // Skipped exactly once when reverting a declined discard-confirm (see
+    // above) so a dirty draft is never replaced except by explicit user
+    // action (Reload/Discard) or a successful save.
     useEffect(() => {
         if (selection?.entryRef !== trackedEntryRef.current) return;
         if (selectedContent === null) return;
+        if (suppressNextAdoptRef.current) {
+            suppressNextAdoptRef.current = false;
+            return;
+        }
         setDraft(selectedContent);
         setBaseline(selectedContent);
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -302,9 +337,15 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     const section = selection.section;
 
     const handleSave = async () => {
+        // While the conflict bar is showing, a plain save must not silently
+        // overwrite the external disk change — the user has to resolve it
+        // first via "Keep mine" (clears `contentStale`, see `onKeepMine`
+        // below) or "Reload" (adopts disk content, clearing `dirty`).
+        if (contentStale) return;
         try {
             await saveItem(section, currentEntry.path, draft);
             setBaseline(draft);
+            resolveStale();
         } catch {
             // saveItem already records the error on the store; keep the
             // draft so the user doesn't lose their edits.
@@ -341,7 +382,7 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
                           await renameEntry(section, currentEntry.path, toPath);
                       }
             }
-            onDelete={() => void handleDelete()}
+            onDelete={section === 'classes' ? undefined : () => void handleDelete()}
         />
     );
 
@@ -354,6 +395,7 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
         onChange: setDraft,
         onSave: () => void handleSave(),
         onReloadExternal: () => void reloadSelectedContent(),
+        onKeepMine: resolveStale,
     };
 
     const renderPanel = (kind: LibraryEntryKind) => {

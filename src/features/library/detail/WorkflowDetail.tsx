@@ -22,6 +22,21 @@ function normalizeSlashes(path: string): string {
 }
 
 /**
+ * True when `candidatePath`'s trailing path segments exactly match
+ * `entryPath`'s segments. Segment-aware (not a raw `endsWith` on the
+ * strings) so an absolute path like `.../other-a/foo.md` does not
+ * false-positive against an entry path of `a/foo.md` — `endsWith` matches
+ * on the substring `a/foo.md` regardless of the segment boundary before it.
+ */
+function matchesEntryPath(candidatePath: string, entryPath: string): boolean {
+    const candidateSegments = normalizeSlashes(candidatePath).split('/').filter(Boolean);
+    const entrySegments = normalizeSlashes(entryPath).split('/').filter(Boolean);
+    if (entrySegments.length === 0 || entrySegments.length > candidateSegments.length) return false;
+    const tail = candidateSegments.slice(candidateSegments.length - entrySegments.length);
+    return tail.every((segment, i) => segment === entrySegments[i]);
+}
+
+/**
  * Workflow panel: blueprint editor + "Launch Run" (resolves the entry to its
  * on-disk blueprint via `workflow_list_blueprints`/`workflow_parse`, then
  * reuses `RunLaunchDialog`) + a link back to the full Workflows view.
@@ -35,6 +50,7 @@ export const WorkflowDetail: React.FC<WorkflowDetailProps> = ({
     onChange,
     onSave,
     onReloadExternal,
+    onKeepMine,
     onOpenWorkflowsView,
 }) => {
     const [launchOpen, setLaunchOpen] = useState(false);
@@ -48,8 +64,7 @@ export const WorkflowDetail: React.FC<WorkflowDetailProps> = ({
         setResolving(true);
         try {
             const refs = await invoke<BlueprintRef[]>('workflow_list_blueprints');
-            const entryPath = normalizeSlashes(entry.path);
-            const ref = refs.find((r) => normalizeSlashes(r.path).endsWith(entryPath));
+            const ref = refs.find((r) => matchesEntryPath(r.path, entry.path));
             if (!ref) {
                 setResolveError('Could not locate this workflow file on disk.');
                 return;
@@ -78,6 +93,7 @@ export const WorkflowDetail: React.FC<WorkflowDetailProps> = ({
                     dirty={dirty}
                     stale={stale}
                     onReloadExternal={onReloadExternal}
+                    onKeepMine={onKeepMine}
                 />
             </div>
             <div className="flex flex-col gap-2 border-t border-wardian-border p-3">

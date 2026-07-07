@@ -53,6 +53,7 @@ export const ClassDetail: React.FC<ClassDetailProps> = ({
     onChange,
     onSave,
     onReloadExternal,
+    onKeepMine,
     deployments,
     onRemoveSkillDeployment,
     onDeleted,
@@ -116,6 +117,7 @@ export const ClassDetail: React.FC<ClassDetailProps> = ({
                     dirty={dirty}
                     stale={stale}
                     onReloadExternal={onReloadExternal}
+                    onKeepMine={onKeepMine}
                 />
             </div>
             <div className="flex flex-col gap-3 border-t border-wardian-border p-3">

@@ -9,15 +9,22 @@ interface MarkdownEditorProps {
     /** True when the file changed on disk while a dirty draft is open. */
     stale: boolean;
     onReloadExternal: () => void;
+    /** Called when the user picks "Keep mine" — in addition to dismissing
+     * the bar locally, the caller uses this to resolve the underlying
+     * `stale` state (e.g. clearing the store's `contentStale`) so a
+     * subsequent save is no longer blocked. Optional so callers that don't
+     * gate saves on `stale` can omit it. */
+    onKeepMine?: () => void;
 }
 
 /**
  * Plain monospace textarea editor shared by every per-kind detail panel.
  * `Ctrl+S`/`Cmd+S` saves; a conflict bar appears when `stale` is true,
  * offering Reload (discard the draft, adopt the on-disk content) or Keep
- * mine (dismiss the nudge locally — the underlying `stale` state is owned
- * by the caller and is not cleared by this dismissal, so it reappears if a
- * *new* external change arrives).
+ * mine (dismiss the nudge locally AND, via `onKeepMine`, resolve the
+ * caller's underlying stale state — a fresh external change still shows the
+ * bar again, since `stale` flipping back to `true` re-arms `dismissed`
+ * below).
  */
 export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     value,
@@ -26,6 +33,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     dirty,
     stale,
     onReloadExternal,
+    onKeepMine,
 }) => {
     const [dismissed, setDismissed] = useState(false);
 
@@ -74,7 +82,10 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                         <button
                             type="button"
                             data-testid="markdown-editor-keep-mine"
-                            onClick={() => setDismissed(true)}
+                            onClick={() => {
+                                setDismissed(true);
+                                onKeepMine?.();
+                            }}
                             className="font-bold underline hover:no-underline"
                         >
                             Keep mine

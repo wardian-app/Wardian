@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { DetailPane } from './DetailPane';
@@ -71,6 +71,8 @@ function baseState(overrides: Partial<ReturnType<typeof useLibraryStore.getState
     contentStale: false,
     markEditorDirty: vi.fn(),
     select: vi.fn().mockResolvedValue(undefined),
+    revertSelection: vi.fn(),
+    resolveStale: vi.fn(),
     reloadSelectedContent: vi.fn().mockResolvedValue(undefined),
     saveItem: vi.fn().mockResolvedValue(undefined),
     updateMetadata: vi.fn().mockResolvedValue(undefined),
@@ -161,5 +163,111 @@ describe('DetailPane', () => {
     star.click();
 
     expect(updateMetadata).toHaveBeenCalledWith('skills/planner', expect.objectContaining({ is_starred: true }));
+  });
+
+  // MAJOR 1: ClassDetail already owns a correct delete_agent_class flow;
+  // the shared header's generic Delete (which always fails for classes,
+  // since core rejects Classes-section deletes via delete_library_entry)
+  // must not also render.
+  it('does not render the generic header Delete button for a class selection', async () => {
+    useLibraryStore.setState({
+      selection: { section: 'classes', entryRef: 'classes/Architect' },
+      selectedContent: '# Role: Architect',
+    });
+    render(<DetailPane selectedAgentIds={new Set()} />);
+
+    await screen.findByTestId('class-detail');
+    expect(screen.queryByTestId('detail-delete-button')).not.toBeInTheDocument();
+  });
+
+  it('still renders the generic header Delete button for non-class selections', async () => {
+    useLibraryStore.setState({
+      selection: { section: 'skills', entryRef: 'skills/planner' },
+      selectedContent: '# planner',
+    });
+    render(<DetailPane selectedAgentIds={new Set()} />);
+
+    expect(await screen.findByTestId('detail-delete-button')).toBeInTheDocument();
+  });
+
+  // MAJOR 2: Ctrl+S must not silently overwrite disk while the stale/
+  // conflict bar is showing; the user has to resolve it via the bar first.
+  describe('stale-guarded save', () => {
+    it('Ctrl+S while stale does not call saveItem', async () => {
+      const saveItem = vi.fn().mockResolvedValue(undefined);
+      useLibraryStore.setState({
+        selection: { section: 'skills', entryRef: 'skills/planner' },
+        selectedContent: '# planner',
+        contentStale: true,
+        saveItem,
+      });
+      render(<DetailPane selectedAgentIds={new Set()} />);
+
+      const textarea = await screen.findByTestId('markdown-editor-textarea');
+      fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
+
+      await Promise.resolve();
+      expect(saveItem).not.toHaveBeenCalled();
+    });
+
+    it('"Keep mine" resolves the conflict so a subsequent Ctrl+S proceeds', async () => {
+      const saveItem = vi.fn().mockResolvedValue(undefined);
+      const resolveStale = vi.fn(() => useLibraryStore.setState({ contentStale: false }));
+      useLibraryStore.setState({
+        selection: { section: 'skills', entryRef: 'skills/planner' },
+        selectedContent: '# planner',
+        contentStale: true,
+        saveItem,
+        resolveStale,
+      });
+      render(<DetailPane selectedAgentIds={new Set()} />);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Keep mine' }));
+      expect(resolveStale).toHaveBeenCalledTimes(1);
+      expect(useLibraryStore.getState().contentStale).toBe(false);
+
+      const textarea = screen.getByTestId('markdown-editor-textarea');
+      fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
+
+      await waitFor(() => expect(saveItem).toHaveBeenCalledWith('skills', 'planner', '# planner'));
+    });
+
+    it('a successful save clears contentStale', async () => {
+      const saveItem = vi.fn().mockResolvedValue(undefined);
+      const resolveStale = vi.fn();
+      useLibraryStore.setState({
+        selection: { section: 'skills', entryRef: 'skills/planner' },
+        selectedContent: '# planner',
+        contentStale: false,
+        saveItem,
+        resolveStale,
+      });
+      render(<DetailPane selectedAgentIds={new Set()} />);
+
+      const textarea = await screen.findByTestId('markdown-editor-textarea');
+      fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
+
+      await waitFor(() => expect(resolveStale).toHaveBeenCalledTimes(1));
+      expect(saveItem).toHaveBeenCalledWith('skills', 'planner', '# planner');
+    });
+
+    it('Reload adopts on-disk content and clears the dirty draft', async () => {
+      const reloadSelectedContent = vi.fn().mockImplementation(async () => {
+        useLibraryStore.setState({ selectedContent: '# updated on disk', contentStale: false });
+      });
+      useLibraryStore.setState({
+        selection: { section: 'skills', entryRef: 'skills/planner' },
+        selectedContent: '# planner',
+        contentStale: true,
+        reloadSelectedContent,
+      });
+      render(<DetailPane selectedAgentIds={new Set()} />);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Reload' }));
+
+      await waitFor(() =>
+        expect(screen.getByTestId('markdown-editor-textarea')).toHaveValue('# updated on disk'),
+      );
+    });
   });
 });

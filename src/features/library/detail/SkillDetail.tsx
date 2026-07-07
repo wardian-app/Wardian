@@ -19,6 +19,7 @@ export const SkillDetail: React.FC<SkillDetailProps> = ({
     onChange,
     onSave,
     onReloadExternal,
+    onKeepMine,
     deployments,
     onApplyDeployments,
 }) => {
@@ -33,6 +34,7 @@ export const SkillDetail: React.FC<SkillDetailProps> = ({
                     dirty={dirty}
                     stale={stale}
                     onReloadExternal={onReloadExternal}
+                    onKeepMine={onKeepMine}
                 />
             </div>
             <div className="border-t border-wardian-border p-3">

@@ -24,6 +24,7 @@ export const PromptDetail: React.FC<PromptDetailProps> = ({
     onChange,
     onSave,
     onReloadExternal,
+    onKeepMine,
     selectedAgentIds,
 }) => {
     const [running, setRunning] = useState(false);
@@ -53,6 +54,7 @@ export const PromptDetail: React.FC<PromptDetailProps> = ({
                     dirty={dirty}
                     stale={stale}
                     onReloadExternal={onReloadExternal}
+                    onKeepMine={onKeepMine}
                 />
             </div>
             <div className="border-t border-wardian-border p-3">
