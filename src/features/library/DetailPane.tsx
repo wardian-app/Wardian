@@ -72,8 +72,9 @@ interface DetailHeaderProps {
 }
 
 /**
- * Header shared by every per-kind detail panel: name (+ inline rename),
- * star toggle, tag editor, and delete-with-confirm.
+ * Header shared by every per-kind detail panel: star toggle + name
+ * (+ inline rename) on the left, delete-with-confirm on the right, and a
+ * tag editor below.
  */
 const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRename, onDelete }) => {
     const [renaming, setRenaming] = useState(false);
@@ -120,6 +121,18 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
     return (
         <div data-testid="detail-header" className="flex flex-col gap-2 px-3 py-2 border-b border-wardian-border">
             <div className="flex items-center gap-2 min-w-0">
+                <button
+                    type="button"
+                    data-testid="detail-star-toggle"
+                    aria-pressed={entry.is_starred}
+                    title={entry.is_starred ? 'Unstar' : 'Star'}
+                    onClick={onToggleStar}
+                    className={`shrink-0 text-base leading-none transition-colors ${
+                        entry.is_starred ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'
+                    }`}
+                >
+                    {entry.is_starred ? '★' : '☆'}
+                </button>
                 {renaming ? (
                     <div className="flex flex-1 min-w-0 items-center gap-1">
                         <input
@@ -167,18 +180,6 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                         )}
                     </>
                 )}
-                <button
-                    type="button"
-                    data-testid="detail-star-toggle"
-                    aria-pressed={entry.is_starred}
-                    title={entry.is_starred ? 'Unstar' : 'Star'}
-                    onClick={onToggleStar}
-                    className={`shrink-0 text-base leading-none transition-colors ${
-                        entry.is_starred ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'
-                    }`}
-                >
-                    {entry.is_starred ? '★' : '☆'}
-                </button>
                 {onDelete && (
                     <button
                         type="button"
