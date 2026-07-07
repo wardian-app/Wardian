@@ -102,13 +102,57 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
     const popoverRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
 
-    // Close the picker and drop any in-progress search when the displayed
-    // entry changes — otherwise a stale query/open popover from the
-    // previously selected skill would leak into this one.
+    /**
+     * Locally authoritative "desired" target set. Add/remove deltas are
+     * computed from THIS ref, never from the `deployments` prop directly —
+     * the prop is a snapshot that only advances after a full `onApply` →
+     * `setSkillDeployments` → `invoke` → `fetchIndex` round trip, so two
+     * rapid ops closing over the same stale prop would otherwise silently
+     * undo each other (see `.superpowers/sdd/deploy-redesign-review.md`,
+     * finding C1). Re-synced from `deployments` in the effect below
+     * whenever a fresh index lands and nothing is in flight, so queued ops
+     * compound instead of reverting one another.
+     */
+    const desiredRef = useRef<SkillDeployment[]>(deployments.map(toSkillDeployment));
+    /**
+     * Chains `onApply` invocations so the underlying `set_skill_deployments`
+     * calls for this skill never overlap. The backend re-scans live disk
+     * state per call rather than trusting the caller's set wholesale, which
+     * makes any two overlapping calls racy even when each call's own
+     * `desired` set is individually correct (fresh-state accumulation alone
+     * isn't enough — see finding C1's trace). `queueIdleRef` lets the first
+     * op of an idle queue run its `onApply` call synchronously (matching
+     * the control's long-standing single-op behavior/tests) while any op
+     * that arrives before the queue drains waits its turn.
+     */
+    const queueRef = useRef<Promise<void>>(Promise.resolve());
+    const queueIdleRef = useRef(true);
+
+    // Close the picker, drop any in-progress search, and reset the local
+    // desired-set/queue when the displayed entry changes — otherwise a
+    // stale query/open popover, or a desired set computed for the
+    // previously selected skill, would leak into this one.
     useEffect(() => {
         setPickerOpen(false);
         setQuery('');
+        setPending(new Set());
+        queueRef.current = Promise.resolve();
+        queueIdleRef.current = true;
+        desiredRef.current = deployments.map(toSkillDeployment);
+        // Deliberately keyed only on the entry switching, not `deployments`
+        // — see the re-sync effect below for the steady-state case.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [entry.entry_ref]);
+
+    // Re-sync the local desired set from the freshest `deployments` prop
+    // once every in-flight op has settled (`pending.size === 0`). Skipped
+    // while an op is pending so a `deployments` prop from *before* that op
+    // lands can't clobber a desired set that already accounts for it.
+    useEffect(() => {
+        if (pending.size === 0) {
+            desiredRef.current = deployments.map(toSkillDeployment);
+        }
+    }, [deployments, pending]);
 
     useEffect(() => {
         let cancelled = false;
@@ -182,38 +226,74 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
         return () => document.removeEventListener('mousedown', handlePointerDown);
     }, [pickerOpen]);
 
-    const applyChange = async (key: string, desired: SkillDeployment[]) => {
+    /**
+     * Marks `key` pending immediately, then enqueues the actual `onApply`
+     * call onto `queueRef` so it runs only after every earlier queued call
+     * (for this skill) has fully settled — serializing the invokes without
+     * blocking the picker or other chips from queuing further ops in the
+     * meantime (`pending` only affects the one chip/row's own disabled
+     * state).
+     */
+    const applyChange = (key: string, desired: SkillDeployment[]) => {
         setPending((prev) => {
             const next = new Set(prev);
             next.add(key);
             return next;
         });
-        try {
-            await onApply(desired);
-        } catch {
-            // The store already surfaces failures via its `error` state
-            // (see LibraryView's error banner) and re-fetches the index so
-            // this control re-syncs from reality either way — nothing else
-            // to do here except make sure this doesn't crash the control.
-        } finally {
-            setPending((prev) => {
-                const next = new Set(prev);
-                next.delete(key);
-                return next;
+        const run = async () => {
+            try {
+                await onApply(desired);
+            } catch {
+                // The store already surfaces failures via its `error` state
+                // (see LibraryView's error banner) and re-fetches the index
+                // on failure — but that round trip hasn't necessarily
+                // reached this component's `deployments` prop yet. Abandon
+                // the local optimistic set now and re-sync from whatever
+                // the store's index already has (falling back to the
+                // still-current prop) so no phantom chip lingers.
+                const fresh = useLibraryStore.getState().index?.deployments[entry.entry_ref];
+                desiredRef.current = (fresh ?? deployments).map(toSkillDeployment);
+            } finally {
+                setPending((prev) => {
+                    const next = new Set(prev);
+                    next.delete(key);
+                    return next;
+                });
+            }
+        };
+        if (queueIdleRef.current) {
+            // Nothing else is in flight for this skill — run (and thus call
+            // `onApply`) synchronously, matching the control's existing
+            // single-op behavior.
+            queueIdleRef.current = false;
+            queueRef.current = run().finally(() => {
+                queueIdleRef.current = true;
+            });
+        } else {
+            // Something else is already queued/in flight — this op's
+            // `onApply` call must wait for it, so overlapping
+            // `set_skill_deployments` calls never race each other on disk.
+            queueRef.current = queueRef.current.then(() => {
+                queueIdleRef.current = false;
+                return run().finally(() => {
+                    queueIdleRef.current = true;
+                });
             });
         }
     };
 
     const handleRemove = (target: DeploymentTarget) => {
         const key = targetKey(target);
-        const desired = deployments.filter((d) => targetKey(d) !== key).map(toSkillDeployment);
-        void applyChange(key, desired);
+        const desired = desiredRef.current.filter((d) => targetKey(d) !== key);
+        desiredRef.current = desired;
+        applyChange(key, desired);
     };
 
     const handleAdd = (target: TargetOption) => {
         const key = targetKey(target);
-        const desired = [...deployments.map(toSkillDeployment), toSkillDeployment(target)];
-        void applyChange(key, desired);
+        const desired = [...desiredRef.current, toSkillDeployment(target)];
+        desiredRef.current = desired;
+        applyChange(key, desired);
     };
 
     const openPicker = () => {
@@ -274,8 +354,15 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
             const spaceRight = window.innerWidth - anchorRect.right;
             const openLeft = spaceRight < POPOVER_WIDTH + 16;
             popoverStyle.left = openLeft ? anchorRect.left - POPOVER_WIDTH - 8 : anchorRect.right + 8;
-            popoverStyle.top = Math.max(8, Math.min(anchorRect.top, window.innerHeight - POPOVER_MAX_HEIGHT - 8));
-            popoverStyle.maxHeight = Math.min(POPOVER_MAX_HEIGHT, window.innerHeight - 16);
+            const maxHeight = Math.min(POPOVER_MAX_HEIGHT, window.innerHeight - 16);
+            // Anchor the popover's bottom edge flush with the button's
+            // bottom edge (rather than aligning tops, which could clamp the
+            // popover well above the button and read as visually
+            // disconnected from its trigger — see
+            // deploy-redesign-review.md Minor #1), clamped so it never
+            // runs off the top of the viewport.
+            popoverStyle.top = Math.max(8, anchorRect.bottom - maxHeight);
+            popoverStyle.maxHeight = maxHeight;
         }
     }
 

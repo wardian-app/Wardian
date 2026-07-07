@@ -273,6 +273,157 @@ describe('DeployTargetsControl', () => {
     });
   });
 
+  describe('concurrent ops (deploy-redesign-review.md C1: fresh-state accumulation + serialization)', () => {
+    /** Builds an `onApply` mock whose calls never auto-settle — each call
+     * pushes a `{ resolve, reject }` pair onto `defers` so the test can
+     * decide exactly when each queued op "completes", to drive races
+     * deterministically instead of relying on real timing. */
+    function deferredOnApply() {
+      const defers: Array<{ resolve: () => void; reject: (e: unknown) => void }> = [];
+      const onApply = vi.fn(
+        (_targets: SkillDeployment[]) =>
+          new Promise<void>((resolve, reject) => {
+            defers.push({ resolve, reject });
+          }),
+      );
+      return { onApply, defers };
+    }
+
+    it('two rapid adds without waiting: both targets survive in the final invoke payload, nothing reverted', async () => {
+      const { onApply, defers } = deferredOnApply();
+      render(<DeployTargetsControl entry={skillEntry()} deployments={[]} onApply={onApply} />);
+
+      fireEvent.click(screen.getByTestId('deploy-targets-add-button'));
+      await screen.findByTestId('deploy-picker');
+      await waitFor(() => expect(screen.getByTestId('deploy-picker-option-agent:agent-1')).toBeInTheDocument());
+
+      // Fire both adds back-to-back, without awaiting anything in between.
+      fireEvent.click(screen.getByTestId('deploy-picker-option-class:Architect'));
+      fireEvent.click(screen.getByTestId('deploy-picker-option-class:Coder'));
+
+      // Only the first op has actually reached onApply so far — the second
+      // is queued behind it (serialization).
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+      expect(onApply.mock.calls[0][0]).toEqual([{ target_type: 'class', target_id: 'Architect' }]);
+
+      defers[0].resolve();
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+      // Fresh-state accumulation: the second call's desired set was
+      // computed from the local desired-set ref, which already included
+      // Architect at the time Coder was clicked — so both survive, instead
+      // of the second call's `desired` reverting to a stale two-item-ago
+      // snapshot that omits Architect.
+      expect(onApply.mock.calls[1][0]).toEqual(
+        expect.arrayContaining([
+          { target_type: 'class', target_id: 'Architect' },
+          { target_type: 'class', target_id: 'Coder' },
+        ]),
+      );
+      expect(onApply.mock.calls[1][0]).toHaveLength(2);
+
+      defers[1].resolve();
+      await waitFor(() => expect(screen.getByTestId('deploy-picker-option-class:Coder')).not.toBeDisabled());
+    });
+
+    it('add then immediately remove a different target: both changes survive', async () => {
+      const { onApply, defers } = deferredOnApply();
+      const deployments: DeploymentTarget[] = [{ target_type: 'class', target_id: 'Architect', linked: true }];
+      render(<DeployTargetsControl entry={skillEntry()} deployments={deployments} onApply={onApply} />);
+
+      fireEvent.click(screen.getByTestId('deploy-targets-add-button'));
+      await screen.findByTestId('deploy-picker');
+      await waitFor(() => expect(screen.getByTestId('deploy-picker-option-class:Coder')).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId('deploy-picker-option-class:Coder')); // add Coder
+      fireEvent.click(screen.getByTestId('deploy-chip-remove-class:Architect')); // remove Architect
+
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+      expect(onApply.mock.calls[0][0]).toEqual(
+        expect.arrayContaining([
+          { target_type: 'class', target_id: 'Architect' },
+          { target_type: 'class', target_id: 'Coder' },
+        ]),
+      );
+      expect(onApply.mock.calls[0][0]).toHaveLength(2);
+
+      defers[0].resolve();
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+      // The queued remove computed its desired set from the local ref
+      // *after* the add had already applied its delta — so Architect is
+      // gone and Coder (added moments earlier) survives.
+      expect(onApply.mock.calls[1][0]).toEqual([{ target_type: 'class', target_id: 'Coder' }]);
+
+      defers[1].resolve();
+    });
+
+    it('serializes queued ops: the second invoke is not issued until the first settles', async () => {
+      const { onApply, defers } = deferredOnApply();
+      const deployments: DeploymentTarget[] = [
+        { target_type: 'class', target_id: 'Architect', linked: true },
+        { target_type: 'class', target_id: 'Coder', linked: true },
+      ];
+      render(<DeployTargetsControl entry={skillEntry()} deployments={deployments} onApply={onApply} />);
+
+      fireEvent.click(screen.getByTestId('deploy-chip-remove-class:Architect'));
+      fireEvent.click(screen.getByTestId('deploy-chip-remove-class:Coder'));
+
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+      // Give any wrongly-unserialized second call a chance to fire, then
+      // confirm it still hasn't.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onApply).toHaveBeenCalledTimes(1);
+
+      defers[0].resolve();
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+
+      defers[1].resolve();
+    });
+
+    it('a failure mid-queue re-syncs the local set from props, so no phantom chip lingers on the next op', async () => {
+      const defers: Array<{ resolve: () => void; reject: (e: unknown) => void }> = [];
+      const onApply = vi.fn(
+        (_targets: SkillDeployment[]) =>
+          new Promise<void>((resolve, reject) => {
+            defers.push({ resolve, reject });
+          }),
+      );
+      const deployments: DeploymentTarget[] = [{ target_type: 'user', target_id: 'global', linked: true }];
+      render(<DeployTargetsControl entry={skillEntry()} deployments={deployments} onApply={onApply} />);
+
+      fireEvent.click(screen.getByTestId('deploy-targets-add-button'));
+      await screen.findByTestId('deploy-picker');
+      await waitFor(() => expect(screen.getByTestId('deploy-picker-option-class:Architect')).toBeInTheDocument());
+
+      fireEvent.click(screen.getByTestId('deploy-picker-option-class:Architect')); // will fail
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+      expect(onApply.mock.calls[0][0]).toEqual(
+        expect.arrayContaining([
+          { target_type: 'user', target_id: 'global' },
+          { target_type: 'class', target_id: 'Architect' },
+        ]),
+      );
+
+      defers[0].reject(new Error('boom'));
+      await waitFor(() => expect(screen.getByTestId('deploy-picker-option-class:Architect')).not.toBeDisabled());
+
+      // Add a different target next. If the local set hadn't re-synced
+      // after the failure, this would compound onto the abandoned
+      // optimistic state and still include the failed Architect add; it
+      // must not.
+      fireEvent.click(screen.getByTestId('deploy-picker-option-class:Coder'));
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+      expect(onApply.mock.calls[1][0]).toEqual(
+        expect.arrayContaining([
+          { target_type: 'user', target_id: 'global' },
+          { target_type: 'class', target_id: 'Coder' },
+        ]),
+      );
+      expect(onApply.mock.calls[1][0]).toHaveLength(2);
+
+      defers[1].resolve();
+    });
+  });
+
   it('accepts a drop of a different skill ref and switches selection to it', async () => {
     const select = vi.fn().mockResolvedValue(undefined);
     useLibraryStore.setState({ select });
