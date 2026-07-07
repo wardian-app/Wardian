@@ -263,9 +263,10 @@ fn codex_trusted_project_override(folder: &str) -> Option<String> {
         return None;
     }
 
+    let project_key = crate::utils::fs::codex_trusted_project_key(std::path::Path::new(trimmed));
     Some(format!(
         r#"projects."{}".trust_level="trusted""#,
-        toml_basic_string_key(trimmed)
+        toml_basic_string_key(&project_key)
     ))
 }
 
@@ -718,6 +719,66 @@ mod tests {
                 && pair[1]
                     == r#"projects."D:\\Development\\Wardian.wt\\wardian-3".trust_level="trusted""#
         }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn spawn_args_trust_workspace_uses_windows_native_path_key() {
+        let p = make_provider();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            folder: "C:/workspace/resttrace".into(),
+            ..Default::default()
+        };
+        let policy = CodexRuntimePolicy {
+            trust_workspaces: true,
+            ..Default::default()
+        };
+
+        let args = p.spawn_args_with_runtime_policy(&config, true, &policy);
+
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-c"
+                && pair[1] == r#"projects."C:\\workspace\\resttrace".trust_level="trusted""#
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn trusted_project_key_canonicalizes_existing_windows_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let slash_path = temp.path().to_string_lossy().replace('\\', "/");
+        let canonical = temp.path().canonicalize().expect("canonical path");
+        let expected =
+            crate::utils::fs::strip_windows_verbatim_prefix(&canonical.to_string_lossy())
+                .replace('/', "\\");
+
+        assert_eq!(
+            crate::utils::fs::codex_trusted_project_key(std::path::Path::new(&slash_path)),
+            expected
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn trusted_project_key_strips_windows_verbatim_drive_prefix() {
+        assert_eq!(
+            crate::utils::fs::codex_trusted_project_key(std::path::Path::new(
+                r"\\?\C:\workspace\resttrace"
+            )),
+            r"C:\workspace\resttrace"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn trusted_project_key_strips_windows_verbatim_unc_prefix() {
+        assert_eq!(
+            crate::utils::fs::codex_trusted_project_key(std::path::Path::new(
+                r"\\?\UNC\server\share\resttrace"
+            )),
+            r"\\server\share\resttrace"
+        );
     }
 
     #[test]
