@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryView } from './LibraryView';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { useLayoutStore } from '../store/useLayoutStore';
 import { LibraryIndex } from '../types';
 
 const emptyIndex: LibraryIndex = {
@@ -24,6 +25,8 @@ describe('LibraryView', () => {
       error: null,
       activeSection: 'skills',
     });
+    localStorage.clear();
+    act(() => useLayoutStore.getState().resetLayout());
   });
 
   it('renders the section rail, list, and detail regions', () => {
@@ -97,5 +100,54 @@ describe('LibraryView', () => {
     fireEvent.click(screen.getByTestId('library-error-banner-retry'));
 
     expect(fetchIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a resize handle between the list and detail panes', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const detail = screen.getByTestId('library-detail');
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    expect(handle).toBeInTheDocument();
+    expect(detail).toContainElement(handle);
+    expect(detail).toHaveStyle({ width: `${useLayoutStore.getState().libraryDetailWidth}px` });
+  });
+
+  it('dragging the resize handle widens the detail pane and persists the width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const startWidth = useLayoutStore.getState().libraryDetailWidth;
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    // edge="left": dragging left (negative delta) grows the right-anchored detail pane.
+    fireEvent.pointerDown(handle, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 440 });
+    fireEvent.pointerUp(window, { clientX: 440 });
+
+    const nextWidth = useLayoutStore.getState().libraryDetailWidth;
+    expect(nextWidth).toBe(startWidth + 60);
+    expect(screen.getByTestId('library-detail')).toHaveStyle({ width: `${nextWidth}px` });
+  });
+
+  it('double-clicking the resize handle resets the detail pane to the default width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    fireEvent.pointerDown(handle, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.pointerUp(window, { clientX: 300 });
+
+    expect(useLayoutStore.getState().libraryDetailWidth).not.toBe(480);
+
+    fireEvent.doubleClick(handle);
+
+    expect(useLayoutStore.getState().libraryDetailWidth).toBe(480);
+  });
+
+  it('never shrinks the list pane below its minimum width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-list')).toHaveClass('min-w-[320px]');
   });
 });

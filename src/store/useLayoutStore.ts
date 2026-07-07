@@ -9,6 +9,9 @@ const MAX_SIDEBAR_FRACTION = 0.4;
 const DEFAULT_USER_TERMINAL_HEIGHT = 360;
 const MIN_USER_TERMINAL_HEIGHT = 180;
 const MAX_USER_TERMINAL_FRACTION = 0.7;
+const DEFAULT_LIBRARY_DETAIL_WIDTH = 480;
+const MIN_LIBRARY_DETAIL_WIDTH = 360;
+const MAX_LIBRARY_DETAIL_FRACTION = 0.7;
 
 const DEFAULT_LAYOUT: GridLayout = {
   column_tracks: [0.5, 0.5],
@@ -25,6 +28,11 @@ const clampUserTerminalHeight = (px: number): number => {
   return Math.max(MIN_USER_TERMINAL_HEIGHT, Math.min(max, Math.round(px)));
 };
 
+const clampLibraryDetailWidth = (px: number): number => {
+  const max = Math.max(MIN_LIBRARY_DETAIL_WIDTH, Math.floor(window.innerWidth * MAX_LIBRARY_DETAIL_FRACTION));
+  return Math.max(MIN_LIBRARY_DETAIL_WIDTH, Math.min(max, Math.round(px)));
+};
+
 interface LayoutState {
   layout: GridLayout;
   leftSidebarWidth: number;
@@ -34,6 +42,7 @@ interface LayoutState {
   userTerminalHeight: number;
   gridStacked: boolean;
   previousColumnTracks: number[] | null;
+  libraryDetailWidth: number;
   setColumnTracks: (tracks: number[]) => void;
   setRowHeight: (height: number) => void;
   setLeftSidebarWidth: (px: number) => void;
@@ -41,6 +50,7 @@ interface LayoutState {
   setUserTerminalOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setUserTerminalHeight: (px: number) => void;
+  setLibraryDetailWidth: (px: number) => void;
   toggleUserTerminal: () => void;
   toggleSettings: () => void;
   setGridStacked: (v: boolean) => void;
@@ -59,6 +69,7 @@ export const useLayoutStore = create<LayoutState>()(
       userTerminalHeight: DEFAULT_USER_TERMINAL_HEIGHT,
       gridStacked: false,
       previousColumnTracks: null,
+      libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
       setColumnTracks: (column_tracks) => set((state) => ({ layout: { ...state.layout, column_tracks } })),
       setRowHeight: (row_height) => set((state) => ({ layout: { ...state.layout, row_height } })),
       setLeftSidebarWidth: (px) => set({ leftSidebarWidth: clampSidebarWidth(px) }),
@@ -66,6 +77,7 @@ export const useLayoutStore = create<LayoutState>()(
       setUserTerminalOpen: (userTerminalOpen) => set({ userTerminalOpen }),
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       setUserTerminalHeight: (px) => set({ userTerminalHeight: clampUserTerminalHeight(px) }),
+      setLibraryDetailWidth: (px) => set({ libraryDetailWidth: clampLibraryDetailWidth(px) }),
       toggleUserTerminal: () => set((state) => ({ userTerminalOpen: !state.userTerminalOpen })),
       toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
       setGridStacked: (gridStacked) => set({ gridStacked }),
@@ -79,6 +91,7 @@ export const useLayoutStore = create<LayoutState>()(
         userTerminalHeight: DEFAULT_USER_TERMINAL_HEIGHT,
         gridStacked: false,
         previousColumnTracks: null,
+        libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
       }),
     }),
     {
@@ -90,6 +103,7 @@ export const useLayoutStore = create<LayoutState>()(
         state.leftSidebarWidth = clampSidebarWidth(state.leftSidebarWidth);
         state.rightSidebarWidth = clampSidebarWidth(state.rightSidebarWidth);
         state.userTerminalHeight = clampUserTerminalHeight(state.userTerminalHeight);
+        state.libraryDetailWidth = clampLibraryDetailWidth(state.libraryDetailWidth);
       },
     }
   )

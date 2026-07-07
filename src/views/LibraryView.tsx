@@ -1,8 +1,10 @@
 import React, { useEffect } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { useLayoutStore } from '../store/useLayoutStore';
 import { SectionRail } from '../features/library/SectionRail';
 import { LibraryList } from '../features/library/LibraryList';
 import { DetailPane } from '../features/library/DetailPane';
+import { SidebarResizeHandle } from '../components/SidebarResizeHandle';
 import { LibrarySectionId } from '../types';
 
 interface LibraryViewProps {
@@ -26,6 +28,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
     const setActiveSection = useLibraryStore((s) => s.setActiveSection);
     const subscribeToLibraryChanges = useLibraryStore((s) => s.subscribeToLibraryChanges);
     const fetchIndex = useLibraryStore((s) => s.fetchIndex);
+    const libraryDetailWidth = useLayoutStore((s) => s.libraryDetailWidth);
+    const setLibraryDetailWidth = useLayoutStore((s) => s.setLibraryDetailWidth);
 
     useEffect(() => subscribeToLibraryChanges(), []);
 
@@ -110,13 +114,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
                     sections={index?.sections ?? null}
                     onSelect={handleSelectSection}
                 />
-                <div data-testid="library-list" className="flex-1 min-w-0 min-h-0 overflow-hidden">
+                <div data-testid="library-list" className="flex-1 min-w-[320px] min-h-0 overflow-hidden">
                     <LibraryList />
                 </div>
                 <div
                     data-testid="library-detail"
-                    className="w-[380px] flex-shrink-0 border-l border-wardian-border overflow-y-auto"
+                    className="relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
+                    style={{ width: `${libraryDetailWidth}px` }}
                 >
+                    <SidebarResizeHandle
+                        baseWidth={libraryDetailWidth}
+                        edge="left"
+                        onResize={setLibraryDetailWidth}
+                        onReset={() => setLibraryDetailWidth(480)}
+                    />
                     <DetailPane selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={onOpenWorkflowsView} />
                 </div>
             </div>
