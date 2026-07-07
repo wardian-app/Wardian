@@ -1,6 +1,6 @@
 # Library Redesign: Unified Detailed-List Library
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-07-05
 
 ## Context and Problem Statement
