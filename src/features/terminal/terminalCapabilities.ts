@@ -37,6 +37,7 @@ const CODEX_TERMINAL_STATUS_SEQUENCE =
 const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
 const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
+const OPENCODE_MOUSE_TRACKING_TOGGLE = /\u001b\[\?(?:1000|1002|1003|1006|1016)[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
 // Matches any SGR sequence so codex's chrome background can be remapped even when
 // it is COMBINED with a foreground/attributes in one SGR. Codex emits the active
@@ -299,7 +300,8 @@ export function normalizeOpenCodeOutput(
   return stripProviderScrollbackErase(data, provider)
     .replace(DECRQM_QUERY, "")
     .replace(SYNC_OUTPUT_TOGGLE, "")
-    .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
+    .replace(THEME_MODE_NOTIFICATION_TOGGLE, "")
+    .replace(OPENCODE_MOUSE_TRACKING_TOGGLE, "");
 }
 
 export function normalizeTerminalOutputBatch(

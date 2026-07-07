@@ -352,6 +352,14 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput("\u001b[?2031hready\u001b[?2031l", "opencode")).toBe("ready");
   });
 
+  it("strips OpenCode mouse-tracking toggles before xterm sees them", () => {
+    const data =
+      "\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h\u001b[?1016hready\u001b[?1016l\u001b[?1006l\u001b[?1003l";
+
+    expect(normalizeOpenCodeOutput(data, "opencode")).toBe("ready");
+    expect(normalizeOpenCodeOutput(data, "codex")).toBe(data);
+  });
+
   it("replies to palette and OSC 10/11 foreground/background queries", () => {
     const data = "\u001b]4;0;?\u0007\u001b]10;?\u0007\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("opencode", data, baseContext);
