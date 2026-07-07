@@ -108,6 +108,15 @@ interface LibraryState {
   setSkillDeployments: (sourcePath: string, targets: SkillDeployment[]) => Promise<void>;
   removeOrphan: (o: OrphanDeployment) => Promise<void>;
   openLibraryFolder: (section: LibrarySectionId, path?: string) => Promise<void>;
+  /** Bumped on every `openLibraryAt` call so a subscriber (App.tsx) can tell
+   * a deep-link request apart from the user simply browsing the library
+   * themselves, and switch the main view to it. */
+  navigationRequest: number;
+  /** Deep-link entry point used by surfaces outside the library view (e.g.
+   * the agent config panel's "Manage skills" affordance): selects the given
+   * section (and, optionally, a specific entry) and signals `App.tsx` via
+   * `navigationRequest` to switch the main view to the library. */
+  openLibraryAt: (section: LibrarySectionId, entryRef?: string) => void;
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -328,5 +337,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } catch (e) {
       console.error('Failed to open folder:', e);
     }
+  },
+
+  navigationRequest: 0,
+
+  openLibraryAt: (section, entryRef) => {
+    set((s) => ({ activeSection: section, navigationRequest: s.navigationRequest + 1 }));
+    void get().select(entryRef ?? null);
   },
 }));

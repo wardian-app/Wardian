@@ -168,7 +168,8 @@ function AppBody() {
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
-  const fetchLibraryTree = useLibraryStore(s => s.fetchLibraryTree);
+  const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
+  const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
   const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
@@ -266,6 +267,15 @@ function AppBody() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  // A library deep-link (e.g. "Manage skills" from the agent config panel)
+  // bumps the store's navigationRequest; switch the main view to the
+  // library whenever that happens, but not on initial mount.
+  useEffect(() => {
+    if (seenLibraryNavigationRequestRef.current === libraryNavigationRequest) return;
+    seenLibraryNavigationRequestRef.current = libraryNavigationRequest;
+    setViewMode("library");
+  }, [libraryNavigationRequest]);
 
   useEffect(() => {
     if (!CACHED_CANVAS_VIEWS.has(viewMode)) return;
@@ -721,8 +731,6 @@ function AppBody() {
     fetchAgentClasses();
     loadQueueItems();
     loadQueuePreferences();
-    fetchLibraryTree("prompts");
-    fetchLibraryTree("skills");
     const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
       const { session_id, data } = event.payload;
       appendAgentEvent(session_id, data as Record<string, unknown>);
@@ -740,7 +748,7 @@ function AppBody() {
       unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
     };
-  }, [appendAgentEvent, fetchLibraryTree, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
+  }, [appendAgentEvent, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
   useEffect(() => {
     const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
@@ -998,6 +1006,11 @@ function AppBody() {
     ? agents.find((agent) => agent.session_id === Array.from(selectedAgentIds)[0])?.folder?.trim() || null
     : null;
 
+  const openWorkflowsView = useCallback(() => {
+    setActiveTab("workflows");
+    setViewMode("workflows");
+  }, []);
+
   const openAgentFromQueue = useCallback((sessionId: string) => {
     setViewMode("grid");
     setSelectedAgentIds(new Set([sessionId]));
@@ -1044,7 +1057,7 @@ function AppBody() {
           onToggleUserTerminal={toggleUserTerminal}
           onToggleSettings={toggleSettings}
         />
-        <SidebarContentPane 
+        <SidebarContentPane
           activeTab={activeTab}
           leftCollapsed={leftCollapsed}
           selectedAgentIds={selectedAgentIds}
@@ -1054,14 +1067,10 @@ function AppBody() {
           telemetry={telemetry}
           sourceControlStatus={sourceControlStatus}
           onAgentsUpdated={fetchAgents}
-          onClassesUpdated={fetchAgentClasses}
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
-          onOpenWorkflowsView={() => {
-            setActiveTab("workflows");
-            setViewMode("workflows");
-          }}
+          onOpenWorkflowsView={openWorkflowsView}
         />
 
         <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
@@ -1076,7 +1085,7 @@ function AppBody() {
             )}
 
             {viewMode === "library" && (
-              <LibraryView selectedAgentIds={selectedAgentIds} />
+              <LibraryView selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={openWorkflowsView} />
             )}
 
             {viewMode === "queue" && (

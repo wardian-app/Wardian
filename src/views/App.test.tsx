@@ -8,6 +8,7 @@ import App from "./App";
 import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderReadiness } from "../types";
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
+import { useLibraryStore } from "../store/useLibraryStore";
 import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -672,17 +673,6 @@ describe("Agent List Management", () => {
     render(<App />);
     await screen.findByText("No Active Instances");
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
-  });
-
-  it("preloads library data on mount", async () => {
-    setupDefaultMocks([], defaultClasses);
-    render(<App />);
-    await screen.findByText("No Active Instances");
-
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "prompts" });
-      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "skills" });
-    });
   });
 
   it("syncs provider theme settings with the effective Wardian theme", async () => {
@@ -1732,6 +1722,22 @@ describe("View Mode Toggle", () => {
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByTestId("garden-canvas")).toBeInTheDocument();
+  });
+});
+
+describe("Library deep-link navigation", () => {
+  it("switches the main view to the library when openLibraryAt fires", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+
+    expect(screen.queryByTestId("library-view")).not.toBeInTheDocument();
+
+    act(() => {
+      useLibraryStore.getState().openLibraryAt("skills");
+    });
+
+    expect(await screen.findByTestId("library-view")).toBeInTheDocument();
   });
 });
 

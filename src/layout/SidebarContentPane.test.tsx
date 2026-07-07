@@ -21,10 +21,6 @@ vi.mock("../features/agents/SpawnAgentPanel", () => ({
   SpawnAgentPanel: () => <h3 className="text-xs">Spawn Agent</h3>,
 }));
 
-vi.mock("../features/agents/ClassManagerPanel", () => ({
-  ClassManagerPanel: () => <div />,
-}));
-
 vi.mock("../features/commands/CommandPanel", () => ({
   CommandPanel: () => <div />,
 }));
@@ -121,7 +117,6 @@ function renderPane({
       telemetry={{}}
       sourceControlStatus={sourceControlStatus}
       onAgentsUpdated={vi.fn()}
-      onClassesUpdated={vi.fn()}
       broadcastMessage=""
       setBroadcastMessage={vi.fn()}
       onBroadcast={vi.fn()}

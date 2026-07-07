@@ -1,7 +1,7 @@
 import React from "react";
 import { Folder, MessageSquareCode } from "lucide-react";
 
-export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "classes" | "workflows";
+export type SidebarTab = "explorer" | "git" | "agent-config" | "command" | "workflows";
 
 interface SidebarIconRailProps {
   activeTab: SidebarTab;
@@ -95,20 +95,6 @@ export const SidebarIconRail: React.FC<SidebarIconRailProps> = ({
       >
         {activeTab === "command" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
         <MessageSquareCode className="w-6 h-6 group-hover:scale-110 transition-transform" strokeWidth={2} />
-      </button>
-
-      <button
-        data-testid="sidebar-tab-classes"
-        onClick={() => handleTabClick("classes")}
-        className={`relative p-3 rounded-xl transition-all group ${activeTab === "classes" ? "bg-wardian-card-bg-muted text-[var(--color-wardian-accent)]" : "text-muted-neutral hover:text-bright-neutral"}`}
-        title="Class Manager"
-      >
-        {activeTab === "classes" && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-[var(--color-wardian-accent)] rounded-r-full" />}
-        <svg className="w-6 h-6 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 5l4 7H8l4-7z" />
-          <rect x="5" y="14" width="6" height="6" rx="1" />
-          <circle cx="17" cy="17" r="3" />
-        </svg>
       </button>
 
       <button

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import type { LibraryFolder } from "../../types";
+import type { LibraryIndex } from "../../types";
 import { flattenPromptForInjection } from "../../utils/terminalInput";
 import { CommandPanel } from "./CommandPanel";
 
@@ -16,43 +16,74 @@ const mockInvoke = vi.mocked(invoke);
 const mockWriteText = vi.mocked(writeText);
 const originalState = useLibraryStore.getState();
 
-function promptTree(): LibraryFolder {
+function emptySection() {
+  return { tree: { path: "", name: "Root", children: [] }, stubbed: false };
+}
+
+function indexWithPrompts(promptsTree: LibraryIndex["sections"]["prompts"]["tree"]): LibraryIndex {
   return {
-    type: "Folder",
+    sections: {
+      skills: emptySection(),
+      prompts: { tree: promptsTree, stubbed: false },
+      workflows: emptySection(),
+      classes: emptySection(),
+      mcps: { ...emptySection(), stubbed: true },
+    },
+    deployments: {},
+    orphans: [],
+  };
+}
+
+function samplePromptsTree(): LibraryIndex["sections"]["prompts"]["tree"] {
+  return {
     path: "",
-    name: "Prompts",
+    name: "Root",
     children: [
       {
-        type: "Prompt",
+        kind: "prompt",
         path: "quick/ship.md",
+        entry_ref: "prompts/quick/ship.md",
         name: "Ship Summary",
-        content: "Ship it\nwith notes",
-        metadata: { id: "prompt-1", tags: [], is_starred: true },
+        description: "Ship it with notes",
+        tags: [],
+        is_starred: true,
+        deployment_count: 0,
       },
       {
-        type: "Prompt",
+        kind: "prompt",
         path: "draft.md",
+        entry_ref: "prompts/draft.md",
         name: "Draft",
-        content: "Hidden prompt",
-        metadata: { id: "prompt-2", tags: [], is_starred: false },
+        description: "Hidden prompt",
+        tags: [],
+        is_starred: false,
+        deployment_count: 0,
       },
       {
-        type: "Folder",
         path: "nested",
         name: "Nested",
         children: [
           {
-            type: "Prompt",
+            kind: "prompt",
             path: "nested/review.md",
+            entry_ref: "prompts/nested/review.md",
             name: "Review Notes",
-            content: "Review this",
-            metadata: { id: "prompt-3", tags: [], is_starred: true },
+            description: "Review this",
+            tags: [],
+            is_starred: true,
+            deployment_count: 0,
           },
         ],
       },
     ],
   };
 }
+
+const promptContents: Record<string, string> = {
+  "quick/ship.md": "Ship it\nwith notes",
+  "draft.md": "Hidden prompt",
+  "nested/review.md": "Review this",
+};
 
 function renderCommandPanel(options?: {
   selectedAgentIds?: Set<string>;
@@ -80,11 +111,16 @@ describe("CommandPanel", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockWriteText.mockReset();
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "read_library_item") {
+        const path = (args as { path?: string } | undefined)?.path ?? "";
+        return promptContents[path] ?? "";
+      }
+      return null;
+    });
     useLibraryStore.setState({
       ...originalState,
-      promptTree: promptTree(),
-      skillTree: null,
-      activeTab: "prompts",
+      index: indexWithPrompts(samplePromptsTree()),
       isLoading: false,
       error: null,
     });
@@ -97,7 +133,6 @@ describe("CommandPanel", () => {
   it("lists starred prompts from nested folders and omits unstarred prompts", () => {
     renderCommandPanel();
 
-    expect(screen.queryByRole("link", { name: /command guide/i })).not.toBeInTheDocument();
     expect(screen.getByText("Ship Summary")).toBeInTheDocument();
     expect(screen.getByText("Review Notes")).toBeInTheDocument();
     expect(screen.queryByText("Draft")).not.toBeInTheDocument();
@@ -105,20 +140,22 @@ describe("CommandPanel", () => {
 
   it("shows an empty quick prompt state when no prompts are starred", () => {
     useLibraryStore.setState({
-      promptTree: {
-        type: "Folder",
+      index: indexWithPrompts({
         path: "",
-        name: "Prompts",
+        name: "Root",
         children: [
           {
-            type: "Prompt",
+            kind: "prompt",
             path: "draft.md",
+            entry_ref: "prompts/draft.md",
             name: "Draft",
-            content: "Hidden prompt",
-            metadata: { id: "prompt-2", tags: [], is_starred: false },
+            description: "Hidden prompt",
+            tags: [],
+            is_starred: false,
+            deployment_count: 0,
           },
         ],
-      },
+      }),
     });
 
     renderCommandPanel();
@@ -142,6 +179,9 @@ describe("CommandPanel", () => {
     await user.click(screen.getByRole("button", { name: /Ship Summary/i }));
 
     await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("read_library_item", { section: "prompts", path: "quick/ship.md" });
+    });
+    await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("submit_prompt_to_agent", {
         sessionId: "agent-1",
         prompt: "Ship it with notes",
@@ -159,21 +199,24 @@ describe("CommandPanel", () => {
     const longContent = Array.from({ length: 30 }, (_, index) => `Line ${index + 1}: review this section.`).join(
       "\n\n",
     );
+    promptContents["long.md"] = longContent;
     useLibraryStore.setState({
-      promptTree: {
-        type: "Folder",
+      index: indexWithPrompts({
         path: "",
-        name: "Prompts",
+        name: "Root",
         children: [
           {
-            type: "Prompt",
+            kind: "prompt",
             path: "long.md",
+            entry_ref: "prompts/long.md",
             name: "Long Prompt",
-            content: longContent,
-            metadata: { id: "prompt-long", tags: [], is_starred: true },
+            description: "Long prompt",
+            tags: [],
+            is_starred: true,
+            deployment_count: 0,
           },
         ],
-      },
+      }),
     });
 
     renderCommandPanel({ selectedAgentIds: new Set(["agent-1"]) });
@@ -189,7 +232,11 @@ describe("CommandPanel", () => {
 
   it("confirms before broadcasting a quick prompt when no agents are selected", async () => {
     const user = userEvent.setup();
-    mockInvoke.mockImplementation(async (command) => {
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "read_library_item") {
+        const path = (args as { path?: string } | undefined)?.path ?? "";
+        return promptContents[path] ?? "";
+      }
       if (command === "list_agents") {
         return [
           { session_id: "agent-1", session_name: "One", agent_class: "Coder", folder: "C:/repo", is_off: false },
@@ -223,8 +270,10 @@ describe("CommandPanel", () => {
     renderCommandPanel();
     await user.click(screen.getAllByTitle("Copy to clipboard")[0]);
 
-    expect(mockWriteText).toHaveBeenCalledWith("Ship it\nwith notes");
-    expect(mockInvoke).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockWriteText).toHaveBeenCalledWith("Ship it\nwith notes");
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("submit_prompt_to_agent", expect.anything());
   });
 
   it("confirms empty-selection broadcasts before submitting", async () => {

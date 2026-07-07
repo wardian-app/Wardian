@@ -77,10 +77,11 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
   });
 
-  test("6. Sidebar navigation - Classes tab", async () => {
-    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+  test("6. Library - Classes section", async () => {
+    await page.getByText("Library", { exact: true }).click();
     await page.waitForTimeout(500);
-    await expect(page.locator('[data-testid="class-manager-panel"]')).toBeVisible();
+    await page.locator('[data-testid="library-section-classes"]').click();
+    await expect(page.locator('[data-testid="library-list-content"]')).toBeVisible();
   });
 
   test("7. Sidebar navigation - Explorer tab", async () => {
@@ -113,15 +114,17 @@ test.describe("Wardian Core Feature Tests", () => {
     expect(options).toBeGreaterThan(0);
   });
 
-  test("10. Class Manager - Create class form", async () => {
-    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+  test("10. Library - Create class entry form", async () => {
+    await page.getByText("Library", { exact: true }).click();
     await page.waitForTimeout(500);
-    
-    await page.locator('[data-testid="class-name-input"]').fill("TestClass");
-    await page.locator('[data-testid="class-description-input"]').fill("A test class for E2E testing");
+    await page.locator('[data-testid="library-section-classes"]').click();
+
+    await page.locator('[data-testid="library-new"]').click();
+    await page.locator('[data-testid="library-new-item"]').click();
+    await page.locator('[data-testid="library-new-name"]').fill("TestClass");
     await page.waitForTimeout(200);
-    
-    await expect(page.locator('[data-testid="class-create-button"]')).toBeVisible();
+
+    await expect(page.locator('[data-testid="library-new-confirm"]')).toBeVisible();
   });
 
   test("11. Spawn Agent form validation", async () => {

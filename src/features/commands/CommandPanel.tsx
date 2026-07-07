@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Copy, Check } from "lucide-react";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import { AgentConfig, LibraryFolder, LibraryPrompt } from "../../types";
+import { flattenAllEntries } from "../library/libraryListUtils";
+import { AgentConfig, LibraryEntry } from "../../types";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { flattenPromptForInjection, submitInputToAgents } from "../../utils/terminalInput";
 
@@ -21,38 +22,33 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
   onBroadcast,
 }) => {
   const confirm = useConfirm();
-  const { promptTree, fetchLibraryTree } = useLibraryStore();
+  const index = useLibraryStore((s) => s.index);
+  const fetchIndex = useLibraryStore((s) => s.fetchIndex);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!promptTree) {
-      fetchLibraryTree('prompts');
+    if (!index) {
+      void fetchIndex();
     }
-  }, [promptTree, fetchLibraryTree]);
+  }, [index, fetchIndex]);
 
-  const quickPrompts = useMemo(() => {
-    const results: LibraryPrompt[] = [];
-    if (!promptTree) return results;
+  // Quick prompts show only description/name from the index — the index is
+  // metadata-only by design (see wardian-core::library::index), so the full
+  // body is fetched on demand (inject/copy) via `read_library_item`.
+  const quickPrompts = useMemo<LibraryEntry[]>(() => {
+    const tree = index?.sections.prompts.tree;
+    if (!tree) return [];
+    return flattenAllEntries(tree)
+      .map((row) => row.entry)
+      .filter((entry): entry is LibraryEntry => entry != null && entry.is_starred);
+  }, [index]);
 
-    function traverse(folder: LibraryFolder) {
-      for (const child of folder.children) {
-        if ('content' in child) {
-          if (child.metadata.is_starred) {
-            results.push(child as LibraryPrompt);
-          }
-        } else if ('children' in child) {
-          traverse(child as LibraryFolder);
-        }
-      }
-    }
+  const readPromptContent = (path: string) => invoke<string>("read_library_item", { section: "prompts", path });
 
-    traverse(promptTree);
-    return results;
-  }, [promptTree]);
-
-  const handleInject = async (promptContent: string) => {
+  const handleInject = async (path: string) => {
     try {
-      const flattenedPrompt = flattenPromptForInjection(promptContent);
+      const content = await readPromptContent(path);
+      const flattenedPrompt = flattenPromptForInjection(content);
       if (selectedAgentIds.size > 0) {
         await submitInputToAgents(selectedAgentIds, flattenedPrompt);
       } else {
@@ -69,9 +65,10 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
     }
   };
 
-  const handleCopy = async (e: React.MouseEvent, content: string, path: string) => {
+  const handleCopy = async (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
     try {
+      const content = await readPromptContent(path);
       await writeText(content);
       setCopiedPath(path);
       setTimeout(() => setCopiedPath(null), 2000);
@@ -103,26 +100,26 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
             <div className="text-xs text-muted-neutral italic">No quick prompts in Library.</div>
           ) : (
             quickPrompts.map((prompt, idx) => (
-              <div 
+              <div
                 data-testid={`quick-prompt-${idx}`}
-                key={`starred-${prompt.path}-${idx}`}
+                key={`starred-${prompt.entry_ref}`}
                 className="relative group/card"
               >
-                <button 
-                  onClick={() => handleInject(prompt.content)}
+                <button
+                  onClick={() => void handleInject(prompt.path)}
                   className="w-full flex flex-col items-start p-3 bg-wardian-card-bg-muted border border-wardian-light/50 rounded-lg text-primary hover:text-[var(--color-wardian-accent)] hover:border-[var(--color-wardian-accent)]/30 transition-all text-left group"
                 >
                   <span className="text-xs font-bold truncate w-9/12">{prompt.name}</span>
                   <span className="text-[10px] text-muted-neutral mt-1 w-full line-clamp-1 whitespace-pre-wrap leading-relaxed group-hover:text-primary/70 transition-colors">
-                    {prompt.content}
+                    {prompt.description}
                   </span>
                 </button>
                 <button
-                  onClick={(e) => handleCopy(e, prompt.content, prompt.path)}
+                  onClick={(e) => void handleCopy(e, prompt.path)}
                   title="Copy to clipboard"
                   className={`absolute top-2 right-2 p-1.5 rounded-md border transition-all active:scale-95 ${
-                    copiedPath === prompt.path 
-                      ? "bg-wardian-success/10 border-wardian-success/30 text-wardian-success" 
+                    copiedPath === prompt.path
+                      ? "bg-wardian-success/10 border-wardian-success/30 text-wardian-success"
                       : "bg-wardian-card-bg border-transparent text-muted-neutral hover:text-primary hover:border-wardian-light shadow-sm opacity-0 group-hover/card:opacity-100"
                   }`}
                 >

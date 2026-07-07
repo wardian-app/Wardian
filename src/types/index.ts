@@ -403,33 +403,6 @@ export function isLibraryEntry(node: LibraryIndexFolder | LibraryEntry): node is
     return 'entry_ref' in node;
 }
 
-// --- Legacy per-section library types (retained until Task 16 removes their
-// remaining consumers: LibraryView, ManageSkills, AssignSkillModal, CommandPanel) ---
-
-export interface LibrarySkill {
-    type: 'Skill';
-    path: string;
-    name: string;
-    description: string;
-    content: string;
-    metadata: LibraryItemMetadata;
-}
-
-export interface LibraryPrompt {
-    type: 'Prompt';
-    path: string;
-    name: string;
-    content: string;
-    metadata: LibraryItemMetadata;
-}
-
-export interface LibraryFolder {
-    type: 'Folder';
-    path: string;
-    name: string;
-    children: (LibraryFolder | LibraryPrompt | LibrarySkill)[];
-}
-
 export interface DeployedSkillRef {
     name: string;
     source_path?: string | null;
