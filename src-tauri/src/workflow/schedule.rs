@@ -35,9 +35,16 @@ pub struct ResolvedFire {
 }
 
 /// Resolve a `FireRequest` into launch parameters without touching Tauri state.
+///
+/// Blueprint lookup uses the same recursive-by-id resolver as the manual run
+/// path (`commands::workflow::resolve_blueprint_path`, backed by
+/// `wardian_core::workflow::resolve_blueprint_path`), so a scheduled run can
+/// find a blueprint nested in a library subfolder, not just one that sits
+/// flat in `library/workflows` with a filename matching its id.
 pub fn resolve_fire(req: &FireRequest) -> Result<ResolvedFire, String> {
-    let path = wardian_core::paths::blueprint_path(&req.blueprint_id)
-        .ok_or_else(|| "no wardian home".to_string())?;
+    let path = wardian_core::workflow::resolve_blueprint_path(&req.blueprint_id).ok_or_else(
+        || format!("could not resolve blueprint path for {}", req.blueprint_id),
+    )?;
     let blueprint =
         wardian_core::workflow::parse_file(&path).map_err(|err| format!("parse failed: {err}"))?;
     let run_id = wardian_core::engine::driver::new_run_id();
@@ -494,6 +501,46 @@ edges:
                 busy_policy: wardian_core::models::BusyPolicy::Skip,
             })
         );
+    }
+
+    #[test]
+    fn resolve_fire_finds_a_blueprint_nested_in_a_library_subfolder() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(home.path(), &mock_script_path());
+
+        // The library redesign made nested workflow folders first-class:
+        // seed the blueprint several levels deep, under a filename that
+        // deliberately does not match its declared `id`, to prove
+        // resolution happens by frontmatter id, not by path/filename
+        // guessing.
+        let nested_dir = home
+            .path()
+            .join("library")
+            .join("workflows")
+            .join("finance")
+            .join("reports");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(nested_dir.join("quarterly.md"), SCHEDULED_BLUEPRINT).unwrap();
+
+        let resolved = resolve_fire(&fire_request_for("sched-test", Some("mock")))
+            .expect("resolve_fire should find a blueprint nested in a library subfolder");
+
+        assert_eq!(resolved.blueprint.id, "sched-test");
+    }
+
+    #[test]
+    fn resolve_fire_still_resolves_a_flat_blueprint() {
+        // Backward compat: existing flat blueprints (filename == id, no
+        // subfolder) must keep resolving after the switch to the shared
+        // recursive resolver.
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(home.path(), &mock_script_path());
+        seed_blueprint(home.path(), "sched-test", SCHEDULED_BLUEPRINT);
+
+        let resolved = resolve_fire(&fire_request_for("sched-test", Some("mock")))
+            .expect("resolve_fire should still resolve a flat blueprint");
+
+        assert_eq!(resolved.blueprint.id, "sched-test");
     }
 
     #[test]
