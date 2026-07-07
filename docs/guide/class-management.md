@@ -2,13 +2,17 @@
 
 In Wardian, a **Class** is more than just a label—it is a functional blueprint that defines the core identity, intelligence, and equipment of your agents.
 
-Use Class Management when you want future agents to start with consistent instructions, provider-ready skills, and a recognizable role.
-
 Classes are Wardian's reusable agent blueprints. They turn repeated setup
 choices into editable, inspectable context so you can evolve an agent role over
 time instead of copying the same instructions into every new session.
 
-![Wardian Classes panel showing class creation, available classes, and class-level skill management](../assets/screenshots/classes/class-management.png)
+> **Class management has moved.** Creating, editing, and deleting classes no
+> longer happens in a left-rail **Classes** tab — that panel has been
+> retired. Class management now lives in the **Classes** section of the
+> [Library](./library.md#3-classes). See that guide for the full workflow
+> (the class workbench, editing `AGENTS.md`, managing deployed skills, and
+> resetting or deleting a class). This page keeps only the conceptual
+> material — what a class is and how to spawn an agent from one.
 
 ## When to Use It
 
@@ -16,15 +20,22 @@ time instead of copying the same instructions into every new session.
 - Tune an existing role before spawning more agents from it.
 - Assign skills at the class level so every new instance starts with the same capabilities.
 
-## Basic Workflow
+## What You Can Do in the Library's Classes Section
 
-Class management lives in the **Classes** tab on the left control rail.
+The [Library](./library.md)'s Classes section is where all class editing
+happens:
 
-1. Click the **Classes** icon in the left control rail.
-2. Browse the list of available classes or create a new class.
-3. Enter the class name, description, and instructions.
-4. Assign class-level skills from the class card.
-5. Spawn a new agent from the class in the left **Agent Configuration** tab.
+- Create, open, and browse classes (classes are flat — no folder nesting).
+- Edit a class's `AGENTS.md` instructions in the same inline markdown editor
+  every other Library section uses.
+- View and manage the skills deployed to the class, including a per-skill
+  remove control.
+- See provider defaults (default vs. custom class, and its description).
+- **Reset to default** for built-in classes, or **Delete class** for custom
+  ones.
+
+See [The Library System](./library.md#3-classes) for the complete, up-to-date
+walkthrough of this workbench.
 
 ## Configuring a Blueprint
 
@@ -35,7 +46,7 @@ Each class is governed by a markdown file. This is where you define:
 - **Standard Procedures**: How the agent should approach tasks (e.g., "Always draft a plan before executing").
 
 ### 2. Pre-Assigned Skills
-You can pre-load a class with specific modular skills. 
+You can pre-load a class with specific modular skills.
 - When you assign a skill to a class, every agent spawned from that blueprint receives the skill through its provider's discovery path. Wardian may use directory links, provider home projection, generated config, or provider-native include roots depending on the selected CLI.
 - This ensures your `Coder` class always starts with `github-cli` and `typescript-tools` ready to go.
 

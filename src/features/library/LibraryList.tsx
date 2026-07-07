@@ -142,6 +142,7 @@ export const LibraryList: React.FC = () => {
 
     const sectionMeta = LIBRARY_SECTIONS.find((s) => s.id === activeSection);
     const kindLabel = sectionMeta?.kindLabel ?? 'item';
+    const kindLabelPlural = sectionMeta?.kindLabelPlural ?? 'items';
 
     if (activeSection === 'mcps') {
         return (
@@ -209,6 +210,7 @@ export const LibraryList: React.FC = () => {
         <div data-testid="library-list-content" className="h-full flex flex-col min-h-0">
             <ListToolbar
                 kindLabel={kindLabel}
+                kindLabelPlural={kindLabelPlural}
                 searchQuery={searchQuery}
                 showStarredOnly={showStarredOnly}
                 canCreateFolder={activeSection !== 'classes'}
@@ -224,8 +226,8 @@ export const LibraryList: React.FC = () => {
                         {searching
                             ? 'No matches. Try a different search.'
                             : showStarredOnly
-                              ? `No starred ${kindLabel}s.`
-                              : `No ${kindLabel}s yet. Use New to create one.`}
+                              ? `No starred ${kindLabelPlural}.`
+                              : `No ${kindLabelPlural} yet. Use New to create one.`}
                     </div>
                 ) : (
                     rows.map((row) =>

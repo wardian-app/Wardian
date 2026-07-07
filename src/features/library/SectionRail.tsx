@@ -1,13 +1,20 @@
 import React from 'react';
 import { LibraryIndex, LibraryIndexFolder, LibrarySectionId, isLibraryEntry } from '../../types';
 
-/** Static metadata for the five library sections, in rail display order. */
-export const LIBRARY_SECTIONS: { id: LibrarySectionId; label: string; kindLabel: string }[] = [
-    { id: 'skills', label: 'Skills', kindLabel: 'skill' },
-    { id: 'prompts', label: 'Prompts', kindLabel: 'prompt' },
-    { id: 'classes', label: 'Classes', kindLabel: 'class' },
-    { id: 'workflows', label: 'Workflows', kindLabel: 'workflow' },
-    { id: 'mcps', label: 'MCPs', kindLabel: 'MCP server' },
+/**
+ * Static metadata for the five library sections, in rail display order.
+ *
+ * `kindLabel` is the singular form of the entry kind (used in "New skill",
+ * "Describe this skill here."); `kindLabelPlural` is an explicit plural form
+ * — not derived by naively appending "s" — since that breaks for "class"
+ * ("classs") and would be wrong for irregular plurals in general.
+ */
+export const LIBRARY_SECTIONS: { id: LibrarySectionId; label: string; kindLabel: string; kindLabelPlural: string }[] = [
+    { id: 'skills', label: 'Skills', kindLabel: 'skill', kindLabelPlural: 'skills' },
+    { id: 'prompts', label: 'Prompts', kindLabel: 'prompt', kindLabelPlural: 'prompts' },
+    { id: 'classes', label: 'Classes', kindLabel: 'class', kindLabelPlural: 'classes' },
+    { id: 'workflows', label: 'Workflows', kindLabel: 'workflow', kindLabelPlural: 'workflows' },
+    { id: 'mcps', label: 'MCPs', kindLabel: 'MCP server', kindLabelPlural: 'MCP servers' },
 ];
 
 /** Recursively counts entries (not folders) under a section's tree. */
@@ -34,7 +41,7 @@ export const SectionRail: React.FC<SectionRailProps> = ({ activeSection, section
     return (
         <div
             data-testid="library-section-rail"
-            className="w-14 flex-shrink-0 border-r border-wardian-border bg-wardian-sidebar-primary flex flex-col items-stretch overflow-y-auto"
+            className="w-16 flex-shrink-0 border-r border-wardian-border bg-wardian-sidebar-primary flex flex-col items-stretch overflow-y-auto"
         >
             {LIBRARY_SECTIONS.map((section) => {
                 const count = sections ? countEntries(sections[section.id].tree) : 0;
@@ -51,7 +58,7 @@ export const SectionRail: React.FC<SectionRailProps> = ({ activeSection, section
                                 : 'border-transparent text-muted hover:text-primary'
                         }`}
                     >
-                        <span className="label-small">{section.label}</span>
+                        <span className="label-small !tracking-normal text-center">{section.label}</span>
                         {count > 0 && <span className="text-[10px] text-muted-neutral">{count}</span>}
                     </button>
                 );

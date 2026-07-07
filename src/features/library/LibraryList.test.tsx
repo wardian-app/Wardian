@@ -319,4 +319,24 @@ describe('LibraryList', () => {
     fireEvent.change(screen.getByTestId('library-search'), { target: { value: 'nothing' } });
     expect(screen.getByTestId('library-list-empty')).toHaveTextContent('No matches');
   });
+
+  it('pluralizes the classes section label correctly instead of naively appending "s"', () => {
+    useLibraryStore.setState({ activeSection: 'classes' });
+    render(<LibraryList />);
+
+    // Regression test for the "Search classs..." / "No classs yet." bug:
+    // "classes" is an irregular plural of "class" that naive `${kindLabel}s`
+    // string concatenation gets wrong.
+    expect(screen.getByTestId('library-search')).toHaveAttribute('placeholder', 'Search classes...');
+    expect(screen.getByTestId('library-search')).toHaveAttribute('aria-label', 'Search classes');
+    expect(screen.getByTestId('library-list-empty')).toHaveTextContent('No classes yet. Use New to create one.');
+    expect(screen.getByTestId('library-list-empty')).not.toHaveTextContent('classs');
+  });
+
+  it('shows the starred-only empty state with the correct plural label', () => {
+    useLibraryStore.setState({ activeSection: 'classes', showStarredOnly: true });
+    render(<LibraryList />);
+
+    expect(screen.getByTestId('library-list-empty')).toHaveTextContent('No starred classes.');
+  });
 });

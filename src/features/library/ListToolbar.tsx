@@ -3,6 +3,8 @@ import React, { useState } from 'react';
 interface ListToolbarProps {
     /** Singular label of the active section's entry kind, e.g. "skill". */
     kindLabel: string;
+    /** Explicit plural label of the active section's entry kind, e.g. "classes". */
+    kindLabelPlural: string;
     searchQuery: string;
     showStarredOnly: boolean;
     /** Folders are not supported in flat sections (classes). */
@@ -21,6 +23,7 @@ interface ListToolbarProps {
  */
 export const ListToolbar: React.FC<ListToolbarProps> = ({
     kindLabel,
+    kindLabelPlural,
     searchQuery,
     showStarredOnly,
     canCreateFolder,
@@ -68,8 +71,8 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                     data-testid="library-search"
                     value={searchQuery}
                     onChange={(e) => onSearchChange(e.target.value)}
-                    placeholder={`Search ${kindLabel}s...`}
-                    aria-label={`Search ${kindLabel}s`}
+                    placeholder={`Search ${kindLabelPlural}...`}
+                    aria-label={`Search ${kindLabelPlural}`}
                     className="flex-1 min-w-0 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1 text-xs text-primary placeholder:text-muted-neutral focus:outline-none focus:border-[var(--color-wardian-accent)]"
                 />
                 <button

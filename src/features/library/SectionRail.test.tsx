@@ -96,4 +96,23 @@ describe('SectionRail', () => {
     expect(screen.getByTestId('library-section-prompts')).toHaveAttribute('aria-current', 'true');
     expect(screen.getByTestId('library-section-skills')).not.toHaveAttribute('aria-current');
   });
+
+  it('renders every section label unclipped, including the longest label ("Workflows")', () => {
+    render(<SectionRail activeSection="skills" sections={sections} onSelect={vi.fn()} />);
+
+    for (const [id, label] of [
+      ['skills', 'Skills'],
+      ['prompts', 'Prompts'],
+      ['classes', 'Classes'],
+      ['workflows', 'Workflows'],
+      ['mcps', 'MCPs'],
+    ] as const) {
+      expect(screen.getByTestId(`library-section-${id}`)).toHaveTextContent(label);
+    }
+
+    // Regression guard: the rail must be wide enough (and the label's
+    // tracking loose enough) that "Workflows" doesn't clip to "Workflow".
+    const rail = screen.getByTestId('library-section-rail');
+    expect(rail.className).not.toContain('w-14');
+  });
 });
