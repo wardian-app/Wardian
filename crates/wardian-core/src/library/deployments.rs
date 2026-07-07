@@ -510,4 +510,26 @@ mod tests {
             .join("SKILL.md")
             .exists());
     }
+
+    /// Manual perf evidence for the native junction/symlink deployment path
+    /// (SDD Task 17, step 3) — replaces the old `mklink` subprocess-per-call
+    /// path this redesign removed. Not run in CI: timing assertions are
+    /// flaky across machines, and the point of this test is to print a
+    /// number for the PR description, not to gate the build.
+    ///
+    /// Run: `cargo test -p wardian-core --release deploy_perf -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual perf evidence: cargo test -p wardian-core --release deploy_perf -- --ignored --nocapture"]
+    fn deploy_perf_twenty_sequential() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        let src = home.join("library/skills/planner");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "perf").unwrap();
+        let start = std::time::Instant::now();
+        for i in 0..20 {
+            deploy_skill(home, "planner", "agent", &format!("agent-{i}")).expect("deploy");
+        }
+        println!("20 deploys in {:?}", start.elapsed());
+    }
 }
