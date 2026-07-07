@@ -57,13 +57,25 @@ impl LibrarySectionId {
 /// no `.`/`..`, no separators, no root/prefix (e.g. Windows `C:`), and no
 /// trailing-separator padding that would otherwise normalize away.
 ///
-/// This is deliberately structural rather than character-based: a
-/// character blocklist (rejecting `/`, `\`, `.`, `..`) still lets strings
-/// like `"C:"` or `"C:evil"` through, and on Windows `PathBuf::join`
-/// treats a joined path with a drive prefix as an absolute replacement of
-/// the base rather than a sub-path, letting the join escape the intended
-/// directory entirely.
+/// This is deliberately structural rather than purely character-based: a
+/// character blocklist alone (rejecting `/`, `\`, `.`, `..`) still lets
+/// strings like `"C:"` or `"C:evil"` through, and on Windows
+/// `PathBuf::join` treats a joined path with a drive prefix as an
+/// absolute replacement of the base rather than a sub-path, letting the
+/// join escape the intended directory entirely.
+///
+/// The structural check alone is not enough, though: `Path::components()`
+/// only treats `\` as a separator on Windows, so on Unix a name like
+/// `"a\\b"` parses as a single `Normal` component and would otherwise
+/// pass here while being rejected on Windows — an OS-dependent result for
+/// the same input. Library entry names must be portable across OSes (a
+/// name created on Linux may later be read on Windows and vice versa), so
+/// both `/` and `\` are rejected explicitly on every platform regardless
+/// of what the host OS considers a separator.
 pub fn is_single_normal_component(name: &str) -> bool {
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
     let mut components = Path::new(name).components();
     matches!(
         (components.next(), components.next()),
@@ -141,5 +153,41 @@ mod tests {
         assert!(resolve_entry_path(home, LibrarySectionId::Skills, "dev/.wardian-skill-source").is_err());
         assert!(resolve_entry_path(home, LibrarySectionId::Skills, "dev/.Wardian-Skill-Source").is_err());
         assert!(resolve_entry_path(home, LibrarySectionId::Mcps, "anything").is_err()); // stubbed section: no paths
+    }
+
+    #[test]
+    fn is_single_normal_component_accepts_plain_names() {
+        assert!(is_single_normal_component("planner"));
+        assert!(is_single_normal_component("my-skill_v2"));
+    }
+
+    #[test]
+    fn is_single_normal_component_rejects_empty_and_dots() {
+        assert!(!is_single_normal_component(""));
+        assert!(!is_single_normal_component("."));
+        assert!(!is_single_normal_component(".."));
+    }
+
+    // These must NOT be cfg-gated: `\` is only a path separator on
+    // Windows, so a character-blind structural check alone would accept
+    // "a\\b" as a single Normal component on Unix while Windows rejects
+    // it. Both separators are rejected explicitly on every platform so
+    // the result is identical everywhere.
+    #[test]
+    fn is_single_normal_component_rejects_path_separators_everywhere() {
+        assert!(!is_single_normal_component("a/b"));
+        assert!(!is_single_normal_component("a\\b"));
+    }
+
+    // On Windows, `Path::components()` parses a leading `C:` as a
+    // `Prefix` component distinct from the rest, so `"C:evil"` fails the
+    // single `Normal` component check and is rejected. On Unix there is
+    // no drive prefix concept, so `"C:evil"` is just an ordinary (if odd)
+    // file name and is a valid single component — this assertion is
+    // Windows-only.
+    #[cfg(windows)]
+    #[test]
+    fn is_single_normal_component_rejects_windows_drive_prefix() {
+        assert!(!is_single_normal_component("C:evil"));
     }
 }
