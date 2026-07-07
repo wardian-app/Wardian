@@ -1,4 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
+import {
+  buildLibraryContentFixture,
+  buildLibraryIndexFixture,
+  installLibraryIpcMock,
+} from "../fixtures/libraryIpcMock";
 
 async function openSettings(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Settings" });
@@ -24,6 +29,14 @@ test.describe("Wardian Core Feature Tests", () => {
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
+    // Tests 6 and 10 drive the index-driven LibraryView, which calls
+    // invoke("get_library_index") on mount. Without a Tauri invoke bridge
+    // that call throws, LibraryView renders its error/retry state, and
+    // SectionRail (and library-section-classes) never mounts. Install the
+    // same invoke mock library-redesign.spec.ts uses (shared via
+    // ../fixtures/libraryIpcMock) before the initial navigation so it's in
+    // place for every test in this suite, not just the library ones.
+    await installLibraryIpcMock(page, buildLibraryIndexFixture(), buildLibraryContentFixture());
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
