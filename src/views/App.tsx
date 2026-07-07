@@ -743,10 +743,22 @@ function AppBody() {
     });
     const unlistenUpdate = listen("agents-updated", () => fetchAgents());
     const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
+    // Class definitions (create/delete/reset) are now managed exclusively
+    // from the Library's ClassDetail panel, which reports changes through
+    // the same `library-changed` event the library store listens for (see
+    // useLibraryStore.subscribeToLibraryChanges / src-tauri/src/commands/library.rs).
+    // The backend only ever emits `library_type: "library"` (it covers both
+    // `library/` and `classes/` under one watch), so there's nothing finer
+    // to filter on here — refetch classes unconditionally on any change.
+    const unlistenLibrary = listen<{ library_type: string }>("library-changed", (event) => {
+      if (event.payload.library_type !== "library") return;
+      fetchAgentClasses();
+    });
     return () => {
       unlistenJson.then(fn => fn());
       unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
+      unlistenLibrary.then(fn => fn());
     };
   }, [appendAgentEvent, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 

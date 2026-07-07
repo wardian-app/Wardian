@@ -326,6 +326,19 @@ function captureAgentMetricsListener() {
   };
 }
 
+function captureLibraryChangedListener() {
+  let libraryListener: EventCallback<{ library_type: string }> | null = null;
+  mockListen.mockImplementation((eventName, handler) => {
+    if (eventName === "library-changed") {
+      libraryListener = handler as EventCallback<{ library_type: string }>;
+    }
+    return Promise.resolve(() => {});
+  });
+  return (payload: { library_type: string }) => {
+    libraryListener?.({ event: "library-changed", id: 0, payload });
+  };
+}
+
 function captureQueueAgentListeners() {
   let jsonListener: EventCallback<{ session_id: string; data: Record<string, unknown> }> | null = null;
   let statusListener: EventCallback<{ session_id: string; current_status: string }> | null = null;
@@ -673,6 +686,28 @@ describe("Agent List Management", () => {
     render(<App />);
     await screen.findByText("No Active Instances");
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
+  });
+
+  it("refetches agent classes when a library-changed event fires", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const emitLibraryChanged = captureLibraryChangedListener();
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    const callsBeforeEvent = mockInvoke.mock.calls.filter(
+      ([cmd]) => cmd === "list_agent_classes"
+    ).length;
+
+    act(() => {
+      emitLibraryChanged({ library_type: "library" });
+    });
+
+    await waitFor(() => {
+      const callsAfterEvent = mockInvoke.mock.calls.filter(
+        ([cmd]) => cmd === "list_agent_classes"
+      ).length;
+      expect(callsAfterEvent).toBe(callsBeforeEvent + 1);
+    });
   });
 
   it("syncs provider theme settings with the effective Wardian theme", async () => {
