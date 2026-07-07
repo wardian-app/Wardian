@@ -6,10 +6,14 @@ import { DeployTargetsControl } from '../DeployTargetsControl';
 
 interface SkillDetailProps extends DetailPanelCommonProps {
     deployments: DeploymentTarget[];
-    onApplyDeployments: (targets: SkillDeployment[]) => void;
+    /** Settles once the store's deploy/undeploy attempt is done (success or
+     * failure), so `DeployTargetsControl` can clear its own pending state
+     * for the affected chip/row. Not expected to reject — see that
+     * control's `onApply` doc comment. */
+    onApplyDeployments: (targets: SkillDeployment[]) => Promise<void>;
 }
 
-/** Skill panel: SKILL.md editor + deploy-target checklist. */
+/** Skill panel: SKILL.md editor + deploy-target chips/picker. */
 export const SkillDetail: React.FC<SkillDetailProps> = ({
     entry,
     header,

@@ -412,13 +412,15 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
                     <SkillDetail
                         {...common}
                         deployments={index?.deployments[currentEntry.entry_ref] ?? []}
-                        onApplyDeployments={(targets: SkillDeployment[]) => {
+                        onApplyDeployments={(targets: SkillDeployment[]) =>
                             // The store already surfaces the error via its
-                            // `error` state; this call site fires-and-forgets,
-                            // so swallow the rejection here to avoid an
-                            // unhandled promise rejection.
-                            void setSkillDeployments(currentEntry.path, targets).catch(() => {});
-                        }}
+                            // `error` state; swallow the rejection here so it
+                            // never reaches the caller (DeployTargetsControl
+                            // awaits the returned promise only to know when
+                            // to clear its own pending state, not to handle
+                            // failure itself).
+                            setSkillDeployments(currentEntry.path, targets).catch(() => {})
+                        }
                     />
                 );
             case 'prompt':

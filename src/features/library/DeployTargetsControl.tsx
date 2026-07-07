@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
+import { X } from 'lucide-react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import {
     AgentConfig,
@@ -16,17 +18,36 @@ interface DeployTargetsControlProps {
     entry: LibraryEntry;
     /** Current deployments for `entry`, from `index.deployments[entry.entry_ref]`. */
     deployments: DeploymentTarget[];
-    onApply: (targets: SkillDeployment[]) => void;
+    /**
+     * Applies a full desired target set immediately (add/remove is computed
+     * by this control as "current deployments ± one target" and handed to
+     * the caller, which wraps `setSkillDeployments`). Returns a promise that
+     * settles once the store's mutation attempt is done (success or
+     * failure) so this control can clear its own pending/disabled state;
+     * the promise is not expected to reject — error reporting is the
+     * store's `error` state, surfaced elsewhere (see `LibraryView`'s error
+     * banner), not this control's job.
+     */
+    onApply: (targets: SkillDeployment[]) => Promise<void>;
 }
 
+type TargetType = 'user' | 'class' | 'agent';
+
 interface TargetOption {
-    target_type: 'user' | 'class' | 'agent';
+    target_type: TargetType;
     target_id: string;
     label: string;
 }
 
+const GROUP_ORDER: TargetType[] = ['user', 'class', 'agent'];
+const GROUP_LABELS: Record<TargetType, string> = { user: 'USER', class: 'CLASSES', agent: 'AGENTS' };
+
 function targetKey(t: { target_type: string; target_id: string }): string {
     return `${t.target_type}:${t.target_id}`;
+}
+
+function toSkillDeployment(t: { target_type: string; target_id: string }): SkillDeployment {
+    return { target_type: t.target_type, target_id: t.target_id };
 }
 
 function collectClassOptions(tree: LibraryIndexFolder): TargetOption[] {
@@ -44,28 +65,50 @@ function collectClassOptions(tree: LibraryIndexFolder): TargetOption[] {
     return options;
 }
 
+/** Resolves a chip's display label. Falls back to the raw `target_id` for a
+ * deployment whose target isn't among the known options (e.g. a persisted
+ * but no-longer-live agent) — the chip must still render so every current
+ * deployment stays visible and individually removable (final-review FIX-NOW
+ * 2's guarantee carries over from the old checklist design). */
+function labelFor(target: { target_type: string; target_id: string }, known: TargetOption[]): string {
+    if (target.target_type === 'user') return 'User (global)';
+    const match = known.find((t) => t.target_type === target.target_type && t.target_id === target.target_id);
+    return match?.label ?? target.target_id;
+}
+
 /**
- * Checklist of deploy targets for a skill: the global user profile, every
- * class, and every persisted agent. Checking/unchecking builds a desired
- * set applied in one shot via `onApply` (which the caller wires to
- * `setSkillDeployments`). Targets that are currently a *copy* rather than a
- * live link surface the amber "copied — edits won't sync" note. The control
- * also accepts a drop of a (different) skill's entry ref — dropping one
- * switches the library selection to that skill, so a quick drag from the
- * list can jump straight to configuring its deployments here.
+ * Deploy targets for a skill, rendered as removable chips (current
+ * deployments) plus a searchable "+ Add target…" popover for adding more.
+ * Both add and remove apply immediately via `onApply` — there is no longer
+ * a batch Apply step. Chips are derived directly from `deployments` (the
+ * index's actual persisted deployments), so every current deployment,
+ * including one to a class/agent the picker can't resolve a label for, has
+ * a chip and can be removed individually without disturbing the others.
+ * Targets that are currently a *copy* rather than a live link surface the
+ * amber "copied — edits won't sync" marker. The control also accepts a drop
+ * of a (different) skill's entry ref — dropping one switches the library
+ * selection to that skill, so a quick drag from the list can jump straight
+ * to configuring its deployments here.
  */
 export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entry, deployments, onApply }) => {
     const classesTree = useLibraryStore((s) => s.index?.sections?.classes?.tree ?? null);
     const select = useLibraryStore((s) => s.select);
     const [agents, setAgents] = useState<AgentConfig[]>([]);
-    const [checked, setChecked] = useState<Set<string>>(() => new Set(deployments.map(targetKey)));
+    const [pending, setPending] = useState<Set<string>>(new Set());
+    const [pickerOpen, setPickerOpen] = useState(false);
+    const [query, setQuery] = useState('');
+    const [highlighted, setHighlighted] = useState(0);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const popoverRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
 
-    // Re-seed the checklist whenever the displayed entry (or its known
-    // deployments) changes — otherwise stale checkbox state from the
+    // Close the picker and drop any in-progress search when the displayed
+    // entry changes — otherwise a stale query/open popover from the
     // previously selected skill would leak into this one.
     useEffect(() => {
-        setChecked(new Set(deployments.map(targetKey)));
-    }, [entry.entry_ref, deployments]);
+        setPickerOpen(false);
+        setQuery('');
+    }, [entry.entry_ref]);
 
     useEffect(() => {
         let cancelled = false;
@@ -86,42 +129,121 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
         () => agents.map((a) => ({ target_type: 'agent', target_id: a.session_id, label: a.session_name || a.session_id })),
         [agents],
     );
-    const targets = useMemo<TargetOption[]>(
+    const allTargets = useMemo<TargetOption[]>(
         () => [{ target_type: 'user', target_id: 'global', label: 'User (global)' }, ...classOptions, ...agentOptions],
         [classOptions, agentOptions],
     );
 
-    const toggle = (target: TargetOption) => {
-        setChecked((prev) => {
+    const deployedKeys = useMemo(() => new Set(deployments.map(targetKey)), [deployments]);
+
+    // Targets already deployed are hidden from the picker entirely (rather
+    // than shown checked-and-disabled) — once `onApply` resolves and the
+    // index refreshes, the newly-deployed target simply drops out of this
+    // list on its own.
+    const availableTargets = useMemo(
+        () => allTargets.filter((t) => !deployedKeys.has(targetKey(t))),
+        [allTargets, deployedKeys],
+    );
+
+    const filteredGroups = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        const matches = (t: TargetOption) => (q ? t.label.toLowerCase().includes(q) : true);
+        const groups: Record<TargetType, TargetOption[]> = { user: [], class: [], agent: [] };
+        for (const t of availableTargets) {
+            if (matches(t)) groups[t.target_type].push(t);
+        }
+        return groups;
+    }, [availableTargets, query]);
+
+    const flatFiltered = useMemo(
+        () => GROUP_ORDER.flatMap((type) => filteredGroups[type]),
+        [filteredGroups],
+    );
+
+    // Keep the keyboard cursor in range whenever the (filtered) list shrinks
+    // or grows, e.g. after a search keystroke or a target becoming deployed.
+    useEffect(() => {
+        setHighlighted((h) => Math.min(h, Math.max(flatFiltered.length - 1, 0)));
+    }, [flatFiltered.length]);
+
+    useEffect(() => {
+        if (pickerOpen) inputRef.current?.focus();
+    }, [pickerOpen]);
+
+    useEffect(() => {
+        if (!pickerOpen) return;
+        const handlePointerDown = (e: MouseEvent) => {
+            const target = e.target as Node;
+            if (popoverRef.current?.contains(target)) return;
+            if (buttonRef.current?.contains(target)) return;
+            setPickerOpen(false);
+        };
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [pickerOpen]);
+
+    const applyChange = async (key: string, desired: SkillDeployment[]) => {
+        setPending((prev) => {
             const next = new Set(prev);
-            const key = targetKey(target);
-            if (next.has(key)) {
-                next.delete(key);
-            } else {
-                next.add(key);
-            }
+            next.add(key);
             return next;
         });
+        try {
+            await onApply(desired);
+        } catch {
+            // The store already surfaces failures via its `error` state
+            // (see LibraryView's error banner) and re-fetches the index so
+            // this control re-syncs from reality either way — nothing else
+            // to do here except make sure this doesn't crash the control.
+        } finally {
+            setPending((prev) => {
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
+        }
     };
 
-    const handleApply = () => {
-        const desired: SkillDeployment[] = targets
-            .filter((t) => checked.has(targetKey(t)))
-            .map((t) => ({ target_type: t.target_type, target_id: t.target_id }));
-        // `targets` only covers the global user profile, classes, and
-        // currently-live agents (`list_agents` returns only agents in
-        // AppState). A deployment can exist for a persisted-but-not-live
-        // agent, or for any agent at all if `list_agents` rejected (the
-        // catch above falls back to []) — such a target has no rendered
-        // checklist row, so it can never appear in `desired`. Preserve any
-        // existing deployment whose target isn't among the rendered options
-        // so Apply can't silently undeploy something it can't see
-        // (final-review FIX-NOW 2).
-        const known = new Set(targets.map(targetKey));
-        const preserved: SkillDeployment[] = deployments
-            .filter((d) => !known.has(targetKey(d)))
-            .map((d) => ({ target_type: d.target_type, target_id: d.target_id }));
-        onApply([...preserved, ...desired]);
+    const handleRemove = (target: DeploymentTarget) => {
+        const key = targetKey(target);
+        const desired = deployments.filter((d) => targetKey(d) !== key).map(toSkillDeployment);
+        void applyChange(key, desired);
+    };
+
+    const handleAdd = (target: TargetOption) => {
+        const key = targetKey(target);
+        const desired = [...deployments.map(toSkillDeployment), toSkillDeployment(target)];
+        void applyChange(key, desired);
+    };
+
+    const openPicker = () => {
+        setQuery('');
+        setHighlighted(0);
+        setPickerOpen(true);
+    };
+
+    const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            setPickerOpen(false);
+            buttonRef.current?.focus();
+            return;
+        }
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setHighlighted((h) => Math.min(h + 1, flatFiltered.length - 1));
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setHighlighted((h) => Math.max(h - 1, 0));
+            return;
+        }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const target = flatFiltered[highlighted];
+            if (target && !pending.has(targetKey(target))) handleAdd(target);
+        }
     };
 
     const handleDrop = (e: React.DragEvent) => {
@@ -132,6 +254,31 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
         }
     };
 
+    const anchorRect = pickerOpen ? buttonRef.current?.getBoundingClientRect() ?? null : null;
+    // Position the popover to avoid going off-screen (mirrors the
+    // off-screen adjustment ContextMenu already does). The "+ Add
+    // target…" button sits directly under the chips it deploys/removes
+    // from, so when there isn't enough room to open downward, anchor beside
+    // the button instead of above it — flipping upward would cover the
+    // very chips the picker is meant to be read alongside.
+    const POPOVER_WIDTH = 256;
+    const POPOVER_MAX_HEIGHT = 320;
+    const popoverStyle: React.CSSProperties = { position: 'fixed', top: 0, left: 0 };
+    if (anchorRect) {
+        const spaceBelow = window.innerHeight - anchorRect.bottom;
+        if (spaceBelow >= 140) {
+            popoverStyle.left = anchorRect.left;
+            popoverStyle.top = anchorRect.bottom + 4;
+            popoverStyle.maxHeight = Math.min(POPOVER_MAX_HEIGHT, spaceBelow - 8);
+        } else {
+            const spaceRight = window.innerWidth - anchorRect.right;
+            const openLeft = spaceRight < POPOVER_WIDTH + 16;
+            popoverStyle.left = openLeft ? anchorRect.left - POPOVER_WIDTH - 8 : anchorRect.right + 8;
+            popoverStyle.top = Math.max(8, Math.min(anchorRect.top, window.innerHeight - POPOVER_MAX_HEIGHT - 8));
+            popoverStyle.maxHeight = Math.min(POPOVER_MAX_HEIGHT, window.innerHeight - 16);
+        }
+    }
+
     return (
         <div
             data-testid="deploy-targets-control"
@@ -139,45 +286,122 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
             onDrop={handleDrop}
             className="flex flex-col gap-2"
         >
-            <h4 className="text-xs font-bold text-muted">Deploy to</h4>
-            <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                {targets.map((target) => {
+            <h4 className="text-xs font-bold text-muted">Deployed to ({deployments.length})</h4>
+            <div className="flex flex-wrap gap-1.5" data-testid="deploy-chips">
+                {deployments.length === 0 && <span className="text-[11px] text-muted">Not deployed anywhere</span>}
+                {deployments.map((target) => {
                     const key = targetKey(target);
-                    const existing = deployments.find((d) => targetKey(d) === key);
-                    const copied = Boolean(existing && !existing.linked);
+                    const label = labelFor(target, allTargets);
+                    const copied = !target.linked;
+                    const isPending = pending.has(key);
                     return (
-                        <label
+                        <span
                             key={key}
-                            data-testid={`deploy-target-${key}`}
-                            className="flex items-center gap-2 text-xs text-primary"
+                            data-testid={`deploy-chip-${key}`}
+                            className="inline-flex max-w-full items-center gap-1 rounded-full border border-wardian-border bg-wardian-card-bg-muted px-2 py-0.5 text-[11px] text-primary"
                         >
-                            <input
-                                type="checkbox"
-                                checked={checked.has(key)}
-                                onChange={() => toggle(target)}
-                                className="h-3.5 w-3.5 accent-[var(--color-wardian-accent)]"
-                            />
-                            <span className="flex-1 truncate">{target.label}</span>
+                            <span className="truncate max-w-[160px]">{label}</span>
                             {copied && (
                                 <span
-                                    data-testid={`deploy-target-copied-${key}`}
-                                    className="text-[10px] text-wardian-warning"
+                                    data-testid={`deploy-chip-copied-${key}`}
+                                    className="shrink-0 text-wardian-warning"
+                                    title="copied — edits won't sync"
                                 >
-                                    copied — edits won&apos;t sync
+                                    ●
                                 </span>
                             )}
-                        </label>
+                            <button
+                                type="button"
+                                data-testid={`deploy-chip-remove-${key}`}
+                                aria-label={`Remove ${label}`}
+                                disabled={isPending}
+                                onClick={() => handleRemove(target)}
+                                className="shrink-0 rounded-full p-0.5 text-muted transition-colors hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                                <X className="h-3 w-3" aria-hidden />
+                            </button>
+                        </span>
                     );
                 })}
             </div>
             <button
                 type="button"
-                data-testid="deploy-targets-apply"
-                onClick={handleApply}
+                ref={buttonRef}
+                data-testid="deploy-targets-add-button"
+                onClick={() => (pickerOpen ? setPickerOpen(false) : openPicker())}
+                aria-expanded={pickerOpen}
                 className="self-start rounded border border-wardian-border px-3 py-1 text-xs text-primary transition-colors hover:bg-wardian-card-bg-muted"
             >
-                Apply
+                + Add target…
             </button>
+            {pickerOpen &&
+                createPortal(
+                    <div
+                        ref={popoverRef}
+                        data-testid="deploy-picker"
+                        role="listbox"
+                        aria-label="Add deploy target"
+                        style={popoverStyle}
+                        className="flex w-64 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-card)] shadow-2xl z-[1000]"
+                    >
+                        <div className="shrink-0 border-b border-wardian-border p-2">
+                            <input
+                                ref={inputRef}
+                                type="search"
+                                data-testid="deploy-picker-search"
+                                aria-label="Search deploy targets"
+                                value={query}
+                                onChange={(e) => setQuery(e.currentTarget.value)}
+                                onKeyDown={handleSearchKeyDown}
+                                placeholder="Search targets…"
+                                className="w-full rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1 text-xs text-primary outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
+                            />
+                        </div>
+                        <div className="min-h-0 flex-1 overflow-y-auto p-1">
+                            {flatFiltered.length === 0 && (
+                                <div className="p-2 text-[11px] text-muted">No matching targets</div>
+                            )}
+                            {GROUP_ORDER.map((type) => {
+                                const options = filteredGroups[type];
+                                if (options.length === 0) return null;
+                                return (
+                                    <div key={type} className="mb-1">
+                                        <div
+                                            data-testid={`deploy-picker-group-${type}`}
+                                            className="px-2 py-1 text-[10px] font-bold text-muted"
+                                        >
+                                            {GROUP_LABELS[type]} ({options.length})
+                                        </div>
+                                        {options.map((option) => {
+                                            const key = targetKey(option);
+                                            const index = flatFiltered.indexOf(option);
+                                            const isHighlighted = index === highlighted;
+                                            const isPending = pending.has(key);
+                                            return (
+                                                <button
+                                                    key={key}
+                                                    type="button"
+                                                    role="option"
+                                                    aria-selected={isHighlighted}
+                                                    data-testid={`deploy-picker-option-${key}`}
+                                                    disabled={isPending}
+                                                    onMouseEnter={() => setHighlighted(index)}
+                                                    onClick={() => handleAdd(option)}
+                                                    className={`flex w-full items-center rounded px-2 py-1 text-left text-xs text-primary transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                                                        isHighlighted ? 'bg-wardian-card-bg-muted' : 'hover:bg-wardian-card-bg-muted'
+                                                    }`}
+                                                >
+                                                    <span className="truncate">{option.label}</span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>,
+                    document.body,
+                )}
         </div>
     );
 };
