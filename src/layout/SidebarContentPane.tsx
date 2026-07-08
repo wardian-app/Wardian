@@ -5,7 +5,6 @@ import { useLayoutStore } from "../store/useLayoutStore";
 import { SidebarResizeHandle } from "../components/SidebarResizeHandle";
 import { ConfigureAgentPanel } from "../features/agents/ConfigureAgentPanel";
 import { SpawnAgentPanel } from "../features/agents/SpawnAgentPanel";
-import { ClassManagerPanel } from "../features/agents/ClassManagerPanel";
 import { CommandPanel } from "../features/commands/CommandPanel";
 import { WorkflowMonitorGlance } from "../features/workflows/monitor/WorkflowMonitorGlance";
 import { ExplorerPanel } from "../features/explorer/ExplorerPanel";
@@ -25,7 +24,6 @@ interface SidebarContentPaneProps {
   telemetry: Record<string, AgentTelemetry>;
   sourceControlStatus: SelectedAgentGitStatus;
   onAgentsUpdated: (agent?: AgentConfig) => void;
-  onClassesUpdated: () => void;
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
@@ -42,7 +40,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   telemetry,
   sourceControlStatus,
   onAgentsUpdated,
-  onClassesUpdated,
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
@@ -95,12 +92,6 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             broadcastMessage={broadcastMessage}
             setBroadcastMessage={setBroadcastMessage}
             onBroadcast={onBroadcast}
-          />
-        )}
-        {activeTab === "classes" && (
-          <ClassManagerPanel
-            agentClasses={agentClasses}
-            onClassesUpdated={onClassesUpdated}
           />
         )}
         {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowsView={onOpenWorkflowsView} />}

@@ -4,14 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigureAgentPanel } from "./ConfigureAgentPanel";
+import { useLibraryStore } from "../../store/useLibraryStore";
 import type { AgentConfig, ProviderReadiness, UserFacingProviderName } from "../../types";
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   writeText: vi.fn(),
-}));
-
-vi.mock("../library/ManageSkills", () => ({
-  ManageSkills: () => <div data-testid="manage-skills" />,
 }));
 
 const invokeMock = vi.mocked(invoke);
@@ -222,5 +219,24 @@ describe("ConfigureAgentPanel", () => {
         }),
       });
     });
+  });
+
+  it("opens the library at the skills section instead of managing skills inline", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <ConfigureAgentPanel
+        agentId="agent-1"
+        agents={[baseAgent]}
+        agentClasses={classes}
+        telemetry={{}}
+        onSaved={() => {}}
+        onBackToSpawn={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByTestId("configure-agent-manage-skills"));
+
+    expect(useLibraryStore.getState().activeSection).toBe("skills");
   });
 });

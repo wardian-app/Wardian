@@ -1,7 +1,5 @@
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -936,41 +934,7 @@ pub(crate) fn create_directory_link(
     target: &std::path::Path,
     link: &std::path::Path,
 ) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let command = format!(
-            "mklink /J \"{}\" \"{}\"",
-            link.to_string_lossy(),
-            target.to_string_lossy()
-        );
-        let mut cmd = crate::utils::process::new_silent_std_command("cmd");
-        cmd.raw_arg("/c").raw_arg(&command);
-        let output = cmd.output().map_err(|e| e.to_string())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Err(format!(
-                "Failed to create junction {} -> {}. {}{}",
-                link.to_string_lossy(),
-                target.to_string_lossy(),
-                stdout,
-                if stderr.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", stderr)
-                }
-            ))
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        std::os::unix::fs::symlink(target, link).map_err(|e| e.to_string())
-    }
+    wardian_core::library::create_directory_link(target, link).map_err(|e| e.to_string())
 }
 
 pub(crate) fn copy_dir_all(

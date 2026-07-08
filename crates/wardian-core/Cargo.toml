@@ -20,5 +20,8 @@ thiserror = { workspace = true }
 tokio = { version = "1.49.0", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
 uuid = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+
 [dev-dependencies]
 tempfile = { workspace = true }

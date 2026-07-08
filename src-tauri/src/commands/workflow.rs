@@ -51,7 +51,7 @@ pub fn workflow_list_blueprints() -> Result<Vec<serde_json::Value>, String> {
     let dir = home.join("library").join("workflows");
     let mut out = Vec::new();
     if dir.exists() {
-        for entry in walk_md(&dir) {
+        for entry in workflow::list_blueprint_files(&dir) {
             if let Ok(bp) = workflow::parse_file(&entry) {
                 out.push(serde_json::json!({ "id": bp.id, "name": bp.name, "path": entry.to_string_lossy() }));
             }
@@ -715,37 +715,13 @@ fn parse_blueprint_file_for_id(
 }
 
 fn resolve_blueprint_path(id: &str) -> Option<std::path::PathBuf> {
-    let home = wardian_core::paths::wardian_home()?;
-    let dir = home.join("library").join("workflows");
-    for entry in walk_md(&dir) {
-        if let Ok(bp) = wardian_core::workflow::parse_file(&entry) {
-            if bp.id == id {
-                return Some(entry);
-            }
-        }
-    }
-    None
+    workflow::resolve_blueprint_path(id)
 }
 
 fn resolve_blueprint(id: &str) -> Option<serde_json::Value> {
     let path = resolve_blueprint_path(id)?;
     let blueprint = wardian_core::workflow::parse_file(&path).ok()?;
     serde_json::to_value(blueprint).ok()
-}
-
-fn walk_md(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                files.extend(walk_md(&p));
-            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
-                files.push(p);
-            }
-        }
-    }
-    files
 }
 
 #[cfg(test)]

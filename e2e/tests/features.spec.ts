@@ -1,4 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
+import {
+  buildLibraryContentFixture,
+  buildLibraryIndexFixture,
+  installLibraryIpcMock,
+} from "../fixtures/libraryIpcMock";
 
 async function openSettings(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Settings" });
@@ -24,6 +29,14 @@ test.describe("Wardian Core Feature Tests", () => {
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
+    // Tests 6 and 10 drive the index-driven LibraryView, which calls
+    // invoke("get_library_index") on mount. Without a Tauri invoke bridge
+    // that call throws, LibraryView renders its error/retry state, and
+    // SectionRail (and library-section-classes) never mounts. Install the
+    // same invoke mock library-redesign.spec.ts uses (shared via
+    // ../fixtures/libraryIpcMock) before the initial navigation so it's in
+    // place for every test in this suite, not just the library ones.
+    await installLibraryIpcMock(page, buildLibraryIndexFixture(), buildLibraryContentFixture());
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
   });
@@ -77,10 +90,11 @@ test.describe("Wardian Core Feature Tests", () => {
     await expect(page.locator('[data-testid="spawn-agent-name"]')).toBeVisible();
   });
 
-  test("6. Sidebar navigation - Classes tab", async () => {
-    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+  test("6. Library - Classes section", async () => {
+    await page.getByText("Library", { exact: true }).click();
     await page.waitForTimeout(500);
-    await expect(page.locator('[data-testid="class-manager-panel"]')).toBeVisible();
+    await page.locator('[data-testid="library-section-classes"]').click();
+    await expect(page.locator('[data-testid="library-list-content"]')).toBeVisible();
   });
 
   test("7. Sidebar navigation - Explorer tab", async () => {
@@ -113,15 +127,17 @@ test.describe("Wardian Core Feature Tests", () => {
     expect(options).toBeGreaterThan(0);
   });
 
-  test("10. Class Manager - Create class form", async () => {
-    await page.locator('[data-testid="sidebar-tab-classes"]').click();
+  test("10. Library - Create class entry form", async () => {
+    await page.getByText("Library", { exact: true }).click();
     await page.waitForTimeout(500);
-    
-    await page.locator('[data-testid="class-name-input"]').fill("TestClass");
-    await page.locator('[data-testid="class-description-input"]').fill("A test class for E2E testing");
+    await page.locator('[data-testid="library-section-classes"]').click();
+
+    await page.locator('[data-testid="library-new"]').click();
+    await page.locator('[data-testid="library-new-item"]').click();
+    await page.locator('[data-testid="library-new-name"]').fill("TestClass");
     await page.waitForTimeout(200);
-    
-    await expect(page.locator('[data-testid="class-create-button"]')).toBeVisible();
+
+    await expect(page.locator('[data-testid="library-new-confirm"]')).toBeVisible();
   });
 
   test("11. Spawn Agent form validation", async () => {

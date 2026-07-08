@@ -4,7 +4,7 @@ import { AgentConfig, AgentClassDefinition, AgentTelemetry, ProviderReadiness, U
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { normalizeAgentConfig, requiresRestart, toPersistedAgentConfig, withProvider } from "./configUtils";
 import { AdvancedSettings } from '../../components/AdvancedSettings';
-import { ManageSkills } from '../library/ManageSkills';
+import { useLibraryStore } from "../../store/useLibraryStore";
 import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName } from "./providerOptions";
 
 interface Props {
@@ -30,6 +30,7 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
   const [copiedLog, setCopiedLog] = useState(false);
   const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness[] | null>(null);
   const [providerNote, setProviderNote] = useState<string | null>(null);
+  const openLibraryAt = useLibraryStore((s) => s.openLibraryAt);
 
   // Sync state when agentId or agents change
   useEffect(() => {
@@ -243,7 +244,17 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
           </div>
         </div>
 
-        <ManageSkills targetType="agent" targetId={config.session_id} />
+        <div className="flex flex-col gap-2 mt-2">
+          <h3 className="text-xs font-bold text-muted tracking-wide">Skills</h3>
+          <button
+            type="button"
+            data-testid="configure-agent-manage-skills"
+            onClick={() => openLibraryAt("skills")}
+            className="self-start rounded border border-wardian-light/50 bg-wardian-card-bg-muted px-3 py-1.5 text-xs text-primary transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+          >
+            Manage skills in Library
+          </button>
+        </div>
 
         <AdvancedSettings 
           config={config} 

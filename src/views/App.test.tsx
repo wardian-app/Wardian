@@ -8,6 +8,7 @@ import App from "./App";
 import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderReadiness } from "../types";
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
+import { useLibraryStore } from "../store/useLibraryStore";
 import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
@@ -322,6 +323,19 @@ function captureAgentMetricsListener() {
   });
   return (payload: AgentTelemetry[]) => {
     metricsListener?.({ event: "agent-metrics", id: 0, payload });
+  };
+}
+
+function captureLibraryChangedListener() {
+  let libraryListener: EventCallback<{ library_type: string }> | null = null;
+  mockListen.mockImplementation((eventName, handler) => {
+    if (eventName === "library-changed") {
+      libraryListener = handler as EventCallback<{ library_type: string }>;
+    }
+    return Promise.resolve(() => {});
+  });
+  return (payload: { library_type: string }) => {
+    libraryListener?.({ event: "library-changed", id: 0, payload });
   };
 }
 
@@ -674,14 +688,25 @@ describe("Agent List Management", () => {
     expect(mockInvoke).toHaveBeenCalledWith("list_agent_classes");
   });
 
-  it("preloads library data on mount", async () => {
+  it("refetches agent classes when a library-changed event fires", async () => {
     setupDefaultMocks([], defaultClasses);
+    const emitLibraryChanged = captureLibraryChangedListener();
     render(<App />);
     await screen.findByText("No Active Instances");
 
+    const callsBeforeEvent = mockInvoke.mock.calls.filter(
+      ([cmd]) => cmd === "list_agent_classes"
+    ).length;
+
+    act(() => {
+      emitLibraryChanged({ library_type: "library" });
+    });
+
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "prompts" });
-      expect(mockInvoke).toHaveBeenCalledWith("get_library_tree", { libraryType: "skills" });
+      const callsAfterEvent = mockInvoke.mock.calls.filter(
+        ([cmd]) => cmd === "list_agent_classes"
+      ).length;
+      expect(callsAfterEvent).toBe(callsBeforeEvent + 1);
     });
   });
 
@@ -1732,6 +1757,22 @@ describe("View Mode Toggle", () => {
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByTestId("garden-canvas")).toBeInTheDocument();
+  });
+});
+
+describe("Library deep-link navigation", () => {
+  it("switches the main view to the library when openLibraryAt fires", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+
+    expect(screen.queryByTestId("library-view")).not.toBeInTheDocument();
+
+    act(() => {
+      useLibraryStore.getState().openLibraryAt("skills");
+    });
+
+    expect(await screen.findByTestId("library-view")).toBeInTheDocument();
   });
 });
 

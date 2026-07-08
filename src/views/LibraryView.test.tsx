@@ -1,45 +1,153 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryView } from './LibraryView';
 import { useLibraryStore } from '../store/useLibraryStore';
+import { useLayoutStore } from '../store/useLayoutStore';
+import { LibraryIndex } from '../types';
 
-vi.mock('../features/library/LibraryGrid', () => ({
-  LibraryGrid: () => <div data-testid="library-grid" />,
-}));
+const emptyIndex: LibraryIndex = {
+  sections: {
+    skills: { tree: { path: '', name: 'Root', children: [] }, stubbed: false },
+    prompts: { tree: { path: '', name: 'Root', children: [] }, stubbed: false },
+    workflows: { tree: { path: '', name: 'Root', children: [] }, stubbed: false },
+    classes: { tree: { path: '', name: 'Root', children: [] }, stubbed: false },
+    mcps: { tree: { path: '', name: 'Root', children: [] }, stubbed: true },
+  },
+  deployments: {},
+  orphans: [],
+};
 
 describe('LibraryView', () => {
   beforeEach(() => {
     useLibraryStore.setState({
-      promptTree: { type: 'Folder', path: '', name: 'prompts', children: [] },
-      skillTree: { type: 'Folder', path: '', name: 'skills', children: [] },
+      index: emptyIndex,
       isLoading: false,
       error: null,
-      activeTab: 'skills',
+      activeSection: 'skills',
     });
+    localStorage.clear();
+    act(() => useLayoutStore.getState().resetLayout());
   });
 
-  it('subscribes to skill library changes only while the skills tab is active', () => {
+  it('renders the section rail, list, and detail regions', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-view')).toBeInTheDocument();
+    expect(screen.getByTestId('library-section-rail')).toBeInTheDocument();
+    expect(screen.getByTestId('library-list')).toBeInTheDocument();
+    expect(screen.getByTestId('library-detail')).toBeInTheDocument();
+  });
+
+  it('subscribes to library changes on mount', () => {
     const cleanup = vi.fn();
     const subscribeToLibraryChanges = vi.fn(() => cleanup);
     useLibraryStore.setState({ subscribeToLibraryChanges });
 
-    render(<LibraryView selectedAgentIds={new Set()} />);
+    const { unmount } = render(<LibraryView selectedAgentIds={new Set()} />);
 
-    expect(subscribeToLibraryChanges).toHaveBeenCalledWith('skills');
+    expect(subscribeToLibraryChanges).toHaveBeenCalledTimes(1);
 
-    act(() => {
-      useLibraryStore.setState({ activeTab: 'prompts' });
-    });
-
+    unmount();
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it('links to the Library guide from the Library view', () => {
+  it('switching sections updates the store activeSection', () => {
     render(<LibraryView selectedAgentIds={new Set()} />);
 
-    expect(screen.getByRole('link', { name: /library guide/i })).toHaveAttribute(
-      'href',
-      'https://docs.wardian.org/guide/library',
-    );
+    expect(useLibraryStore.getState().activeSection).toBe('skills');
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('library-section-prompts'));
+    });
+
+    expect(useLibraryStore.getState().activeSection).toBe('prompts');
+  });
+
+  it('shows a loading state when fetching with no index yet', () => {
+    useLibraryStore.setState({ index: null, isLoading: true, error: null });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-section-rail')).not.toBeInTheDocument();
+  });
+
+  it('shows an error state with retry when the initial fetch fails', () => {
+    const fetchIndex = vi.fn();
+    useLibraryStore.setState({ index: null, isLoading: false, error: 'boom', fetchIndex });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-error')).toHaveTextContent('boom');
+    expect(screen.queryByTestId('library-section-rail')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-retry'));
+
+    expect(fetchIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the loaded content visible and shows a banner when a background refetch fails', () => {
+    const fetchIndex = vi.fn();
+    useLibraryStore.setState({ index: emptyIndex, isLoading: false, error: 'refresh failed', fetchIndex });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-error-banner')).toHaveTextContent('refresh failed');
+    expect(screen.getByTestId('library-section-rail')).toBeInTheDocument();
+    expect(screen.getByTestId('library-list')).toBeInTheDocument();
+    expect(screen.getByTestId('library-detail')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('library-error-banner-retry'));
+
+    expect(fetchIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a resize handle between the list and detail panes', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const detail = screen.getByTestId('library-detail');
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    expect(handle).toBeInTheDocument();
+    expect(detail).toContainElement(handle);
+    expect(detail).toHaveStyle({ width: `${useLayoutStore.getState().libraryDetailWidth}px` });
+  });
+
+  it('dragging the resize handle widens the detail pane and persists the width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const startWidth = useLayoutStore.getState().libraryDetailWidth;
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    // edge="left": dragging left (negative delta) grows the right-anchored detail pane.
+    fireEvent.pointerDown(handle, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 440 });
+    fireEvent.pointerUp(window, { clientX: 440 });
+
+    const nextWidth = useLayoutStore.getState().libraryDetailWidth;
+    expect(nextWidth).toBe(startWidth + 60);
+    expect(screen.getByTestId('library-detail')).toHaveStyle({ width: `${nextWidth}px` });
+  });
+
+  it('double-clicking the resize handle resets the detail pane to the default width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    const handle = screen.getByTestId('sidebar-resize-handle');
+
+    fireEvent.pointerDown(handle, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.pointerUp(window, { clientX: 300 });
+
+    expect(useLayoutStore.getState().libraryDetailWidth).not.toBe(480);
+
+    fireEvent.doubleClick(handle);
+
+    expect(useLayoutStore.getState().libraryDetailWidth).toBe(480);
+  });
+
+  it('never shrinks the list pane below its minimum width', () => {
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-list')).toHaveClass('min-w-[320px]');
   });
 });

@@ -346,28 +346,61 @@ export interface LibraryItemMetadata {
     last_used?: string;
 }
 
-export interface LibrarySkill {
-    type: 'Skill';
+// --- Unified library index (Task 5 DTOs) -----------------------------------
+// Mirrors wardian_core::models::library and wardian_core::library::deployments
+// exactly; property names are snake_case to match Rust serde output directly.
+
+export type LibrarySectionId = 'skills' | 'prompts' | 'workflows' | 'classes' | 'mcps';
+export type LibraryEntryKind = 'skill' | 'prompt' | 'workflow' | 'class';
+
+export interface LibraryEntry {
+    kind: LibraryEntryKind;
     path: string;
+    entry_ref: string;
     name: string;
     description: string;
-    content: string;
-    metadata: LibraryItemMetadata;
+    tags: string[];
+    is_starred: boolean;
+    deployment_count: number;
+    error?: string | null;
 }
 
-export interface LibraryPrompt {
-    type: 'Prompt';
+export interface LibraryIndexFolder {
     path: string;
     name: string;
-    content: string;
-    metadata: LibraryItemMetadata;
+    children: (LibraryIndexFolder | LibraryEntry)[];
 }
 
-export interface LibraryFolder {
-    type: 'Folder';
-    path: string;
-    name: string;
-    children: (LibraryFolder | LibraryPrompt | LibrarySkill)[];
+export interface LibrarySection {
+    tree: LibraryIndexFolder;
+    stubbed: boolean;
+}
+
+export interface DeploymentTarget {
+    target_type: 'user' | 'class' | 'agent';
+    target_id: string;
+    linked: boolean;
+}
+
+export interface OrphanDeployment {
+    target_type: string;
+    target_id: string;
+    skill_name: string;
+}
+
+export interface SkillDeployment {
+    target_type: string;
+    target_id: string;
+}
+
+export interface LibraryIndex {
+    sections: Record<LibrarySectionId, LibrarySection>;
+    deployments: Record<string, DeploymentTarget[]>;
+    orphans: OrphanDeployment[];
+}
+
+export function isLibraryEntry(node: LibraryIndexFolder | LibraryEntry): node is LibraryEntry {
+    return 'entry_ref' in node;
 }
 
 export interface DeployedSkillRef {

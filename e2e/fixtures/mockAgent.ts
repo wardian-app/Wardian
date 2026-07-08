@@ -81,6 +81,61 @@ export function seededHome(scenario: string = "basic"): SeededHome {
  * @param edges Array of [agentId1, agentId2] pairs to create manual edges
  * @param ignoredPairs Array of [agentId1, agentId2] pairs to ignore (optional)
  */
+/**
+ * Seeds a library-redesign fixture set into the given WARDIAN_HOME: two
+ * skills in nested folders, one prompt, one workflow, and one class — the
+ * minimum shape `library-redesign.spec.ts` and
+ * `library-deployment-native.test.mjs` both build their assertions against.
+ *
+ * This writes real files on disk (consumed for real by the native E2E layer,
+ * which talks to a live Tauri backend). The browser E2E layer has no real
+ * Tauri backend to read this from — like `seedTopology` above, its UI tests
+ * mock the `invoke` bridge directly with an equivalent in-memory fixture,
+ * and this function's on-disk behavior is verified separately by reading
+ * back what it wrote (see the `seedLibraryFixtures fixture` describe block
+ * in `library-redesign.spec.ts`).
+ *
+ * @param home The WARDIAN_HOME directory path
+ */
+export function seedLibraryFixtures(home: string): void {
+  const librarySkills = path.join(home, "library", "skills");
+  const libraryPrompts = path.join(home, "library", "prompts");
+  const libraryWorkflows = path.join(home, "library", "workflows");
+  const classesDir = path.join(home, "classes", "Architect");
+
+  const plannerDir = path.join(librarySkills, "dev", "planner");
+  fs.mkdirSync(plannerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(plannerDir, "SKILL.md"),
+    "---\ndescription: Plans work\n---\n# Planner\nBody\n",
+  );
+
+  const reviewerDir = path.join(librarySkills, "ops", "reviewer");
+  fs.mkdirSync(reviewerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(reviewerDir, "SKILL.md"),
+    "---\ndescription: Reviews code\n---\n# Reviewer\nBody\n",
+  );
+
+  fs.mkdirSync(libraryPrompts, { recursive: true });
+  fs.writeFileSync(
+    path.join(libraryPrompts, "greeting.md"),
+    "# Greeting\nSay hello to the team\n",
+  );
+
+  fs.mkdirSync(libraryWorkflows, { recursive: true });
+  fs.writeFileSync(
+    path.join(libraryWorkflows, "triage.md"),
+    "---\ndescription: Triage workflow\n---\n# Triage\n",
+  );
+
+  fs.mkdirSync(classesDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(classesDir, "AGENTS.md"),
+    "# Role: Architect\nDesigns systems\n",
+  );
+}
+
 export function seedTopology(
   home: string,
   edges: Array<[string, string]>,

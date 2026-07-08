@@ -1,21 +1,15 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::manager::log_debug;
 use crate::state::{AppState, LibraryWatchRegistration};
-use crate::utils::fs::{copy_dir_all, get_wardian_home};
+use crate::utils::fs::get_wardian_home;
+use wardian_core::library::{self, LibrarySectionId};
 use wardian_core::models::{
-    AgentConfig, DeployedSkillRef, LibraryFolder, LibraryItemMetadata, LibraryNode, LibraryPrompt,
-    SkillDeployment,
+    AgentConfig, DeployedSkillRef, LibraryIndex, LibraryItemMetadata, SkillDeployment,
 };
 
-const LIBRARY_PROMPTS_DIR: &str = "library/prompts";
-const LIBRARY_SKILLS_DIR: &str = "library/skills";
-const LIBRARY_METADATA_FILE: &str = "library/library.json";
-const DEPLOYED_SKILL_SOURCE_FILE: &str = ".wardian-skill-source";
 const LIBRARY_WATCH_DEBOUNCE_MS: u64 = 200;
 static LIBRARY_WATCH_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -24,13 +18,25 @@ struct LibraryChangedPayload {
     library_type: String,
 }
 
+fn parse_section(section: &str) -> Result<LibrarySectionId, String> {
+    LibrarySectionId::parse(section).ok_or_else(|| format!("Unknown library section: {section}"))
+}
+
+// --- Watching -----------------------------------------------------------
+//
+// The library watcher only supports a single logical type, `"library"`,
+// which covers everything under `library/` (skills, prompts, workflows)
+// plus `classes/` (class definitions can also be edited from the library
+// UI). The `library_type` parameter is kept on the commands for interface
+// stability, but any value other than `"library"` is rejected.
+
 fn is_supported_watch_library_type(library_type: &str) -> bool {
-    library_type == "skills"
+    library_type == "library"
 }
 
 fn library_dir_for_type(home: &Path, library_type: &str) -> Result<PathBuf, String> {
     match library_type {
-        "skills" => Ok(home.join(LIBRARY_SKILLS_DIR)),
+        "library" => Ok(home.join("library")),
         _ => Err(format!("Unsupported library watch type: {}", library_type)),
     }
 }
@@ -45,6 +51,11 @@ fn path_is_within(child: &Path, parent: &Path) -> bool {
     child == parent || child.starts_with(parent)
 }
 
+/// Walk `library/skills` for directories that contain a `SKILL.md` whose
+/// canonical path lies outside the skills root itself (i.e. the skill
+/// directory is a live link to an external target). Notify's recursive
+/// watch does not reliably follow reparse points/symlinks on every
+/// platform, so those external targets need to be watched explicitly.
 fn discover_skill_watch_targets(skills_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let canonical_skills = skills_dir
         .canonicalize()
@@ -84,6 +95,37 @@ fn discover_skill_watch_targets(skills_dir: &Path) -> Result<Vec<PathBuf>, Strin
     Ok(targets)
 }
 
+/// Build the full set of paths the `"library"` watcher should observe: the
+/// `library/` root and `classes/` root (both recursive), plus any
+/// externally-linked skill targets discovered under `library/skills`. The
+/// external-link discovery is deliberately scoped to library skills only —
+/// deployed (target-side) skill junctions under `classes/*/.agents/skills`
+/// are not separately watched.
+fn discover_library_watch_targets(home: &Path, library_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut targets = vec![library_root
+        .canonicalize()
+        .unwrap_or_else(|_| library_root.to_path_buf())];
+
+    let classes_root = home.join("classes");
+    fs::create_dir_all(&classes_root).map_err(|e| e.to_string())?;
+    let canonical_classes = classes_root
+        .canonicalize()
+        .unwrap_or_else(|_| classes_root.clone());
+    if !targets.iter().any(|t| t == &canonical_classes) {
+        targets.push(canonical_classes);
+    }
+
+    let skills_dir = library_root.join("skills");
+    fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
+    for extra in discover_skill_watch_targets(&skills_dir)? {
+        if !targets.iter().any(|t| t == &extra) {
+            targets.push(extra);
+        }
+    }
+
+    Ok(targets)
+}
+
 #[cfg(test)]
 fn is_current_library_watch_generation(
     state: &AppState,
@@ -98,239 +140,98 @@ fn is_current_library_watch_generation(
         == Some(generation)
 }
 
+// --- Index / mutations ---------------------------------------------------
+//
+// Every command below resolves the Wardian home, parses its section (where
+// applicable), and delegates the actual work to `wardian_core::library`.
+// No business logic lives here; this layer only adapts Tauri's calling
+// convention (AppHandle, async commands, String errors) onto the core
+// engine, and layers the Antigravity live-projection refresh on top where
+// a deployment changed.
+
 #[tauri::command]
-pub async fn get_library_tree(
+pub async fn get_library_index(_app: AppHandle) -> Result<LibraryIndex, String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::build_library_index(&home)
+}
+
+#[tauri::command]
+pub async fn read_library_item(
     _app: AppHandle,
-    library_type: String,
-) -> Result<LibraryFolder, String> {
-    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-
-    let target_dir = if library_type == "skills" {
-        wardian_home.join(LIBRARY_SKILLS_DIR)
-    } else {
-        wardian_home.join(LIBRARY_PROMPTS_DIR)
-    };
-
-    let metadata_path = wardian_home.join(LIBRARY_METADATA_FILE);
-
-    if !target_dir.exists() {
-        if let Err(e) = fs::create_dir_all(&target_dir) {
-            log_debug(&format!("[Wardian] Failed to create library dir: {}", e));
-        }
-    }
-
-    let mut metadata_map: HashMap<String, LibraryItemMetadata> = HashMap::new();
-    if metadata_path.exists() {
-        if let Ok(data) = fs::read_to_string(&metadata_path) {
-            if let Ok(map) = serde_json::from_str(&data) {
-                metadata_map = map;
-            }
-        }
-    }
-
-    fn build_tree(
-        dir: &Path,
-        base_dir: &Path,
-        metadata_map: &HashMap<String, LibraryItemMetadata>,
-        is_skills: bool,
-    ) -> LibraryFolder {
-        let mut children = Vec::new();
-        let rel_path = dir
-            .strip_prefix(base_dir)
-            .unwrap_or(dir)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let name = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-
-                if path.is_dir() {
-                    // For skills, check if it's an actual skill (e.g. contains SKILL.md)
-                    let is_skill_node = is_skills && path.join("SKILL.md").exists();
-
-                    if is_skill_node {
-                        let file_rel_path = path
-                            .strip_prefix(base_dir)
-                            .unwrap_or(&path)
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        let file_name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        let metadata =
-                            metadata_map
-                                .get(&file_rel_path)
-                                .cloned()
-                                .unwrap_or_else(|| LibraryItemMetadata {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    tags: vec![],
-                                    is_starred: false,
-                                    last_used: None,
-                                });
-
-                        let content = fs::read_to_string(path.join("SKILL.md")).unwrap_or_default();
-                        let description = content.lines().next().unwrap_or("").to_string();
-
-                        children.push(LibraryNode::Skill(wardian_core::models::LibrarySkill {
-                            path: file_rel_path,
-                            name: file_name,
-                            description,
-                            content,
-                            metadata,
-                        }));
-                    } else {
-                        let folder = build_tree(&path, base_dir, metadata_map, is_skills);
-                        children.push(LibraryNode::Folder(folder));
-                    }
-                } else if !is_skills && path.extension().is_some_and(|e| e == "md") {
-                    let file_rel_path = path
-                        .strip_prefix(base_dir)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let file_name = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let content = fs::read_to_string(&path).unwrap_or_default();
-
-                    let metadata = metadata_map
-                        .get(&file_rel_path)
-                        .cloned()
-                        .unwrap_or_else(|| LibraryItemMetadata {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            tags: vec![],
-                            is_starred: false,
-                            last_used: None,
-                        });
-
-                    children.push(LibraryNode::Prompt(LibraryPrompt {
-                        path: file_rel_path,
-                        name: file_name,
-                        content,
-                        metadata,
-                    }));
-                }
-            }
-        }
-
-        LibraryFolder {
-            path: rel_path,
-            name: if name.is_empty() {
-                "Root".to_string()
-            } else {
-                name
-            },
-            children,
-        }
-    }
-
-    Ok(build_tree(
-        &target_dir,
-        &target_dir,
-        &metadata_map,
-        library_type == "skills",
-    ))
+    section: String,
+    path: String,
+) -> Result<String, String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section = parse_section(&section)?;
+    library::read_item(&home, section, &path)
 }
 
 #[tauri::command]
 pub async fn save_library_item(
     _app: AppHandle,
-    library_type: String,
+    section: String,
     path: String,
     content: String,
-    metadata: LibraryItemMetadata,
 ) -> Result<(), String> {
-    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-
-    let base_dir = if library_type == "skills" {
-        wardian_home.join(LIBRARY_SKILLS_DIR)
-    } else {
-        wardian_home.join(LIBRARY_PROMPTS_DIR)
-    };
-
-    let mut file_path = base_dir.join(&path);
-    if library_type == "skills" {
-        file_path = file_path.join("SKILL.md");
-    }
-
-    if let Some(parent) = file_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    fs::write(&file_path, content).map_err(|e| e.to_string())?;
-
-    // Update metadata
-    let metadata_path = wardian_home.join(LIBRARY_METADATA_FILE);
-    let mut metadata_map: HashMap<String, LibraryItemMetadata> = HashMap::new();
-    if metadata_path.exists() {
-        if let Ok(data) = fs::read_to_string(&metadata_path) {
-            if let Ok(map) = serde_json::from_str(&data) {
-                metadata_map = map;
-            }
-        }
-    } else if let Some(parent) = metadata_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    metadata_map.insert(path, metadata);
-    let json = serde_json::to_string_pretty(&metadata_map).map_err(|e| e.to_string())?;
-    fs::write(&metadata_path, json).map_err(|e| e.to_string())?;
-
-    Ok(())
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section = parse_section(&section)?;
+    library::save_item(&home, section, &path, &content)
 }
 
 #[tauri::command]
 pub async fn update_library_metadata(
     _app: AppHandle,
-    path: String,
+    entry_ref: String,
     metadata: LibraryItemMetadata,
 ) -> Result<(), String> {
-    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let metadata_path = wardian_home.join(LIBRARY_METADATA_FILE);
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::update_metadata(&home, &entry_ref, metadata)
+}
 
-    let mut metadata_map: HashMap<String, LibraryItemMetadata> = HashMap::new();
-    if metadata_path.exists() {
-        if let Ok(data) = fs::read_to_string(&metadata_path) {
-            if let Ok(map) = serde_json::from_str(&data) {
-                metadata_map = map;
-            }
-        }
-    } else if let Some(parent) = metadata_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+#[tauri::command]
+pub async fn create_library_folder(
+    _app: AppHandle,
+    section: String,
+    path: String,
+) -> Result<(), String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section = parse_section(&section)?;
+    library::create_folder(&home, section, &path)
+}
 
-    metadata_map.insert(path, metadata);
-    let json = serde_json::to_string_pretty(&metadata_map).map_err(|e| e.to_string())?;
-    fs::write(&metadata_path, json).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn rename_library_entry(
+    _app: AppHandle,
+    section: String,
+    from_path: String,
+    to_path: String,
+) -> Result<(), String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section = parse_section(&section)?;
+    library::rename_entry(&home, section, &from_path, &to_path)
+}
 
-    Ok(())
+#[tauri::command]
+pub async fn delete_library_entry(
+    _app: AppHandle,
+    section: String,
+    path: String,
+) -> Result<(), String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section = parse_section(&section)?;
+    library::delete_entry(&home, section, &path)
 }
 
 #[tauri::command]
 pub async fn open_library_folder(
     _app: AppHandle,
-    library_type: String,
+    section: String,
     path: Option<String>,
 ) -> Result<(), String> {
-    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let section_id = parse_section(&section)?;
 
-    let base_dir = if library_type == "skills" {
-        LIBRARY_SKILLS_DIR
-    } else {
-        LIBRARY_PROMPTS_DIR
-    };
-
-    let mut target_dir = wardian_home.join(base_dir);
+    let mut target_dir = section_id.root_for_home(&home);
     if let Some(p) = path {
         if !p.is_empty() {
             target_dir = target_dir.join(p);
@@ -370,140 +271,15 @@ pub async fn open_library_folder(
     Ok(())
 }
 
-pub(crate) fn get_target_skills_dir(
-    target_type: &str,
-    target_id: &str,
-) -> Result<std::path::PathBuf, String> {
-    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let base = match target_type {
-        "agent" => home.join("agents").join(target_id),
-        "class" => home.join("classes").join(target_id),
-        "user" => home.join("common"),
-        _ => return Err(format!("Unknown target type: {}", target_type)),
-    };
-    Ok(base.join(".agents").join("skills"))
-}
+// --- Deployments -----------------------------------------------------------
 
-fn remove_existing_deployment(path: &Path) -> std::io::Result<()> {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-
-    if metadata.file_type().is_symlink() {
-        #[cfg(target_os = "windows")]
-        {
-            return fs::remove_dir(path).or_else(|_| fs::remove_file(path));
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            return fs::remove_file(path);
-        }
-    }
-
-    if metadata.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn link_skill_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let src = src.canonicalize()?;
-    let dst = match (dst.parent(), dst.file_name()) {
-        (Some(parent), Some(file_name)) => parent.canonicalize()?.join(file_name),
-        _ => dst.to_path_buf(),
-    };
-
-    let output = crate::utils::process::new_silent_std_command("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(&dst)
-        .arg(&src)
-        .output()?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(std::io::Error::other(format!(
-            "mklink /J failed: {}{}",
-            stdout, stderr
-        )))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn link_skill_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
-fn deploy_skill_dir_with_linker<F>(
-    src_dir: &Path,
-    dst_dir: &Path,
-    linker: F,
-) -> std::io::Result<bool>
-where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
-{
-    remove_existing_deployment(dst_dir)?;
-
-    if let Some(parent) = dst_dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    match linker(src_dir, dst_dir) {
-        Ok(()) => Ok(false),
-        Err(link_error) => {
-            log_debug(&format!(
-                "[Wardian] Failed to link skill {:?} to {:?}; falling back to copy: {}",
-                src_dir, dst_dir, link_error
-            ));
-            copy_dir_all(src_dir, dst_dir)?;
-            Ok(true)
-        }
-    }
-}
-
-pub(crate) fn deploy_skill_from_library(
-    source_path: &str,
-    target_type: &str,
-    target_id: &str,
-) -> Result<(), String> {
-    deploy_skill_from_library_with_linker(source_path, target_type, target_id, link_skill_dir)
-}
-
-fn deploy_skill_from_library_with_linker<F>(
-    source_path: &str,
-    target_type: &str,
-    target_id: &str,
-    linker: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
-{
-    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let src_dir = home.join(LIBRARY_SKILLS_DIR).join(source_path);
-
-    if !src_dir.exists() || !src_dir.is_dir() {
-        return Err(format!(
-            "Skill source not found or is not a directory: {:?}",
-            src_dir
-        ));
-    }
-
-    let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
-    let skill_name = Path::new(source_path).file_name().unwrap_or_default();
-    let dst_dir = target_skills_dir.join(skill_name);
-
-    let copied =
-        deploy_skill_dir_with_linker(&src_dir, &dst_dir, linker).map_err(|e| e.to_string())?;
-    if copied {
-        fs::write(dst_dir.join(DEPLOYED_SKILL_SOURCE_FILE), source_path)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+/// The final path component of a section-relative skill path, used as the
+/// deployed skill directory's name (e.g. `dev/planner` -> `planner`).
+fn skill_name_from_rel(rel: &str) -> String {
+    Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 fn refresh_antigravity_skill_projections_for_configs(
@@ -537,6 +313,11 @@ fn refresh_antigravity_skill_projections_for_configs(
     }
 }
 
+/// Refresh every live Antigravity skill projection. Snapshots the current
+/// agent configs first (no filesystem work), then exits early unless at
+/// least one config is an Antigravity provider — this keeps the common
+/// case (deploy/rename/delete with no Antigravity agents running) from
+/// touching the filesystem at all.
 async fn refresh_live_antigravity_skill_projections(app: &AppHandle) {
     let state = app.state::<AppState>();
     let configs = {
@@ -546,127 +327,60 @@ async fn refresh_live_antigravity_skill_projections(app: &AppHandle) {
             .filter_map(|agent| agent.config.lock().ok().map(|config| config.clone()))
             .collect::<Vec<_>>()
     };
+
+    if !configs.iter().any(|c| c.provider == "antigravity") {
+        return;
+    }
+
     refresh_antigravity_skill_projections_for_configs(configs);
 }
 
-fn list_deployed_skill_names(target_type: &str, target_id: &str) -> Result<Vec<String>, String> {
-    let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
-    let mut skills = Vec::new();
-
-    if !target_skills_dir.exists() {
-        return Ok(skills);
-    }
-
-    let entries = fs::read_dir(target_skills_dir).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            skills.push(entry.file_name().to_string_lossy().to_string());
-        }
-    }
-    skills.sort();
-
-    Ok(skills)
-}
-
-fn collect_library_skill_sources(
-    dir: &Path,
-    base_dir: &Path,
-    sources: &mut Vec<(String, String, PathBuf)>,
+/// Deploy a single library skill to a single target. Used internally by
+/// agent-cloning flows; keeps its pre-refactor signature but now delegates
+/// to the core engine.
+pub(crate) fn deploy_skill_from_library(
+    source_path: &str,
+    target_type: &str,
+    target_id: &str,
 ) -> Result<(), String> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        if path.join("SKILL.md").exists() {
-            let rel_path = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if let Ok(canonical) = path.canonicalize() {
-                sources.push((rel_path, name, canonical));
-            }
-            continue;
-        }
-
-        collect_library_skill_sources(&path, base_dir, sources)?;
-    }
-
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::deploy_skill(&home, source_path, target_type, target_id)?;
     Ok(())
 }
 
-fn read_deployed_skill_source_marker(path: &Path) -> Option<String> {
-    fs::read_to_string(path.join(DEPLOYED_SKILL_SOURCE_FILE))
-        .ok()
-        .map(|source| source.trim().replace('\\', "/"))
-        .filter(|source| !source.is_empty())
-}
-
-fn source_path_for_deployed_skill(
+/// Resolve a deployed skill directory back to a library source using only
+/// the `.wardian-skill-source` marker or an exact canonical-path match —
+/// no same-name inference. This is deliberately more conservative than
+/// `list_deployed_skill_refs_for_target`: it backs the agent-clone preview
+/// flow, where guessing a source for an unmarked, unlinked directory could
+/// cause the clone to deploy the wrong skill content.
+fn resolve_deployed_skill_source_strict(
     deployed_path: &Path,
-    deployed_name: &str,
-    library_sources: &[(String, String, PathBuf)],
-    infer_same_name_source: bool,
+    sources: &[library::SkillSource],
 ) -> Option<String> {
-    if let Some(marker_source) = read_deployed_skill_source_marker(deployed_path) {
-        if library_sources
-            .iter()
-            .any(|(rel_path, _, _)| rel_path == &marker_source)
-        {
-            return Some(marker_source);
+    if let Ok(marker) = fs::read_to_string(deployed_path.join(library::DEPLOYED_SKILL_SOURCE_FILE)) {
+        let marker = marker.trim().replace('\\', "/");
+        if !marker.is_empty() && sources.iter().any(|s| s.rel_path == marker) {
+            return Some(marker);
         }
     }
 
-    if let Ok(canonical_path) = deployed_path.canonicalize() {
-        if let Some((rel_path, _, _)) = library_sources
-            .iter()
-            .find(|(_, _, source_canonical)| source_canonical == &canonical_path)
-        {
-            return Some(rel_path.clone());
+    if let Ok(canonical) = deployed_path.canonicalize() {
+        if let Some(source) = sources.iter().find(|s| s.canonical == canonical) {
+            return Some(source.rel_path.clone());
         }
-    }
-
-    if !infer_same_name_source {
-        return None;
-    }
-
-    let mut same_name_sources = library_sources
-        .iter()
-        .filter(|(_, name, _)| name == deployed_name);
-    let only_source = same_name_sources.next();
-    if only_source.is_some() && same_name_sources.next().is_none() {
-        return only_source.map(|(rel_path, _, _)| rel_path.clone());
     }
 
     None
 }
 
-fn list_deployed_skill_refs_for_target_with_options(
+pub(crate) fn list_deployed_skill_refs_for_target_strict(
     target_type: &str,
     target_id: &str,
-    infer_same_name_source: bool,
 ) -> Result<Vec<DeployedSkillRef>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let target_skills_dir = get_target_skills_dir(target_type, target_id)?;
-    let library_skills_dir = home.join(LIBRARY_SKILLS_DIR);
-    let mut library_sources = Vec::new();
-    collect_library_skill_sources(
-        &library_skills_dir,
-        &library_skills_dir,
-        &mut library_sources,
-    )?;
+    let sources = library::collect_skill_sources(&home);
+    let target_skills_dir = library::get_target_skills_dir(&home, target_type, target_id)?;
 
     let mut deployed = Vec::new();
     if !target_skills_dir.exists() {
@@ -681,9 +395,7 @@ fn list_deployed_skill_refs_for_target_with_options(
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
-        let source_path =
-            source_path_for_deployed_skill(&path, &name, &library_sources, infer_same_name_source);
-
+        let source_path = resolve_deployed_skill_source_strict(&path, &sources);
         deployed.push(DeployedSkillRef { name, source_path });
     }
 
@@ -701,51 +413,39 @@ pub(crate) fn list_deployed_skill_refs_for_target(
     target_type: &str,
     target_id: &str,
 ) -> Result<Vec<DeployedSkillRef>, String> {
-    list_deployed_skill_refs_for_target_with_options(target_type, target_id, true)
-}
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let sources = library::collect_skill_sources(&home);
+    let scan = library::scan_deployments(&home, &sources);
 
-pub(crate) fn list_deployed_skill_refs_for_target_strict(
-    target_type: &str,
-    target_id: &str,
-) -> Result<Vec<DeployedSkillRef>, String> {
-    list_deployed_skill_refs_for_target_with_options(target_type, target_id, false)
-}
-
-fn deployment_matches_source(
-    target: &Path,
-    skill_name: &str,
-    source_path: Option<&str>,
-    library_sources: &[(String, String, PathBuf)],
-    home: &Path,
-) -> bool {
-    if !target.exists() || !target.is_dir() {
-        return false;
+    let mut deployed = Vec::new();
+    for (rel_path, targets) in &scan.deployments {
+        if targets
+            .iter()
+            .any(|t| t.target_type == target_type && t.target_id == target_id)
+        {
+            deployed.push(DeployedSkillRef {
+                name: skill_name_from_rel(rel_path),
+                source_path: Some(rel_path.clone()),
+            });
+        }
+    }
+    for orphan in &scan.orphans {
+        if orphan.target_type == target_type && orphan.target_id == target_id {
+            deployed.push(DeployedSkillRef {
+                name: orphan.skill_name.clone(),
+                source_path: None,
+            });
+        }
     }
 
-    let Some(source_path) = source_path else {
-        return true;
-    };
+    deployed.sort_by(|a, b| {
+        a.source_path
+            .as_deref()
+            .unwrap_or(&a.name)
+            .cmp(b.source_path.as_deref().unwrap_or(&b.name))
+    });
 
-    if read_deployed_skill_source_marker(target).as_deref() == Some(source_path) {
-        return true;
-    }
-
-    let source = home.join(LIBRARY_SKILLS_DIR).join(source_path);
-    if matches!(
-        (target.canonicalize(), source.canonicalize()),
-        (Ok(target), Ok(source)) if target == source
-    ) {
-        return true;
-    }
-
-    let mut same_name_sources = library_sources
-        .iter()
-        .filter(|(_, name, _)| name == skill_name);
-    let only_source = same_name_sources.next();
-    only_source
-        .map(|(rel_path, _, _)| rel_path == source_path)
-        .unwrap_or(false)
-        && same_name_sources.next().is_none()
+    Ok(deployed)
 }
 
 #[tauri::command]
@@ -755,7 +455,8 @@ pub async fn deploy_skill(
     target_type: String,
     target_id: String,
 ) -> Result<(), String> {
-    deploy_skill_from_library(&source_path, &target_type, &target_id)?;
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::deploy_skill(&home, &source_path, &target_type, &target_id)?;
     refresh_live_antigravity_skill_projections(&app).await;
     Ok(())
 }
@@ -767,13 +468,8 @@ pub async fn remove_deployed_skill(
     target_id: String,
     skill_name: String,
 ) -> Result<(), String> {
-    let target_skills_dir = get_target_skills_dir(&target_type, &target_id)?;
-    let dst_dir = target_skills_dir.join(&skill_name);
-
-    if dst_dir.exists() {
-        fs::remove_dir_all(&dst_dir).map_err(|e| e.to_string())?;
-    }
-
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::remove_deployed_skill(&home, &target_type, &target_id, &skill_name)?;
     refresh_live_antigravity_skill_projections(&app).await;
     Ok(())
 }
@@ -784,7 +480,23 @@ pub async fn list_deployed_skills(
     target_type: String,
     target_id: String,
 ) -> Result<Vec<String>, String> {
-    list_deployed_skill_names(&target_type, &target_id)
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let target_skills_dir = library::get_target_skills_dir(&home, &target_type, &target_id)?;
+    let mut skills = Vec::new();
+
+    if !target_skills_dir.exists() {
+        return Ok(skills);
+    }
+
+    let entries = fs::read_dir(target_skills_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            skills.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    skills.sort();
+
+    Ok(skills)
 }
 
 #[tauri::command]
@@ -802,90 +514,38 @@ pub async fn list_skill_deployments(
     skill_name: String,
     source_path: Option<String>,
 ) -> Result<Vec<SkillDeployment>, String> {
-    list_skill_deployments_for_source(&skill_name, source_path.as_deref())
-}
-
-fn list_skill_deployments_for_source(
-    skill_name: &str,
-    source_path: Option<&str>,
-) -> Result<Vec<SkillDeployment>, String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let library_skills_dir = home.join(LIBRARY_SKILLS_DIR);
-    let mut library_sources = Vec::new();
-    collect_library_skill_sources(
-        &library_skills_dir,
-        &library_skills_dir,
-        &mut library_sources,
-    )?;
+    let sources = library::collect_skill_sources(&home);
+    let scan = library::scan_deployments(&home, &sources);
+
     let mut deployments = Vec::new();
-
-    let user_target = home
-        .join("common")
-        .join(".agents")
-        .join("skills")
-        .join(skill_name);
-    if deployment_matches_source(
-        &user_target,
-        skill_name,
-        source_path,
-        &library_sources,
-        &home,
-    ) {
-        deployments.push(SkillDeployment {
-            target_type: "user".to_string(),
-            target_id: "global".to_string(),
-        });
-    }
-
-    let classes_dir = home.join("classes");
-    if classes_dir.exists() {
-        if let Ok(entries) = fs::read_dir(classes_dir) {
-            for entry in entries.flatten() {
-                if let Ok(ty) = entry.file_type() {
-                    if ty.is_dir() {
-                        let class_name = entry.file_name().to_string_lossy().to_string();
-                        let class_target =
-                            entry.path().join(".agents").join("skills").join(skill_name);
-                        if deployment_matches_source(
-                            &class_target,
-                            skill_name,
-                            source_path,
-                            &library_sources,
-                            &home,
-                        ) {
-                            deployments.push(SkillDeployment {
-                                target_type: "class".to_string(),
-                                target_id: class_name,
-                            });
-                        }
-                    }
-                }
+    match source_path.as_deref() {
+        Some(source_path) => {
+            for target in scan.deployments.get(source_path).into_iter().flatten() {
+                deployments.push(SkillDeployment {
+                    target_type: target.target_type.clone(),
+                    target_id: target.target_id.clone(),
+                });
             }
         }
-    }
-
-    let agents_dir = home.join("agents");
-    if agents_dir.exists() {
-        if let Ok(entries) = fs::read_dir(agents_dir) {
-            for entry in entries.flatten() {
-                if let Ok(ty) = entry.file_type() {
-                    if ty.is_dir() {
-                        let agent_id = entry.file_name().to_string_lossy().to_string();
-                        let agent_target =
-                            entry.path().join(".agents").join("skills").join(skill_name);
-                        if deployment_matches_source(
-                            &agent_target,
-                            skill_name,
-                            source_path,
-                            &library_sources,
-                            &home,
-                        ) {
-                            deployments.push(SkillDeployment {
-                                target_type: "agent".to_string(),
-                                target_id: agent_id,
-                            });
-                        }
-                    }
+        None => {
+            for (rel_path, targets) in &scan.deployments {
+                if skill_name_from_rel(rel_path) != skill_name {
+                    continue;
+                }
+                for target in targets {
+                    deployments.push(SkillDeployment {
+                        target_type: target.target_type.clone(),
+                        target_id: target.target_id.clone(),
+                    });
+                }
+            }
+            for orphan in &scan.orphans {
+                if orphan.skill_name == skill_name {
+                    deployments.push(SkillDeployment {
+                        target_type: orphan.target_type.clone(),
+                        target_id: orphan.target_id.clone(),
+                    });
                 }
             }
         }
@@ -893,6 +553,37 @@ fn list_skill_deployments_for_source(
 
     Ok(deployments)
 }
+
+#[tauri::command]
+pub async fn set_skill_deployments(
+    app: AppHandle,
+    source_path: String,
+    targets: Vec<SkillDeployment>,
+) -> Result<(), String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    // The core engine's per-target add/remove outcome counts are useful for
+    // logging/telemetry but not part of this command's contract; discard
+    // them here. The Antigravity refresh only needs to run once, after the
+    // whole desired set has been reconciled (this used to run once per
+    // deploy/undeploy call from the frontend, which was O(n) refreshes for
+    // one save).
+    let _outcome = library::set_skill_deployments(&home, &source_path, &targets)?;
+    refresh_live_antigravity_skill_projections(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_orphan_deployment(
+    _app: AppHandle,
+    target_type: String,
+    target_id: String,
+    skill_name: String,
+) -> Result<(), String> {
+    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    library::remove_orphan_deployment(&home, &target_type, &target_id, &skill_name)
+}
+
+// --- Watching (commands) ---------------------------------------------------
 
 #[tauri::command]
 pub async fn library_watch(
@@ -911,8 +602,8 @@ pub async fn library_watch(
     }
 
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let skills_dir = ensure_library_watch_dir(&home, &library_type)?;
-    let watch_targets = discover_skill_watch_targets(&skills_dir)?;
+    let library_root = ensure_library_watch_dir(&home, &library_type)?;
+    let watch_targets = discover_library_watch_targets(&home, &library_root)?;
     let generation = LIBRARY_WATCH_GENERATION.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
@@ -972,8 +663,8 @@ pub async fn library_watch(
             }
 
             if let Some(home) = get_wardian_home() {
-                if let Ok(skills_dir) = library_dir_for_type(&home, &task_library_type) {
-                    if let Ok(next_targets) = discover_skill_watch_targets(&skills_dir) {
+                if let Ok(library_root) = library_dir_for_type(&home, &task_library_type) {
+                    if let Ok(next_targets) = discover_library_watch_targets(&home, &library_root) {
                         let mut registrations = state.library_watchers.lock().await;
                         let Some(registration) = registrations.get_mut(&task_library_type) else {
                             return;
@@ -1024,9 +715,7 @@ pub async fn library_watch(
                 }
             }
 
-            if task_library_type == "skills" {
-                refresh_live_antigravity_skill_projections(&app_handle).await;
-            }
+            refresh_live_antigravity_skill_projections(&app_handle).await;
 
             let _ = app_handle.emit(
                 "library-changed",
@@ -1116,25 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn list_deployed_skills_includes_linked_skill_directories() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        let source_dir = temp.path().join("library").join("skills").join("planner");
-        fs::create_dir_all(&source_dir).expect("source skill dir");
-        fs::write(source_dir.join("SKILL.md"), "linked").expect("source skill");
-
-        deploy_skill_from_library("planner", "agent", "agent-1").expect("deploy skill");
-
-        assert_eq!(
-            list_deployed_skill_names("agent", "agent-1").expect("list skills"),
-            vec!["planner".to_string()]
-        );
-    }
-
-    #[test]
     fn refresh_antigravity_skill_projections_picks_up_live_skill_changes() {
         let _lock = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -1192,227 +862,19 @@ mod tests {
     }
 
     #[test]
-    fn list_deployed_skill_refs_distinguishes_duplicate_skill_names_by_source_path() {
-        let _lock = crate::utils::wardian_test_env_lock();
+    fn library_watch_helpers_resolve_and_create_library_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        let first = temp
-            .path()
-            .join("library")
-            .join("skills")
-            .join("group-a")
-            .join("planner");
-        let second = temp
-            .path()
-            .join("library")
-            .join("skills")
-            .join("group-b")
-            .join("planner");
-        fs::create_dir_all(&first).expect("first skill");
-        fs::create_dir_all(&second).expect("second skill");
-        fs::write(first.join("SKILL.md"), "first").expect("first skill file");
-        fs::write(second.join("SKILL.md"), "second").expect("second skill file");
-
-        deploy_skill_from_library("group-b/planner", "agent", "agent-1").expect("deploy skill");
+        let library_dir = temp.path().join("library");
 
         assert_eq!(
-            list_deployed_skill_refs_for_target("agent", "agent-1").expect("deployed refs"),
-            vec![DeployedSkillRef {
-                name: "planner".to_string(),
-                source_path: Some("group-b/planner".to_string()),
-            }]
+            library_dir_for_type(temp.path(), "library").expect("library dir"),
+            library_dir
         );
-    }
+        assert!(library_dir_for_type(temp.path(), "skills").is_err());
 
-    #[test]
-    fn list_skill_deployments_filters_duplicate_skill_names_by_source_path() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        for source in ["group-a/planner", "group-b/planner"] {
-            let source_dir = temp.path().join("library").join("skills").join(source);
-            fs::create_dir_all(&source_dir).expect("source skill");
-            fs::write(source_dir.join("SKILL.md"), source).expect("source skill file");
-        }
-
-        deploy_skill_from_library("group-b/planner", "agent", "agent-1").expect("deploy skill");
-
-        assert!(
-            list_skill_deployments_for_source("planner", Some("group-a/planner"))
-                .expect("group-a deployments")
-                .is_empty()
-        );
-        assert_eq!(
-            list_skill_deployments_for_source("planner", Some("group-b/planner"))
-                .expect("group-b deployments")
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn copied_deployed_skill_refs_keep_source_path_marker() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        let source_dir = temp
-            .path()
-            .join("library")
-            .join("skills")
-            .join("group-a")
-            .join("planner");
-        fs::create_dir_all(&source_dir).expect("source skill");
-        fs::write(source_dir.join("SKILL.md"), "source").expect("source skill file");
-
-        deploy_skill_from_library_with_linker(
-            "group-a/planner",
-            "agent",
-            "agent-1",
-            |_src, _dst| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "link denied",
-                ))
-            },
-        )
-        .expect("deploy copied skill");
-
-        assert_eq!(
-            list_deployed_skill_refs_for_target("agent", "agent-1").expect("deployed refs"),
-            vec![DeployedSkillRef {
-                name: "planner".to_string(),
-                source_path: Some("group-a/planner".to_string()),
-            }]
-        );
-        assert_eq!(
-            list_skill_deployments_for_source("planner", Some("group-a/planner"))
-                .expect("deployments")
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn unmarked_copied_deployment_infers_source_only_when_name_is_unique() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        let source_dir = temp.path().join("library").join("skills").join("planner");
-        let target_dir = temp
-            .path()
-            .join("agents")
-            .join("agent-1")
-            .join(".agents")
-            .join("skills")
-            .join("planner");
-        fs::create_dir_all(&source_dir).expect("source skill");
-        fs::write(source_dir.join("SKILL.md"), "source").expect("source skill file");
-        copy_dir_all(&source_dir, &target_dir).expect("legacy copied deployment");
-
-        assert_eq!(
-            list_deployed_skill_refs_for_target("agent", "agent-1").expect("deployed refs"),
-            vec![DeployedSkillRef {
-                name: "planner".to_string(),
-                source_path: Some("planner".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    fn unmarked_copied_duplicate_deployment_stays_ambiguous() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp dir");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
-        let _env_guard = WardianHomeGuard;
-
-        for source in ["group-a/planner", "group-b/planner"] {
-            let source_dir = temp.path().join("library").join("skills").join(source);
-            fs::create_dir_all(&source_dir).expect("source skill");
-            fs::write(source_dir.join("SKILL.md"), source).expect("source skill file");
-        }
-        let target_dir = temp
-            .path()
-            .join("agents")
-            .join("agent-1")
-            .join(".agents")
-            .join("skills")
-            .join("planner");
-        copy_dir_all(
-            temp.path()
-                .join("library")
-                .join("skills")
-                .join("group-b")
-                .join("planner"),
-            &target_dir,
-        )
-        .expect("legacy copied deployment");
-
-        assert_eq!(
-            list_deployed_skill_refs_for_target("agent", "agent-1").expect("deployed refs"),
-            vec![DeployedSkillRef {
-                name: "planner".to_string(),
-                source_path: None,
-            }]
-        );
-        assert!(
-            list_skill_deployments_for_source("planner", Some("group-b/planner"))
-                .expect("group-b deployments")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn deploy_skill_copies_directory_when_link_creation_fails() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_dir = temp.path().join("source");
-        let target_dir = temp.path().join("target");
-        fs::create_dir_all(source_dir.join("nested")).expect("source dirs");
-        fs::write(source_dir.join("SKILL.md"), "fallback").expect("source skill");
-        fs::write(source_dir.join("nested").join("notes.md"), "notes").expect("nested file");
-
-        let copied = deploy_skill_dir_with_linker(&source_dir, &target_dir, |_src, _dst| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "link denied",
-            ))
-        })
-        .expect("fallback copy");
-        assert!(copied);
-
-        fs::write(source_dir.join("SKILL.md"), "source changed").expect("update source skill");
-
-        assert_eq!(
-            fs::read_to_string(target_dir.join("SKILL.md")).expect("copied skill content"),
-            "fallback"
-        );
-        assert_eq!(
-            fs::read_to_string(target_dir.join("nested").join("notes.md")).expect("nested copy"),
-            "notes"
-        );
-    }
-
-    #[test]
-    fn library_watch_helpers_resolve_and_create_skills_dir() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let skills_dir = temp.path().join("library").join("skills");
-
-        assert_eq!(
-            library_dir_for_type(temp.path(), "skills").expect("skills dir"),
-            skills_dir
-        );
-        assert!(library_dir_for_type(temp.path(), "prompts").is_err());
-
-        let ensured = ensure_library_watch_dir(temp.path(), "skills").expect("ensure skills dir");
-        assert_eq!(ensured, skills_dir);
-        assert!(skills_dir.is_dir());
+        let ensured = ensure_library_watch_dir(temp.path(), "library").expect("ensure library dir");
+        assert_eq!(ensured, library_dir);
+        assert!(library_dir.is_dir());
     }
 
     #[test]
@@ -1444,9 +906,38 @@ mod tests {
     }
 
     #[test]
+    fn discover_library_watch_targets_includes_library_and_classes_roots() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        let library_root = home.join("library");
+        let external_skill = home.join("external").join("planner");
+        let linked_skill = library_root.join("skills").join("planner");
+
+        fs::create_dir_all(&library_root).expect("library root");
+        fs::create_dir_all(home.join("classes")).expect("classes root");
+        fs::create_dir_all(&external_skill).expect("external skill dir");
+        fs::write(external_skill.join("SKILL.md"), "linked").expect("external skill file");
+        fs::create_dir_all(library_root.join("skills")).expect("skills dir");
+        create_directory_link(&external_skill, &linked_skill).expect("linked skill");
+
+        let targets = discover_library_watch_targets(home, &library_root).expect("watch targets");
+
+        let canonical_library = library_root.canonicalize().expect("canonical library");
+        let canonical_classes = home
+            .join("classes")
+            .canonicalize()
+            .expect("canonical classes");
+        let canonical_external = external_skill.canonicalize().expect("canonical external");
+
+        assert!(targets.contains(&canonical_library));
+        assert!(targets.contains(&canonical_classes));
+        assert!(targets.contains(&canonical_external));
+    }
+
+    #[test]
     fn library_watch_generation_is_not_current_after_registration_removed() {
         let state = AppState::new();
-        assert!(!is_current_library_watch_generation(&state, "skills", 1));
+        assert!(!is_current_library_watch_generation(&state, "library", 1));
     }
 
     fn fs_event_touches(event: &notify::Event, expected: &Path) -> bool {
