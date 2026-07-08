@@ -1,5 +1,6 @@
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryItemMetadata, LibrarySectionId, OrphanDeployment } from '../../types';
 import { ListToolbar } from './ListToolbar';
@@ -285,8 +286,12 @@ export const LibraryList: React.FC = () => {
                                 style={{ paddingLeft: `${12 + row.depth * 16}px` }}
                                 className="flex items-center gap-1.5 w-full pr-3 py-1 border-b border-wardian-border text-left text-xs transition-colors hover:bg-wardian-card-bg-muted"
                             >
-                                <span className="text-[10px] text-muted-neutral">
-                                    {expandedFolders.has(folderKey(activeSection, row.folderPath ?? '')) ? '▾' : '▸'}
+                                <span className="text-muted shrink-0 flex items-center justify-center w-4 h-4">
+                                    {expandedFolders.has(folderKey(activeSection, row.folderPath ?? '')) ? (
+                                        <ChevronDown className="w-3 h-3" />
+                                    ) : (
+                                        <ChevronRight className="w-3 h-3" />
+                                    )}
                                 </span>
                                 <span className="font-semibold text-primary truncate">
                                     {(row.folderPath ?? '').split('/').pop()}
