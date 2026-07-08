@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
-use wardian_core::engine::{store::read_checkpoint, RunStatus};
+use wardian_core::engine::{
+    store::{append_event, read_checkpoint, write_checkpoint},
+    Event, EventKind, RunState, RunStatus,
+};
 use wardian_core::models::InvocationKind;
 use wardian_core::schedule::{load_schedules, plan_tick, save_schedules, FireRequest};
 use wardian_core::workflow::Blueprint;
@@ -70,6 +73,11 @@ async fn fire_request(app: &AppHandle, req: &FireRequest) {
         Ok(resolved) => resolved,
         Err(message) => {
             mark_error(&req.schedule_id, &message);
+            if let Err(error) = record_schedule_launch_failure(req, &message) {
+                crate::utils::logging::log_debug(&format!(
+                    "[workflow] scheduler could not write failed run artifact: {error}"
+                ));
+            }
             return;
         }
     };
@@ -146,6 +154,48 @@ fn mark_error(schedule_id: &str, message: &str) {
     }
     let _ = save_schedules(&schedules);
     crate::utils::logging::log_debug(&format!("[workflow] scheduler: {message}"));
+}
+
+fn record_schedule_launch_failure(req: &FireRequest, message: &str) -> Result<PathBuf, String> {
+    let run_id = wardian_core::engine::driver::new_run_id();
+    let run_root = wardian_core::paths::workflow_run_dir(&req.blueprint_id, &run_id)
+        .ok_or_else(|| "could not resolve failed schedule run directory".to_string())?;
+    let provider = resolve_provider(req);
+    let workspace = req
+        .workspace
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_root.clone());
+    let assignments = wardian_core::workflow::assignment::normalize_assignments(
+        Some(req.assignments.clone()),
+        &req.bindings,
+        InvocationKind::Scheduled,
+    );
+
+    runs::write_run_invocation_with_schedule_id(
+        &run_root,
+        &provider,
+        &workspace,
+        &req.bindings,
+        &assignments,
+        Some(req.schedule_id.clone()),
+    )?;
+
+    let event = Event::new(
+        0,
+        EventKind::RunFailed {
+            error: message.to_string(),
+        },
+    );
+    append_event(&run_root, &event).map_err(|error| error.to_string())?;
+
+    let mut state = RunState::new(run_id, &req.blueprint_id);
+    state.status = RunStatus::Failed;
+    state.failure = Some(message.to_string());
+    state.next_seq = event.seq + 1;
+    write_checkpoint(&run_root, &state).map_err(|error| error.to_string())?;
+
+    Ok(run_root)
 }
 
 fn mark_finished_from_checkpoint(schedule_id: &str, run_root: &std::path::Path) {
@@ -254,7 +304,12 @@ pub async fn start_scheduler(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wardian_core::engine::{driver::new_run_id, store::read_checkpoint, RunStatus};
+    use wardian_core::engine::{
+        driver::new_run_id,
+        event::EventKind,
+        store::{read_checkpoint, read_events},
+        RunStatus,
+    };
 
     const BLUEPRINT: &str = r#"---
 schema: 2
@@ -506,6 +561,38 @@ edges:
             result.is_err(),
             "missing blueprint must resolve to an error, not a panic"
         );
+    }
+
+    #[test]
+    fn schedule_launch_failure_writes_a_failed_run_artifact() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(home.path(), &mock_script_path());
+        let req = fire_request_for("missing-workflow", Some("mock"));
+
+        let run_root = record_schedule_launch_failure(
+            &req,
+            "parse failed: io error: The system cannot find the file specified.",
+        )
+        .expect("schedule launch failure should be durable");
+
+        let state = read_checkpoint(&run_root).unwrap().unwrap();
+        assert_eq!(state.blueprint_id, "missing-workflow");
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(
+            state.failure.as_deref(),
+            Some("parse failed: io error: The system cannot find the file specified.")
+        );
+
+        let invocation = runs::read_run_invocation(&run_root).unwrap().unwrap();
+        assert_eq!(invocation.schedule_id.as_deref(), Some("s1"));
+        assert_eq!(invocation.provider, "mock");
+
+        let events = read_events(&run_root).unwrap();
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(EventKind::RunFailed { error })
+                if error == "parse failed: io error: The system cannot find the file specified."
+        ));
     }
 
     #[test]
