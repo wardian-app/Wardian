@@ -76,17 +76,9 @@ wardian library restore-default <classes/name>
 user:global,class:Reviewer,agent:<agent-id>
 ```
 
-An empty target list means the skill should have no deployments:
-
-```bash
-wardian library deploy skills/review/planner --targets ""
-```
-
-PowerShell:
-
-```powershell
-wardian library deploy skills/review/planner --targets ""
-```
+The target list must name at least one existing target. `class:<ClassName>`
+must match a saved or initialized class, and `agent:<agent-id>` must match a
+known persisted or live agent id.
 
 ### 3. Read, Show, Create, and Write Semantics
 
@@ -164,7 +156,7 @@ wardian library deploy skills/review/planner --targets user:global,class:Reviewe
 
 means "make these the complete desired targets for this skill." The CLI calls
 `wardian_core::library::set_skill_deployments`, so it adds missing targets and
-removes targets not present in the supplied list.
+removes targets not present in the supplied non-empty list.
 
 `wardian library deployments <skills/path>` reports the current target list for
 one skill. `wardian library orphans` reports unresolved deployed skill
@@ -172,7 +164,8 @@ directories. `wardian library orphan delete` removes one unresolved deployment
 directory and requires both the target and deployed skill directory name.
 
 The CLI does not add separate `deployments add`, `deployments remove`, or
-`undeploy` verbs in this slice.
+`undeploy` verbs in this slice. It also rejects empty target lists so an unset
+shell variable cannot accidentally clear every deployment for a skill.
 
 ### 7. Metadata Model
 
@@ -260,8 +253,9 @@ junction or symlink behavior. Browser E2E cannot prove those filesystem details.
   the Library CLI does not become a second workflow runtime.
 - **Positive:** Set-based deployment matches the core engine and avoids a
   proliferation of add/remove/undeploy aliases.
-- **Negative:** `deploy --targets ""` is a little awkward for undeploy-all, but
-  it preserves one canonical deployment behavior.
+- **Negative:** Undeploy-all is deferred instead of being encoded as an empty
+  `--targets` value, which keeps typo and unset-variable failures safer for
+  agents.
 - **Negative:** Raw metadata JSON mutation is deferred, so unusual metadata
   edits may still require direct file editing until a real use case justifies a
   broader command.

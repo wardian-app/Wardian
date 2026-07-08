@@ -11,6 +11,7 @@ pub struct Cli {
 pub enum Command {
     Agent(AgentArgs),
     Conversation(ConversationArgs),
+    Library(LibraryArgs),
     Workflow(WorkflowArgs),
     Team(TeamArgs),
     Watchlist(WatchlistArgs),
@@ -18,6 +19,91 @@ pub enum Command {
     Send(SendArgs),
     Ask(AskArgs),
     Reply(ReplyArgs),
+}
+
+// ---------------------------------------------------------------------------
+// wardian library
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct LibraryArgs {
+    #[command(subcommand)]
+    pub command: LibraryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryCommand {
+    List {
+        section: Option<String>,
+        #[arg(long)]
+        flat: bool,
+    },
+    Show {
+        entry_ref: String,
+        #[arg(long)]
+        content: bool,
+    },
+    Read {
+        entry_ref: String,
+    },
+    Create {
+        entry_ref: String,
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<String>,
+    },
+    Write {
+        entry_ref: String,
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<String>,
+    },
+    Move {
+        from_ref: String,
+        to_ref: String,
+    },
+    Delete {
+        entry_ref: String,
+    },
+    Star {
+        entry_ref: String,
+    },
+    Unstar {
+        entry_ref: String,
+    },
+    Tags {
+        entry_ref: String,
+        #[arg(long = "set", required = true)]
+        set: Vec<String>,
+    },
+    Deployments {
+        skill_ref: String,
+    },
+    Deploy {
+        skill_ref: String,
+        #[arg(long)]
+        targets: String,
+    },
+    Orphans,
+    Orphan {
+        #[command(subcommand)]
+        command: LibraryOrphanCommand,
+    },
+    RestoreDefault {
+        entry_ref: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryOrphanCommand {
+    Delete {
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        skill: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +605,163 @@ mod tests {
     fn parses_agent_target_shorthand() {
         let cli = Cli::try_parse_from(["wardian", "agent", "coder-a1"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(_)));
+    }
+
+    #[test]
+    fn parses_library_list_show_and_read() {
+        let cli = Cli::try_parse_from(["wardian", "library", "list", "skills", "--flat"]).unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::List {
+                section: Some(ref section),
+                flat: true
+            } if section == "skills"
+        ));
+
+        let cli =
+            Cli::try_parse_from(["wardian", "library", "show", "workflows/audit.md"]).unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Show {
+                ref entry_ref,
+                content: false
+            } if entry_ref == "workflows/audit.md"
+        ));
+
+        let cli = Cli::try_parse_from(["wardian", "library", "read", "classes/Reviewer"]).unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Read { ref entry_ref } if entry_ref == "classes/Reviewer"
+        ));
+    }
+
+    #[test]
+    fn library_create_rejects_stdin_and_file_together() {
+        let error = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "create",
+            "prompts/triage.md",
+            "--stdin",
+            "--file",
+            "triage.md",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_library_mutations_metadata_and_deployments() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "create",
+            "prompts/triage.md",
+            "--stdin",
+        ])
+        .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Create {
+                ref entry_ref,
+                stdin: true,
+                file: None
+            } if entry_ref == "prompts/triage.md"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "write",
+            "skills/planner",
+            "--file",
+            "SKILL.md",
+        ])
+        .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Write {
+                ref entry_ref,
+                stdin: false,
+                ref file
+            } if entry_ref == "skills/planner" && file.as_deref() == Some("SKILL.md")
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "tags",
+            "skills/planner",
+            "--set",
+            "review",
+            "--set",
+            "daily",
+        ])
+        .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Tags { ref entry_ref, ref set }
+                if entry_ref == "skills/planner"
+                    && set == &vec!["review".to_string(), "daily".to_string()]
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "deploy",
+            "skills/planner",
+            "--targets",
+            "user:global,class:Reviewer",
+        ])
+        .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Deploy { ref skill_ref, ref targets }
+                if skill_ref == "skills/planner" && targets == "user:global,class:Reviewer"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "library",
+            "orphan",
+            "delete",
+            "--target",
+            "class:Reviewer",
+            "--skill",
+            "planner",
+        ])
+        .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Orphan {
+                command: LibraryOrphanCommand::Delete { ref target, ref skill }
+            } if target == "class:Reviewer" && skill == "planner"
+        ));
     }
 
     #[test]

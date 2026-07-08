@@ -6,20 +6,14 @@ use wardian_core::models::AgentClassDefinition;
 const BUNDLED_COMMON_SKILLS: &[&str] = &["wardian-skills/wardian-cli"];
 
 pub fn get_all_agent_classes(_app: &AppHandle) -> Vec<AgentClassDefinition> {
-    if let Some(app_dir) = get_wardian_home() {
-        let classes_path = app_dir.join("classes.json");
-        if let Ok(data) = std::fs::read_to_string(&classes_path) {
-            return serde_json::from_str::<Vec<AgentClassDefinition>>(&data).unwrap_or_default();
-        }
-    }
-    Vec::new()
+    get_wardian_home()
+        .and_then(|app_dir| wardian_core::classes::load_class_definitions(&app_dir).ok())
+        .unwrap_or_default()
 }
 
 pub fn save_classes(_app: &AppHandle, classes: &[AgentClassDefinition]) -> Result<(), String> {
     let app_dir = get_wardian_home().ok_or("No home dir")?;
-    let json = serde_json::to_string_pretty(classes).map_err(|e| e.to_string())?;
-    std::fs::write(app_dir.join("classes.json"), json).map_err(|e| e.to_string())?;
-    Ok(())
+    wardian_core::classes::save_class_definitions(&app_dir, classes)
 }
 
 pub fn init_agent_classes(app: &AppHandle) {
@@ -37,11 +31,7 @@ pub fn init_agent_classes(app: &AppHandle) {
 
         // Migration and Initialization
         if !classes_path.exists() {
-            let mut defaults: Vec<AgentClassDefinition> =
-                serde_json::from_str(include_str!("../default_classes.json")).unwrap_or_default();
-            for d in defaults.iter_mut() {
-                d.is_default = true;
-            }
+            let mut defaults = wardian_core::classes::default_class_definitions();
 
             let custom_path = app_dir.join("custom_classes.json");
             if custom_path.exists() {
@@ -63,36 +53,10 @@ pub fn init_agent_classes(app: &AppHandle) {
         let classes = get_all_agent_classes(app);
         for cls in &classes {
             let role_dir = classes_dir.join(&cls.name);
-            let _ = std::fs::create_dir_all(&role_dir);
+            let _ = wardian_core::classes::ensure_class_directory(&app_dir, cls, None);
 
-            // 1. Create AGENTS.md master file
-            let agents_md_path = role_dir.join("AGENTS.md");
-            if !agents_md_path.exists() {
-                let content = if cls.is_default {
-                    app.path()
-                        .resolve(
-                            format!("agent_prompts/{}.md", cls.name),
-                            tauri::path::BaseDirectory::Resource,
-                        )
-                        .ok()
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                        .unwrap_or_default()
-                } else {
-                    format!("# {} Agent\n\n{}\n", cls.name, cls.description)
-                };
-                let _ = std::fs::write(agents_md_path, content);
-            }
-
-            // 2. Expose canonical skills through provider-specific discovery shims.
+            // Expose canonical skills through provider-specific discovery shims.
             ensure_claude_skills_link(&role_dir);
-
-            // 3. Create thin compatibility stubs that point providers back to AGENTS.md.
-            for stub_name in &["GEMINI.md", "CLAUDE.md"] {
-                let stub_path = role_dir.join(stub_name);
-                if !stub_path.exists() {
-                    let _ = std::fs::write(stub_path, "@AGENTS.md\n");
-                }
-            }
         }
     }
 }
@@ -195,14 +159,8 @@ fn init_bundled_common_skills(app: &AppHandle, app_dir: &Path) {
     }
 }
 
-pub fn get_agent_class_default_instruction(app: &AppHandle, class_name: &str) -> Option<String> {
-    app.path()
-        .resolve(
-            format!("agent_prompts/{}.md", class_name),
-            tauri::path::BaseDirectory::Resource,
-        )
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+pub fn get_agent_class_default_instruction(_app: &AppHandle, class_name: &str) -> Option<String> {
+    wardian_core::classes::default_class_instruction(class_name).map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

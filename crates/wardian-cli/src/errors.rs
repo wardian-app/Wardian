@@ -74,6 +74,16 @@ impl CliError {
         }
     }
 
+    pub fn library_not_found(entry_ref: &str) -> Self {
+        Self {
+            exit_code: ExitCode::NotFound,
+            code: "not_found",
+            message: format!("Library entry was not found: {entry_ref}"),
+            hint: Some("Run `wardian library list --flat` to inspect known entries.".to_string()),
+            details: Some(Box::new(serde_json::json!({ "entry_ref": entry_ref }))),
+        }
+    }
+
     pub fn db_unavailable(message: impl Into<String>) -> Self {
         Self {
             exit_code: ExitCode::DbUnavailable,
@@ -94,6 +104,59 @@ impl CliError {
             message: format!("Unknown field: {field}"),
             hint: Some("Use one of: name, uuid, class, provider, workspace, status, status_source, pid, started_at, last_status_at.".to_string()),
             details: Some(Box::new(serde_json::json!({ "field": field }))),
+        }
+    }
+
+    pub fn invalid_ref(message: impl Into<String>) -> Self {
+        Self {
+            exit_code: ExitCode::Generic,
+            code: "invalid_ref",
+            message: message.into(),
+            hint: Some(
+                "Use a section-qualified ref such as skills/review/planner or classes/Reviewer."
+                    .to_string(),
+            ),
+            details: None,
+        }
+    }
+
+    pub fn unknown_section(section: &str) -> Self {
+        Self {
+            exit_code: ExitCode::Generic,
+            code: "unknown_section",
+            message: format!("Unknown library section: {section}"),
+            hint: Some("Use one of: skills, prompts, classes, workflows, mcps.".to_string()),
+            details: Some(Box::new(serde_json::json!({ "section": section }))),
+        }
+    }
+
+    pub fn already_exists(entry_ref: &str) -> Self {
+        Self {
+            exit_code: ExitCode::Generic,
+            code: "already_exists",
+            message: format!("Library entry already exists: {entry_ref}"),
+            hint: Some("Use `wardian library write` to update an existing entry.".to_string()),
+            details: Some(Box::new(serde_json::json!({ "entry_ref": entry_ref }))),
+        }
+    }
+
+    pub fn not_supported(message: impl Into<String>) -> Self {
+        Self {
+            exit_code: ExitCode::Generic,
+            code: "not_supported",
+            message: message.into(),
+            hint: None,
+            details: None,
+        }
+    }
+
+    pub fn invalid_target(target: &str) -> Self {
+        Self {
+            exit_code: ExitCode::Generic,
+            code: "invalid_target",
+            message: format!("Invalid library deployment target: {target}"),
+            hint: Some("Use user:global, class:<ClassName>, or agent:<agent-id>.".to_string()),
+            details: Some(Box::new(serde_json::json!({ "target": target }))),
         }
     }
 

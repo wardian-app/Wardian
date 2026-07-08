@@ -44,7 +44,7 @@ pub enum LibraryNode {
     Skill(LibrarySkill),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillDeployment {
     pub target_type: String,
     pub target_id: String,

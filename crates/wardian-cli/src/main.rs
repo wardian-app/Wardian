@@ -2,6 +2,7 @@ mod args;
 mod disk;
 mod errors;
 mod graph;
+mod library;
 mod live;
 mod output;
 mod watchlist;
@@ -47,6 +48,7 @@ fn run() -> i32 {
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
         Command::Conversation(args) => handle_conversation(args),
+        Command::Library(args) => library::handle_library(args),
         Command::Workflow(args) => handle_workflow(args),
         Command::Team(args) => watchlist::handle_team(args),
         Command::Watchlist(args) => watchlist::handle_watchlist(args),

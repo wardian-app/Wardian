@@ -1,3 +1,4 @@
+pub mod classes;
 pub mod control;
 pub mod conversation_lease;
 pub mod conversations;

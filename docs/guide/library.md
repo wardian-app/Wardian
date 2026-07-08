@@ -115,6 +115,32 @@ with the same scoping skills use. It ships empty and read-only in this
 release — selecting it shows an explanatory stub instead of a list or editor.
 No `library/mcps` directory is created until the real feature lands.
 
+## Agent CLI Access
+
+Agents can use `wardian library` to inspect and edit reusable Library assets
+from a terminal without opening the desktop app:
+
+```bash
+wardian library list skills --flat
+wardian library show prompts/review.md --content
+wardian library read classes/Reviewer
+wardian library create skills/review/planner --stdin
+wardian library write prompts/review.md --file <prompt-file.md>
+wardian library tags prompts/review.md --set review --set daily
+wardian library deploy skills/review/planner --targets user:global,class:Reviewer,agent:<agent-id>
+wardian library orphans
+wardian library restore-default classes/Reviewer
+```
+
+`read` emits raw markdown for the entry. `show` emits JSON metadata and
+resolved paths, with optional content via `--content`. `deploy --targets`
+reconciles the supplied non-empty target list as the complete desired
+deployment set for that skill; class and agent targets must already exist.
+
+Library workflow commands author blueprint files only. Use the `wardian
+workflow` namespace to validate, parse, normalize, execute, schedule, or
+inspect workflow runs.
+
 ## Folder Organization and Drag-to-Move
 
 Skills, prompts, and workflows can be organized into folders on disk:
