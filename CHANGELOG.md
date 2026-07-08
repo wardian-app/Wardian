@@ -4,6 +4,50 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.4.3](https://github.com/wardian-app/Wardian/compare/v0.4.2...v0.4.3) (2026-07-08)
+
+
+### Features
+
+* **agents:** add per-agent conversation logging ([#616](https://github.com/wardian-app/Wardian/issues/616)) ([31fe142](https://github.com/wardian-app/Wardian/commit/31fe142814f4ae4dadafa1bf92cbde2ff741d733))
+* **cli:** add graph topology CLI ([#635](https://github.com/wardian-app/Wardian/issues/635)) ([9a57042](https://github.com/wardian-app/Wardian/commit/9a57042a4af4b5e6043ad493e3511ac44fb395a4))
+* **cli:** add team and watchlist writes ([#639](https://github.com/wardian-app/Wardian/issues/639)) ([bbb6cfc](https://github.com/wardian-app/Wardian/commit/bbb6cfc0ec46d9dadf09e8cc7bfe84abfbf6065f))
+* **codex:** add workspace trust setting ([#628](https://github.com/wardian-app/Wardian/issues/628)) ([4d6e00e](https://github.com/wardian-app/Wardian/commit/4d6e00ecd15cec93f6526e61055a0c67f07e7be5))
+* **explorer:** open root in external app ([#647](https://github.com/wardian-app/Wardian/issues/647)) ([ae284d5](https://github.com/wardian-app/Wardian/commit/ae284d533e32b07998d8103b012bc146db5c7501))
+* **git:** expand source control parity ([#606](https://github.com/wardian-app/Wardian/issues/606)) ([aa72a8a](https://github.com/wardian-app/Wardian/commit/aa72a8a9da4b9d2bc6e114954628d539af8ad978))
+* **graph:** communication topology control surface ([#610](https://github.com/wardian-app/Wardian/issues/610)) ([#629](https://github.com/wardian-app/Wardian/issues/629)) ([0320143](https://github.com/wardian-app/Wardian/commit/032014392e5ed454400196a581d39beb8f2e35ee))
+* **library:** unified rail/list/detail library with classes, workflow blueprints, and native junction deploys ([#651](https://github.com/wardian-app/Wardian/issues/651)) ([49f6d2c](https://github.com/wardian-app/Wardian/commit/49f6d2cb5327bba71151f31679ae3e9577e61eb7))
+* **remote:** add mobile settings panel ([#612](https://github.com/wardian-app/Wardian/issues/612)) ([5d436f5](https://github.com/wardian-app/Wardian/commit/5d436f59118f52d4941288ce140b9b7281679986))
+
+
+### Bug Fixes
+
+* **agent:** clean deleted agent references ([#641](https://github.com/wardian-app/Wardian/issues/641)) ([c6bf963](https://github.com/wardian-app/Wardian/commit/c6bf9638e13ee4a548921b4540f564fb3801eff9))
+* **chat:** stabilize chat mode transcript views ([#614](https://github.com/wardian-app/Wardian/issues/614)) ([98eb4d9](https://github.com/wardian-app/Wardian/commit/98eb4d9e88216e4576d2d31b9d559e5cb86d6444))
+* **claude:** preserve native terminal scrollback ([#620](https://github.com/wardian-app/Wardian/issues/620)) ([47f8838](https://github.com/wardian-app/Wardian/commit/47f88381b5d6eb7fdd475a0a1df2d5152cc7f8a4))
+* **codex:** trust projected homes for existing agents ([#646](https://github.com/wardian-app/Wardian/issues/646)) ([cf1174f](https://github.com/wardian-app/Wardian/commit/cf1174ffba5227ee4bf5736a1af6bf6101a328e7))
+* **conversations:** derive request-indexed turns ([#599](https://github.com/wardian-app/Wardian/issues/599)) ([beb0ceb](https://github.com/wardian-app/Wardian/commit/beb0ceb0614e765c0a4d77c7e38acddfc0261b62))
+* **opencode:** preserve live TUI status over log errors ([#655](https://github.com/wardian-app/Wardian/issues/655)) ([c69ab90](https://github.com/wardian-app/Wardian/commit/c69ab90e4bce7cfe00236d40e5678871461931a0))
+* **remote:** handle mobile PWA back swipe ([#608](https://github.com/wardian-app/Wardian/issues/608)) ([d788845](https://github.com/wardian-app/Wardian/commit/d7888457385d3b724a5057a913114f1346f6d117))
+* **terminal:** align OpenCode mouse input behavior ([#631](https://github.com/wardian-app/Wardian/issues/631)) ([779033c](https://github.com/wardian-app/Wardian/commit/779033c0dd738ed4cb6a68311f125af87c607824))
+* **terminal:** fill agent terminal row grid ([#658](https://github.com/wardian-app/Wardian/issues/658)) ([733cdf9](https://github.com/wardian-app/Wardian/commit/733cdf98214e84d8caa0c9479cd30973bef3cd9b))
+* **terminal:** filter opencode mouse motion input ([#618](https://github.com/wardian-app/Wardian/issues/618)) ([4b0d7f8](https://github.com/wardian-app/Wardian/commit/4b0d7f84c6178453ad22e98fcb3bf251a09901c6))
+* **terminal:** log Windows ConPTY runtime diagnostics ([#624](https://github.com/wardian-app/Wardian/issues/624)) ([1e2327e](https://github.com/wardian-app/Wardian/commit/1e2327eea773a34e000d42d1f240ee166e0cc00e))
+* **terminal:** open wrapped links reliably ([#600](https://github.com/wardian-app/Wardian/issues/600)) ([916bc4b](https://github.com/wardian-app/Wardian/commit/916bc4b76ed635557caa31ecec0b7363ac7770d3))
+* **terminal:** preserve OpenCode text selection ([#653](https://github.com/wardian-app/Wardian/issues/653)) ([381e4b4](https://github.com/wardian-app/Wardian/commit/381e4b43b11fe18bced4175d9bba41d9ef11ede9))
+* **terminal:** serialize native PTY resizes ([#604](https://github.com/wardian-app/Wardian/issues/604)) ([456fcb3](https://github.com/wardian-app/Wardian/commit/456fcb31ac368d8d2609f29f2bae50948c362427))
+* **tests:** wait for custom clone modal readiness ([#595](https://github.com/wardian-app/Wardian/issues/595)) ([14dc477](https://github.com/wardian-app/Wardian/commit/14dc477b24ed2b1ef2d881fd1fb21944d26befd6))
+* **topology:** persist deleted team-seeded edges ([#634](https://github.com/wardian-app/Wardian/issues/634)) ([1cd5f95](https://github.com/wardian-app/Wardian/commit/1cd5f95d8d75692a9c0b6d00ff23ec5936b10b5c))
+* **watchlist:** preserve individual membership during restore ([#626](https://github.com/wardian-app/Wardian/issues/626)) ([4cc9606](https://github.com/wardian-app/Wardian/commit/4cc96066e4180943b7e0bfad57ac2ed31f0b76d6))
+* **workflows:** bound launch dialog height ([#622](https://github.com/wardian-app/Wardian/issues/622)) ([58b4aec](https://github.com/wardian-app/Wardian/commit/58b4aec724824cf713b99cea03a333f81ec8a2d1))
+* **workflows:** persist scheduled launch failures ([#657](https://github.com/wardian-app/Wardian/issues/657)) ([99b47ba](https://github.com/wardian-app/Wardian/commit/99b47bad4ea386ef297d27b918dc83b7db17a04e))
+* **workflows:** stabilize monitor history triage ([#637](https://github.com/wardian-app/Wardian/issues/637)) ([661b634](https://github.com/wardian-app/Wardian/commit/661b6343680d3f71110cf4504186321301350489))
+
+
+### Documentation
+
+* reposition Wardian around habitat language ([#615](https://github.com/wardian-app/Wardian/issues/615)) ([235daad](https://github.com/wardian-app/Wardian/commit/235daad7c18dc78aa41f752ca2a346a20c8e1fd9))
+
 ## [0.4.2](https://github.com/wardian-app/Wardian/compare/v0.4.1...v0.4.2) (2026-06-25)
 
 

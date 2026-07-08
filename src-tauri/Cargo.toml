@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.4.2"
+version = "0.4.3"
 description = "A modular, local-first desktop habitat for agents, workflows, and reusable context."
 authors = ["Tan Gemicioglu"]
 edition = "2021"

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "Wardian"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -5691,7 +5691,7 @@ dependencies = [
 
 [[package]]
 name = "wardian-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "clap",
@@ -5705,7 +5705,7 @@ dependencies = [
 
 [[package]]
 name = "wardian-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "chrono",
