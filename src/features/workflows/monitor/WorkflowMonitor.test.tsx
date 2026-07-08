@@ -520,9 +520,13 @@ describe('WorkflowMonitor', () => {
 
     const row = screen.getByTestId('workflow-activity-row-evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name');
     expect(row.className).toContain(
-      'md:grid-cols-[minmax(0,220px)_minmax(0,150px)_minmax(0,170px)_minmax(0,170px)_minmax(0,220px)_112px]',
+      'md:grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]',
     );
-    expect(row.firstElementChild).toHaveClass('min-w-0');
+    const columns = Array.from(row.children);
+    expect(columns[0]).toHaveTextContent('Time');
+    expect(columns[1]).toHaveTextContent('Evolver Weekly SkillOpt Batch With An Exceptionally Long Display Name');
+    expect(columns[2]).toHaveTextContent('No runs yet');
+    expect(columns[5]).toHaveClass('md:justify-self-end');
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -589,12 +593,47 @@ describe('WorkflowMonitor', () => {
     const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
     expect(latestRunId.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(olderRunRow).toHaveTextContent('run-old');
-    expect(olderRunRow).toHaveTextContent('Run');
+    expect(olderRunRow).toHaveTextContent('Status');
     expect(olderRunRow).toHaveTextContent('Schedule');
     expect(olderRunRow).toHaveTextContent('Assignment');
     expect(olderRunRow).toHaveTextContent('Manual only');
     expect(olderRunRow).toHaveTextContent('Default');
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
+  });
+
+  it('keeps schedule and assignment labels on scheduled history rows', () => {
+    scheduleState.schedules = [
+      {
+        id: 'schedule-1',
+        blueprint_id: 'routine-check',
+        name: 'Routine Check',
+        input: {},
+        bindings: { reviewer: 'agent-reviewer' },
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        next_run_epoch_ms: Date.UTC(2026, 5, 1, 17, 0, 0),
+      },
+    ];
+    runState.runs = [
+      {
+        run_id: 'run-scheduled',
+        blueprint_id: 'routine-check',
+        schedule_id: 'schedule-1',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/scheduled',
+        updated_at: '2026-06-01T16:00:00Z',
+      },
+    ];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+
+    const row = screen.getByTestId('workflow-history-run-run-scheduled');
+    expect(row).toHaveTextContent('Every 1h');
+    expect(row).toHaveTextContent('reviewer: agent-reviewer');
+    expect(row).not.toHaveTextContent('Manual only');
+    expect(row).not.toHaveTextContent('Default');
   });
 
   it('reveals older history ten runs at a time', () => {
@@ -962,6 +1001,39 @@ describe('WorkflowMonitor', () => {
       statusLabel: 'Scheduled',
       tone: 'accent',
       issue: 'Provider crashed',
+    });
+  });
+
+  it('does not let an older completed run hide the latest scheduled launch failure', () => {
+    const model = buildMonitorModel([
+      {
+        run_id: 'run-previous-success',
+        blueprint_id: 'audit',
+        status: 'completed',
+        node_count: 2,
+        path: '/runs/previous-success',
+        updated_at: '2026-06-01T18:00:00Z',
+      },
+    ], [
+      {
+        id: 'schedule-failed',
+        blueprint_id: 'audit',
+        name: 'Audit',
+        input: {},
+        bindings: {},
+        schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+        is_paused: false,
+        last_run_status: 'failed',
+        last_run_error: 'parse failed: io error: The system cannot find the file specified.',
+      },
+    ]);
+
+    expect(model.stats.failedCount).toBe(1);
+    expect(model.activities[0]).toMatchObject({
+      section: 'history',
+      statusLabel: 'Failed',
+      tone: 'error',
+      issue: 'parse failed: io error: The system cannot find the file specified.',
     });
   });
 });

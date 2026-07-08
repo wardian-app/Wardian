@@ -88,7 +88,9 @@ rows expose the current Monitor actions:
 
 Active and recent runs appear in the same feed so you can jump directly into
 Observe. Older history is paged separately to keep the main feed focused on the
-latest run per blueprint.
+latest run per blueprint. History rows lead with the run time, keep workflow
+identity separate from status, and show schedule cadence plus assignment labels
+when the run came from a schedule.
 
 ## Important Limits
 

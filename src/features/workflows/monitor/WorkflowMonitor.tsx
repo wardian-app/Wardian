@@ -134,6 +134,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
   }, []);
 
   const monitorModel = useMemo(() => buildMonitorModel(runs, schedules), [runs, schedules]);
+  const schedulesById = useMemo(() => scheduleLookupById(schedules), [schedules]);
   const upcomingSchedules = monitorModel.upcomingSchedules;
   const activities = monitorModel.activities;
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
@@ -210,6 +211,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
                 title={SECTION_LABELS[section]}
                 activities={items}
                 olderRuns={historyItems}
+                schedulesById={schedulesById}
                 remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
                 agentLabels={agentLabels}
                 historyScrollRef={historyScrollRef}
@@ -239,6 +241,7 @@ function ActivitySection({
   title,
   activities,
   olderRuns,
+  schedulesById,
   remainingOlderRuns,
   agentLabels,
   historyScrollRef,
@@ -254,6 +257,7 @@ function ActivitySection({
   title: string;
   activities: WorkflowActivity[];
   olderRuns: RunSummary[];
+  schedulesById: Map<string, WorkflowSchedule>;
   remainingOlderRuns: number;
   agentLabels: Record<string, string>;
   historyScrollRef: RefObject<HTMLDivElement | null>;
@@ -291,6 +295,7 @@ function ActivitySection({
         {olderRuns.length > 0 ? (
           <VirtualHistoryRows
             runs={olderRuns}
+            schedulesById={schedulesById}
             agentLabels={agentLabels}
             scrollContainerRef={historyScrollRef}
             onOpenRun={onOpenRun}
@@ -330,6 +335,7 @@ function ActivitySection({
 
 function VirtualHistoryRows({
   runs,
+  schedulesById,
   agentLabels,
   scrollContainerRef,
   onOpenRun,
@@ -339,6 +345,7 @@ function VirtualHistoryRows({
   onEditSchedule,
 }: {
   runs: RunSummary[];
+  schedulesById: Map<string, WorkflowSchedule>;
   agentLabels: Record<string, string>;
   scrollContainerRef: RefObject<HTMLDivElement | null>;
   onOpenRun: (blueprintId: string, runId: string) => void;
@@ -416,6 +423,7 @@ function VirtualHistoryRows({
     >
       {visibleRuns.map((run, index) => {
         const runIndex = firstIndex + index;
+        const schedule = run.schedule_id ? schedulesById.get(run.schedule_id) ?? null : null;
         return (
           <div
             key={run.run_id}
@@ -423,7 +431,7 @@ function VirtualHistoryRows({
             style={{ top: runIndex * HISTORY_ROW_ESTIMATE_PX }}
           >
             <ActivityRow
-              activity={historyActivityFromRun(run)}
+              activity={historyActivityFromRun(run, schedule)}
               agentLabels={agentLabels}
               testId={`workflow-history-run-${run.run_id}`}
               onOpenRun={onOpenRun}
@@ -468,39 +476,42 @@ function ActivityRow({
   return (
     <div
       data-testid={testId ?? `workflow-activity-row-${activity.blueprintId}`}
-      className="grid grid-cols-1 items-start gap-x-4 gap-y-1 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)] md:grid-cols-[minmax(0,220px)_minmax(0,150px)_minmax(0,170px)_minmax(0,170px)_minmax(0,220px)_112px]"
+      className="grid grid-cols-1 items-start gap-x-4 gap-y-1 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)] md:grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]"
       style={activityRowScrollStyle}
     >
-      <div className="min-w-0">
-        <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
-        {activity.blueprintId !== activity.name ? (
-          <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.blueprintId}>{activity.blueprintId}</div>
-        ) : null}
-        <div className={`mt-1 flex items-center gap-2 text-[10px] font-bold ${toneClass[activity.tone]}`}>
-          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[activity.tone]}`} aria-hidden />
-          <span>{activity.statusLabel}</span>
-        </div>
-        {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
-      </div>
-      <div className="min-w-0">
-        <div className="mb-0.5 text-[9px] font-bold text-muted">Run</div>
-        {activity.latestRun ? (
-          <>
-            <div className={`truncate text-[10px] font-bold ${runToneClass(activity.latestRun.status)}`}>
-              {formatRunStatus(activity.latestRun.status)}
-            </div>
-            <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.latestRun.run_id}>{activity.latestRun.run_id}</div>
-          </>
-        ) : (
-          <span className="text-[10px] text-muted">No runs yet</span>
-        )}
-      </div>
       <div className="min-w-0">
         <div className="mb-0.5 text-[9px] font-bold text-muted">Time</div>
         {runTimestampLabel ? (
           <div className="truncate text-[10px] text-muted" title={runTimestamp ?? undefined}>{runTimestampLabel}</div>
         ) : (
           <span className="text-[10px] text-muted">Unknown</span>
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Workflow</div>
+        <div className="truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>{activity.name}</div>
+        {activity.blueprintId !== activity.name ? (
+          <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.blueprintId}>{activity.blueprintId}</div>
+        ) : null}
+      </div>
+      <div className="min-w-0">
+        <div className="mb-0.5 text-[9px] font-bold text-muted">Status</div>
+        <div className={`flex items-center gap-2 text-[10px] font-bold ${toneClass[activity.tone]}`}>
+          <span className={`h-2 w-2 shrink-0 rounded-full ${toneDotClass[activity.tone]}`} aria-hidden />
+          <span>{activity.statusLabel}</span>
+        </div>
+        {activity.latestRun ? (
+          <>
+            <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={activity.latestRun.run_id}>
+              {activity.latestRun.run_id}
+            </div>
+            {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
+          </>
+        ) : (
+          <>
+            <div className="mt-0.5 text-[10px] text-muted">No runs yet</div>
+            {activity.issue ? <div className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-error)]">{activity.issue}</div> : null}
+          </>
         )}
       </div>
       <div className="min-w-0">
@@ -749,15 +760,15 @@ function activityFromParts(parts: {
   return { ...parts, ...state };
 }
 
-function historyActivityFromRun(run: RunSummary): WorkflowActivity {
+function historyActivityFromRun(run: RunSummary, schedule: WorkflowSchedule | null = null): WorkflowActivity {
   return {
     activityId: `history:${run.run_id}`,
     blueprintId: run.blueprint_id,
     name: run.blueprint_id,
-    schedules: [],
+    schedules: schedule ? [schedule] : [],
     latestRun: run,
     activeRun: null,
-    nextSchedule: null,
+    nextSchedule: schedule,
     statusLabel: formatRunStatus(run.status),
     tone: historyTone(run.status),
     section: 'history',
@@ -784,6 +795,9 @@ function activityState(
   }
   if (nextSchedule?.is_paused) {
     return { statusLabel: 'Paused', tone: 'warning', section: 'scheduled', issue: scheduleIssue };
+  }
+  if (scheduleIssue) {
+    return { statusLabel: 'Failed', tone: 'error', section: 'history', issue: scheduleIssue };
   }
   if (latestRun?.status === 'failed') {
     return {
@@ -842,14 +856,6 @@ function compareScheduleRecency(left: WorkflowSchedule, right: WorkflowSchedule)
   return left.name.localeCompare(right.name);
 }
 
-function runToneClass(status: RunStatusKind) {
-  if (status === 'running') return 'text-[var(--color-wardian-processing)]';
-  if (status === 'awaiting_approval') return 'text-[var(--color-wardian-warning)]';
-  if (status === 'completed') return 'text-[var(--color-wardian-success)]';
-  if (status === 'failed') return 'text-[var(--color-wardian-error)]';
-  return 'text-muted';
-}
-
 function agentLabelMap(agents: AgentConfig[]) {
   const labels: Record<string, string> = {};
   for (const agent of agents) {
@@ -858,6 +864,14 @@ function agentLabelMap(agents: AgentConfig[]) {
     labels[agent.session_id] = label;
   }
   return labels;
+}
+
+function scheduleLookupById(schedules: WorkflowSchedule[]) {
+  const lookup = new Map<string, WorkflowSchedule>();
+  for (const schedule of schedules) {
+    lookup.set(schedule.id, schedule);
+  }
+  return lookup;
 }
 
 function providerLabel(provider: string) {
