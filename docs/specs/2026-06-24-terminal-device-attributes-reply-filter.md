@@ -75,6 +75,21 @@ terminal card to be selected first. OpenCode passive mouse-motion reports remain
 filtered by `filterProviderTerminalInput`, so preserving direct terminal
 scrolling does not reintroduce composer garbage characters.
 
+## Update 2026-07-07: OpenCode mouse tracking suppressed for text selection
+
+OpenCode can also enable xterm mouse-tracking modes with DECSET toggles such as
+`ESC[?1000h`, `ESC[?1002h`, `ESC[?1003h`, `ESC[?1006h`, and `ESC[?1016h`.
+When xterm.js enters those modes, plain drag gestures become mouse protocol
+input and normal text selection is unavailable unless the user uses a
+terminal-specific modifier.
+
+Wardian now strips those OpenCode-only mouse-tracking toggles from rendered
+output before xterm sees them. Terminal stdin remains enabled, keyboard input
+and capability replies are unchanged, and the passive mouse-motion input guard
+remains as defense in depth. OpenCode-owned mouse tracking is no longer
+preserved in Wardian terminals because selectable terminal text is the expected
+default interaction.
+
 ## Verification
 
 Focused regression coverage lives in
@@ -90,4 +105,6 @@ Focused regression coverage lives in
   while Wardian's capability broker still injects required terminal replies.
 - OpenCode passive mouse-motion reports, including bare binary triplets that
   match the visible composer garbage pattern, are dropped before PTY forwarding
-  while wheel packets and non-OpenCode provider input are preserved.
+  while non-OpenCode provider input is preserved.
+- OpenCode mouse-tracking toggles are stripped from rendered output before
+  xterm.js can enter mouse-reporting mode.
