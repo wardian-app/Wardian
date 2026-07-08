@@ -1354,9 +1354,8 @@ function proposeTerminalDimensions(
     const hostHeight = renderer.host.clientHeight;
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
-      const renderedRowHeight = options?.useRenderedRowGeometry === false
-        ? null
-        : renderedTerminalRowHeight(renderer);
+      const renderedRowHeight =
+        options?.useRenderedRowGeometry === false ? null : renderedTerminalRowHeight(renderer);
       const rows = proposeTerminalRows(hostHeight, cellHeight, renderedRowHeight);
       if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
         return { cols, rows };

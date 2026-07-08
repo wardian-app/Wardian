@@ -3866,6 +3866,93 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("does not resize from stale rendered rows when a preserved renderer remounts", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      const firstRender = render(
+        <AgentTerminal sessionId="codex-preserved-renderer-remount" provider="codex" theme="dark" />,
+      );
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+
+      const instance = getLatestTerminalInstance();
+      Object.defineProperty(instance.element, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(instance.element, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+      instance._core = {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 8, height: 20 },
+            },
+          },
+        },
+      };
+      instance.cols = 100;
+      instance.rows = 16;
+
+      const rowOne = document.createElement("div");
+      const rowTwo = document.createElement("div");
+      rowOne.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 16,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      rowTwo.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 16,
+            left: 0,
+            right: 800,
+            bottom: 32,
+            x: 0,
+            y: 16,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      const rows = document.createElement("div");
+      rows.className = "xterm-rows";
+      rows.append(rowOne, rowTwo);
+      instance.element.append(rows);
+
+      firstRender.unmount();
+      instance.resize.mockClear();
+
+      render(<AgentTerminal sessionId="codex-preserved-renderer-remount" provider="codex" theme="dark" />);
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(instance.resize).not.toHaveBeenCalled();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it("coalesces bursty ResizeObserver fits before resizing the xterm grid", async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
     let resizeCallback: ResizeObserverCallback | undefined;
