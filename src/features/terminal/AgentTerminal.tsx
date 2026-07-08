@@ -1240,7 +1240,7 @@ function proposeTerminalDimensions(
     const hostHeight = renderer.host.clientHeight;
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
-      const rows = Math.floor(hostHeight / cellHeight);
+      const rows = proposeTerminalRows(hostHeight, cellHeight, renderedTerminalRowHeight(renderer));
       if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
         return { cols, rows };
       }
@@ -1250,6 +1250,42 @@ function proposeTerminalDimensions(
   }
   const proposed = renderer.fitAddon.proposeDimensions();
   return proposed ? { cols: proposed.cols, rows: proposed.rows } : null;
+}
+
+function renderedTerminalRowHeight(renderer: TerminalRendererEntry) {
+  const rowElements = renderer.term.element?.querySelectorAll<HTMLElement>(".xterm-rows > div");
+  const first = rowElements?.[0];
+  if (!first) {
+    return null;
+  }
+
+  const firstRect = first.getBoundingClientRect();
+  const secondRect = rowElements?.[1]?.getBoundingClientRect();
+  const rowStep = secondRect ? secondRect.top - firstRect.top : 0;
+  if (Number.isFinite(rowStep) && rowStep > 0) {
+    return rowStep;
+  }
+  if (Number.isFinite(firstRect.height) && firstRect.height > 0) {
+    return firstRect.height;
+  }
+  return null;
+}
+
+function proposeTerminalRows(
+  hostHeight: number,
+  xtermCellHeight: number,
+  renderedRowHeight: number | null,
+) {
+  const rowsFromXterm = Math.floor(hostHeight / xtermCellHeight);
+  if (!renderedRowHeight || renderedRowHeight <= 0 || renderedRowHeight >= xtermCellHeight) {
+    return rowsFromXterm;
+  }
+
+  const rowsFromRenderedGeometry = Math.floor(hostHeight / renderedRowHeight);
+  const visibleGap = hostHeight - rowsFromXterm * renderedRowHeight;
+  return rowsFromRenderedGeometry > rowsFromXterm && visibleGap >= renderedRowHeight
+    ? rowsFromRenderedGeometry
+    : rowsFromXterm;
 }
 
 async function fitTerminalToContainer(

@@ -402,6 +402,56 @@ describe("AgentTerminal scrollback", () => {
     expect(fallback).toHaveBeenCalledTimes(1);
   });
 
+  it("uses rendered row geometry when stale xterm internals would leave blank bottom rows", () => {
+    const fallback = vi.fn(() => ({ cols: 1, rows: 1 }));
+    const rowOne = document.createElement("div");
+    const rowTwo = document.createElement("div");
+    rowOne.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          width: 800,
+          height: 16,
+          top: 0,
+          left: 0,
+          right: 800,
+          bottom: 16,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
+    rowTwo.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          width: 800,
+          height: 16,
+          top: 16,
+          left: 0,
+          right: 800,
+          bottom: 32,
+          x: 0,
+          y: 16,
+          toJSON: () => ({}),
+        }) as DOMRect,
+    );
+    const rows = document.createElement("div");
+    rows.className = "xterm-rows";
+    rows.append(rowOne, rowTwo);
+    const element = document.createElement("div");
+    element.append(rows);
+    const renderer = {
+      term: {
+        element,
+        _core: { _renderService: { dimensions: { css: { cell: { width: 8, height: 20 } } } } },
+      },
+      host: { clientWidth: 800, clientHeight: 320 },
+      fitAddon: { proposeDimensions: fallback },
+    } as never;
+
+    expect(__terminalTesting.proposeTerminalDimensions(renderer)).toEqual({ cols: 100, rows: 20 });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
   it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
     // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
     // unavailable (common once the browser nears its context cap). Probing only
