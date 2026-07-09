@@ -47,6 +47,7 @@ import {
   terminalThemeForProvider,
   type WardianTerminalTheme,
 } from "./terminalThemes";
+import { proposeTerminalRows, renderedTerminalRowHeight } from "./terminalSizing";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -1355,7 +1356,7 @@ function proposeTerminalDimensions(
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
       const renderedRowHeight =
-        options?.useRenderedRowGeometry === false ? null : renderedTerminalRowHeight(renderer);
+        options?.useRenderedRowGeometry === false ? null : renderedTerminalRowHeight(renderer.term.element);
       const rows = proposeTerminalRows(hostHeight, cellHeight, renderedRowHeight);
       if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
         return { cols, rows };
@@ -1373,42 +1374,6 @@ function geometryForRenderer(renderer: TerminalRendererEntry) {
     cols: Math.max(MIN_TERMINAL_COLS, renderer.term.cols),
     rows: Math.max(MIN_TERMINAL_ROWS, renderer.term.rows),
   };
-}
-
-function renderedTerminalRowHeight(renderer: TerminalRendererEntry) {
-  const rowElements = renderer.term.element?.querySelectorAll<HTMLElement>(".xterm-rows > div");
-  const first = rowElements?.[0];
-  if (!first) {
-    return null;
-  }
-
-  const firstRect = first.getBoundingClientRect();
-  const secondRect = rowElements?.[1]?.getBoundingClientRect();
-  const rowStep = secondRect ? secondRect.top - firstRect.top : 0;
-  if (Number.isFinite(rowStep) && rowStep > 0) {
-    return rowStep;
-  }
-  if (Number.isFinite(firstRect.height) && firstRect.height > 0) {
-    return firstRect.height;
-  }
-  return null;
-}
-
-function proposeTerminalRows(
-  hostHeight: number,
-  xtermCellHeight: number,
-  renderedRowHeight: number | null,
-) {
-  const rowsFromXterm = Math.floor(hostHeight / xtermCellHeight);
-  if (!renderedRowHeight || renderedRowHeight <= 0 || renderedRowHeight >= xtermCellHeight) {
-    return rowsFromXterm;
-  }
-
-  const rowsFromRenderedGeometry = Math.floor(hostHeight / renderedRowHeight);
-  const visibleGap = hostHeight - rowsFromXterm * renderedRowHeight;
-  return rowsFromRenderedGeometry > rowsFromXterm && visibleGap >= renderedRowHeight
-    ? rowsFromRenderedGeometry
-    : rowsFromXterm;
 }
 
 async function fitTerminalToContainer(

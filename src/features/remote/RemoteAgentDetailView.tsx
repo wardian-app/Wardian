@@ -51,6 +51,7 @@ import {
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
 import { calculateTerminalMirrorFit } from "../terminal/terminalRendererBudget";
+import { proposeTerminalRows, renderedTerminalRowHeight } from "../terminal/terminalSizing";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -329,6 +330,7 @@ function proposedRemoteViewport(
   terminal: Terminal,
   host: HTMLDivElement,
   scrollSurface: HTMLDivElement,
+  options?: { useRenderedRowGeometry?: boolean },
 ) {
   const viewport = scrollSurface.getBoundingClientRect();
   const viewportWidth = viewport.width || scrollSurface.clientWidth;
@@ -350,7 +352,14 @@ function proposedRemoteViewport(
   ) {
     return {
       cols: Math.max(1, Math.floor(viewportWidth / cellWidth)),
-      rows: Math.max(1, Math.floor(viewportHeight / cellHeight)),
+      rows: Math.max(
+        1,
+        proposeTerminalRows(
+          viewportHeight,
+          cellHeight,
+          options?.useRenderedRowGeometry === false ? null : renderedTerminalRowHeight(host),
+        ),
+      ),
     };
   }
   const saved = {
@@ -747,16 +756,22 @@ function TerminalPane({
       const state = terminalSession?.state;
       const brokerState = state?.broker_state;
       if (!state || !brokerState) return;
-      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface);
       if (state.mode !== "owner") {
+        const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface, {
+          useRenderedRowGeometry: false,
+        });
         reportViewport(brokerState.runtime_generation, proposed.cols, proposed.rows);
         applyRemoteMirrorLayout(terminal, host, scrollSurface, brokerState.geometry);
         return;
       }
       resetRemoteOwnerLayout(host, scrollSurface);
       fitAddon.fit?.();
-      const cols = terminal.cols || proposed.cols;
-      const rows = terminal.rows || proposed.rows;
+      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface);
+      const cols = proposed.cols;
+      const rows = proposed.rows;
+      if (terminal.cols !== cols || terminal.rows !== rows) {
+        terminal.resize(cols, rows);
+      }
       reportViewport(brokerState.runtime_generation, cols, rows);
       if (
         lastOwnerResize.runtimeGeneration !== brokerState.runtime_generation
