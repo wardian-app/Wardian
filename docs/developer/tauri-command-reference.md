@@ -70,12 +70,15 @@ evidence or queue the interaction.
 
 - `load_watchlists`
 - `save_watchlists`
+- `load_watchlist_prefs`
+- `save_watchlist_prefs`
 - `load_queue_items`
 - `save_queue_items`
 - `load_queue_preferences`
 - `save_queue_preferences`
 - `load_agent_interactions`
 - `save_agent_interactions`
+- `load_opencode_last_assistant_text`
 
 The CLI `team` and `watchlist` commands read and write `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays for reads, write canonical v2 JSON for mutations, and best-effort notify the running app when the local control endpoint is available. Team create/add/split operations also seed communication-topology edges while preserving existing seed-suppression tombstones.
 
@@ -120,15 +123,21 @@ workflow system. Do not add new frontend behavior against those names.
 
 ## Library (`commands/library.rs`)
 
-- `get_library_tree`
+- `get_library_index`
+- `read_library_item`
 - `save_library_item`
 - `update_library_metadata`
+- `create_library_folder`
+- `rename_library_entry`
+- `delete_library_entry`
 - `open_library_folder`
 - `deploy_skill`
 - `remove_deployed_skill`
 - `list_deployed_skills`
 - `list_deployed_skill_refs`
 - `list_skill_deployments`
+- `set_skill_deployments`
+- `remove_orphan_deployment`
 - `library_watch`
 - `library_unwatch`
 

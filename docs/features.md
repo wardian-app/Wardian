@@ -5,7 +5,7 @@ This page maps Wardian's major capabilities to their detailed guides.
 ## Malleable Agent Environment
 
 - Local-first agent habitat where prompts, classes, skills, workflows, queue evidence, and memory-ready context are inspectable artifacts rather than opaque app-only state
-- Multiple lenses over shared Wardian state: desktop UI, CLI, Library, Workflows, Explorer, Queue, Graph, and future spatial views operate against the same canonical records
+- Multiple lenses over shared Wardian state: desktop UI, CLI, Library, Workflows, Explorer, Queue, Graph, and Garden operate against the same canonical records
 - Gentle slope from use to creation: run an agent, save a prompt, tune a class, deploy a skill, automate a workflow, then promote durable evidence into memory or project context
 - Explicit scopes for global, class, agent, team/project, workspace, and workflow-run context so reusable capabilities can be shared without losing provenance
 
@@ -23,7 +23,7 @@ Related docs:
 - Left control rail for spawning, commands, workflows, Explorer, and settings
 - Right roster with status lights, thought snippets, and agent working sets
 - Queue tab for unread agent completions and workflow outcomes
-- Roadmap direction: Sites, Cohorts, movable surfaces, Garden spatial organization, and Graph communication topology
+- Roadmap direction: Sites, Cohorts, movable surfaces, richer Garden spatial organization, and Graph communication topology
 
 Related docs:
 
@@ -37,7 +37,7 @@ Related docs:
 ## Agent Classes and Reusable Library
 
 - Class blueprints with instruction files and assigned skills
-- Prompt and skill management from a filesystem-backed library
+- Prompt, skill, class, and workflow-blueprint management from a filesystem-backed library
 - Starred prompts for one-click execution from the Command panel
 
 Related docs:

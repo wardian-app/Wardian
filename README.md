@@ -70,7 +70,7 @@ Debian/Ubuntu users who want package-manager updates can use the optional
 - [Why Wardian?](#why-wardian)
 - [Core Features](#core-features)
 - [Platform Support](#platform-support)
-- [Project Roadmap](#project-roadmap)
+- [Product Direction](#product-direction)
 - [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
 - [Development Setup](#development-setup)
@@ -216,13 +216,15 @@ Wardian leverages native OS capabilities for high-performance terminal emulation
 
 ---
 
-## Project Roadmap
+## Product Direction
 
 Wardian is evolving toward a malleable home for your agents: a local environment where agent capabilities, workflows, evidence, and project context can be inspected, rearranged, and extended over time.
 
-- **Phase 1-2**: Dual-Sidebar UI, PTY Grid, Shared Habitat, CLI Utility, live CLI control, agent cloning, worktrees, and scheduled workflow foundations. [DONE]
-- **Phase 3-4**: Agent-to-Agent IPC, HITL approval queue expansion, workflow hardening, and cross-platform runtime polish. [ACTIVE]
-- **Phase 5**: Swarm Visualization, Plugins, and File-System Watcher Hooks. [PLANNED]
+- **Runtime reliability and provider fidelity**: keep real PTY behavior, provider-specific delivery, transcript capture, and cross-platform process supervision stable as provider CLIs change.
+- **Reusable context and capabilities**: continue tightening the Library around prompts, skills, classes, workflow blueprints, MCP configuration, and inspectable filesystem-backed artifacts.
+- **Coordination surfaces**: improve Graph topology, teams, watchlists, Queue evidence, structured asks/replies, and CLI automation so multi-agent work stays visible and bounded.
+- **Workflow operations**: harden workflow authoring, scheduling, run observation, history, and failure evidence for repeatable local automation.
+- **Remote and distribution polish**: improve the mobile remote surface, installer/update paths, package-manager channels, and first-run documentation.
 
 Full details available in [ROADMAP.md](ROADMAP.md).
 

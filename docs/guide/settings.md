@@ -55,7 +55,7 @@ notes that **Auto** prefers Claude when available.
 ## Updates
 
 The General category shows the currently running Wardian version, such as
-`Wardian v0.3.6`.
+`Wardian vX.Y.Z`.
 
 Wardian checks for updates silently when Settings loads. If no newer stable
 release is available, Settings shows that Wardian is up to date. If a newer

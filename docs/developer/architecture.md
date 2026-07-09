@@ -9,10 +9,11 @@ invariants:
 
 - **Canonical state has an owner.** The backend owns live agent runtime truth;
   workflow files own workflow templates; workflow run logs own run evidence;
-  library files own reusable prompts and skills; watchlist/team records own
-  roster organization until a broader project-scope model exists.
-- **Views are lenses, not state silos.** Grid, Dashboard, Graph, future spatial
-  views, Library, Workflows, Explorer, Queue, and the CLI should resolve and
+  library files own reusable prompts, skills, classes, and workflow blueprints;
+  watchlist/team records own roster organization until a broader project-scope
+  model exists.
+- **Views are lenses, not state silos.** Grid, Dashboard, Graph, Garden,
+  Library, Workflows, Explorer, Queue, and the CLI should resolve and
   mutate canonical Wardian records through shared commands or file contracts.
 - **Artifacts stay inspectable where practical.** User-shapable prompts,
   classes, skills, workflows, evidence, and memory-ready context should remain
