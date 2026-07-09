@@ -888,7 +888,6 @@ function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) 
 
 function scrollTerminalFromWheel(
   term: Terminal,
-  provider: string | undefined,
   event: {
     deltaMode: number;
     deltaY: number;
@@ -899,11 +898,6 @@ function scrollTerminalFromWheel(
   sessionId?: string,
 ) {
   recordWheel(sessionId, "events");
-  if (provider === "opencode") {
-    recordWheel(sessionId, "opencode_owned");
-    return false;
-  }
-
   const buffer = term.buffer.active;
   if ((buffer.baseY ?? 0) <= 0) {
     recordWheel(sessionId, "no_scrollback");
@@ -2248,7 +2242,7 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   host.addEventListener(
     "wheel",
     (event) => {
-      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, terminalKey)) {
+      if (scrollTerminalFromWheel(term, event, wheelRowRemainder, terminalKey)) {
         syncParserViewportToRenderer(entry);
       }
     },
@@ -2899,7 +2893,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry || !term) {
       return;
     }
-    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, terminalKey)) {
+    if (scrollTerminalFromWheel(term, event, wheelRowRemainderRef, terminalKey)) {
       syncParserViewportToRenderer(entry);
     }
   }, [terminalKey]);

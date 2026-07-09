@@ -3273,6 +3273,33 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.refresh).not.toHaveBeenCalled();
   });
 
+  it("scrolls OpenCode scrollback through the user wheel surface instead of the composer", async () => {
+    render(<AgentTerminal sessionId="opencode-wheel-scroll" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.baseY = 27;
+    instance.buffer.active.viewportY = 27;
+    instance.scrollLines.mockClear();
+    instance.refresh.mockClear();
+    const parser = getLatestHeadlessTerminalInstance();
+    parser.scrollToLine.mockClear();
+
+    fireEvent.wheel(screen.getByTestId("agent-terminal-host"), {
+      deltaY: -240,
+      deltaMode: 0,
+    });
+
+    expect(instance.scrollLines).toHaveBeenCalledWith(expect.any(Number));
+    expect(instance.scrollLines.mock.calls[0][0]).toBeLessThan(0);
+    expect(instance.buffer.active.viewportY).toBeLessThan(27);
+    expect(parser.scrollToLine).toHaveBeenCalledWith(instance.buffer.active.viewportY);
+    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+  });
+
   it("forwards codex enter as a plain carriage return", async () => {
     render(<AgentTerminal sessionId="codex-enter" provider="codex" theme="dark" />);
 
