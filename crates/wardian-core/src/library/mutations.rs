@@ -307,12 +307,25 @@ pub fn remove_orphan_deployment(
     target_type: &str,
     target_id: &str,
     skill_name: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !is_single_normal_component(skill_name) {
         return Err(format!("Invalid skill name: {skill_name}"));
     }
+    let sources = collect_skill_sources(home);
+    let scan = scan_deployments(home, &sources);
+    let is_orphan = scan.orphans.iter().any(|orphan| {
+        orphan.target_type == target_type
+            && orphan.target_id == target_id
+            && orphan.skill_name == skill_name
+    });
+    if !is_orphan {
+        return Ok(false);
+    }
+
     let skills_dir = get_target_skills_dir(home, target_type, target_id)?;
-    remove_existing_deployment(&skills_dir.join(skill_name)).map_err(|e| e.to_string())
+    remove_existing_deployment(&skills_dir.join(skill_name))
+        .map(|()| true)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -487,9 +500,24 @@ mod tests {
         fs::create_dir_all(&orphan).unwrap();
         fs::write(orphan.join("SKILL.md"), "stale").unwrap();
 
-        remove_orphan_deployment(home, "user", "global", "ghost").unwrap();
+        assert!(remove_orphan_deployment(home, "user", "global", "ghost").unwrap());
 
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn remove_orphan_deployment_preserves_healthy_deployment() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        let source = home.join("library/skills/planner");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "healthy").unwrap();
+        let deployed = home.join("common/.agents/skills/planner");
+        crate::library::links::create_directory_link(&source, &deployed).unwrap();
+
+        assert!(!remove_orphan_deployment(home, "user", "global", "planner").unwrap());
+
+        assert!(deployed.join("SKILL.md").is_file());
     }
 
     #[test]

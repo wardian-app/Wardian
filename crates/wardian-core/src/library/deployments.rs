@@ -291,6 +291,14 @@ pub fn set_skill_deployments(
 ) -> Result<SetDeploymentsOutcome, String> {
     let rel_norm = source_rel.replace('\\', "/");
     let skill_name = skill_name_from_rel(&rel_norm);
+    let mut seen_desired = HashSet::new();
+    let desired: Vec<SkillDeployment> = desired
+        .iter()
+        .filter(|target| {
+            seen_desired.insert((target.target_type.clone(), target.target_id.clone()))
+        })
+        .cloned()
+        .collect();
 
     let sources = collect_skill_sources(home);
     let scan = scan_deployments(home, &sources);
@@ -325,7 +333,7 @@ pub fn set_skill_deployments(
         }
     }
 
-    for target in desired {
+    for target in &desired {
         let key = (target.target_type.clone(), target.target_id.clone());
         if !current_set.contains(&key) {
             match deploy_skill(home, &rel_norm, &target.target_type, &target.target_id) {
@@ -448,6 +456,29 @@ mod tests {
         // Idempotent.
         let outcome = set_skill_deployments(home, "planner", &narrowed).unwrap();
         assert_eq!((outcome.added, outcome.removed), (0, 0));
+    }
+
+    #[test]
+    fn set_deployments_deduplicates_desired_targets() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+        seed_skill(home, "planner");
+        let desired = vec![
+            SkillDeployment {
+                target_type: "user".into(),
+                target_id: "global".into(),
+            },
+            SkillDeployment {
+                target_type: "user".into(),
+                target_id: "global".into(),
+            },
+        ];
+
+        let outcome = set_skill_deployments(home, "planner", &desired).unwrap();
+
+        assert_eq!(outcome.added, 1);
+        let scan = scan_deployments(home, &collect_skill_sources(home));
+        assert_eq!(scan.deployments["planner"].len(), 1);
     }
 
     #[test]

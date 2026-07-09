@@ -580,7 +580,13 @@ pub async fn remove_orphan_deployment(
     skill_name: String,
 ) -> Result<(), String> {
     let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    library::remove_orphan_deployment(&home, &target_type, &target_id, &skill_name)
+    if library::remove_orphan_deployment(&home, &target_type, &target_id, &skill_name)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "Deployment is not currently orphaned: {target_type}:{target_id}/{skill_name}"
+        ))
+    }
 }
 
 // --- Watching (commands) ---------------------------------------------------

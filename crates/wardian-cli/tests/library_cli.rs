@@ -427,6 +427,39 @@ fn deploy_reconciles_complete_target_set() {
 }
 
 #[test]
+fn deploy_deduplicates_targets_and_clear_removes_the_final_deployment() {
+    let home = TempDir::new().unwrap();
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/review/planner", "--stdin"],
+        Some("# Planner\n"),
+    ));
+
+    let deployed = assert_success_json(run(
+        home.path(),
+        &[
+            "library",
+            "deploy",
+            "skills/review/planner",
+            "--targets",
+            "user:global,user:global",
+        ],
+        None,
+    ));
+    assert_eq!(deployed["targets"].as_array().unwrap().len(), 1);
+    assert_eq!(deployed["outcome"]["added"], 1);
+
+    let cleared = assert_success_json(run(
+        home.path(),
+        &["library", "deploy", "skills/review/planner", "--clear"],
+        None,
+    ));
+    assert_eq!(cleared["targets"], serde_json::json!([]));
+    assert_eq!(cleared["outcome"]["removed"], 1);
+    assert!(!home.path().join("common/.agents/skills/planner").exists());
+}
+
+#[test]
 fn deploy_rejects_unknown_targets_without_creating_directories() {
     let home = TempDir::new().unwrap();
     seed_default_classes(home.path());
@@ -570,6 +603,46 @@ fn orphans_list_and_delete_remove_unresolved_deployment() {
     ));
     assert_eq!(deleted["ok"], true);
     assert!(!orphan.exists());
+}
+
+#[test]
+fn orphan_delete_rejects_healthy_deployment_without_removing_it() {
+    let home = TempDir::new().unwrap();
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/review/planner", "--stdin"],
+        Some("# Planner\n"),
+    ));
+    assert_success_json(run(
+        home.path(),
+        &[
+            "library",
+            "deploy",
+            "skills/review/planner",
+            "--targets",
+            "user:global",
+        ],
+        None,
+    ));
+
+    let rejected = assert_failure_json(run(
+        home.path(),
+        &[
+            "library",
+            "orphan",
+            "delete",
+            "--target",
+            "user:global",
+            "--skill",
+            "planner",
+        ],
+        None,
+    ));
+    assert_eq!(rejected["error"]["code"], "not_found");
+    assert!(home
+        .path()
+        .join("common/.agents/skills/planner/SKILL.md")
+        .is_file());
 }
 
 #[test]

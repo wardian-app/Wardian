@@ -2,6 +2,7 @@ use crate::{
     args::{LibraryArgs, LibraryCommand, LibraryOrphanCommand},
     errors::CliError,
 };
+use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use wardian_core::library::{self, LibrarySectionId, DEPLOYED_SKILL_SOURCE_FILE};
@@ -36,7 +37,11 @@ pub fn handle_library(args: LibraryArgs) -> Result<String, CliError> {
         LibraryCommand::Unstar { entry_ref } => handle_star(&entry_ref, false),
         LibraryCommand::Tags { entry_ref, set } => handle_tags(&entry_ref, set),
         LibraryCommand::Deployments { skill_ref } => handle_deployments(&skill_ref),
-        LibraryCommand::Deploy { skill_ref, targets } => handle_deploy(&skill_ref, &targets),
+        LibraryCommand::Deploy {
+            skill_ref,
+            targets,
+            clear,
+        } => handle_deploy(&skill_ref, targets.as_deref(), clear),
         LibraryCommand::Orphans => handle_orphans(),
         LibraryCommand::Orphan { command } => match command {
             LibraryOrphanCommand::Delete { target, skill } => handle_orphan_delete(&target, &skill),
@@ -308,13 +313,17 @@ fn handle_deployments(skill_ref: &str) -> Result<String, CliError> {
     }))
 }
 
-fn handle_deploy(skill_ref: &str, targets: &str) -> Result<String, CliError> {
+fn handle_deploy(skill_ref: &str, targets: Option<&str>, clear: bool) -> Result<String, CliError> {
     let home = wardian_home()?;
     let skill_ref = parse_skill_ref(skill_ref)?;
     if !entry_exists(&home, &skill_ref) {
         return Err(CliError::library_not_found(&skill_ref.entry_ref));
     }
-    let targets = parse_target_refs(targets)?;
+    let targets = if clear {
+        Vec::new()
+    } else {
+        parse_target_refs(targets.unwrap_or_default())?
+    };
     validate_deployment_targets(&home, &targets)?;
     let outcome = library::set_skill_deployments(&home, &skill_ref.rel_path, &targets)
         .map_err(CliError::generic)?;
@@ -340,8 +349,13 @@ fn handle_orphans() -> Result<String, CliError> {
 fn handle_orphan_delete(target: &str, skill: &str) -> Result<String, CliError> {
     let home = wardian_home()?;
     let (target_type, target_id) = parse_target_ref(target)?;
-    library::remove_orphan_deployment(&home, &target_type, &target_id, skill)
+    let removed = library::remove_orphan_deployment(&home, &target_type, &target_id, skill)
         .map_err(CliError::generic)?;
+    if !removed {
+        return Err(CliError::library_not_found(&format!(
+            "orphan/{target}/{skill}"
+        )));
+    }
     render_json(serde_json::json!({
         "schema": 1,
         "ok": true,
@@ -435,6 +449,7 @@ fn parse_target_refs(value: &str) -> Result<Vec<SkillDeployment>, CliError> {
     }
 
     let mut targets = Vec::new();
+    let mut seen = HashSet::new();
     for target in trimmed.split(',').map(str::trim) {
         if target.is_empty() {
             return Err(CliError::invalid_target(value));
@@ -442,24 +457,23 @@ fn parse_target_refs(value: &str) -> Result<Vec<SkillDeployment>, CliError> {
         let (target_type, target_id) = target
             .split_once(':')
             .ok_or_else(|| CliError::invalid_target(target))?;
-        match target_type {
-            "user" if target_id == "global" => targets.push(SkillDeployment {
+        let deployment = match target_type {
+            "user" if target_id == "global" => SkillDeployment {
                 target_type: "user".to_string(),
                 target_id: "global".to_string(),
-            }),
-            "class" if library::is_single_normal_component(target_id) => {
-                targets.push(SkillDeployment {
-                    target_type: "class".to_string(),
-                    target_id: target_id.to_string(),
-                });
-            }
-            "agent" if library::is_single_normal_component(target_id) => {
-                targets.push(SkillDeployment {
-                    target_type: "agent".to_string(),
-                    target_id: target_id.to_string(),
-                });
-            }
+            },
+            "class" if library::is_single_normal_component(target_id) => SkillDeployment {
+                target_type: "class".to_string(),
+                target_id: target_id.to_string(),
+            },
+            "agent" if library::is_single_normal_component(target_id) => SkillDeployment {
+                target_type: "agent".to_string(),
+                target_id: target_id.to_string(),
+            },
             _ => return Err(CliError::invalid_target(target)),
+        };
+        if seen.insert((deployment.target_type.clone(), deployment.target_id.clone())) {
+            targets.push(deployment);
         }
     }
 

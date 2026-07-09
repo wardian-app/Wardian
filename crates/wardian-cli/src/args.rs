@@ -83,8 +83,10 @@ pub enum LibraryCommand {
     },
     Deploy {
         skill_ref: String,
-        #[arg(long)]
-        targets: String,
+        #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+        targets: Option<String>,
+        #[arg(long, required_unless_present = "targets", conflicts_with = "targets")]
+        clear: bool,
     },
     Orphans,
     Orphan {
@@ -738,8 +740,9 @@ mod tests {
         };
         assert!(matches!(
             args.command,
-            LibraryCommand::Deploy { ref skill_ref, ref targets }
-                if skill_ref == "skills/planner" && targets == "user:global,class:Reviewer"
+            LibraryCommand::Deploy { ref skill_ref, ref targets, clear: false }
+                if skill_ref == "skills/planner"
+                    && targets.as_deref() == Some("user:global,class:Reviewer")
         ));
 
         let cli = Cli::try_parse_from([
@@ -762,6 +765,36 @@ mod tests {
                 command: LibraryOrphanCommand::Delete { ref target, ref skill }
             } if target == "class:Reviewer" && skill == "planner"
         ));
+    }
+
+    #[test]
+    fn parses_library_deploy_clear_as_explicit_empty_set() {
+        let cli =
+            Cli::try_parse_from(["wardian", "library", "deploy", "skills/planner", "--clear"])
+                .unwrap();
+        let Command::Library(args) = cli.command else {
+            panic!("expected Library")
+        };
+        assert!(matches!(
+            args.command,
+            LibraryCommand::Deploy {
+                ref skill_ref,
+                targets: None,
+                clear: true
+            } if skill_ref == "skills/planner"
+        ));
+
+        assert!(Cli::try_parse_from(["wardian", "library", "deploy", "skills/planner",]).is_err());
+        assert!(Cli::try_parse_from([
+            "wardian",
+            "library",
+            "deploy",
+            "skills/planner",
+            "--clear",
+            "--targets",
+            "user:global",
+        ])
+        .is_err());
     }
 
     #[test]
