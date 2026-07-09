@@ -1,3 +1,4 @@
+mod atomic_file;
 pub mod classes;
 pub mod control;
 pub mod conversation_lease;

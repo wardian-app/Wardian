@@ -1,14 +1,13 @@
 //! Public model types for agent-owned conversation archives.
 
+use crate::atomic_file::{replace_file, tmp_path_for};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
-#[cfg(windows)]
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 pub const CONVERSATION_SCHEMA: u8 = 1;
 pub const CONVERSATION_TURNS_SCHEMA: u8 = 3;
@@ -355,18 +354,7 @@ pub fn read_jsonl_records<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Resu
 }
 
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let tmp_path = tmp_path_for(path);
-    let mut file = fs::File::create(&tmp_path)?;
-    serde_json::to_writer_pretty(&mut file, value).map_err(io::Error::other)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
-    drop(file);
-
-    replace_file(&tmp_path, path)
+    crate::atomic_file::write_json_atomic(path, value)
 }
 
 pub fn materialize_text_payload(
@@ -425,42 +413,6 @@ pub fn read_latest_index_entries(path: &Path) -> io::Result<Vec<ConversationInde
     Ok(entries)
 }
 
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("wardian");
-    path.with_file_name(format!(".{file_name}.tmp"))
-}
-
-#[cfg(not(windows))]
-fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
-    fs::rename(from, to)
-}
-
-#[cfg(windows)]
-fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
-    let from = wide_null(from.as_os_str());
-    let to = wide_null(to.as_os_str());
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-
-    // Windows std::fs::rename does not replace an existing destination.
-    // MoveFileExW avoids a pre-delete gap while keeping the operation same-volume.
-    let replaced = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if replaced == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -475,17 +427,6 @@ pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Resul
         file.sync_all()?;
     }
     replace_file(&tmp_path, path)
-}
-
-#[cfg(windows)]
-fn wide_null(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
 }
 
 fn sanitize_artifact_stem(stem: &str) -> String {

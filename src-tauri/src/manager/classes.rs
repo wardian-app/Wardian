@@ -50,13 +50,13 @@ pub fn init_agent_classes(app: &AppHandle) {
             let _ = save_classes(app, &defaults);
         }
 
-        let classes = get_all_agent_classes(app);
-        for cls in &classes {
-            let role_dir = classes_dir.join(&cls.name);
-            let _ = wardian_core::classes::ensure_class_directory(&app_dir, cls, None);
+        if let Ok(classes) = wardian_core::classes::initialize_classes(&app_dir) {
+            for cls in &classes {
+                let role_dir = classes_dir.join(&cls.name);
 
-            // Expose canonical skills through provider-specific discovery shims.
-            ensure_claude_skills_link(&role_dir);
+                // Expose canonical skills through provider-specific discovery shims.
+                ensure_claude_skills_link(&role_dir);
+            }
         }
     }
 }
