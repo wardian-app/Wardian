@@ -16,11 +16,11 @@ Use this index to find the guide that matches the task you are trying to finish.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.
 - [Queue](./queue.md): triage completed agent and workflow outcomes.
-- [Class Management](./class-management.md): define the blueprints used when spawning agents.
+- [Class Management](./class-management.md): understand class blueprints; edit them from the Library's Classes section.
 
 ## Reuse and Direct Work
 
-- [Library](./library.md): manage reusable prompts and skills.
+- [Library](./library.md): manage reusable prompts, skills, classes, workflow blueprints, and MCP placeholders.
 - [Command Panel](./command-panel.md): send one-off broadcasts or starred prompts to selected agents.
 - [Wardian CLI](./cli.md): let agents and automation inspect or control Wardian from a shell.
 

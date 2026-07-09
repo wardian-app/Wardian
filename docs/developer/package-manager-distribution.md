@@ -6,23 +6,20 @@ install surfaces that reuse the same desktop installers.
 
 ## Scope
 
-Phase 1 covers:
+Current package-manager support covers:
 
 - winget for Windows, using the NSIS `.exe`.
 - Homebrew Cask for macOS, using the Apple Silicon and Intel `.dmg` files.
 - A signed APT repository for Debian/Ubuntu x64, using the stable `.deb`.
 - Linux direct-install fallback docs for `.deb` and AppImage artifacts.
 
-npm bootstrap and standalone CLI-only distribution are out of scope for Phase 1.
-Linux package-manager publishing is tracked in
-[#324](https://github.com/wardian-app/Wardian/issues/324). The Phase 2 decision
-is documented in
+npm bootstrap and standalone CLI-only distribution are out of scope for the
+current desktop distribution model. Linux package-manager publishing uses the
+signed APT repository decision documented in
 [Linux Package Manager Distribution](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-06-11-linux-package-manager-distribution.md):
 use a signed APT repository as the first Linux package-manager channel, defer
 Flathub and Snap until Wardian has a deliberate sandbox/permission design, and
 keep AppImage as a direct-download artifact.
-The Phase 1 implementation is tracked in
-[#325](https://github.com/wardian-app/Wardian/issues/325).
 
 ## Generate Manifests
 
@@ -30,26 +27,26 @@ Run this only after the stable release workflow has published the GitHub
 Release and validated updater metadata.
 
 ```bash
-mkdir -p dist/package-managers/v0.3.6
-gh release view v0.3.6 --json tagName,assets > dist/package-managers/v0.3.6/assets.json
-npm run release:package-manifests -- --release-assets dist/package-managers/v0.3.6/assets.json --out dist/package-managers/v0.3.6
+mkdir -p dist/package-managers/vX.Y.Z
+gh release view vX.Y.Z --json tagName,assets > dist/package-managers/vX.Y.Z/assets.json
+npm run release:package-manifests -- --release-assets dist/package-managers/vX.Y.Z/assets.json --out dist/package-managers/vX.Y.Z
 ```
 
 PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Force dist/package-managers/v0.3.6 | Out-Null
-gh release view v0.3.6 --json tagName,assets > dist/package-managers/v0.3.6/assets.json
-npm run release:package-manifests -- --release-assets dist/package-managers/v0.3.6/assets.json --out dist/package-managers/v0.3.6
+New-Item -ItemType Directory -Force dist/package-managers/vX.Y.Z | Out-Null
+gh release view vX.Y.Z --json tagName,assets > dist/package-managers/vX.Y.Z/assets.json
+npm run release:package-manifests -- --release-assets dist/package-managers/vX.Y.Z/assets.json --out dist/package-managers/vX.Y.Z
 ```
 
 Generated files:
 
-- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.yaml`
-- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.locale.en-US.yaml`
-- `dist/package-managers/v0.3.6/winget/WardianApp.Wardian.installer.yaml`
-- `dist/package-managers/v0.3.6/homebrew/wardian.rb`
-- `dist/package-managers/v0.3.6/linux/install.md`
+- `dist/package-managers/vX.Y.Z/winget/WardianApp.Wardian.yaml`
+- `dist/package-managers/vX.Y.Z/winget/WardianApp.Wardian.locale.en-US.yaml`
+- `dist/package-managers/vX.Y.Z/winget/WardianApp.Wardian.installer.yaml`
+- `dist/package-managers/vX.Y.Z/homebrew/wardian.rb`
+- `dist/package-managers/vX.Y.Z/linux/install.md`
 
 The generator fails if a required asset is missing, lacks a SHA-256 digest, or
 does not point at the requested release tag.
@@ -60,19 +57,19 @@ Copy the generated winget files into a local clone of
 `microsoft/winget-pkgs` under:
 
 ```text
-manifests/w/WardianApp/Wardian/0.3.6/
+manifests/w/WardianApp/Wardian/X.Y.Z/
 ```
 
 Validate before submitting:
 
 ```bash
-winget validate manifests/w/WardianApp/Wardian/0.3.6
+winget validate manifests/w/WardianApp/Wardian/X.Y.Z
 ```
 
 PowerShell:
 
 ```powershell
-winget validate manifests\w\WardianApp\Wardian\0.3.6
+winget validate manifests\w\WardianApp\Wardian\X.Y.Z
 ```
 
 Submit through the normal `microsoft/winget-pkgs` PR flow or with
@@ -82,7 +79,7 @@ Submit through the normal `microsoft/winget-pkgs` PR flow or with
 
 The `wardian-app/homebrew-tap` repository owns the published Homebrew Cask.
 After a stable release, its **Update Wardian Cask** workflow can be run with a
-release tag such as `v0.3.6`. The main Wardian release workflow also dispatches
+release tag such as `vX.Y.Z`. The main Wardian release workflow also dispatches
 that tap workflow after stable publication when the Wardian repository has the
 Wardian release dispatch GitHub App configured. Set
 `WARDIAN_RELEASE_DISPATCH_APP_ID` as a repository variable and
@@ -91,7 +88,7 @@ installed on `wardian-app/homebrew-tap` with Actions write permission.
 
 The tap workflow reads the published Wardian release assets, rewrites
 `Casks/wardian.rb`, runs Homebrew audit, and opens a pull request in the tap.
-The generated `dist/package-managers/v0.3.6/homebrew/wardian.rb` file remains a
+The generated `dist/package-managers/vX.Y.Z/homebrew/wardian.rb` file remains a
 local fallback and a useful comparison artifact, but maintainers should prefer
 the tap workflow for published cask updates.
 
@@ -108,7 +105,7 @@ they must never point at prerelease or draft artifacts.
 
 ## Linux Direct Install
 
-Use `dist/package-managers/v0.3.6/linux/install.md` as the hash-verified Linux
+Use `dist/package-managers/vX.Y.Z/linux/install.md` as the hash-verified Linux
 install fallback for release notes and documentation. Debian/Ubuntu users should
 prefer the signed APT repository. Do not present direct `.deb` downloads as
 Flatpak, Snap, or AppImageUpdate.

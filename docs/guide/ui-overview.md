@@ -14,14 +14,14 @@ The fixed header at the top of the application acts as the global navigation and
 - **Center (View Switcher)**: Quickly toggle between primary workspace modes:
   - **GRID**: The primary terminal workspace for live agent interaction.
   - **DASHBOARD**: A summary view of system health and active agent status.
-  - **LIBRARY**: Management center for prompts and skills.
+  - **LIBRARY**: Management center for prompts, skills, classes, workflow blueprints, and future MCP definitions.
   - **WORKFLOWS**: Visual canvas for building automated agent sequences.
   - **QUEUE / GRAPH / GARDEN**: Specialized views for completion triage, communication topology, and spatial agent organization.
 - **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
 
 ![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
 
-The **Graph** mode maps agents as status-colored nodes with relationship edges for same team, same project (same repository, following worktrees back to their source), and same folder (same physical checkout). Use the centered relationship lenses to focus the map, and open the inspector or context menu from any node to use the same agent actions available in the roster.
+The **Graph** mode maps agents as status-colored nodes with topology edges for manual connections and team-seeded communication links. It also offers read-only relationship lenses for same team, same project (same repository, following worktrees back to their source), and same folder (same physical checkout). Open the inspector or context menu from any node to use the same agent actions available in the roster.
 
 The **Garden** mode is a spatial canvas for organizing agents and workflows as draggable units (living orbs / pods) you arrange freely. Agent units display live status color; workflow units cluster in a shelf and show run state. Unit positions persist locally across restart. Only actively-processing units animate with a gentle pulse — the default is calm. Full agent session inspection still happens by opening the agent in Grid (Garden routes there), not inside Garden.
 

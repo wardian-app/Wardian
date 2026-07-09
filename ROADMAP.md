@@ -1,90 +1,73 @@
-# Wardian Project Roadmap
+# Wardian Product Direction
 
-Wardian is an advanced Agent Terminal Manager designed for managing multiple autonomous agents through a unified, high-performance interface. This document outlines the development phases for implementing the core features.
+Wardian is a local-first desktop habitat for live agents, workflows, reusable
+context, and durable evidence. The early phase-based roadmap has served its
+purpose; major foundations such as the multi-view shell, PTY-backed agents,
+the Wardian CLI, worktrees, workflows, Queue evidence, Graph topology, remote
+mobile control, and package-manager distribution are now part of the product.
 
-## Phase 1: Layout & Terminal Management
+This roadmap describes current product direction without promising a strict
+phase sequence. Priorities can move as provider CLIs, release infrastructure,
+and user workflows change.
 
-_Goal: Provide a professional-grade local habitat for live agent work._
+## Current Priorities
 
-- [x] **Dual-Sidebar Habitat Shell**
-  - **Left Sidebar (Primary)**:
-    - A thin **Icon Bar** for switching between views (Explorer, Connections, Workflows, Settings).
-    - A collapsible **Content Pane** that displays the menu for the active icon (e.g., Spawn Instance form, SSH hosts).
-  - **Right Sidebar (Secondary)**:
-    - A **collapsible, searchable agent list** for rapid selection, status monitoring, and drag-drop reordering.
-  - Support for multi-select in the right sidebar and main grid views.
-- [x] **Dynamic Grid Layouts**
-  - Implement predefined grid templates (Single, 2x2, 1+2, etc.).
-  - Support for drag-and-drop reordering of terminals.
-  - Ability to "move" selected agents between grid slots or view layers.
-  - Perspective/Layout saving and restoration across sessions.
-- [x] **Dashboard Command Matrix Refresh**
-  - Replace generic buttons with standard action set:
-    - **Delete**: Terminates the active process and removes it from the roster.
-    - **Pause**: Suspends the terminal process but preserves agent session and metadata in `Wardian_state.json`.
-    - **Query**: A versatile prompt injection tool (evolution of "Summarize") for rapid context extraction.
-    - **Restart**: Resets the PTY session and re-initializes the agent from its current configuration.
-- [x] **Selection-Based Orchestration**
-  - Target broadcasting to only selected agents.
-  - Bulk actions (terminate, restart, group) for selected instances.
-  - "Pinning" agents to specific grid slots from the sidebar list.
-- [x] **Identity & Customization**
-  - Support for renaming agents (display names vs. session IDs).
-  - Custom color coding and icons for different agent roles.
+### Runtime Reliability and Provider Fidelity
 
-## Phase 2: Agent Infrastructure & CLI Utility
+- Keep real PTY behavior stable across Windows ConPTY, macOS, and Linux.
+- Preserve provider-specific launch policy, delivery evidence, transcript
+  capture, status transitions, and terminal rendering as provider CLIs change.
+- Make failures inspectable through Queue, workflow history, conversation
+  archives, logs, and native E2E evidence.
 
-_Goal: Empower agents with local persistence and self-awareness._
+### Reusable Context and Capabilities
 
-- [x] **Home Directories**
-  - Automate creation of per-agent state under the Wardian home for each instance.
-  - Isolate temporary and permanent files per agent.
-- [x] **Wardian CLI Utility**
-  - Implement a lightweight binary accessible from terminals and managed agent processes.
-  - `wardian agent`: Returns the current managed session when `WARDIAN_SESSION_ID` is set.
-  - `wardian agent list --scope all`: Lists live or persisted agents for coordination.
-  - `wardian send`, `wardian ask`, `wardian agent wait`, and `wardian agent watch`: Provide terminal-native coordination and response evidence.
-  - `wardian workflow list/show/run/stop`: Expose workflow inspection and live run control from the shell.
-- [x] **Session Branching (Forking)**
-  - Support cloning an agent configuration into a new parallel session.
-- [x] **Agent-Specific Include Directories**
-  - Ability to specify additional `include` paths for each agent to monitor or reference beyond its base `folder`.
-- [x] **CLI Portability Tools**
-  - Expose agent identity, workspace, provider, status, and worktree state through scriptable CLI commands.
-  - Keep direct provider resume commands as provider-runtime implementation details rather than the primary user contract.
-- [x] **Session Lifecycle Management**
-  - Preserve inactive agents in the roster and allow users to start, pause, resume, kill, clone, and reassign sessions explicitly.
-- [x] **Scheduled Task Engine**
-  - Implement scheduled workflow triggers and scheduled run instances.
-  - Support interval, daily, weekly, and one-time scheduled workflow launches.
-  - Provide UI and backend commands for managing, pausing, running, and deleting scheduled executions.
+- Continue making the Library the home for prompts, skills, classes, workflow
+  blueprints, and future MCP definitions.
+- Keep reusable artifacts filesystem-backed and inspectable under the Wardian
+  home instead of hiding them in opaque app state.
+- Expand safe deployment and synchronization of skills and context across
+  global, class, agent, workflow, workspace, and team scopes.
 
-## Phase 3: Communication & Orchestration
+### Coordination Surfaces
 
-_Goal: Enable collaborative workflows between isolated agent instances._
+- Improve Graph topology as the visible control surface for agent-to-agent
+  communication boundaries.
+- Tighten teams, watchlists, structured asks/replies, CLI coordination, and
+  Queue triage so multi-agent work remains bounded and reviewable.
+- Preserve operator control over manually drawn connections, team-seeded
+  topology, and workspace fallback behavior.
 
-- [ ] **Agent-to-Agent IPC & Routing**
-  - Implement a message bus (Pub/Sub) in the Rust backend.
-  - **Deterministic Routing Engine**: Define UI-based rules for routing JSON outputs between agents.
-- [ ] **Human-in-the-Loop (HITL) Queue**
-  - Expand the current completion Queue into a centralized approval and interruption surface for sensitive agent actions.
-- [ ] **Context Janitor (Memory Management)**
-  - Automated summarization workflows to compress context windows when token limits are approached.
+### Workflow Operations
 
-## Phase 4: Connectivity & Remote Management
+- Harden workflow authoring, validation, launch dialogs, schedules, run
+  observation, history, and failure records.
+- Keep the Rust workflow engine deterministic and testable while exposing
+  higher-level workflow ergonomics in the desktop app and CLI.
+- Make workflow outcomes easy to review, reuse, and promote into durable
+  context.
 
-_Goal: Expand the reach of Wardian across environments._
+### Remote, Packaging, and First-Run Polish
 
-- [ ] **Native SSH & Multiplexing**
-  - Support spawning agents on remote hosts via SSH.
-  - Integrate with `tmux` for persistent remote sessions that survive disconnection.
-- [ ] **Cross-Platform Compatibility**
-  - Hardening PTY implementation for Linux and macOS.
+- Improve the mobile remote PWA while keeping the desktop app the authority for
+  agents, PTYs, provider CLIs, filesystem access, and workflow execution.
+- Keep installer, updater, winget, Homebrew, APT, `.deb`, and AppImage guidance
+  aligned with actual release artifacts.
+- Reduce first-run friction through better provider readiness checks,
+  troubleshooting, and cross-platform documentation.
 
-## Phase 5: Polish & Ecosystem
+## Later Directions
 
-- [ ] **High-Fidelity Interaction Visualization**
-  - A dynamic, node-link swarm visualization of agents interacting in real-time.
-  - Visualizes message passing, task delegation, and collective thought processes.
-- [ ] **File-System Watcher Hooks**: Trigger agent tasks based on local file changes.
-- [ ] **Theme Engine**: Support for system-wide themes, OLED black mode, and a functional **Light Mode** toggle.
+- Richer Garden spatial organization and persistent workspace layouts.
+- MCP configuration and deployment from the Library.
+- Remote Queue hydration from desktop-owned Queue storage.
+- Broader package-manager coverage after sandbox and permission tradeoffs are
+  understood.
+- More automation around file-watch, listener, and project-context workflows.
+
+## What Is Not a Roadmap Contract
+
+This document is not a release schedule. Historical specs in `docs/specs/`
+remain useful design records, but their phase names and deferred sections
+should not be read as the current delivery order. Use the current README,
+public docs, changelog, and open issues for up-to-date release context.
