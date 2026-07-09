@@ -2703,6 +2703,112 @@ describe("RemoteMobileApp", () => {
     }
   });
 
+  it("does not apply rendered row geometry to remote mobile OpenCode terminals", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    mockRemoteAgentDetailFetch("opencode");
+
+    try {
+      render(<RemoteMobileApp />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+      act(() => {
+        MockWebSocket.instances[1]?.emit("open");
+      });
+
+      const terminalHost = await screen.findByTestId("remote-terminal-attach");
+      Object.defineProperty(terminalHost, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(terminalHost, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+
+      const terminalResults = vi.mocked(Terminal).mock.results;
+      const terminalInstance = terminalResults[terminalResults.length - 1]?.value as {
+        _core?: unknown;
+        cols: number;
+        rows: number;
+      };
+      terminalInstance._core = {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 8, height: 20 },
+            },
+          },
+        },
+      };
+      terminalInstance.cols = 100;
+      terminalInstance.rows = 16;
+
+      const rowOne = document.createElement("div");
+      const rowTwo = document.createElement("div");
+      rowOne.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 16,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      rowTwo.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 16,
+            left: 0,
+            right: 800,
+            bottom: 32,
+            x: 0,
+            y: 16,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      const rows = document.createElement("div");
+      rows.className = "xterm-rows";
+      rows.append(rowOne, rowTwo);
+      terminalHost.append(rows);
+
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+
+      const resizeMessages = MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload));
+      expect(resizeMessages).toContainEqual({
+        type: "resize",
+        cols: 100,
+        rows: 16,
+      });
+      expect(resizeMessages).not.toContainEqual({
+        type: "resize",
+        cols: 100,
+        rows: 20,
+      });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it("does not clear xterm scrollback when a later terminal snapshot arrives", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {

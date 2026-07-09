@@ -766,7 +766,9 @@ function TerminalPane({
       }
       resetRemoteOwnerLayout(host, scrollSurface);
       fitAddon.fit?.();
-      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface);
+      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface, {
+        useRenderedRowGeometry: agent.provider !== "opencode",
+      });
       const cols = proposed.cols;
       const rows = proposed.rows;
       if (terminal.cols !== cols || terminal.rows !== rows) {

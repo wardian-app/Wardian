@@ -2612,6 +2612,12 @@ describe("AgentTerminal scrollback", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it("leaves OpenCode out of rendered row geometry fits because its TUI owns scroll", () => {
+    expect(__terminalTesting.shouldUseRenderedRowGeometryForProvider("codex", false)).toBe(true);
+    expect(__terminalTesting.shouldUseRenderedRowGeometryForProvider("opencode", false)).toBe(false);
+    expect(__terminalTesting.shouldUseRenderedRowGeometryForProvider("codex", true)).toBe(false);
+  });
+
   it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
     // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
     // unavailable (common once the browser nears its context cap). Probing only

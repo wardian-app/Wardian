@@ -1376,6 +1376,10 @@ function geometryForRenderer(renderer: TerminalRendererEntry) {
   };
 }
 
+function shouldUseRenderedRowGeometryForProvider(provider: string | undefined, force: boolean) {
+  return !force && provider !== "opencode";
+}
+
 async function fitTerminalToContainer(
   entry: TerminalSessionEntry,
   container: HTMLDivElement,
@@ -1407,7 +1411,7 @@ async function fitTerminalToContainer(
       // A forced fit runs during mount/remount before the browser has painted
       // fresh row DOM. Preserved rows can report stale heights and create a
       // resize -> repaint -> resize cascade, so use xterm's cell metrics only.
-      useRenderedRowGeometry: !force,
+      useRenderedRowGeometry: shouldUseRenderedRowGeometryForProvider(entry.provider, force),
     });
     entry.fitCount += 1;
     if (!proposedDimensions) {
@@ -3631,6 +3635,7 @@ export const __terminalTesting = {
   proposeTerminalDimensions,
   removeSnapshotOverlay,
   resizeParser,
+  shouldUseRenderedRowGeometryForProvider,
   isProviderViewportRedraw,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,
