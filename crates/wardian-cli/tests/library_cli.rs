@@ -254,8 +254,44 @@ fn list_flat_outputs_section_entries() {
 
     assert_eq!(listed["schema"], 1);
     assert_eq!(listed["section"], "skills");
+    assert!(listed.get("tree").is_none());
+    assert_eq!(listed["entries"][0]["section"], "skills");
     assert_eq!(listed["entries"][0]["entry_ref"], "skills/review/planner");
     assert_eq!(listed["entries"][0]["description"], "Plans reviews");
+}
+
+#[test]
+fn list_flat_without_section_combines_entries_without_index_payloads() {
+    let home = TempDir::new().unwrap();
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/planner", "--stdin"],
+        Some("# Planner\n"),
+    ));
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "prompts/triage.md", "--stdin"],
+        Some("# Triage\n"),
+    ));
+
+    let listed = assert_success_json(run(home.path(), &["library", "list", "--flat"], None));
+
+    let refs: Vec<&str> = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["entry_ref"].as_str())
+        .collect();
+    assert!(refs.contains(&"skills/planner"));
+    assert!(refs.contains(&"prompts/triage.md"));
+    assert!(listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["section"].is_string()));
+    for omitted in ["sections", "tree", "deployments", "orphans"] {
+        assert!(listed.get(omitted).is_none(), "unexpected key: {omitted}");
+    }
 }
 
 #[test]
@@ -708,4 +744,68 @@ fn class_create_delete_and_restore_default_are_class_aware() {
     )
     .unwrap()
     .contains("Skeptical Auditor"));
+}
+
+#[test]
+fn fresh_home_default_classes_support_cli_access_and_deployment() {
+    let home = TempDir::new().unwrap();
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/review/planner", "--stdin"],
+        Some("# Planner\n"),
+    ));
+
+    let deployed = assert_success_json(run(
+        home.path(),
+        &[
+            "library",
+            "deploy",
+            "skills/review/planner",
+            "--targets",
+            "class:Reviewer",
+        ],
+        None,
+    ));
+    assert_eq!(deployed["outcome"]["added"], 1);
+
+    let listed = assert_success_json(run(
+        home.path(),
+        &["library", "list", "classes", "--flat"],
+        None,
+    ));
+    assert!(listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["entry_ref"] == "classes/Reviewer"));
+    assert_success_json(run(
+        home.path(),
+        &["library", "show", "classes/Reviewer"],
+        None,
+    ));
+    assert!(assert_success_text(run(
+        home.path(),
+        &["library", "read", "classes/Reviewer"],
+        None,
+    ))
+    .contains("Skeptical Auditor"));
+    assert_success_json(run(
+        home.path(),
+        &["library", "write", "classes/Reviewer", "--stdin"],
+        Some("# Edited Reviewer\n"),
+    ));
+
+    let root = home.path().join("classes/Reviewer");
+    assert_eq!(
+        std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+        "# Edited Reviewer\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("GEMINI.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        "@AGENTS.md\n"
+    );
 }

@@ -33,19 +33,24 @@ pub struct LibraryArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
+    /// List Library entries as a tree or agent-friendly flat rows.
     List {
+        /// Optional section: skills, prompts, classes, workflows, or mcps.
         section: Option<String>,
+        /// Emit entries only, without tree, deployment, or orphan payloads.
         #[arg(long)]
         flat: bool,
     },
+    /// Show one entry's metadata, resolved path, and optional content.
     Show {
+        /// Section-qualified ref such as skills/review/planner.
         entry_ref: String,
         #[arg(long)]
         content: bool,
     },
-    Read {
-        entry_ref: String,
-    },
+    /// Print one entry's raw content without a JSON envelope.
+    Read { entry_ref: String },
+    /// Create an entry. Workflow files are authored here; use wardian workflow for operations.
     Create {
         entry_ref: String,
         #[arg(long, conflicts_with = "file")]
@@ -53,6 +58,7 @@ pub enum LibraryCommand {
         #[arg(long, conflicts_with = "stdin")]
         file: Option<String>,
     },
+    /// Replace the content of an existing entry.
     Write {
         entry_ref: String,
         #[arg(long, conflicts_with = "file")]
@@ -60,49 +66,52 @@ pub enum LibraryCommand {
         #[arg(long, conflicts_with = "stdin")]
         file: Option<String>,
     },
-    Move {
-        from_ref: String,
-        to_ref: String,
-    },
-    Delete {
-        entry_ref: String,
-    },
-    Star {
-        entry_ref: String,
-    },
-    Unstar {
-        entry_ref: String,
-    },
+    /// Rename or move an entry within its current section.
+    Move { from_ref: String, to_ref: String },
+    /// Delete an entry and its associated Library metadata.
+    Delete { entry_ref: String },
+    /// Mark an entry as starred.
+    Star { entry_ref: String },
+    /// Remove an entry's starred state.
+    Unstar { entry_ref: String },
+    /// Replace all tags on an entry.
     Tags {
         entry_ref: String,
+        /// Complete tag set; repeat --set for multiple tags.
         #[arg(long = "set", required = true)]
         set: Vec<String>,
     },
-    Deployments {
-        skill_ref: String,
-    },
+    /// Show every current deployment target for one skill.
+    Deployments { skill_ref: String },
+    /// Reconcile a skill to the complete desired target set.
     Deploy {
         skill_ref: String,
+        /// Non-empty comma-separated user, class, and agent target refs.
         #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
         targets: Option<String>,
+        /// Reconcile to an empty desired set, removing every deployment.
         #[arg(long, required_unless_present = "targets", conflicts_with = "targets")]
         clear: bool,
     },
+    /// List deployed skill directories whose Library source is missing.
     Orphans,
+    /// Manage unresolved deployed skill directories.
     Orphan {
         #[command(subcommand)]
         command: LibraryOrphanCommand,
     },
-    RestoreDefault {
-        entry_ref: String,
-    },
+    /// Restore the bundled instructions for a default class.
+    RestoreDefault { entry_ref: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryOrphanCommand {
+    /// Delete one deployment only if it is currently reported as orphaned.
     Delete {
+        /// Target ref such as user:global or class:Reviewer.
         #[arg(long)]
         target: String,
+        /// Deployed skill directory name.
         #[arg(long)]
         skill: String,
     },
@@ -795,6 +804,25 @@ mod tests {
             "user:global",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn library_help_describes_agent_contracts() {
+        let library_help = Cli::try_parse_from(["wardian", "library", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(library_help.contains("List Library entries"));
+
+        let deploy_help = Cli::try_parse_from(["wardian", "library", "deploy", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(deploy_help.contains("complete desired target set"));
+        assert!(deploy_help.contains("--clear"));
+
+        let create_help = Cli::try_parse_from(["wardian", "library", "create", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(create_help.contains("wardian workflow"));
     }
 
     #[test]

@@ -51,25 +51,51 @@ pub fn handle_library(args: LibraryArgs) -> Result<String, CliError> {
 
 fn handle_list(section: Option<&str>, flat: bool) -> Result<String, CliError> {
     let home = wardian_home()?;
+    let requested_section = parse_section(section)?;
+    if requested_section.is_none() || requested_section == Some(LibrarySectionId::Classes) {
+        initialize_classes(&home)?;
+    }
     let index = library::build_library_index(&home).map_err(CliError::generic)?;
-    if let Some(section_id) = parse_section(section)? {
+    if let Some(section_id) = requested_section {
         let section_name = section_id.as_str();
         let section = index
             .sections
             .get(section_name)
             .ok_or_else(|| CliError::unknown_section(section_name))?;
-        let mut body = serde_json::json!({
+        if flat {
+            let mut entries = Vec::new();
+            flatten_entries(&section.tree.children, &mut entries);
+            return render_json(serde_json::json!({
+                "schema": 1,
+                "section": section_name,
+                "stubbed": section.stubbed,
+                "entries": flat_entry_values(section_name, entries)?,
+            }));
+        }
+        return render_json(serde_json::json!({
             "schema": 1,
             "section": section_name,
             "tree": section.tree,
             "stubbed": section.stubbed,
-        });
-        if flat {
-            let mut entries = Vec::new();
-            flatten_entries(&section.tree.children, &mut entries);
-            body["entries"] = serde_json::json!(entries);
+        }));
+    }
+
+    if flat {
+        let mut entries = Vec::new();
+        for section_id in LibrarySectionId::ALL {
+            let section_name = section_id.as_str();
+            let section = index
+                .sections
+                .get(section_name)
+                .ok_or_else(|| CliError::unknown_section(section_name))?;
+            let mut section_entries = Vec::new();
+            flatten_entries(&section.tree.children, &mut section_entries);
+            entries.extend(flat_entry_values(section_name, section_entries)?);
         }
-        return render_json(body);
+        return render_json(serde_json::json!({
+            "schema": 1,
+            "entries": entries,
+        }));
     }
 
     let body = serde_json::json!({
@@ -84,6 +110,7 @@ fn handle_list(section: Option<&str>, flat: bool) -> Result<String, CliError> {
 fn handle_show(entry_ref: &str, include_content: bool) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
@@ -113,6 +140,7 @@ fn handle_show(entry_ref: &str, include_content: bool) -> Result<String, CliErro
 fn handle_read(entry_ref: &str) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
@@ -123,6 +151,7 @@ fn handle_read(entry_ref: &str) -> Result<String, CliError> {
 fn handle_create(entry_ref: &str, stdin: bool, file: Option<&str>) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if entry_exists(&home, &entry_ref) {
         return Err(CliError::already_exists(&entry_ref.entry_ref));
@@ -153,6 +182,7 @@ fn handle_create(entry_ref: &str, stdin: bool, file: Option<&str>) -> Result<Str
 fn handle_write(entry_ref: &str, stdin: bool, file: Option<&str>) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
@@ -173,6 +203,8 @@ fn handle_move(from_ref: &str, to_ref: &str) -> Result<String, CliError> {
     let home = wardian_home()?;
     let from_ref = parse_library_ref(from_ref)?;
     let to_ref = parse_library_ref(to_ref)?;
+    initialize_class_ref(&home, &from_ref)?;
+    initialize_class_ref(&home, &to_ref)?;
     reject_mcps(&from_ref)?;
     reject_mcps(&to_ref)?;
     if from_ref.section != to_ref.section {
@@ -211,6 +243,7 @@ fn handle_move(from_ref: &str, to_ref: &str) -> Result<String, CliError> {
 fn handle_delete(entry_ref: &str) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if entry_ref.section == LibrarySectionId::Classes {
         wardian_core::classes::delete_class(&home, &entry_ref.rel_path)
@@ -232,6 +265,7 @@ fn handle_delete(entry_ref: &str) -> Result<String, CliError> {
 fn handle_restore_default(entry_ref: &str) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     if entry_ref.section != LibrarySectionId::Classes {
         return Err(CliError::invalid_ref(
             "restore-default requires a classes/<Name> ref",
@@ -249,6 +283,7 @@ fn handle_restore_default(entry_ref: &str) -> Result<String, CliError> {
 fn handle_star(entry_ref: &str, is_starred: bool) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
@@ -269,6 +304,7 @@ fn handle_star(entry_ref: &str, is_starred: bool) -> Result<String, CliError> {
 fn handle_tags(entry_ref: &str, tags: Vec<String>) -> Result<String, CliError> {
     let home = wardian_home()?;
     let entry_ref = parse_library_ref(entry_ref)?;
+    initialize_class_ref(&home, &entry_ref)?;
     reject_mcps(&entry_ref)?;
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
@@ -500,6 +536,9 @@ fn parse_skill_ref(value: &str) -> Result<LibraryRef, CliError> {
 }
 
 fn validate_deployment_targets(home: &Path, targets: &[SkillDeployment]) -> Result<(), CliError> {
+    if targets.iter().any(|target| target.target_type == "class") {
+        initialize_classes(home)?;
+    }
     for target in targets {
         let target_ref = format!("{}:{}", target.target_type, target.target_id);
         match target.target_type.as_str() {
@@ -657,6 +696,34 @@ fn display_path(path: &Path) -> String {
         .collect::<PathBuf>()
         .to_string_lossy()
         .to_string()
+}
+
+fn initialize_classes(home: &Path) -> Result<(), CliError> {
+    wardian_core::classes::initialize_classes(home)
+        .map(|_| ())
+        .map_err(CliError::generic)
+}
+
+fn initialize_class_ref(home: &Path, entry_ref: &LibraryRef) -> Result<(), CliError> {
+    if entry_ref.section == LibrarySectionId::Classes {
+        initialize_classes(home)?;
+    }
+    Ok(())
+}
+
+fn flat_entry_values(
+    section: &str,
+    entries: Vec<LibraryEntry>,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let mut value = serde_json::to_value(entry)
+                .map_err(|error| CliError::generic(error.to_string()))?;
+            value["section"] = serde_json::json!(section);
+            Ok(value)
+        })
+        .collect()
 }
 
 #[cfg(test)]
