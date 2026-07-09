@@ -19,5 +19,5 @@ pub use links::{create_directory_link, copy_dir_all, deploy_skill_dir, remove_ex
 pub use metadata::MetadataStore;
 pub use mutations::{
     create_folder, delete_entry, read_item, remove_orphan_deployment, rename_entry, save_item,
-    update_metadata,
+    update_metadata, validate_entry_destination,
 };

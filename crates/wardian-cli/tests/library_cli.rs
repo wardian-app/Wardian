@@ -185,6 +185,59 @@ fn prompt_create_show_read_write_move_delete_round_trip() {
 }
 
 #[test]
+fn rejects_unindexable_entry_shapes_without_hiding_existing_entries() {
+    let home = TempDir::new().unwrap();
+
+    for entry_ref in ["prompts/audit", "workflows/audit.txt"] {
+        let rejected = assert_failure_json(run(
+            home.path(),
+            &["library", "create", entry_ref, "--stdin"],
+            Some("body"),
+        ));
+        assert_eq!(rejected["error"]["code"], "invalid_ref");
+    }
+    assert!(!home.path().join("library/prompts/audit").exists());
+    assert!(!home.path().join("library/workflows/audit.txt").exists());
+
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/parent", "--stdin"],
+        Some("# Parent\n"),
+    ));
+    let nested = assert_failure_json(run(
+        home.path(),
+        &["library", "create", "skills/parent/child", "--stdin"],
+        Some("# Child\n"),
+    ));
+    assert_eq!(nested["error"]["code"], "invalid_ref");
+
+    assert_success_json(run(
+        home.path(),
+        &["library", "create", "skills/group/child", "--stdin"],
+        Some("# Group child\n"),
+    ));
+    let promoted = assert_failure_json(run(
+        home.path(),
+        &["library", "create", "skills/group", "--stdin"],
+        Some("# Group parent\n"),
+    ));
+    assert_eq!(promoted["error"]["code"], "invalid_ref");
+
+    let listed = assert_success_json(run(
+        home.path(),
+        &["library", "list", "skills", "--flat"],
+        None,
+    ));
+    let refs: Vec<&str> = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["entry_ref"].as_str())
+        .collect();
+    assert_eq!(refs, vec!["skills/group/child", "skills/parent"]);
+}
+
+#[test]
 fn list_flat_outputs_section_entries() {
     let home = TempDir::new().unwrap();
     assert_success_json(run(

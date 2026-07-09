@@ -26,6 +26,70 @@ pub(crate) fn content_file_path(
     })
 }
 
+/// Validate that a mutation destination can be represented by the Library index.
+pub fn validate_entry_destination(
+    home: &Path,
+    section: LibrarySectionId,
+    rel: &str,
+) -> Result<(), String> {
+    let target = resolve_entry_path(home, section, rel)?;
+    match section {
+        LibrarySectionId::Prompts | LibrarySectionId::Workflows => {
+            let is_markdown = target
+                .extension()
+                .map(|extension| extension.eq_ignore_ascii_case("md"))
+                .unwrap_or(false);
+            if !is_markdown {
+                return Err(format!(
+                    "{} entries must use a .md extension: {rel}",
+                    section.as_str()
+                ));
+            }
+        }
+        LibrarySectionId::Skills => validate_skill_destination(home, &target, rel)?,
+        LibrarySectionId::Classes => {}
+        LibrarySectionId::Mcps => unreachable!("MCP paths are rejected by resolve_entry_path"),
+    }
+    Ok(())
+}
+
+fn validate_skill_destination(home: &Path, target: &Path, rel: &str) -> Result<(), String> {
+    let root = LibrarySectionId::Skills.root_for_home(home);
+    let relative = target
+        .strip_prefix(&root)
+        .map_err(|_| format!("Skill path is outside the Library: {rel}"))?;
+    let mut ancestor = root;
+    let components: Vec<_> = relative.components().collect();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        ancestor.push(component.as_os_str());
+        if ancestor.join("SKILL.md").is_file() {
+            return Err(format!(
+                "A skill cannot be nested inside another skill: {rel}"
+            ));
+        }
+    }
+
+    if target.is_dir() && !target.join("SKILL.md").is_file() && directory_contains_skill(target)? {
+        return Err(format!(
+            "A skill group containing other skills cannot also be a skill: {rel}"
+        ));
+    }
+    Ok(())
+}
+
+fn directory_contains_skill(directory: &Path) -> Result<bool, String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join("SKILL.md").is_file() || directory_contains_skill(&path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Read the content of a library item.
 /// - Skills read `<dir>/SKILL.md`
 /// - Classes read `<dir>/AGENTS.md`
@@ -40,7 +104,13 @@ pub fn read_item(home: &Path, section: LibrarySectionId, rel: &str) -> Result<St
 /// - Skills write to `<dir>/SKILL.md`
 /// - Classes write to `<dir>/AGENTS.md`
 /// - Prompts/Workflows write to the file itself
-pub fn save_item(home: &Path, section: LibrarySectionId, rel: &str, content: &str) -> Result<(), String> {
+pub fn save_item(
+    home: &Path,
+    section: LibrarySectionId,
+    rel: &str,
+    content: &str,
+) -> Result<(), String> {
+    validate_entry_destination(home, section, rel)?;
     let path = content_file_path(home, section, rel)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -116,6 +186,8 @@ pub fn rename_entry(
         return Err("Renaming classes is not supported".to_string());
     }
 
+    validate_entry_destination(home, section, to_rel)?;
+
     let from_path = resolve_entry_path(home, section, from_rel)?;
     let to_path = resolve_entry_path(home, section, to_rel)?;
     let from_norm = from_rel.replace('\\', "/");
@@ -170,7 +242,8 @@ pub fn rename_entry(
                         if let Some(parent) = new_target_path.parent() {
                             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                         }
-                        fs::rename(&old_target_path, &new_target_path).map_err(|e| e.to_string())?;
+                        fs::rename(&old_target_path, &new_target_path)
+                            .map_err(|e| e.to_string())?;
                     }
                     fs::write(new_target_path.join(DEPLOYED_SKILL_SOURCE_FILE), &to_norm)
                         .map_err(|e| e.to_string())?;
@@ -258,8 +331,36 @@ mod tests {
         assert!(home.join("library/skills/dev/planner/SKILL.md").exists());
         assert!(home.join("library/prompts/greet.md").exists());
         assert!(home.join("classes/Architect/AGENTS.md").exists());
-        assert_eq!(read_item(home, LibrarySectionId::Skills, "dev/planner").unwrap(), "skill body");
-        assert_eq!(read_item(home, LibrarySectionId::Classes, "Architect").unwrap(), "agents body");
+        assert_eq!(
+            read_item(home, LibrarySectionId::Skills, "dev/planner").unwrap(),
+            "skill body"
+        );
+        assert_eq!(
+            read_item(home, LibrarySectionId::Classes, "Architect").unwrap(),
+            "agents body"
+        );
+    }
+
+    #[test]
+    fn save_rejects_unindexable_entry_shapes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let home = temp.path();
+
+        assert!(save_item(home, LibrarySectionId::Prompts, "audit", "body").is_err());
+        assert!(save_item(home, LibrarySectionId::Workflows, "audit.txt", "body").is_err());
+
+        save_item(home, LibrarySectionId::Skills, "parent", "parent").unwrap();
+        assert!(save_item(home, LibrarySectionId::Skills, "parent/child", "child").is_err());
+
+        save_item(home, LibrarySectionId::Skills, "group/child", "child").unwrap();
+        assert!(save_item(home, LibrarySectionId::Skills, "group", "parent").is_err());
+        assert!(rename_entry(
+            home,
+            LibrarySectionId::Skills,
+            "group/child",
+            "parent/child"
+        )
+        .is_err());
     }
 
     #[test]
@@ -279,7 +380,12 @@ mod tests {
     }
 
     fn meta(id: &str) -> LibraryItemMetadata {
-        LibraryItemMetadata { id: id.to_string(), tags: vec![], is_starred: true, last_used: None }
+        LibraryItemMetadata {
+            id: id.to_string(),
+            tags: vec![],
+            is_starred: true,
+            last_used: None,
+        }
     }
 
     #[test]
@@ -321,22 +427,41 @@ mod tests {
         crate::library::links::create_directory_link(&src, &linked).unwrap();
         let copied = home.join("agents/a1/.agents/skills/planner");
         crate::library::links::copy_dir_all(&src, &copied).unwrap();
-        fs::write(copied.join(crate::library::section::DEPLOYED_SKILL_SOURCE_FILE), "planner").unwrap();
+        fs::write(
+            copied.join(crate::library::section::DEPLOYED_SKILL_SOURCE_FILE),
+            "planner",
+        )
+        .unwrap();
         // starred metadata
-        fs::write(home.join("library/library.json"),
-            r#"{"skills/planner": {"id":"m1","tags":[],"is_starred":true,"last_used":null}}"#).unwrap();
+        fs::write(
+            home.join("library/library.json"),
+            r#"{"skills/planner": {"id":"m1","tags":[],"is_starred":true,"last_used":null}}"#,
+        )
+        .unwrap();
         fs::create_dir_all(home.join("library/prompts")).unwrap();
 
         rename_entry(home, LibrarySectionId::Skills, "planner", "dev/planner").unwrap();
 
         fs::write(home.join("library/skills/dev/planner/SKILL.md"), "v2").unwrap();
-        assert_eq!(fs::read_to_string(linked.join("SKILL.md")).unwrap(), "v2", "junction re-created");
         assert_eq!(
-            fs::read_to_string(copied.join(crate::library::section::DEPLOYED_SKILL_SOURCE_FILE)).unwrap().trim(),
-            "dev/planner", "marker rewritten"
+            fs::read_to_string(linked.join("SKILL.md")).unwrap(),
+            "v2",
+            "junction re-created"
+        );
+        assert_eq!(
+            fs::read_to_string(copied.join(crate::library::section::DEPLOYED_SKILL_SOURCE_FILE))
+                .unwrap()
+                .trim(),
+            "dev/planner",
+            "marker rewritten"
         );
         let store = crate::library::metadata::MetadataStore::load(home);
-        assert!(store.get("skills/dev/planner").expect("metadata migrated").is_starred);
+        assert!(
+            store
+                .get("skills/dev/planner")
+                .expect("metadata migrated")
+                .is_starred
+        );
     }
 
     #[test]

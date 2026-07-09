@@ -122,6 +122,8 @@ fn handle_create(entry_ref: &str, stdin: bool, file: Option<&str>) -> Result<Str
     if entry_exists(&home, &entry_ref) {
         return Err(CliError::already_exists(&entry_ref.entry_ref));
     }
+    library::validate_entry_destination(&home, entry_ref.section, &entry_ref.rel_path)
+        .map_err(CliError::invalid_ref)?;
     let content = read_content_arg(stdin, file)?;
     if entry_ref.section == LibrarySectionId::Classes {
         let description = class_description_from_content(&content);
@@ -150,6 +152,8 @@ fn handle_write(entry_ref: &str, stdin: bool, file: Option<&str>) -> Result<Stri
     if !entry_exists(&home, &entry_ref) {
         return Err(CliError::library_not_found(&entry_ref.entry_ref));
     }
+    library::validate_entry_destination(&home, entry_ref.section, &entry_ref.rel_path)
+        .map_err(CliError::invalid_ref)?;
     let content = read_content_arg(stdin, file)?;
     library::save_item(&home, entry_ref.section, &entry_ref.rel_path, &content)
         .map_err(CliError::generic)?;
@@ -176,6 +180,8 @@ fn handle_move(from_ref: &str, to_ref: &str) -> Result<String, CliError> {
             "Moving classes is not supported; create a new class and delete the old one if needed.",
         ));
     }
+    library::validate_entry_destination(&home, to_ref.section, &to_ref.rel_path)
+        .map_err(CliError::invalid_ref)?;
     if !entry_exists(&home, &from_ref) {
         return Err(CliError::library_not_found(&from_ref.entry_ref));
     }
