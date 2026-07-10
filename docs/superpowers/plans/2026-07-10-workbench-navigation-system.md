@@ -273,6 +273,11 @@ conflict. Reusing a `request_id` with different bytes is also a conflict.
 - Modify: `src/views/App.tsx`
 - Modify: `src/views/App.test.tsx`
 
+Executed scope corrections: the safe-mode contract required a separate thin
+Rust boot-config command/registration, while removing the layout shadow writer
+required moving Settings modal state and Library detail width to their owning
+stores and updating `LibraryView`.
+
 **Interfaces:**
 - Developer migration flag: `VITE_WARDIAN_WORKBENCH=1`, default off until Task 19 after browser, native, and performance gates pass.
 - Runtime rollback flag: Rust reads `WARDIAN_WORKBENCH_SAFE_MODE=1`; the frontend receives it in the load result/boot command and renders the one-group safe adapter without downgrading the document.
@@ -293,15 +298,15 @@ conflict. Reusing a `request_id` with different bytes is also a conflict.
   Replace Disk (reload durable R, revalidate the local draft as R+1, then save
   against R), or Export Local JSON. Future-schema conflicts allow export only.
 
-- [ ] **Step 1: Write failing tests** for load sources/token, revision-zero first save, required R→R+1 relation, request ID/expected token payload, pending/durable indicators, coalesced mutations during an in-flight write, lost-response identical retry, stale/wrong-request acknowledgement, CAS conflict freeze, Use Disk, Replace Disk rebase without structural merge, Export Local JSON, future-schema export-only mode, unmount/shutdown flush as best effort only, and reset immediate flush.
-- [ ] **Step 2: Write migration tests** using real `wardian-layout` localStorage payloads: allowlist/clamp sidebar widths, terminal open/height; exclude Settings modal, Grid tracks/stacking, and Library detail width; default existing users to Agents Overview; corrupt/missing storage uses defaults.
-- [ ] **Step 3: Run** the focused tests. **Expected:** FAIL on missing persistence bridge.
-- [ ] **Step 4: Implement the invoke adapter and serialized save state machine.** Treat `future_schema` as read-only: preserve files, show notice, and never call save/reset. On ordinary CAS conflict, reload only for the explicit resolution dialog; never mutate the local draft automatically.
-- [ ] **Step 5: Implement one-time import.** Only when no valid workbench exists, create V1, optionally seed the same-run old `viewMode`, import the shell allowlist, persist it, then remove `wardian-layout` only after the backend acknowledgement.
-- [ ] **Step 6: Remove Zustand persistence for migrated shell/layout fields.** Move remaining Library-specific width and Settings modal state to their owning stores; do not leave a shadow writer.
-- [ ] **Step 7: Add feature/safe-mode tests** and a non-blocking durability/recovery notice host in `App` (temporary old-shell branch remains until cutover).
-- [ ] **Step 8: Run** focused tests, `npm run lint`, and `npm run build`. **Expected:** PASS with the flag off and on.
-- [ ] **Step 9: Commit** `feat(workbench): restore and durably save workbench state`.
+- [x] **Step 1: Write failing tests** for load sources/token, revision-zero first save, required R→R+1 relation, request ID/expected token payload, pending/durable indicators, coalesced mutations during an in-flight write, lost-response identical retry, stale/wrong-request acknowledgement, CAS conflict freeze, Use Disk, Replace Disk rebase without structural merge, Export Local JSON, future-schema export-only mode, unmount/shutdown flush as best effort only, and reset immediate flush.
+- [x] **Step 2: Write migration tests** using real `wardian-layout` localStorage payloads: allowlist/clamp sidebar widths, terminal open/height; exclude Settings modal, Grid tracks/stacking, and Library detail width; default existing users to Agents Overview; corrupt/missing storage uses defaults.
+- [x] **Step 3: Run** the focused tests. **Expected:** FAIL on missing persistence bridge.
+- [x] **Step 4: Implement the invoke adapter and serialized save state machine.** Treat `future_schema` as read-only: preserve files, show notice, and never call save/reset. On ordinary CAS conflict, reload only for the explicit resolution dialog; never mutate the local draft automatically.
+- [x] **Step 5: Implement one-time import.** Only when no valid workbench exists, create V1, optionally seed the same-run old `viewMode`, import the shell allowlist, persist it, then remove `wardian-layout` only after the backend acknowledgement.
+- [x] **Step 6: Remove Zustand persistence for migrated shell/layout fields.** Move remaining Library-specific width and Settings modal state to their owning stores; do not leave a shadow writer.
+- [x] **Step 7: Add feature/safe-mode tests** and a non-blocking durability/recovery notice host in `App` (temporary old-shell branch remains until cutover).
+- [x] **Step 8: Run** focused tests, `npm run lint`, and `npm run build`. **Expected:** PASS with the flag off and on.
+- [x] **Step 9: Commit** `feat(workbench): restore and durably save workbench state`.
 
 ### Task 6: Build the production workbench host, adapter, Home, and command router
 
