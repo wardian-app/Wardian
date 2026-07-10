@@ -82,13 +82,13 @@
 - The measurement script requires `WARDIAN_HOME` and exits non-zero if it is absent or resolves to the production Wardian home.
 - The evaluation document records package version, MIT license, 3,300,226-byte unpacked package size, React 19 peer compatibility, production bundle delta, React commit/switch/drag timings, mounted renderer/WebGL counts, accessibility findings, maintenance/release evidence, and an explicit `Decision: Promote | Reject`.
 
-- [ ] **Step 1: Write the failing component test.** Assert the proof creates four independently addressable groups, 20 tabs, moves a tab without remounting its keyed child, zooms/unzooms without changing the serialized proof model, and restores from the proof model rather than Dockview JSON.
-- [ ] **Step 2: Run** `npm run test -- src/layout/workbench/proof/DockviewEvaluationHarness.test.tsx`. **Expected:** FAIL because the harness and dependency do not exist.
-- [ ] **Step 3: Install the exact React candidate** with `npm install --save-exact dockview-react@7.0.2`. Do not substitute the vanilla `dockview` package or accept the experimental dist-tag.
-- [ ] **Step 4: Implement the smallest proof.** Import `DockviewReact` from `dockview-react` and `dockview-react/dist/styles/dockview.css`, wrap it in Wardian semantic variables, and keep a separate plain proof model. Do not call or persist Dockview serialization.
-- [ ] **Step 5: Add the browser proof.** Use real drag/drop and keyboard equivalents; assert no console errors, correct ARIA tab roles, stable component instance counters, one owner/three distinct xterm hosts, and Graph/Garden hide/show.
-- [ ] **Step 6: Make the performance script fail closed.** It must reject missing, empty, profile-root, or non-isolated `WARDIAN_HOME`; seed only its explicit temp home.
-- [ ] **Step 7: Run the proof in an explicit temp home.** POSIX:
+- [x] **Step 1: Write the failing component test.** Assert the proof creates four independently addressable groups, 20 tabs, moves a tab without remounting its keyed child, zooms/unzooms without changing the serialized proof model, and restores from the proof model rather than Dockview JSON.
+- [x] **Step 2: Run** `npm run test -- src/layout/workbench/proof/DockviewEvaluationHarness.test.tsx`. **Expected:** FAIL because the harness and dependency do not exist.
+- [x] **Step 3: Install the exact React candidate** with `npm install --save-exact dockview-react@7.0.2`. Do not substitute the vanilla `dockview` package or accept the experimental dist-tag.
+- [x] **Step 4: Implement the smallest proof.** Import `DockviewReact` from `dockview-react` and `dockview-react/dist/styles/dockview.css`, wrap it in Wardian semantic variables, and keep a separate plain proof model. Do not call or persist Dockview serialization.
+- [x] **Step 5: Add the browser proof.** Use real drag/drop and keyboard equivalents; assert no console errors, correct ARIA tab roles, stable component instance counters, one owner/three distinct xterm hosts, and Graph/Garden hide/show.
+- [x] **Step 6: Make the performance script fail closed.** It must reject missing, empty, profile-root, or non-isolated `WARDIAN_HOME`; seed only its explicit temp home.
+- [x] **Step 7: Run the proof in an explicit temp home.** POSIX:
 
   ```bash
   WARDIAN_HOME="$(mktemp -d)" npm run test:e2e -- workbench-adapter-proof.spec.ts
@@ -106,10 +106,10 @@
   ```
 
   **Expected:** 20 tabs/four groups pass; keyboard and drag paths work; no renderer host is stolen; JSON baseline is emitted.
-- [ ] **Step 8: Record the promote/reject decision.** Promote only if React 19.2.4 is clean, Wardian can fully drive layout from its model, no private serialization/lifecycle dependency exists, keyboard/ARIA gaps are fixable in the adapter, and bundle/performance deltas are accepted in the document. If rejected, remove Dockview/package changes and revise Task 6 to a Wardian/custom adapter before continuing.
-- [ ] **Step 9: Promote or remove the proof route.** Never leave a second prototype navigation path. Keep the measurement scenario only if it drives the production adapter contract.
-- [ ] **Step 10: Re-run** the focused Vitest, browser proof, `npm run lint`, and `npm run build`. **Expected:** PASS.
-- [ ] **Step 11: Commit** `chore(workbench): evaluate dockview layout adapter`.
+- [x] **Step 8: Record the promote/reject decision.** Promote only if React 19.2.4 is clean, Wardian can fully drive layout from its model, no private serialization/lifecycle dependency exists, keyboard/ARIA gaps are fixable in the adapter, and bundle/performance deltas are accepted in the document. If rejected, remove Dockview/package changes and revise Task 6 to a Wardian/custom adapter before continuing.
+- [x] **Step 9: Promote or remove the proof route.** Never leave a second prototype navigation path. Keep the measurement scenario only if it drives the production adapter contract.
+- [x] **Step 10: Re-run** the focused Vitest, browser proof, `npm run lint`, and `npm run build`. **Expected:** PASS.
+- [x] **Step 11: Commit** `chore(workbench): evaluate dockview layout adapter`.
 
 ## Phase 1 — Canonical workbench and persistence
 
