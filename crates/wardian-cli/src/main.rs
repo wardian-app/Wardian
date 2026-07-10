@@ -197,6 +197,11 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             workspace.as_deref(),
             &args,
         ),
+        Some(AgentCommand::Update {
+            target,
+            class,
+            workspace,
+        }) => handle_agent_update(target, class.as_deref(), workspace.as_deref()),
         Some(AgentCommand::Clone { target, name }) => {
             handle_agent_clone(target, name.as_deref(), &args)
         }
@@ -272,6 +277,17 @@ fn handle_agent_spawn(
 ) -> Result<String, CliError> {
     let agent = live::agent_spawn(provider, class, name, workspace).map_err(control_error)?;
     render_show(&agent, &render_options(args))
+}
+
+fn handle_agent_update(
+    target: &str,
+    class: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<String, CliError> {
+    let response = live::agent_update(target, class, workspace).map_err(control_error)?;
+    serde_json::to_string_pretty(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::generic(e.to_string()))
 }
 
 fn handle_agent_clone(
@@ -1241,6 +1257,7 @@ fn control_error(e: std::io::Error) -> CliError {
         match endpoint_error.code() {
             "not_supported" => backend_error(ExitCode::Generic, "not_supported"),
             "not_found" => backend_error(ExitCode::NotFound, "not_found"),
+            "bad_request" => backend_error(ExitCode::Generic, "bad_request"),
             "request_failed" => backend_error(ExitCode::Generic, "request_failed"),
             "not_managed_worktree" => backend_error(ExitCode::Generic, "not_managed_worktree"),
             "watch_timeout" => backend_error(ExitCode::Generic, "watch_timeout"),
@@ -1764,6 +1781,20 @@ mod tests {
         assert_eq!(cli_error.code, "not_found");
         assert_eq!(cli_error.code_i32(), 2);
         assert!(cli_error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn control_error_preserves_backend_bad_request_code() {
+        let error = std::io::Error::other(live::ControlEndpointError::new(
+            "bad_request",
+            "workspace must be an absolute directory",
+        ));
+
+        let cli_error = control_error(error);
+
+        assert_eq!(cli_error.code, "bad_request");
+        assert_eq!(cli_error.code_i32(), 1);
+        assert!(cli_error.message.contains("absolute directory"));
     }
 
     #[test]

@@ -102,6 +102,8 @@ app to be running for the same `WARDIAN_HOME`.
 
 ```bash
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
+wardian agent update coder-a1 --class Reviewer
+wardian agent update coder-a1 --workspace <absolute-workspace-path>
 wardian agent clone coder-a1 --name coder-a2
 wardian agent worktree enable coder-a1 --name review-fixes
 wardian agent worktree join coder-a1 --worktree <absolute-worktree-path-or-id>
@@ -120,6 +122,15 @@ wardian reply ask_0123456789abcdef --status done --stdin
 defaults when creating agents. `agent clone` copies the source agent's provider,
 class, workspace, and context unless the CLI offers an override for the field
 you need.
+
+Use `agent update` instead of editing `settings/state.json` directly. It updates
+the running app and persisted state together. `--class` assigns an existing
+class and regenerates instruction include directories; `--workspace` moves an
+ordinary agent to an existing folder, such as after a workspace rename. Supply
+both flags for one atomic update. The response includes `updated_fields` and
+`restart_required`; restart the agent when required before relying on the new
+class instructions or working directory. Managed worktree agents must use
+`agent worktree join` or `agent worktree disable`.
 
 `agent wait <target> --until <status>` blocks until a single agent name or UUID
 reaches a normalized status such as `idle`, `processing`, `action_required`,

@@ -12,13 +12,13 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
-    AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
-    DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef, MessageInputMode,
-    MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
-    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
-    WatchDeliverySnapshot, WatchEvidenceError,
+    AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary,
+    ApprovalAction, AskResponse, ControlRequest, ConversationListResponse,
+    ConversationShowResponse, DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind,
+    InteractionBodyRef, MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness,
+    ProviderReadyEvidence, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
+    StructuredReply, WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
 };
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
@@ -26,6 +26,20 @@ use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
 const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
 const CODEX_PAYLOAD_ECHO_TIMEOUT_MS: u64 = 750;
+
+async fn rollback_agent_update(
+    state: &AppState,
+    session_id: &str,
+    previous_config: wardian_core::models::AgentConfig,
+) -> Result<(), String> {
+    let snapshot = crate::commands::agent::restore_agent_config_in_state(
+        state,
+        session_id,
+        previous_config,
+    )
+    .await?;
+    manager::try_save_state_snapshot(&snapshot)
+}
 
 #[cfg(windows)]
 pub(crate) type ControlEndpointClaim = tokio::net::windows::named_pipe::NamedPipeServer;
@@ -243,6 +257,96 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 .map_err(ControlError::request_failed)?;
             let identity = agent_config_to_identity(&config, app).await;
             ok_json(&AgentResponse::new(identity))
+        }
+
+        ControlRequest::AgentUpdate {
+            target,
+            class,
+            workspace,
+        } => {
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+            let home = crate::utils::fs::get_wardian_home()
+                .ok_or_else(|| ControlError::request_failed("Could not locate Wardian home"))?;
+            let classes = wardian_core::classes::initialize_classes(&home)
+                .map_err(ControlError::request_failed)?;
+            if let Some(class) = class.as_deref() {
+                if !classes
+                    .iter()
+                    .any(|definition| definition.name.eq_ignore_ascii_case(class.trim()))
+                {
+                    return Err(ControlError::not_found(format!(
+                        "agent class not found: {class}"
+                    )));
+                }
+            }
+
+            let state = app.state::<AppState>();
+            let outcome = crate::commands::agent::update_agent_fields_in_state(
+                state.inner(),
+                &uuid,
+                class.as_deref(),
+                workspace.as_deref(),
+                &classes,
+            )
+            .await
+            .map_err(ControlError::bad_request)?;
+            if let Err(error) = manager::try_save_state_snapshot(&outcome.state_snapshot) {
+                let rollback_error = rollback_agent_update(
+                    state.inner(),
+                    &uuid,
+                    outcome.previous_config.clone(),
+                )
+                .await
+                .err()
+                .map(|rollback| format!("; rollback also failed: {rollback}"))
+                .unwrap_or_default();
+                return Err(ControlError::request_failed(format!(
+                    "Failed to persist agent update: {error}{rollback_error}"
+                )));
+            }
+            let workspace =
+                crate::utils::fs::resolve_cwd(&outcome.config.folder, &outcome.config.session_id)
+                    .to_string_lossy()
+                    .to_string();
+            let project = wardian_core::db::project_name_from_workspace(&workspace);
+            let metadata_error = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+                session_id: &outcome.config.session_id,
+                session_name: &outcome.config.session_name,
+                agent_class: &outcome.config.agent_class,
+                provider: &outcome.config.provider,
+                workspace: Some(&workspace),
+                project: project.as_deref(),
+                is_off: outcome.config.is_off,
+                created_at: None,
+            })
+            .err()
+            .map(|error| error.to_string());
+            if let Some(error) = metadata_error {
+                let rollback_error = rollback_agent_update(
+                    state.inner(),
+                    &uuid,
+                    outcome.previous_config.clone(),
+                )
+                .await
+                .err()
+                .map(|rollback| format!("; rollback also failed: {rollback}"))
+                .unwrap_or_default();
+                return Err(ControlError::request_failed(format!(
+                    "Failed to persist agent metadata: {error}{rollback_error}"
+                )));
+            }
+            let _ = app.emit("agents-updated", ());
+            let restart_required = !outcome.updated_fields.is_empty() && !outcome.config.is_off;
+            let identity = agent_config_to_identity(&outcome.config, app).await;
+            ok_json(&AgentUpdateResponse {
+                schema: wardian_core::control::CONTROL_SCHEMA,
+                ok: true,
+                agent: identity,
+                updated_fields: outcome.updated_fields,
+                restart_required,
+            })
         }
 
         ControlRequest::AgentClone { target, name } => {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 
 import {
@@ -579,6 +579,40 @@ test("native CLI control commands operate through the running app", { timeout: 1
     assert.equal(queued.delivery_state, "queued");
     assert.equal(queued.runtime_state, "provider_input_not_ready");
     assert.match(queued.message_id, /^msg_/);
+
+    const updatedWorkspace = path.join(harness.repoRoot, "crates");
+    const updateResult = runCliOk(cliPath, harness, [
+      "agent",
+      "update",
+      CONTROL_SESSION_NAME,
+      "--class",
+      "Coder",
+      "--workspace",
+      updatedWorkspace,
+    ]);
+    const update = JSON.parse(updateResult.stdout);
+    assert.deepEqual(update.updated_fields, ["class", "workspace"]);
+    assert.equal(update.restart_required, true);
+    assert.equal(update.agent.class, "Coder");
+    assert.equal(path.resolve(update.agent.workspace), path.resolve(updatedWorkspace));
+    await waitForCliField(cliPath, harness, CONTROL_SESSION_NAME, "class", "Coder");
+    await waitForCliField(
+      cliPath,
+      harness,
+      CONTROL_SESSION_NAME,
+      "workspace",
+      update.agent.workspace,
+    );
+    const persisted = JSON.parse(
+      readFileSync(path.join(harness.isolatedHome, "settings", "state.json"), "utf8"),
+    ).find((agent) => agent.session_id === source.uuid);
+    assert.equal(persisted.agent_class, "Coder");
+    assert.equal(path.resolve(persisted.folder), path.resolve(updatedWorkspace));
+    assert.ok(
+      persisted.system_include_directories.some((directory) =>
+        directory.replaceAll("\\", "/").endsWith("/classes/Coder"),
+      ),
+    );
 
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
     const cloneResult = runCliOk(cliPath, harness, [

@@ -204,6 +204,17 @@ async fn lock_agent_lifecycle(
     lifecycle_lock.lock_owned().await
 }
 
+async fn acquire_agent_lifecycle_guard(
+    state: &AppState,
+    session_id: &str,
+    existing: Option<tokio::sync::OwnedMutexGuard<()>>,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    match existing {
+        Some(guard) => guard,
+        None => lock_agent_lifecycle(state, session_id).await,
+    }
+}
+
 struct PreparedAgentClear {
     termination: ActiveAgent,
     config: AgentConfig,
@@ -1723,6 +1734,121 @@ fn normalize_spawn_folder(folder: &str) -> Result<String, String> {
         .map(|path| normalize_workspace_record_path(&path))
 }
 
+fn normalize_agent_update_workspace(folder: &str) -> Result<String, String> {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err("Workspace path cannot be empty".to_string());
+    }
+    let path = std::path::Path::new(folder);
+    if !path.is_absolute() {
+        return Err("Workspace path must be absolute".to_string());
+    }
+    let normalized = normalize_spawn_folder(folder)?;
+    if !std::path::Path::new(&normalized).is_dir() {
+        return Err("Workspace path must be a directory".to_string());
+    }
+    Ok(normalized)
+}
+
+fn apply_agent_update_fields(
+    config: &mut AgentConfig,
+    class: Option<&str>,
+    workspace: Option<&str>,
+    classes: &[wardian_core::models::AgentClassDefinition],
+) -> Result<Vec<String>, String> {
+    let mut updated_fields = Vec::new();
+
+    if let Some(class) = class {
+        let class = class.trim();
+        let canonical = classes
+            .iter()
+            .find(|definition| definition.name.eq_ignore_ascii_case(class))
+            .ok_or_else(|| format!("Agent class not found: {class}"))?;
+        if config.agent_class != canonical.name {
+            config.agent_class = canonical.name.clone();
+            updated_fields.push("class".to_string());
+        }
+    }
+
+    if let Some(workspace) = workspace {
+        let normalized = normalize_agent_update_workspace(workspace)?;
+        if config.git_worktree == Some(true) {
+            return Err(
+                "Managed worktree agents must use `wardian agent worktree join` or `disable`"
+                    .to_string(),
+            );
+        }
+        if config.folder != normalized {
+            config.folder = normalized;
+            updated_fields.push("workspace".to_string());
+        }
+    }
+
+    Ok(updated_fields)
+}
+
+pub(crate) struct AgentUpdateOutcome {
+    pub config: AgentConfig,
+    pub previous_config: AgentConfig,
+    pub updated_fields: Vec<String>,
+    pub state_snapshot: Vec<AgentConfig>,
+    _lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub(crate) async fn update_agent_fields_in_state(
+    state: &AppState,
+    session_id: &str,
+    class: Option<&str>,
+    workspace: Option<&str>,
+    classes: &[wardian_core::models::AgentClassDefinition],
+) -> Result<AgentUpdateOutcome, String> {
+    if class.is_none() && workspace.is_none() {
+        return Err("At least one agent update field is required".to_string());
+    }
+
+    let lifecycle_guard = lock_agent_lifecycle(state, session_id).await;
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+    let agent = agents
+        .get_mut(session_id)
+        .ok_or_else(|| format!("Agent {session_id} not found"))?;
+    let previous_config = agent.config.lock().unwrap().clone();
+    let mut config = previous_config.clone();
+    let updated_fields = apply_agent_update_fields(&mut config, class, workspace, classes)?;
+
+    if updated_fields.iter().any(|field| field == "class") {
+        config.system_include_directories =
+            Some(crate::utils::fs::resolve_system_include_directories(
+                &config.agent_class,
+                &config.session_id,
+            ));
+    }
+
+    *agent.config.lock().unwrap() = config.clone();
+    let state_snapshot = manager::state_configs_snapshot(&agents, &order);
+    Ok(AgentUpdateOutcome {
+        config,
+        previous_config,
+        updated_fields,
+        state_snapshot,
+        _lifecycle_guard: lifecycle_guard,
+    })
+}
+
+pub(crate) async fn restore_agent_config_in_state(
+    state: &AppState,
+    session_id: &str,
+    config: AgentConfig,
+) -> Result<Vec<AgentConfig>, String> {
+    let mut agents = state.agents.lock().await;
+    let order = state.agent_order.lock().await;
+    let agent = agents
+        .get_mut(session_id)
+        .ok_or_else(|| format!("Agent {session_id} not found"))?;
+    *agent.config.lock().unwrap() = config;
+    Ok(manager::state_configs_snapshot(&agents, &order))
+}
+
 fn normalize_clone_folder_override(folder: Option<String>) -> Result<Option<String>, String> {
     folder.as_deref().map(normalize_spawn_folder).transpose()
 }
@@ -2658,17 +2784,7 @@ pub async fn clear_agent_session_with_reason(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    clear_agent_session_inner(session_id, reason, state, app, None).await
-}
-
-async fn clear_agent_session_with_archive_snapshot(
-    session_id: String,
-    reason: Option<String>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-    archive_snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
-) -> Result<(), String> {
-    clear_agent_session_inner(session_id, reason, state, app, Some(archive_snapshot)).await
+    clear_agent_session_inner(session_id, reason, state, app, None, None).await
 }
 
 async fn clear_agent_session_inner(
@@ -2677,12 +2793,14 @@ async fn clear_agent_session_inner(
     state: State<'_, AppState>,
     app: AppHandle,
     archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
+    lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<(), String> {
     manager::log_debug(&format!(
         "[WARDIAN] clear_agent_session called for session: {}",
         session_id
     ));
-    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let _lifecycle_guard =
+        acquire_agent_lifecycle_guard(&state, &session_id, lifecycle_guard).await;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
     let archive_result = if let Some(snapshot) = archive_snapshot {
         archive_agent_lifecycle_boundary_from_snapshot(
@@ -2953,6 +3071,7 @@ pub async fn update_agent_config(
     ));
     new_config.validate_provider_config_matches_provider()?;
     new_config.mark_provider_config_nested_for_save();
+    let _lifecycle_guard = lock_agent_lifecycle(&state, &new_config.session_id).await;
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
 
@@ -3200,6 +3319,7 @@ pub async fn enable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     let archive_snapshot =
         crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
             .await
@@ -3269,7 +3389,14 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 async fn clear_agent_after_worktree_mutation(
@@ -3277,13 +3404,18 @@ async fn clear_agent_after_worktree_mutation(
     state: State<'_, AppState>,
     app: AppHandle,
     archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
+    lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<(), String> {
     let reason = Some("worktree_switch".to_string());
-    if let Some(snapshot) = archive_snapshot {
-        clear_agent_session_with_archive_snapshot(session_id, reason, state, app, snapshot).await
-    } else {
-        clear_agent_session_with_reason(session_id, reason, state, app).await
-    }
+    clear_agent_session_inner(
+        session_id,
+        reason,
+        state,
+        app,
+        archive_snapshot,
+        Some(lifecycle_guard),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3318,6 +3450,7 @@ pub async fn assign_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     let archive_snapshot =
         crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
             .await
@@ -3367,7 +3500,14 @@ pub async fn assign_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3419,6 +3559,7 @@ pub async fn disable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     let archive_snapshot =
         crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
             .await
@@ -3439,7 +3580,14 @@ pub async fn disable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot).await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3459,7 +3607,8 @@ pub async fn reorder_agents(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_status_update_payload, archive_agent_lifecycle_boundary,
+        acquire_agent_lifecycle_guard, agent_status_update_payload, apply_agent_update_fields,
+        archive_agent_lifecycle_boundary,
         archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
         build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
         build_agent_clone_preview, capture_opencode_pause_resume_session,
@@ -3489,7 +3638,8 @@ mod tests {
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
         strip_claude_embedded_stream_flags, sync_resumed_input_sender,
-        take_agent_runtime_for_termination, terminal_cleared_payload,
+        restore_agent_config_in_state, take_agent_runtime_for_termination,
+        terminal_cleared_payload, update_agent_fields_in_state,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
@@ -3503,9 +3653,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use wardian_core::models::provider::AgentProvider;
     use wardian_core::models::{
-        AgentConfig, AgentSessionPersistenceOverride, AntigravityProviderConfig,
-        ClaudeProviderConfig, CodexProviderConfig, DeployedSkillRef, GeminiProviderConfig,
-        OpenCodeProviderConfig, ProviderConfig,
+        AgentClassDefinition, AgentConfig, AgentSessionPersistenceOverride,
+        AntigravityProviderConfig, ClaudeProviderConfig, CodexProviderConfig, DeployedSkillRef,
+        GeminiProviderConfig, OpenCodeProviderConfig, ProviderConfig,
     };
 
     struct WardianHomeGuard;
@@ -5038,6 +5188,210 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
+    fn agent_update_fields_canonicalize_class_and_workspace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("renamed-workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let classes = vec![AgentClassDefinition {
+            name: "Reviewer".to_string(),
+            description: "Reviews work".to_string(),
+            is_default: true,
+            instruction_content: None,
+            assigned_skills: None,
+        }];
+        let mut config = AgentConfig {
+            session_id: "agent-1".to_string(),
+            agent_class: "Coder".to_string(),
+            folder: temp.path().to_string_lossy().replace('\\', "/"),
+            ..Default::default()
+        };
+
+        let updated_fields = apply_agent_update_fields(
+            &mut config,
+            Some("reviewer"),
+            Some(&workspace.to_string_lossy()),
+            &classes,
+        )
+        .expect("update fields");
+
+        assert_eq!(updated_fields, vec!["class", "workspace"]);
+        assert_eq!(config.agent_class, "Reviewer");
+        assert_eq!(
+            config.folder,
+            normalize_spawn_folder(&workspace.to_string_lossy()).unwrap()
+        );
+    }
+
+    #[test]
+    fn agent_update_workspace_rejects_managed_worktree_assignment() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("renamed-workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let mut config = AgentConfig {
+            git_worktree: Some(true),
+            folder: temp.path().to_string_lossy().replace('\\', "/"),
+            ..Default::default()
+        };
+
+        let error =
+            apply_agent_update_fields(&mut config, None, Some(&workspace.to_string_lossy()), &[])
+                .expect_err("managed worktree must use worktree commands");
+
+        assert!(error.contains("agent worktree"));
+
+        let current_workspace = config.folder.clone();
+        let no_op_error = apply_agent_update_fields(
+            &mut config,
+            None,
+            Some(&current_workspace),
+            &[],
+        )
+        .expect_err("managed worktree no-op must still use worktree commands");
+        assert!(no_op_error.contains("agent worktree"));
+    }
+
+    #[test]
+    fn agent_update_workspace_requires_an_absolute_existing_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file = temp.path().join("not-a-workspace.txt");
+        std::fs::write(&file, "not a directory").expect("create file");
+        let mut config = AgentConfig {
+            folder: temp.path().to_string_lossy().replace('\\', "/"),
+            ..Default::default()
+        };
+
+        let blank = apply_agent_update_fields(&mut config, None, Some("   "), &[])
+            .expect_err("blank workspace must be rejected");
+        assert!(blank.contains("cannot be empty"));
+
+        let relative = apply_agent_update_fields(&mut config, None, Some("."), &[])
+            .expect_err("relative workspace must be rejected");
+        assert!(relative.contains("absolute"));
+
+        let file_error =
+            apply_agent_update_fields(&mut config, None, Some(&file.to_string_lossy()), &[])
+                .expect_err("workspace file must be rejected");
+        assert!(file_error.contains("directory"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn agent_update_fields_mutate_live_state_and_capture_persisted_snapshot() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("renamed-workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(temp.path().join("classes/Reviewer"))
+            .expect("create class directory");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+
+        let classes = vec![AgentClassDefinition {
+            name: "Reviewer".to_string(),
+            description: "Reviews work".to_string(),
+            is_default: true,
+            instruction_content: None,
+            assigned_skills: None,
+        }];
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.session_name = "CoderOne".to_string();
+            config.agent_class = "Coder".to_string();
+            config.folder = temp.path().to_string_lossy().replace('\\', "/");
+        }
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        state.agent_order.lock().await.push("agent-1".to_string());
+
+        let outcome = update_agent_fields_in_state(
+            &state,
+            "agent-1",
+            Some("Reviewer"),
+            Some(&workspace.to_string_lossy()),
+            &classes,
+        )
+        .await
+        .expect("update live state");
+
+        assert_eq!(outcome.updated_fields, vec!["class", "workspace"]);
+        assert_eq!(outcome.config.agent_class, "Reviewer");
+        assert_eq!(outcome.state_snapshot.len(), 1);
+        assert_eq!(
+            outcome.state_snapshot[0].agent_class,
+            outcome.config.agent_class
+        );
+        assert_eq!(outcome.state_snapshot[0].folder, outcome.config.folder);
+        assert!(outcome
+            .config
+            .system_include_directories
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|path| path.replace('\\', "/").ends_with("/classes/Reviewer")));
+
+        let rollback_snapshot = restore_agent_config_in_state(
+            &state,
+            "agent-1",
+            outcome.previous_config.clone(),
+        )
+        .await
+        .expect("restore previous config");
+        assert_eq!(rollback_snapshot[0].agent_class, "Coder");
+        assert_eq!(
+            rollback_snapshot[0].folder,
+            temp.path().to_string_lossy().replace('\\', "/")
+        );
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+    }
+
+    #[tokio::test]
+    async fn agent_update_fields_wait_for_the_agent_lifecycle_lock() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("renamed-workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let state = Arc::new(AppState::new());
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = "agent-1".to_string();
+            config.folder = temp.path().to_string_lossy().replace('\\', "/");
+        }
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        state.agent_order.lock().await.push("agent-1".to_string());
+
+        let first_guard = lock_agent_lifecycle(&state, "agent-1").await;
+        let state_for_update = Arc::clone(&state);
+        let workspace_for_update = workspace.to_string_lossy().to_string();
+        let update = tokio::spawn(async move {
+            update_agent_fields_in_state(
+                &state_for_update,
+                "agent-1",
+                None,
+                Some(&workspace_for_update),
+                &[],
+            )
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!update.is_finished());
+        drop(first_guard);
+
+        let outcome = update.await.unwrap().expect("update after lifecycle lock");
+        assert_eq!(outcome.updated_fields, vec!["workspace"]);
+    }
+
+    #[test]
     fn resolve_agent_worktree_branch_name_slugifies_session_name() {
         assert_eq!(
             resolve_agent_worktree_branch_name("Repo Agent!! 2"),
@@ -6083,6 +6437,21 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .await
             .expect("second lifecycle lock should acquire");
         waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_lifecycle_guard_is_reused_without_self_deadlock() {
+        let state = AppState::new();
+        let guard = lock_agent_lifecycle(&state, "agent-1").await;
+
+        let reused = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            acquire_agent_lifecycle_guard(&state, "agent-1", Some(guard)),
+        )
+        .await
+        .expect("existing lifecycle guard should be reused");
+
+        drop(reused);
     }
 
     #[test]

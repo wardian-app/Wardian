@@ -127,6 +127,21 @@ class-aware and reject default classes. `restore-default classes/<Name>` only
 restores the default `AGENTS.md` for a built-in class; it does not change tags,
 deployments, schedules, or agent assignments.
 
+Class authoring and agent assignment are separate operations. Library commands
+create and edit reusable class definitions.
+`wardian agent update <target> --class <ClassName>` routes assignment through
+the running app so the live roster, persisted state, instruction include
+directories, and derived agent metadata stay aligned. The update response
+reports whether the provider must be restarted before it consumes the new
+instructions.
+
+The same live update accepts `--workspace <absolute-workspace-path>` for an
+ordinary agent whose workspace folder was moved or renamed. The destination
+must exist, and class plus workspace can be changed atomically. Managed
+worktree agents are rejected and remain on the dedicated
+`wardian agent worktree` surface because those operations also maintain
+worktree assignment metadata and provider session lifecycle.
+
 MCP entries are read-only. Mutations under `mcps` return `not_supported`.
 
 ### 5. Workflow Boundary

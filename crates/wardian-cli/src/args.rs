@@ -552,6 +552,17 @@ pub enum AgentCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Update live agent configuration without restarting the provider process.
+    Update {
+        /// Agent name or UUID.
+        target: String,
+        /// Assign an existing class and regenerate its instruction include directories.
+        #[arg(long, required_unless_present = "workspace")]
+        class: Option<String>,
+        /// Move an ordinary agent workspace to an existing path.
+        #[arg(long, required_unless_present = "class")]
+        workspace: Option<String>,
+    },
     Clone {
         target: String,
         #[arg(long)]
@@ -616,6 +627,40 @@ mod tests {
     fn parses_agent_target_shorthand() {
         let cli = Cli::try_parse_from(["wardian", "agent", "coder-a1"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(_)));
+    }
+
+    #[test]
+    fn parses_agent_update_and_requires_a_change() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "update",
+            "coder-a1",
+            "--class",
+            "Reviewer",
+            "--workspace",
+            "D:/Development/Wardian",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Update {
+                ref target,
+                class: Some(ref class),
+                workspace: Some(ref workspace),
+            }) if target == "coder-a1"
+                && class == "Reviewer"
+                && workspace == "D:/Development/Wardian"
+        ));
+
+        let error = Cli::try_parse_from(["wardian", "agent", "update", "coder-a1"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

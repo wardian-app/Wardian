@@ -27,6 +27,11 @@ pub enum ControlRequest {
         name: Option<String>,
         workspace: Option<String>,
     },
+    AgentUpdate {
+        target: String,
+        class: Option<String>,
+        workspace: Option<String>,
+    },
     AgentClone {
         target: String,
         name: Option<String>,
@@ -154,6 +159,15 @@ pub enum ApprovalAction {
 pub struct AgentListResponse {
     pub schema: u8,
     pub agents: Vec<AgentIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentUpdateResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent: AgentIdentity,
+    pub updated_fields: Vec<String>,
+    pub restart_required: bool,
 }
 
 impl AgentListResponse {
@@ -661,6 +675,45 @@ mod tests {
         assert!(json.contains(r#""command":"agent_spawn""#));
         assert!(json.contains(r#""provider":"codex""#));
         assert!(json.contains(r#""class":"Reviewer""#));
+    }
+
+    #[test]
+    fn agent_update_request_and_response_serialize_live_changes() {
+        let req = ControlRequest::AgentUpdate {
+            target: "coder-a1".to_string(),
+            class: Some("Reviewer".to_string()),
+            workspace: Some("D:/Development/Wardian".to_string()),
+        };
+        let request_json = serde_json::to_string(&req).unwrap();
+
+        assert!(request_json.contains(r#""command":"agent_update""#));
+        assert!(request_json.contains(r#""target":"coder-a1""#));
+        assert!(request_json.contains(r#""class":"Reviewer""#));
+        assert!(request_json.contains(r#""workspace":"D:/Development/Wardian""#));
+
+        let response = AgentUpdateResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            agent: AgentIdentity {
+                name: "coder-a1".to_string(),
+                uuid: "uuid-1".to_string(),
+                class: "Reviewer".to_string(),
+                provider: "codex".to_string(),
+                status: "idle".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: Some("D:/Development/Wardian".to_string()),
+                last_status_at: None,
+                status_source: crate::identity::StatusSource::Live,
+                visibility: None,
+            },
+            updated_fields: vec!["class".to_string(), "workspace".to_string()],
+            restart_required: true,
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+
+        assert!(response_json.contains(r#""updated_fields":["class","workspace"]"#));
+        assert!(response_json.contains(r#""restart_required":true"#));
     }
 
     #[test]

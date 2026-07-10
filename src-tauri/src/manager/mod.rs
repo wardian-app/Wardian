@@ -567,15 +567,17 @@ pub(crate) fn state_configs_snapshot(
     configs
 }
 
+pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(configs).map_err(|error| error.to_string())?;
+    let app_dir = get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    std::fs::create_dir_all(&app_dir).map_err(|error| error.to_string())?;
+    let settings_dir = app_dir.join("settings");
+    std::fs::create_dir_all(&settings_dir).map_err(|error| error.to_string())?;
+    std::fs::write(settings_dir.join("state.json"), json).map_err(|error| error.to_string())
+}
+
 pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
-    if let Ok(json) = serde_json::to_string_pretty(&configs) {
-        if let Some(app_dir) = get_wardian_home() {
-            let _ = std::fs::create_dir_all(&app_dir);
-            let _ = std::fs::create_dir_all(app_dir.join("settings"));
-            let state_path = app_dir.join("settings/state.json");
-            let _ = std::fs::write(state_path, json);
-        }
-    }
+    let _ = try_save_state_snapshot(configs);
 }
 
 pub fn save_state(app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
@@ -905,6 +907,24 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn try_save_state_snapshot_reports_write_failures() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let blocked_home = temp.path().join("blocked-home");
+        std::fs::write(&blocked_home, "not a directory").expect("create blocking file");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        unsafe { std::env::set_var("WARDIAN_HOME", &blocked_home) };
+
+        let result = try_save_state_snapshot(&[AgentConfig::default()]);
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("WARDIAN_HOME", value) },
+            None => unsafe { std::env::remove_var("WARDIAN_HOME") },
+        }
+        assert!(result.is_err());
+    }
 
     #[test]
     fn antigravity_interactive_launch_supplies_empty_prompt_value() {

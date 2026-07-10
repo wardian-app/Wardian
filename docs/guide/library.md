@@ -145,6 +145,16 @@ targets must already exist. Use explicit `deploy --clear` to remove every
 deployment. Empty `--targets` remains invalid. Default class definitions and
 instruction files initialize automatically on first CLI class access.
 
+Library class commands author class definitions; they do not assign a class to
+an existing agent. With the desktop app running, use
+`wardian agent update <name-or-uuid> --class <ClassName>` to update live and
+persisted agent state.
+The response tells you whether the provider process must be restarted before it
+uses the new instructions. The same command accepts
+`--workspace <absolute-workspace-path>` when an ordinary agent's workspace
+folder was moved or renamed. Managed worktrees remain on the
+`wardian agent worktree` surface.
+
 Library workflow commands author blueprint files only. Use the `wardian
 workflow` namespace to validate, parse, normalize, execute, schedule, or
 inspect workflow runs.

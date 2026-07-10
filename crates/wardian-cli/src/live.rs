@@ -5,11 +5,11 @@ use std::{
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentWatchResponse, AgentWorktreeListResponse,
-    AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction, AskResponse,
-    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
-    MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
-    StructuredReply, WatchEvent, WatchEvidenceError, WorkflowRunResponse,
+    AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
+    AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
+    DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus,
+    SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError, WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -70,6 +70,7 @@ enum ControlOperation {
     AgentPause,
     AgentResume,
     AgentSpawn,
+    AgentUpdate,
     AgentClone,
     AgentWorktreeList,
     AgentWorktreeEnable,
@@ -304,6 +305,24 @@ pub fn agent_spawn(
     let resp: AgentResponse =
         serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(resp.agent)
+}
+
+pub fn agent_update(
+    target: &str,
+    class: Option<&str>,
+    workspace: Option<&str>,
+) -> io::Result<AgentUpdateResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentUpdate,
+        send_request(ControlRequest::AgentUpdate {
+            target: target.to_string(),
+            class: class.map(str::to_string),
+            workspace: workspace.map(str::to_string),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
 pub fn agent_clone(target: &str, name: Option<&str>) -> io::Result<AgentIdentity> {
@@ -776,6 +795,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentSpawn
+        | ControlOperation::AgentUpdate
         | ControlOperation::AgentClone
         | ControlOperation::AgentWorktreeEnable
         | ControlOperation::AgentWorktreeJoin
@@ -1067,8 +1087,12 @@ mod tests {
     }
 
     #[test]
-    fn spawn_and_clone_use_longer_control_timeout() {
+    fn agent_mutations_use_longer_control_timeout() {
         assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentUpdate),
+            CONTROL_MUTATION_TIMEOUT
+        );
         assert!(operation_timeout(&ControlOperation::AgentClone) > CONTROL_TIMEOUT);
     }
 
