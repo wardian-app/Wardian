@@ -442,6 +442,17 @@ broadcast lag, or expired replay range requests a new snapshot. Slow clients are
 resynchronized instead of accumulating an unbounded send backlog. Remote socket
 backpressure and rate limits remain in force.
 
+Feed consumers are separate from interactive presentations. One desktop session
+consumer fans the shared ordered stream to local renderers; each authenticated
+remote socket has its own cursor. Consumers subscribe with a generation, pull
+bounded batches (`after_sequence`, at most 256 events / 256 KiB), acknowledge
+applied sequences for lag diagnostics, and unsubscribe explicitly. A cursor gap,
+generation change, or termination is a structured batch status; gap/generation
+responses carry a recovery snapshot and barrier. Acknowledgements do not pin
+replay retention and no consumer receives a private output queue. Desktop is
+woken by a coalesced session/sequence event; remote sockets use broker wake-ups
+and the same cursor protocol.
+
 Mirrors never resize the PTY. They render the canonical owner grid:
 
 - fit locally at normal font size when possible;
@@ -559,8 +570,8 @@ publishing a mutation. Failed commands leave the previous document unchanged.
 Closed Surface. Reopening restores the prior group/index when possible and
 falls back to the active group; an ID collision generates a new `surface_id`.
 
-The entire document is limited to 2 MiB and each registered surface state to
-64 KiB. A registry may set a smaller limit. Unknown surface types are preserved
+The entire document is limited to 2 MiB, split-tree depth to 64 nodes, and each
+registered surface state to 64 KiB. A registry may set a smaller limit. Unknown surface types are preserved
 as inert opaque JSON, including their `state_schema_version`, within the same
 limit so reinstalling a contribution can recover them. Wardian never executes
 or merges unknown state before the type is registered and validates it.
@@ -573,10 +584,14 @@ last-known-good backup is
 `<wardian-home>/settings/workbench.backup.json`. This follows Wardian's existing
 device-local UI/settings boundary while remaining directly inspectable.
 
-Writes use temp-file + flush + atomic replace. The backup rotates only from a
-successfully parsed and fully validated primary; a corrupt primary can never
-replace the last-known-good file. The backend rejects invalid schemas, unsafe
-sizes, and non-monotonic revisions.
+Writes use same-directory temp-file + file flush + atomic replace and flush the
+parent directory where the platform requires it (`MOVEFILE_WRITE_THROUGH` on
+Windows; directory `sync_all` after rename on Unix). The backup rotates only
+from a successfully parsed and fully validated primary; a corrupt primary can
+never replace the last-known-good file. Backup replacement is made durable
+before primary replacement, and acknowledgement follows the final durable
+primary replace. The backend rejects invalid schemas, unsafe sizes, and
+non-monotonic revisions.
 
 Workbench mutations enter one serialized save queue immediately. If a write is
 active, later mutations coalesce to the newest revision; no acknowledged newer
@@ -587,6 +602,21 @@ window, and explicit Reset/Restore commands flush immediately. Clean shutdown
 requests a final flush but is not the sole durability mechanism. “Exact restore”
 means the latest acknowledged revision; a process or power crash can lose only
 the currently unacknowledged window.
+
+Revision zero is the uninitialized base. The frontend proposes exactly
+`durable_revision + 1`; the backend accepts it only when the supplied expected
+revision and opaque durable token equal disk, stays within JavaScript's maximum
+safe integer, and returns the durable revision/token plus the caller's request
+ID. Only Rust serializes and hashes the exact persisted bytes; TypeScript treats
+the token as opaque. A lost-response retry is idempotent when its revision and
+backend-computed token equal the durable primary; same-revision/different-content
+is a conflict. Local
+mutations made during a write remain in a separate working draft and become the
+next revision only after acknowledgement. A CAS conflict freezes saving and
+preserves the complete local draft. Wardian never structurally auto-merges two
+workbench documents: the user explicitly chooses Use Disk, Replace Disk after a
+fresh CAS rebase/validation, or Export Local JSON. A future-schema conflict is
+export-only.
 
 The document is device-local UI state. It contains:
 
