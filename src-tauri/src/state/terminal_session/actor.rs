@@ -167,7 +167,7 @@ impl ActivationKey {
 
 struct ActivationControlState {
     key: ActivationKey,
-    ack_reserved: bool,
+    ack_reservations: usize,
     deadline_elapsed: bool,
     timeout_due: bool,
 }
@@ -199,7 +199,7 @@ impl TerminalControlPlane {
         self.state.lock().expect("terminal control lock").activation =
             Some(ActivationControlState {
                 key,
-                ack_reserved: false,
+                ack_reservations: 0,
                 deadline_elapsed: false,
                 timeout_due: false,
             });
@@ -216,87 +216,84 @@ impl TerminalControlPlane {
         }
     }
 
-    fn reserve_activation_ack(
+    fn classify_activation_ack(
         self: &Arc<Self>,
         request: &TerminalActivationAckRequest,
-    ) -> Option<ActivationAckReservation> {
+    ) -> ActivationAckArrival {
         let key = ActivationKey::from_ack(request);
         let mut state = self.state.lock().expect("terminal control lock");
-        let activation = state
+        let Some(activation) = state
             .activation
             .as_mut()
-            .filter(|activation| activation.key == key)?;
-        if activation.deadline_elapsed || activation.ack_reserved {
-            return None;
+            .filter(|activation| activation.key == key)
+        else {
+            return ActivationAckArrival::NonMatching;
+        };
+        if activation.deadline_elapsed {
+            return ActivationAckArrival::MatchingAfterDeadline;
         }
-        // This reservation is the acknowledgement's arrival point. It remains claimed
-        // while the bounded external channel is full, so later deadline expiry cannot
-        // roll back an acknowledgement that was already submitted.
-        activation.ack_reserved = true;
-        Some(ActivationAckReservation {
-            control: self.clone(),
-            key,
-            committed: false,
-        })
+        // Each matching arrival owns one counted reservation while it waits for the
+        // bounded external FIFO. Releasing one caller cannot expose another live caller
+        // to timeout rollback.
+        activation.ack_reservations = activation
+            .ack_reservations
+            .checked_add(1)
+            .expect("activation acknowledgement reservation overflow");
+        ActivationAckArrival::MatchingBeforeDeadline {
+            _reservation: ActivationAckReservation {
+                control: self.clone(),
+                key,
+            },
+        }
     }
 
     fn release_activation_ack(&self, key: &ActivationKey) {
-        let should_notify = {
-            let mut state = self.state.lock().expect("terminal control lock");
-            let Some(activation) = state
-                .activation
-                .as_mut()
-                .filter(|activation| activation.key == *key)
-            else {
-                return;
-            };
-            activation.ack_reserved = false;
-            if activation.deadline_elapsed && !activation.timeout_due {
-                activation.timeout_due = true;
-                true
-            } else {
-                false
-            }
+        let mut state = self.state.lock().expect("terminal control lock");
+        let Some(activation) = state
+            .activation
+            .as_mut()
+            .filter(|activation| activation.key == *key)
+        else {
+            return;
         };
-        if should_notify {
+        activation.ack_reservations = activation
+            .ack_reservations
+            .checked_sub(1)
+            .expect("activation acknowledgement reservation underflow");
+        if activation.ack_reservations == 0
+            && activation.deadline_elapsed
+            && !activation.timeout_due
+        {
+            activation.timeout_due = true;
+            // Publish the due bit and its notification under the same mutex. An ack
+            // classified after this point cannot overtake an unpublished wakeup.
             self.notify.notify_one();
         }
     }
 
     fn activation_deadline_elapsed(&self, key: &ActivationKey) {
-        let should_notify = {
-            let mut state = self.state.lock().expect("terminal control lock");
-            let Some(activation) = state
-                .activation
-                .as_mut()
-                .filter(|activation| activation.key == *key)
-            else {
-                return;
-            };
-            activation.deadline_elapsed = true;
-            if !activation.ack_reserved && !activation.timeout_due {
-                activation.timeout_due = true;
-                true
-            } else {
-                false
-            }
+        let mut state = self.state.lock().expect("terminal control lock");
+        let Some(activation) = state
+            .activation
+            .as_mut()
+            .filter(|activation| activation.key == *key)
+        else {
+            return;
         };
-        if should_notify {
+        activation.deadline_elapsed = true;
+        if activation.ack_reservations == 0 && !activation.timeout_due {
+            activation.timeout_due = true;
+            // Keep publication and notification atomic with respect to ack arrival
+            // classification; the actor-side classification check is the second line
+            // of defense if the notification is consumed or delayed.
             self.notify.notify_one();
         }
     }
 
     fn mark_wake_due(&self) {
-        let should_notify = {
-            let mut state = self.state.lock().expect("terminal control lock");
-            if state.wake_due {
-                false
-            } else {
-                state.wake_due = true;
-                true
-            }
-        };
-        if should_notify {
+        let mut state = self.state.lock().expect("terminal control lock");
+        if !state.wake_due {
+            state.wake_due = true;
             self.notify.notify_one();
         }
     }
@@ -323,13 +320,22 @@ impl TerminalControlPlane {
 
     #[cfg(test)]
     fn activation_ack_reserved(&self, activation_id: &str) -> bool {
+        self.activation_ack_reservation_count(activation_id) > 0
+    }
+
+    #[cfg(test)]
+    fn activation_ack_reservation_count(&self, activation_id: &str) -> usize {
         self.state
             .lock()
             .expect("terminal control lock")
             .activation
             .as_ref()
-            .is_some_and(|activation| {
-                activation.key.activation_id == activation_id && activation.ack_reserved
+            .map_or(0, |activation| {
+                if activation.key.activation_id == activation_id {
+                    activation.ack_reservations
+                } else {
+                    0
+                }
             })
     }
 
@@ -348,22 +354,29 @@ impl TerminalControlPlane {
 struct ActivationAckReservation {
     control: Arc<TerminalControlPlane>,
     key: ActivationKey,
-    committed: bool,
 }
 
-impl ActivationAckReservation {
-    fn commit(mut self) {
-        // Once enqueued, the actor owns the request. Keep the reservation claimed until
-        // that actor either commits or supersedes the activation.
-        self.committed = true;
+enum ActivationAckArrival {
+    MatchingBeforeDeadline {
+        _reservation: ActivationAckReservation,
+    },
+    MatchingAfterDeadline,
+    NonMatching,
+}
+
+impl ActivationAckArrival {
+    fn matching_before_deadline(&self) -> bool {
+        matches!(self, Self::MatchingBeforeDeadline { .. })
+    }
+
+    fn matching_after_deadline(&self) -> bool {
+        matches!(self, Self::MatchingAfterDeadline)
     }
 }
 
 impl Drop for ActivationAckReservation {
     fn drop(&mut self) {
-        if !self.committed {
-            self.control.release_activation_ack(&self.key);
-        }
+        self.control.release_activation_ack(&self.key);
     }
 }
 
@@ -579,19 +592,17 @@ impl TerminalSessionBroker {
         if handle.terminated.load(Ordering::SeqCst) {
             return Err(TerminalBrokerError::RuntimeTerminated);
         }
-        let reservation = handle.control.reserve_activation_ack(&request);
+        let arrival = handle.control.classify_activation_ack(&request);
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .tx
             .send(TerminalSessionMessage::AckActivation {
                 request,
+                arrival,
                 reply: reply_tx,
             })
             .await
             .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
-        if let Some(reservation) = reservation {
-            reservation.commit();
-        }
         reply_rx
             .await
             .map_err(|_| TerminalBrokerError::RuntimeTerminated)?
@@ -787,6 +798,29 @@ impl TerminalSessionBroker {
             .await?
             .control
             .activation_slots())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn activation_ack_reservation_count_for_test(
+        &self,
+        session_id: &str,
+        activation_id: &str,
+    ) -> Result<usize, TerminalBrokerError> {
+        Ok(self
+            .session_handle(session_id)
+            .await?
+            .control
+            .activation_ack_reservation_count(activation_id))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn consume_control_notification_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<(), TerminalBrokerError> {
+        let handle = self.session_handle(session_id).await?;
+        handle.control.notify.notified().await;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -998,6 +1032,7 @@ enum TerminalSessionMessage {
     },
     AckActivation {
         request: TerminalActivationAckRequest,
+        arrival: ActivationAckArrival,
         reply: BrokerReply<TerminalActivationAckResult>,
     },
     Input {
@@ -1257,8 +1292,12 @@ impl TerminalSessionActor {
                 let result = self.begin_activation(request);
                 let _ = reply.send(result);
             }
-            TerminalSessionMessage::AckActivation { request, reply } => {
-                let result = self.ack_activation(request).await;
+            TerminalSessionMessage::AckActivation {
+                request,
+                arrival,
+                reply,
+            } => {
+                let result = self.ack_activation(request, &arrival).await;
                 let _ = reply.send(result);
             }
             TerminalSessionMessage::Input { request, reply } => {
@@ -1635,8 +1674,14 @@ impl TerminalSessionActor {
     async fn ack_activation(
         &mut self,
         request: TerminalActivationAckRequest,
+        arrival: &ActivationAckArrival,
     ) -> Result<TerminalActivationAckResult, TerminalBrokerError> {
         self.ensure_session(&request.session_id)?;
+        if arrival.matching_after_deadline() {
+            self.activation_timeout(&ActivationKey::from_ack(&request))
+                .await;
+            return Ok(self.rejected_ack(TerminalLeaseRejectionReason::StaleActivation));
+        }
         if let Some(completed) = self.completed_activation.as_ref() {
             if completed.request == request {
                 return Ok(completed.result.clone());
@@ -1652,6 +1697,9 @@ impl TerminalSessionActor {
                 && pending.state.activation_id == request.activation_id
         });
         if !matches_pending {
+            return Ok(self.rejected_ack(TerminalLeaseRejectionReason::StaleActivation));
+        }
+        if !arrival.matching_before_deadline() {
             return Ok(self.rejected_ack(TerminalLeaseRejectionReason::StaleActivation));
         }
         if !self.presentation_is_eligible(&request.presentation_id) {

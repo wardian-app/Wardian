@@ -212,6 +212,28 @@ async fn wait_for_ack_reservation(broker: &TerminalSessionBroker, activation_id:
     .expect("ack was never reserved before deadline");
 }
 
+async fn wait_for_ack_reservation_count(
+    broker: &TerminalSessionBroker,
+    activation_id: &str,
+    expected: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if broker
+                .activation_ack_reservation_count_for_test("session-1", activation_id)
+                .await
+                .expect("ack reservation count diagnostic")
+                == expected
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("ack reservation count never reached {expected}"));
+}
+
 async fn wait_for_live_sleep_count(timer: &ManualTimer, duration: Duration, expected: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1792,6 +1814,86 @@ async fn ack_submitted_before_deadline_wins_while_external_queue_is_full() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_one_of_two_predeadline_acks_keeps_the_other_protected() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let pending = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+    let activation_id = pending.activation_id.expect("activation id");
+    let ack_request = TerminalActivationAckRequest {
+        session_id: "session-1".to_string(),
+        presentation_id: "takeover".to_string(),
+        runtime_generation: generation,
+        lease_epoch: pending.decision.lease_epoch,
+        activation_id: activation_id.clone(),
+    };
+
+    let release = broker
+        .block_actor_for_test("session-1")
+        .await
+        .expect("block actor");
+    let mut output_threads = Vec::new();
+    for index in 0..TERMINAL_SESSION_ACTOR_CAPACITY {
+        let output_broker = broker.clone();
+        output_threads.push(std::thread::spawn(move || {
+            output_broker.process_output_blocking(
+                "session-1",
+                generation,
+                vec![(index % 251) as u8],
+            )
+        }));
+    }
+    wait_for_external_capacity(&broker, 0).await;
+
+    let first_broker = broker.clone();
+    let first_request = ack_request.clone();
+    let first = tokio::spawn(async move { first_broker.ack_activation(first_request).await });
+    wait_for_ack_reservation_count(&broker, &activation_id, 1).await;
+    let second_broker = broker.clone();
+    let second = tokio::spawn(async move { second_broker.ack_activation(ack_request).await });
+    wait_for_ack_reservation_count(&broker, &activation_id, 2).await;
+
+    first.abort();
+    assert!(first
+        .await
+        .expect_err("first ack must be cancelled")
+        .is_cancelled());
+    wait_for_ack_reservation_count(&broker, &activation_id, 1).await;
+    timer.fire(Duration::from_secs(5)).await;
+    release.send(()).expect("release actor");
+
+    let committed = second
+        .await
+        .expect("second ack task")
+        .expect("second ack after queue drains");
+    assert_eq!(
+        committed.decision.status,
+        TerminalLeaseDecisionStatus::Accepted
+    );
+    assert_eq!(
+        committed.broker_state.owner_presentation_id.as_deref(),
+        Some("takeover")
+    );
+    assert!(committed.broker_state.pending_activation.is_none());
+    for thread in output_threads {
+        thread
+            .join()
+            .expect("output thread")
+            .expect("output retained");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ack_submitted_after_deadline_is_rejected_as_stale() {
     let timer = Arc::new(ManualTimer::default());
     let (broker, generation) = start(timer.clone()).await;
@@ -1828,6 +1930,69 @@ async fn ack_submitted_after_deadline_is_rejected_as_stale() {
     release.send(()).expect("release actor");
 
     let rejected = ack.await.expect("ack task").expect("structured stale ack");
+    assert_eq!(
+        rejected.decision.status,
+        TerminalLeaseDecisionStatus::Rejected
+    );
+    assert_eq!(
+        rejected.decision.reason,
+        Some(TerminalLeaseRejectionReason::StaleActivation)
+    );
+    assert_eq!(
+        rejected.broker_state.owner_presentation_id.as_deref(),
+        Some("owner")
+    );
+    assert!(rejected.broker_state.pending_activation.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postdeadline_ack_is_rejected_before_timeout_notification_is_processed() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let pending = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+
+    let release = broker
+        .block_actor_for_test("session-1")
+        .await
+        .expect("block actor");
+    timer.fire(Duration::from_secs(5)).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        broker.consume_control_notification_for_test("session-1"),
+    )
+    .await
+    .expect("timeout notification was never published")
+    .expect("consume timeout notification before actor sees it");
+    let ack_broker = broker.clone();
+    let ack = tokio::spawn(async move {
+        ack_broker
+            .ack_activation(TerminalActivationAckRequest {
+                session_id: "session-1".to_string(),
+                presentation_id: "takeover".to_string(),
+                runtime_generation: generation,
+                lease_epoch: pending.decision.lease_epoch,
+                activation_id: pending.activation_id.expect("activation id"),
+            })
+            .await
+    });
+    wait_for_external_capacity(&broker, TERMINAL_SESSION_ACTOR_CAPACITY - 1).await;
+    release.send(()).expect("release actor");
+
+    let rejected = ack
+        .await
+        .expect("ack task")
+        .expect("structured postdeadline ack");
     assert_eq!(
         rejected.decision.status,
         TerminalLeaseDecisionStatus::Rejected
