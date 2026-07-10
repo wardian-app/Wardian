@@ -447,16 +447,11 @@ fn normalize_shell_overrides(mut overrides: ShellSettingsOverrides) -> ShellSett
     overrides.codex_runtime_policy = overrides
         .codex_runtime_policy
         .map(normalize_codex_runtime_policy_overrides)
-        .and_then(|policy| {
-            if policy.sandbox_mode.is_none()
+        .filter(|policy| {
+            !(policy.sandbox_mode.is_none()
                 && policy.approval_policy.is_none()
                 && policy.full_auto.is_none()
-                && policy.trust_workspaces.is_none()
-            {
-                None
-            } else {
-                Some(policy)
-            }
+                && policy.trust_workspaces.is_none())
         });
     overrides.default_provider = overrides
         .default_provider
