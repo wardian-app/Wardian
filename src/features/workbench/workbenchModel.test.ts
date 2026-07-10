@@ -86,6 +86,46 @@ function removeOne(values: string[], value: string): void {
   if (index >= 0) values.splice(index, 1);
 }
 
+function makeDeepEdgeAdjacentDocument(depth: number): {
+  document: WorkbenchDocumentV1;
+  deep_group_id: string;
+  neighbor_group_id: string;
+} {
+  let document = createDefaultWorkbenchDocument();
+  document = acceptedDocument(applyWorkbenchCommand(document, {
+    type: "split_group",
+    group_id: "group-1",
+    new_group_id: "group-neighbor",
+    node_id: "split-root",
+    direction: "horizontal",
+    placement: "after",
+  }));
+  let deepGroupId = "group-1";
+  for (let level = 0; level < depth; level += 1) {
+    const newGroupId = `group-deep-${level}`;
+    const nodeId = `split-deep-${level}`;
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: deepGroupId,
+      new_group_id: newGroupId,
+      node_id: nodeId,
+      direction: "vertical",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "set_split_ratio",
+      node_id: nodeId,
+      ratio: 0.9,
+    }));
+    deepGroupId = newGroupId;
+  }
+  return {
+    document,
+    deep_group_id: deepGroupId,
+    neighbor_group_id: "group-neighbor",
+  };
+}
+
 function randomWorkbenchCommand(
   document: WorkbenchDocumentV1,
   seed: number,
@@ -854,6 +894,182 @@ describe("workbench model", () => {
       columns: ["name", "status"],
       unicode_label: "Habitat 🌿",
     });
+  });
+
+  it("requires saved_at to be a canonical finite UTC millisecond timestamp", () => {
+    const validTimestamps = [
+      "0000-01-01T00:00:00.000Z",
+      "1970-01-01T00:00:00.000Z",
+      "2026-07-10T12:34:56.789Z",
+      "9999-12-31T23:59:59.999Z",
+    ];
+    for (const saved_at of validTimestamps) {
+      expect(validateWorkbenchDocument({
+        ...createDefaultWorkbenchDocument(),
+        saved_at,
+      }).valid).toBe(true);
+    }
+
+    const invalidTimestamps = [
+      "",
+      "not-a-timestamp",
+      "2026-02-30T00:00:00.000Z",
+      "2026-07-10T12:34:56Z",
+      "2026-07-10T12:34:56.789+00:00",
+      "2026-07-10t12:34:56.789z",
+      "+010000-01-01T00:00:00.000Z",
+    ];
+    for (const saved_at of invalidTimestamps) {
+      expect(validateWorkbenchDocument({
+        ...createDefaultWorkbenchDocument(),
+        saved_at,
+      }).valid).toBe(false);
+    }
+  });
+
+  it("rejects custom prototypes throughout the canonical DTO graph", () => {
+    const documents = Array.from({ length: 6 }, () => makeSingleGroupDocument([
+      makeSurface("surface-1"),
+    ]));
+    Object.setPrototypeOf(documents[0], { custom: true });
+    Object.setPrototypeOf(documents[1].root, { custom: true });
+    Object.setPrototypeOf(documents[2].groups, { custom: true });
+    Object.setPrototypeOf(documents[3].groups["group-1"], { custom: true });
+    Object.setPrototypeOf(documents[4].surfaces["surface-1"], { custom: true });
+    Object.setPrototypeOf(documents[5].shell, { custom: true });
+
+    for (const document of documents) {
+      expect(validateWorkbenchDocument(document).valid).toBe(false);
+    }
+  });
+
+  it("rejects symbol, non-enumerable, accessor, and extra array properties without invoking getters", () => {
+    const symbolDocument = createDefaultWorkbenchDocument();
+    Object.defineProperty(symbolDocument.shell, Symbol("hidden"), {
+      value: true,
+      enumerable: true,
+    });
+
+    const nonEnumerableDocument = createDefaultWorkbenchDocument();
+    Object.defineProperty(nonEnumerableDocument.groups["group-1"], "hidden", {
+      value: true,
+      enumerable: false,
+    });
+
+    let rootGetterInvoked = false;
+    const accessorDocument = createDefaultWorkbenchDocument();
+    Object.defineProperty(accessorDocument, "saved_at", {
+      enumerable: true,
+      get() {
+        rootGetterInvoked = true;
+        throw new Error("saved_at getter must not run");
+      },
+    });
+
+    const extraArrayDocument = makeSingleGroupDocument([makeSurface("surface-1")]);
+    Object.defineProperty(extraArrayDocument.groups["group-1"].surface_ids, "extra", {
+      value: true,
+      enumerable: true,
+    });
+
+    let arrayGetterInvoked = false;
+    const accessorArrayDocument = makeSingleGroupDocument([makeSurface("surface-1")]);
+    Object.defineProperty(accessorArrayDocument.groups["group-1"].surface_ids, "0", {
+      enumerable: true,
+      get() {
+        arrayGetterInvoked = true;
+        throw new Error("array getter must not run");
+      },
+    });
+
+    expect(validateWorkbenchDocument(symbolDocument).valid).toBe(false);
+    expect(validateWorkbenchDocument(nonEnumerableDocument).valid).toBe(false);
+    expect(() => validateWorkbenchDocument(accessorDocument)).not.toThrow();
+    expect(validateWorkbenchDocument(accessorDocument).valid).toBe(false);
+    expect(rootGetterInvoked).toBe(false);
+    expect(validateWorkbenchDocument(extraArrayDocument).valid).toBe(false);
+    expect(() => validateWorkbenchDocument(accessorArrayDocument)).not.toThrow();
+    expect(validateWorkbenchDocument(accessorArrayDocument).valid).toBe(false);
+    expect(arrayGetterInvoked).toBe(false);
+  });
+
+  it("validates opaque state as getter-safe canonical JSON while allowing null-prototype records", () => {
+    const nullPrototypeState = Object.assign(Object.create(null) as Record<string, unknown>, {
+      label: "plain-null-prototype",
+      nested: [1, true, null],
+    });
+    expect(validateWorkbenchDocument(makeSingleGroupDocument([
+      makeSurface("surface-1", { state: nullPrototypeState }),
+    ])).valid).toBe(true);
+
+    let stateGetterInvoked = false;
+    const accessorState = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(accessorState, "secret", {
+      enumerable: true,
+      get() {
+        stateGetterInvoked = true;
+        throw new Error("state getter must not run");
+      },
+    });
+    const accessorStateDocument = makeSingleGroupDocument([
+      makeSurface("surface-1", { state: accessorState }),
+    ]);
+    expect(() => validateWorkbenchDocument(accessorStateDocument)).not.toThrow();
+    expect(validateWorkbenchDocument(accessorStateDocument).valid).toBe(false);
+    expect(stateGetterInvoked).toBe(false);
+
+    const symbolState = { visible: true };
+    Object.defineProperty(symbolState, Symbol("hidden"), { value: true, enumerable: true });
+    expect(validateWorkbenchDocument(makeSingleGroupDocument([
+      makeSurface("surface-1", { state: symbolState }),
+    ])).valid).toBe(false);
+  });
+
+  it("keeps positive deep shared edges adjacent at extreme ratios without accepting corners", () => {
+    for (const depth of [1, 30, 62]) {
+      const { document, deep_group_id, neighbor_group_id } = makeDeepEdgeAdjacentDocument(depth);
+      expect(applyWorkbenchCommand(document, {
+        type: "join_group",
+        source_group_id: deep_group_id,
+        target_group_id: neighbor_group_id,
+      }).accepted, `depth=${depth}`).toBe(true);
+    }
+
+    let cornerDocument = createDefaultWorkbenchDocument();
+    cornerDocument = acceptedDocument(applyWorkbenchCommand(cornerDocument, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-horizontal",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    cornerDocument = acceptedDocument(applyWorkbenchCommand(cornerDocument, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-3",
+      node_id: "split-left-vertical",
+      direction: "vertical",
+      placement: "after",
+    }));
+    cornerDocument = acceptedDocument(applyWorkbenchCommand(cornerDocument, {
+      type: "split_group",
+      group_id: "group-2",
+      new_group_id: "group-4",
+      node_id: "split-right-vertical",
+      direction: "vertical",
+      placement: "after",
+    }));
+    expect(applyWorkbenchCommand(cornerDocument, {
+      type: "join_group",
+      source_group_id: "group-1",
+      target_group_id: "group-4",
+    }).accepted).toBe(false);
+    expect(applyWorkbenchCommand(cornerDocument, {
+      type: "join_group",
+      source_group_id: "group-1",
+      target_group_id: "group-2",
+    }).accepted).toBe(true);
   });
 
   it("preserves invariants across 10,000 fixed-seed randomized commands", () => {

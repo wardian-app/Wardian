@@ -48,10 +48,6 @@ const DEFAULT_SHELL: WorkbenchShellV1 = {
   bottom_terminal_height: 360,
 };
 
-function validationFailure(path: string, message: string): WorkbenchValidationResult {
-  return { valid: false, errors: [{ path, message }] };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -74,6 +70,97 @@ function addError(errors: WorkbenchValidationError[], path: string, message: str
   errors.push({ path, message });
 }
 
+function validatePlainRecordContainer(
+  value: unknown,
+  path: string,
+  errors: WorkbenchValidationError[],
+): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    addError(errors, path, "must be a plain object");
+    return false;
+  }
+  let valid = true;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    addError(errors, path, "must use a plain object prototype");
+    valid = false;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === "symbol") {
+      addError(errors, path, "must not contain symbol properties");
+      valid = false;
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable) {
+      addError(errors, `${path}.${key}`, "must be an enumerable own data property");
+      valid = false;
+    } else if (!("value" in descriptor)) {
+      addError(errors, `${path}.${key}`, "must not be an accessor property");
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+function validateCanonicalArrayContainer(
+  value: unknown,
+  path: string,
+  errors: WorkbenchValidationError[],
+): value is unknown[] {
+  if (!Array.isArray(value)) {
+    addError(errors, path, "must be an array");
+    return false;
+  }
+  let valid = true;
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    addError(errors, path, "must use the canonical array prototype");
+    valid = false;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === "symbol") {
+      addError(errors, path, "must not contain symbol properties");
+      valid = false;
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (key === "length") {
+      if (!descriptor || !("value" in descriptor)) {
+        addError(errors, `${path}.length`, "must use the canonical array length property");
+        valid = false;
+      }
+      continue;
+    }
+    const index = Number(key);
+    const isCanonicalIndex = Number.isInteger(index)
+      && index >= 0
+      && index < value.length
+      && String(index) === key;
+    if (!isCanonicalIndex) {
+      addError(errors, `${path}.${key}`, "must not contain extra array properties");
+      valid = false;
+    } else if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      addError(errors, `${path}[${index}]`, "must be an enumerable own data property");
+      valid = false;
+    }
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!hasOwn(value, index)) {
+      addError(errors, `${path}[${index}]`, "must not be a sparse array entry");
+      valid = false;
+    }
+  }
+  return valid;
+}
+
+const CANONICAL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !CANONICAL_TIMESTAMP_PATTERN.test(value)) return false;
+  const timestamp = new Date(value);
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value;
+}
+
 function jsonByteLength(value: unknown): number | null {
   try {
     const json = JSON.stringify(value);
@@ -91,7 +178,9 @@ function validateJsonValue(
 ): void {
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) addError(errors, path, "must contain only finite JSON numbers");
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      addError(errors, path, "must contain only round-trippable finite JSON numbers");
+    }
     return;
   }
   if (typeof value !== "object") {
@@ -105,21 +194,22 @@ function validateJsonValue(
 
   ancestors.add(value);
   if (Array.isArray(value)) {
+    if (!validateCanonicalArrayContainer(value, path, errors)) {
+      ancestors.delete(value);
+      return;
+    }
     for (let index = 0; index < value.length; index += 1) {
-      if (!hasOwn(value, index)) {
-        addError(errors, `${path}[${index}]`, "must not be a sparse array entry");
-      } else {
-        validateJsonValue(value[index], `${path}[${index}]`, errors, ancestors);
-      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      validateJsonValue(descriptor?.value, `${path}[${index}]`, errors, ancestors);
     }
   } else {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      addError(errors, path, "must contain only plain JSON objects");
-    } else {
-      for (const [key, child] of Object.entries(value)) {
-        validateJsonValue(child, `${path}.${key}`, errors, ancestors);
-      }
+    if (!validatePlainRecordContainer(value, path, errors)) {
+      ancestors.delete(value);
+      return;
+    }
+    for (const key of Object.keys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      validateJsonValue(descriptor?.value, `${path}.${key}`, errors, ancestors);
     }
   }
   ancestors.delete(value);
@@ -130,10 +220,7 @@ function validateSurface(
   path: string,
   errors: WorkbenchValidationError[],
 ): string | null {
-  if (!isRecord(value)) {
-    addError(errors, path, "must be an object");
-    return null;
-  }
+  if (!validatePlainRecordContainer(value, path, errors)) return null;
   if (!hasExactKeys(
     value,
     ["surface_id", "surface_type", "state_schema_version", "state"],
@@ -157,16 +244,19 @@ function validateSurface(
   if (!Number.isSafeInteger(value.state_schema_version) || (value.state_schema_version as number) < 0) {
     addError(errors, `${path}.state_schema_version`, "must be a non-negative safe integer");
   }
+  const stateErrorCount = errors.length;
   try {
     validateJsonValue(value.state, `${path}.state`, errors);
   } catch {
     addError(errors, `${path}.state`, "is nested too deeply to validate safely");
   }
-  const stateBytes = jsonByteLength(value.state);
-  if (stateBytes === null) {
-    addError(errors, `${path}.state`, "must be serializable JSON");
-  } else if (stateBytes > MAX_WORKBENCH_SURFACE_STATE_BYTES) {
-    addError(errors, `${path}.state`, "exceeds the 64 KiB UTF-8 limit");
+  if (errors.length === stateErrorCount) {
+    const stateBytes = jsonByteLength(value.state);
+    if (stateBytes === null) {
+      addError(errors, `${path}.state`, "must be serializable JSON");
+    } else if (stateBytes > MAX_WORKBENCH_SURFACE_STATE_BYTES) {
+      addError(errors, `${path}.state`, "exceeds the 64 KiB UTF-8 limit");
+    }
   }
   return typeof surfaceId === "string" ? surfaceId : null;
 }
@@ -184,10 +274,7 @@ function validateNode(
     addError(errors, path, "exceeds the 64-node tree depth limit");
     return;
   }
-  if (!isRecord(value)) {
-    addError(errors, path, "must be a workbench node object");
-    return;
-  }
+  if (!validatePlainRecordContainer(value, path, errors)) return;
   if (ancestors.has(value)) {
     addError(errors, path, "split tree must be acyclic");
     return;
@@ -278,41 +365,45 @@ export function createDefaultWorkbenchDocument(): WorkbenchDocumentV1 {
 
 /** Validates an untrusted value without normalizing or cloning it. */
 export function validateWorkbenchDocument(value: unknown): WorkbenchValidationResult {
-  if (!isRecord(value)) return validationFailure("$", "must be an object");
   const errors: WorkbenchValidationError[] = [];
+  if (!validatePlainRecordContainer(value, "$", errors)) {
+    return { valid: false, errors };
+  }
   if (!hasExactKeys(value, DOCUMENT_KEYS)) {
     addError(errors, "$", "must contain exactly the V1 document fields");
   }
   if (value.schema_version !== 1) addError(errors, "$.schema_version", "must equal 1");
-  if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0) {
+  if (
+    !Number.isSafeInteger(value.revision) ||
+    (value.revision as number) < 0 ||
+    Object.is(value.revision, -0)
+  ) {
     addError(errors, "$.revision", "must be a non-negative safe integer");
   }
-  if (typeof value.saved_at !== "string") addError(errors, "$.saved_at", "must be a string");
+  if (!isCanonicalTimestamp(value.saved_at)) {
+    addError(errors, "$.saved_at", "must be a canonical UTC millisecond timestamp");
+  }
 
   const groupReferences: string[] = [];
   const splitIds = new Set<string>();
   validateNode(value.root, 1, groupReferences, splitIds, errors, new WeakSet<object>());
 
   const openSurfaceReferences: string[] = [];
-  if (!isRecord(value.groups)) {
-    addError(errors, "$.groups", "must be a record");
-  } else {
-    for (const [groupKey, groupValue] of Object.entries(value.groups)) {
+  const groupsValue = value.groups;
+  const groups = validatePlainRecordContainer(groupsValue, "$.groups", errors)
+    ? groupsValue
+    : null;
+  if (groups) {
+    for (const [groupKey, groupValue] of Object.entries(groups)) {
       const path = `$.groups.${groupKey}`;
-      if (!isRecord(groupValue)) {
-        addError(errors, path, "must be an object");
-        continue;
-      }
+      if (!validatePlainRecordContainer(groupValue, path, errors)) continue;
       if (!hasExactKeys(groupValue, ["group_id", "surface_ids", "active_surface_id"])) {
         addError(errors, path, "must contain exactly the V1 group fields");
       }
       if (groupValue.group_id !== groupKey) {
         addError(errors, `${path}.group_id`, "must match its record key");
       }
-      if (!Array.isArray(groupValue.surface_ids)) {
-        addError(errors, `${path}.surface_ids`, "must be an array");
-        continue;
-      }
+      if (!validateCanonicalArrayContainer(groupValue.surface_ids, `${path}.surface_ids`, errors)) continue;
       const localIds = new Set<string>();
       for (const [index, surfaceId] of groupValue.surface_ids.entries()) {
         if (typeof surfaceId !== "string" || surfaceId.length === 0) {
@@ -341,22 +432,24 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
     for (const groupId of groupReferences) {
       referenceCounts.set(groupId, (referenceCounts.get(groupId) ?? 0) + 1);
     }
-    for (const groupId of Object.keys(value.groups)) {
+    for (const groupId of Object.keys(groups)) {
       if (referenceCounts.get(groupId) !== 1) {
         addError(errors, `$.groups.${groupId}`, "must be referenced exactly once by the tree");
       }
     }
     for (const groupId of groupReferences) {
-      if (!hasOwn(value.groups, groupId)) {
+      if (!hasOwn(groups, groupId)) {
         addError(errors, "$.root", `references missing group ${groupId}`);
       }
     }
   }
 
-  if (!isRecord(value.surfaces)) {
-    addError(errors, "$.surfaces", "must be a record");
-  } else {
-    for (const [surfaceKey, surfaceValue] of Object.entries(value.surfaces)) {
+  const surfacesValue = value.surfaces;
+  const surfaces = validatePlainRecordContainer(surfacesValue, "$.surfaces", errors)
+    ? surfacesValue
+    : null;
+  if (surfaces) {
+    for (const [surfaceKey, surfaceValue] of Object.entries(surfaces)) {
       const surfaceId = validateSurface(surfaceValue, `$.surfaces.${surfaceKey}`, errors);
       if (surfaceId !== surfaceKey) {
         addError(errors, `$.surfaces.${surfaceKey}.surface_id`, "must match its record key");
@@ -366,13 +459,13 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
     for (const surfaceId of openSurfaceReferences) {
       referenceCounts.set(surfaceId, (referenceCounts.get(surfaceId) ?? 0) + 1);
     }
-    for (const surfaceId of Object.keys(value.surfaces)) {
+    for (const surfaceId of Object.keys(surfaces)) {
       if (referenceCounts.get(surfaceId) !== 1) {
         addError(errors, `$.surfaces.${surfaceId}`, "must be referenced exactly once by a group");
       }
     }
     for (const surfaceId of openSurfaceReferences) {
-      if (!hasOwn(value.surfaces, surfaceId)) {
+      if (!hasOwn(surfaces, surfaceId)) {
         addError(errors, "$.groups", `references missing surface ${surfaceId}`);
       }
     }
@@ -380,30 +473,21 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
 
   if (
     typeof value.active_group_id !== "string" ||
-    !isRecord(value.groups) ||
-    !hasOwn(value.groups, value.active_group_id) ||
+    !groups ||
+    !hasOwn(groups, value.active_group_id) ||
     !groupReferences.includes(value.active_group_id)
   ) {
     addError(errors, "$.active_group_id", "must reference a tree group");
   }
 
-  if (!Array.isArray(value.recently_closed)) {
-    addError(errors, "$.recently_closed", "must be an array");
-  } else {
+  if (validateCanonicalArrayContainer(value.recently_closed, "$.recently_closed", errors)) {
     if (value.recently_closed.length > MAX_RECENTLY_CLOSED_SURFACES) {
       addError(errors, "$.recently_closed", "must contain at most 20 surfaces");
     }
     for (let index = 0; index < value.recently_closed.length; index += 1) {
       const path = `$.recently_closed[${index}]`;
-      if (!hasOwn(value.recently_closed, index)) {
-        addError(errors, path, "must not be a sparse array entry");
-        continue;
-      }
       const closed = value.recently_closed[index];
-      if (!isRecord(closed)) {
-        addError(errors, path, "must be an object");
-        continue;
-      }
+      if (!validatePlainRecordContainer(closed, path, errors)) continue;
       if (!hasExactKeys(closed, ["surface", "previous_group_id", "previous_index"])) {
         addError(errors, path, "must contain exactly the V1 closed-surface fields");
       }
@@ -411,15 +495,20 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
       if (typeof closed.previous_group_id !== "string" || closed.previous_group_id.length === 0) {
         addError(errors, `${path}.previous_group_id`, "must be a non-empty string");
       }
-      if (!Number.isSafeInteger(closed.previous_index) || (closed.previous_index as number) < 0) {
+      if (
+        !Number.isSafeInteger(closed.previous_index) ||
+        (closed.previous_index as number) < 0 ||
+        Object.is(closed.previous_index, -0)
+      ) {
         addError(errors, `${path}.previous_index`, "must be a non-negative safe integer");
       }
     }
   }
 
-  if (!isRecord(value.shell) || !hasExactKeys(value.shell, SHELL_KEYS)) {
-    addError(errors, "$.shell", "must contain exactly the V1 shell fields");
-  } else {
+  if (validatePlainRecordContainer(value.shell, "$.shell", errors)) {
+    if (!hasExactKeys(value.shell, SHELL_KEYS)) {
+      addError(errors, "$.shell", "must contain exactly the V1 shell fields");
+    }
     for (const key of [
       "left_sidebar_collapsed",
       "right_sidebar_collapsed",
@@ -435,17 +524,19 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
       "bottom_terminal_height",
     ] as const) {
       const size = value.shell[key];
-      if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
+      if (typeof size !== "number" || !Number.isFinite(size) || size < 0 || Object.is(size, -0)) {
         addError(errors, `$.shell.${key}`, "must be a finite non-negative number");
       }
     }
   }
 
-  const documentBytes = jsonByteLength(value);
-  if (documentBytes === null) {
-    addError(errors, "$", "must be serializable JSON");
-  } else if (documentBytes > MAX_WORKBENCH_DOCUMENT_BYTES) {
-    addError(errors, "$", "exceeds the 2 MiB UTF-8 document limit");
+  if (errors.length === 0) {
+    const documentBytes = jsonByteLength(value);
+    if (documentBytes === null) {
+      addError(errors, "$", "must be serializable JSON");
+    } else if (documentBytes > MAX_WORKBENCH_DOCUMENT_BYTES) {
+      addError(errors, "$", "exceeds the 2 MiB UTF-8 document limit");
+    }
   }
 
   return errors.length === 0
@@ -579,48 +670,143 @@ function siblingSubtreeForGroup(
     ?? siblingSubtreeForGroup(node.second, groupId);
 }
 
-type WorkbenchRectangle = {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
+type ExactFraction = {
+  numerator: bigint;
+  denominator: bigint;
 };
 
-function collectGroupRectangles(
+type ExactWorkbenchRectangle = {
+  left: ExactFraction;
+  top: ExactFraction;
+  right: ExactFraction;
+  bottom: ExactFraction;
+};
+
+const EXACT_ZERO: ExactFraction = { numerator: 0n, denominator: 1n };
+const EXACT_ONE: ExactFraction = { numerator: 1n, denominator: 1n };
+
+function greatestCommonDivisor(first: bigint, second: bigint): bigint {
+  let left = first < 0n ? -first : first;
+  let right = second < 0n ? -second : second;
+  while (right !== 0n) {
+    const remainder = left % right;
+    left = right;
+    right = remainder;
+  }
+  return left === 0n ? 1n : left;
+}
+
+function exactFraction(numerator: bigint, denominator: bigint): ExactFraction {
+  const sign = denominator < 0n ? -1n : 1n;
+  const divisor = greatestCommonDivisor(numerator, denominator);
+  return {
+    numerator: (numerator / divisor) * sign,
+    denominator: (denominator / divisor) * sign,
+  };
+}
+
+function decimalNumberAsExactFraction(value: number): ExactFraction {
+  const [coefficient, exponentText] = value.toString().toLowerCase().split("e");
+  const [whole, fraction = ""] = coefficient.split(".");
+  const exponent = exponentText === undefined ? 0 : Number(exponentText);
+  const digits = `${whole}${fraction}`;
+  const scale = fraction.length - exponent;
+  return scale >= 0
+    ? exactFraction(BigInt(digits), 10n ** BigInt(scale))
+    : exactFraction(BigInt(digits) * (10n ** BigInt(-scale)), 1n);
+}
+
+function addExact(first: ExactFraction, second: ExactFraction): ExactFraction {
+  return exactFraction(
+    (first.numerator * second.denominator) + (second.numerator * first.denominator),
+    first.denominator * second.denominator,
+  );
+}
+
+function subtractExact(first: ExactFraction, second: ExactFraction): ExactFraction {
+  return exactFraction(
+    (first.numerator * second.denominator) - (second.numerator * first.denominator),
+    first.denominator * second.denominator,
+  );
+}
+
+function multiplyExact(first: ExactFraction, second: ExactFraction): ExactFraction {
+  return exactFraction(
+    first.numerator * second.numerator,
+    first.denominator * second.denominator,
+  );
+}
+
+function compareExact(first: ExactFraction, second: ExactFraction): number {
+  const difference = (first.numerator * second.denominator)
+    - (second.numerator * first.denominator);
+  return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+}
+
+function exactBoundary(
+  start: ExactFraction,
+  end: ExactFraction,
+  ratio: number,
+): ExactFraction {
+  return addExact(
+    start,
+    multiplyExact(subtractExact(end, start), decimalNumberAsExactFraction(ratio)),
+  );
+}
+
+function collectExactGroupRectangles(
   node: WorkbenchNodeV1,
-  rectangle: WorkbenchRectangle,
-  rectangles: Map<string, WorkbenchRectangle>,
+  rectangle: ExactWorkbenchRectangle,
+  rectangles: Map<string, ExactWorkbenchRectangle>,
 ): void {
   if (node.kind === "group") {
     rectangles.set(node.group_id, rectangle);
     return;
   }
   if (node.direction === "horizontal") {
-    const boundary = rectangle.left + ((rectangle.right - rectangle.left) * node.ratio);
-    collectGroupRectangles(node.first, { ...rectangle, right: boundary }, rectangles);
-    collectGroupRectangles(node.second, { ...rectangle, left: boundary }, rectangles);
+    const boundary = exactBoundary(rectangle.left, rectangle.right, node.ratio);
+    collectExactGroupRectangles(node.first, { ...rectangle, right: boundary }, rectangles);
+    collectExactGroupRectangles(node.second, { ...rectangle, left: boundary }, rectangles);
     return;
   }
-  const boundary = rectangle.top + ((rectangle.bottom - rectangle.top) * node.ratio);
-  collectGroupRectangles(node.first, { ...rectangle, bottom: boundary }, rectangles);
-  collectGroupRectangles(node.second, { ...rectangle, top: boundary }, rectangles);
+  const boundary = exactBoundary(rectangle.top, rectangle.bottom, node.ratio);
+  collectExactGroupRectangles(node.first, { ...rectangle, bottom: boundary }, rectangles);
+  collectExactGroupRectangles(node.second, { ...rectangle, top: boundary }, rectangles);
+}
+
+function intervalsOverlapPositively(
+  firstStart: ExactFraction,
+  firstEnd: ExactFraction,
+  secondStart: ExactFraction,
+  secondEnd: ExactFraction,
+): boolean {
+  const laterStart = compareExact(firstStart, secondStart) >= 0 ? firstStart : secondStart;
+  const earlierEnd = compareExact(firstEnd, secondEnd) <= 0 ? firstEnd : secondEnd;
+  return compareExact(earlierEnd, laterStart) > 0;
 }
 
 function groupsAreAdjacent(root: WorkbenchNodeV1, firstId: string, secondId: string): boolean {
-  const rectangles = new Map<string, WorkbenchRectangle>();
-  collectGroupRectangles(root, { left: 0, top: 0, right: 1, bottom: 1 }, rectangles);
+  const rectangles = new Map<string, ExactWorkbenchRectangle>();
+  collectExactGroupRectangles(root, {
+    left: EXACT_ZERO,
+    top: EXACT_ZERO,
+    right: EXACT_ONE,
+    bottom: EXACT_ONE,
+  }, rectangles);
   const first = rectangles.get(firstId);
   const second = rectangles.get(secondId);
   if (!first || !second) return false;
-  const epsilon = 1e-10;
-  const verticalOverlap = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
-  const horizontalOverlap = Math.min(first.right, second.right) - Math.max(first.left, second.left);
-  const touchesVertically = Math.abs(first.right - second.left) <= epsilon
-    || Math.abs(second.right - first.left) <= epsilon;
-  const touchesHorizontally = Math.abs(first.bottom - second.top) <= epsilon
-    || Math.abs(second.bottom - first.top) <= epsilon;
-  return (touchesVertically && verticalOverlap > epsilon)
-    || (touchesHorizontally && horizontalOverlap > epsilon);
+  const touchesVertically = compareExact(first.right, second.left) === 0
+    || compareExact(second.right, first.left) === 0;
+  const touchesHorizontally = compareExact(first.bottom, second.top) === 0
+    || compareExact(second.bottom, first.top) === 0;
+  return (
+    touchesVertically &&
+    intervalsOverlapPositively(first.top, first.bottom, second.top, second.bottom)
+  ) || (
+    touchesHorizontally &&
+    intervalsOverlapPositively(first.left, first.right, second.left, second.right)
+  );
 }
 
 function closeGroupSurfaces(
