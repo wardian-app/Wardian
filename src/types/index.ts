@@ -514,3 +514,77 @@ export type WorkbenchCommandResult =
         document: WorkbenchDocumentV1;
         errors: WorkbenchValidationError[];
     };
+
+// --- Workbench surface registry contracts ---------------------------------
+
+export type SurfaceState = unknown;
+export type SurfaceType = string;
+export type SurfaceIcon = string;
+
+export type SurfaceRenderPolicy =
+    | "keep_alive"
+    | "suspend_when_hidden"
+    | "recreate_from_state";
+
+export type SurfaceOpenPolicy = "singleton" | "focus_resource" | "allow_multiple";
+export type SurfaceRuntimePolicy = "view_only" | "runtime_backed";
+export type SurfaceClosePolicy = "close_view" | "confirm_if_dirty";
+export type CloseDecision = "allow" | "cancel";
+
+export type OpenSurfaceRequest = {
+    surface_type: SurfaceType;
+    resource_key?: string;
+    state?: SurfaceState;
+    group_id?: string;
+    duplicate?: boolean;
+};
+
+export type SurfaceRestoreResult<TState extends SurfaceState = SurfaceState> =
+    | { ok: true; state: TState }
+    | { ok: false; error: string };
+
+export type SerializedSurfaceState = {
+    state_schema_version: number;
+    state: unknown;
+};
+
+export type SurfaceCommandDefinition = {
+    command_id: string;
+    title: string;
+    accessibility_label?: string;
+};
+
+export type SurfaceBadge = {
+    badge_id: string;
+    label: string;
+};
+
+export type SurfacePresentationMetadata = {
+    title: string;
+    icon: SurfaceIcon;
+    commands: readonly SurfaceCommandDefinition[];
+    badges: readonly SurfaceBadge[];
+};
+
+export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
+    type: SurfaceType;
+    title: (surface: WorkbenchSurfaceV1) => string;
+    icon: SurfaceIcon;
+    render_policy: SurfaceRenderPolicy;
+    open_policy: SurfaceOpenPolicy;
+    runtime_policy: SurfaceRuntimePolicy;
+    close_policy: SurfaceClosePolicy;
+    state_schema_version: number;
+    max_state_bytes: number;
+    resource_key?: (request: OpenSurfaceRequest) => string | undefined;
+    resolve_existing?: (
+        request: OpenSurfaceRequest,
+        candidates: WorkbenchSurfaceV1[],
+    ) => string | undefined;
+    default_state: () => TState;
+    serialize_state: (state: TState) => unknown;
+    restore_state: (value: unknown, version: number) => SurfaceRestoreResult<TState>;
+    can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
+    commands: SurfaceCommandDefinition[];
+    badges?: (surface: WorkbenchSurfaceV1) => SurfaceBadge[];
+};

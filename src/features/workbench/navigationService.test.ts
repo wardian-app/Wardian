@@ -1,0 +1,286 @@
+import { describe, expect, it, vi } from "vitest";
+
+import type {
+  SurfaceDefinition,
+  WorkbenchDocumentV1,
+  WorkbenchSurfaceV1,
+} from "../../types";
+import { createWorkbenchNavigationService } from "./navigationService";
+import { createSurfaceRegistry } from "./surfaceRegistry";
+import { createWorkbenchStore } from "./useWorkbenchStore";
+import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
+
+type TestState = { label: string };
+
+function definition(
+  type: string,
+  overrides: Partial<SurfaceDefinition<TestState>> = {},
+): SurfaceDefinition<TestState> {
+  return {
+    type,
+    title: () => type,
+    icon: type,
+    render_policy: "recreate_from_state",
+    open_policy: "allow_multiple",
+    runtime_policy: "view_only",
+    close_policy: "close_view",
+    state_schema_version: 1,
+    max_state_bytes: 1024,
+    default_state: () => ({ label: "default" }),
+    serialize_state: (state) => state,
+    restore_state: (value) => ({ ok: true, state: value as TestState }),
+    commands: [],
+    ...overrides,
+  };
+}
+
+function deterministicIds(values: string[]) {
+  let index = 0;
+  return (_kind: "surface" | "group" | "node"): string => {
+    const value = values[index];
+    if (value === undefined) throw new Error("deterministic ID sequence exhausted");
+    index += 1;
+    return value;
+  };
+}
+
+describe("workbench navigation service", () => {
+  it("opens through the store's canonical writer with deterministic injected IDs", () => {
+    const registry = createSurfaceRegistry([definition("notes")]);
+    const original = makeSingleGroupDocument();
+    const store = createWorkbenchStore({
+      initial_document: original,
+      now: () => "2026-07-10T12:00:00.000Z",
+    });
+    const applyCommands = vi.spyOn(store.getState(), "apply_commands");
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["surface-fixed"]),
+    });
+
+    expect(navigation.open({ surface_type: "notes", state: { label: "hello" } }))
+      .toBe("surface-fixed");
+
+    expect(applyCommands).toHaveBeenCalledOnce();
+    expect(original.groups["group-1"].surface_ids).toEqual([]);
+    expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["surface-fixed"]);
+    expect(store.getState().document.surfaces["surface-fixed"].state).toEqual({ label: "hello" });
+  });
+
+  it("focuses normal singleton/resource opens while explicit duplicates create presentations", () => {
+    const registry = createSurfaceRegistry();
+    registry.register(definition("singleton", { open_policy: "singleton" }));
+    registry.register(definition("agent-session", {
+      open_policy: "focus_resource",
+      resource_key: (request) => request.resource_key,
+    }));
+    const singleton = makeSurface("singleton-1", { surface_type: "singleton" });
+    const oldAgent = makeSurface("agent-old", {
+      surface_type: "agent-session",
+      resource_key: "agent-1",
+    });
+    const recentAgent = makeSurface("agent-recent", {
+      surface_type: "agent-session",
+      resource_key: "agent-1",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([singleton, oldAgent, recentAgent]),
+      now: () => "2026-07-10T12:00:00.000Z",
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["singleton-duplicate", "agent-duplicate"]),
+    });
+
+    expect(navigation.open({ surface_type: "singleton" })).toBe("singleton-1");
+    expect(navigation.open({ surface_type: "agent-session", resource_key: "agent-1" }))
+      .toBe("agent-recent");
+    expect(navigation.open({ surface_type: "singleton", duplicate: true }))
+      .toBe("singleton-duplicate");
+    expect(navigation.open({
+      surface_type: "agent-session",
+      resource_key: "agent-1",
+      duplicate: true,
+    })).toBe("agent-duplicate");
+  });
+
+  it("opens to the side as one transaction and activates the new group/tab", () => {
+    const registry = createSurfaceRegistry([definition("notes")]);
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument(),
+      now: () => "2026-07-10T12:00:00.000Z",
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["group-right", "split-root", "surface-right"]),
+    });
+
+    expect(navigation.open_to_side({ surface_type: "notes" }, "vertical"))
+      .toBe("surface-right");
+
+    const document = store.getState().document;
+    expect(document.root).toEqual({
+      kind: "split",
+      node_id: "split-root",
+      direction: "vertical",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-right" },
+    });
+    expect(document.active_group_id).toBe("group-right");
+    expect(document.groups["group-right"].active_surface_id).toBe("surface-right");
+    expect(document.revision).toBe(1);
+  });
+
+  it("always duplicates singleton surfaces for Open to Side", () => {
+    const registry = createSurfaceRegistry([
+      definition("singleton", { open_policy: "singleton" }),
+    ]);
+    const existing = makeSurface("singleton-1", { surface_type: "singleton" });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([existing]),
+      now: () => "2026-07-10T12:00:00.000Z",
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["group-side", "split-side", "singleton-side"]),
+    });
+
+    expect(navigation.open_to_side({ surface_type: "singleton" }))
+      .toBe("singleton-side");
+    expect(Object.keys(store.getState().document.surfaces)).toEqual([
+      "singleton-1",
+      "singleton-side",
+    ]);
+  });
+
+  it("does not mutate a surface, group, or reset when an async guard cancels", async () => {
+    const guard = vi.fn(async (entry: WorkbenchSurfaceV1): Promise<"allow" | "cancel"> =>
+      entry.surface_id === "surface-2" ? "cancel" : "allow",
+    );
+    const registry = createSurfaceRegistry([
+      definition("dirty", {
+        close_policy: "confirm_if_dirty",
+        can_close: guard,
+      }),
+    ]);
+    const initial = makeSingleGroupDocument([
+      makeSurface("surface-1", { surface_type: "dirty" }),
+      makeSurface("surface-2", { surface_type: "dirty" }),
+    ]);
+
+    const assertCancellation = async (
+      action: (navigation: ReturnType<typeof createWorkbenchNavigationService>) => Promise<unknown>,
+    ): Promise<void> => {
+      const store = createWorkbenchStore({ initial_document: structuredClone(initial) });
+      const before = store.getState().document;
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds([]),
+      });
+      await expect(action(navigation)).resolves.toBe("cancel");
+      expect(store.getState().document).toBe(before);
+    };
+
+    await assertCancellation((navigation) => navigation.close("surface-2"));
+    await assertCancellation((navigation) => navigation.close_group("group-1"));
+    await assertCancellation((navigation) => navigation.reset_workbench());
+    expect(guard).toHaveBeenCalled();
+  });
+
+  it("evaluates reset guards in depth-first group and visual tab order before one commit", async () => {
+    const order: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("guarded", {
+        can_close: async (entry): Promise<"allow"> => {
+          order.push(entry.surface_id);
+          return "allow";
+        },
+      }),
+    ]);
+    const leftA = makeSurface("left-a", { surface_type: "guarded" });
+    const leftB = makeSurface("left-b", { surface_type: "guarded" });
+    const right = makeSurface("right-a", { surface_type: "guarded" });
+    const document: WorkbenchDocumentV1 = {
+      ...makeSingleGroupDocument(),
+      root: {
+        kind: "split",
+        node_id: "split-1",
+        direction: "horizontal",
+        ratio: 0.5,
+        first: { kind: "group", group_id: "left" },
+        second: { kind: "group", group_id: "right" },
+      },
+      groups: {
+        left: { group_id: "left", surface_ids: ["left-a", "left-b"], active_surface_id: "left-b" },
+        right: { group_id: "right", surface_ids: ["right-a"], active_surface_id: "right-a" },
+      },
+      surfaces: { "left-a": leftA, "left-b": leftB, "right-a": right },
+      active_group_id: "right",
+    };
+    const store = createWorkbenchStore({
+      initial_document: document,
+      now: () => "2026-07-10T12:00:00.000Z",
+    });
+    const resetDocument = vi.spyOn(store.getState(), "reset_document");
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    await expect(navigation.reset_workbench()).resolves.toBe("allow");
+
+    expect(order).toEqual(["left-a", "left-b", "right-a"]);
+    expect(resetDocument).toHaveBeenCalledOnce();
+    expect(store.getState().document.groups["group-1"].surface_ids).toEqual([]);
+  });
+
+  it("cancels a stale async close transaction instead of overwriting newer state", async () => {
+    let releaseGuard: ((decision: "allow") => void) | undefined;
+    const guardDecision = new Promise<"allow">((resolve) => {
+      releaseGuard = resolve;
+    });
+    const registry = createSurfaceRegistry([
+      definition("guarded", { can_close: () => guardDecision }),
+    ]);
+    const entry = makeSurface("surface-1", { surface_type: "guarded" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    const close = navigation.close("surface-1");
+    store.getState().apply_commands([{ type: "focus_surface", surface_id: "surface-1" }]);
+    releaseGuard?.("allow");
+
+    await expect(close).resolves.toBe("cancel");
+    expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
+  });
+
+  it("commits allowed closes only after the guard resolves", async () => {
+    const canClose = vi.fn(async (): Promise<"allow"> => "allow");
+    const registry = createSurfaceRegistry([
+      definition("guarded", { can_close: canClose }),
+    ]);
+    const entry = makeSurface("surface-1", { surface_type: "guarded" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    await expect(navigation.close("surface-1")).resolves.toBe("allow");
+    expect(canClose).toHaveBeenCalledWith(entry);
+    expect(store.getState().document.surfaces["surface-1"]).toBeUndefined();
+    expect(store.getState().document.recently_closed[0]?.surface).toBe(entry);
+  });
+});
