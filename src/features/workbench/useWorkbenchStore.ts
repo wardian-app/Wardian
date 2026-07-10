@@ -220,44 +220,62 @@ export function createWorkbenchStore(
   const createDefaultDocument = options.create_default_document ?? createDefaultWorkbenchDocument;
 
   const zustandStore = createStore<MutableWorkbenchStoreState>((set, get) => {
-    const reduceCommands = (
+    const mutationEligibility = (
       current: MutableWorkbenchStoreState,
-      commands: readonly WorkbenchCommand[],
-    ): WorkbenchMutationResult => {
+    ):
+      | { allowed: true; revision: number }
+      | { allowed: false; result: WorkbenchMutationResult } => {
       if (current.loading || current.read_only) {
-        return rejected(current.document, [{
-          path: "$.durability",
-          message: current.loading ? "workbench is loading" : "workbench is read-only",
-        }]);
+        return {
+          allowed: false,
+          result: rejected(current.document, [{
+            path: "$.durability",
+            message: current.loading ? "workbench is loading" : "workbench is read-only",
+          }]),
+        };
       }
       if (
         current.pending_request_id !== null
         && current.pending_revision === Number.MAX_SAFE_INTEGER
       ) {
-        return rejected(current.document, [{
-          path: "$.revision",
-          message: "pending MAX_SAFE_INTEGER revision cannot accept newer working edits",
-        }]);
+        return {
+          allowed: false,
+          result: rejected(current.document, [{
+            path: "$.revision",
+            message: "pending MAX_SAFE_INTEGER revision cannot accept newer working edits",
+          }]),
+        };
       }
+      const revision = current.is_dirty
+        ? current.document.revision
+        : nextRevision(current.durable_revision);
+      return revision === null
+        ? {
+            allowed: false,
+            result: rejected(current.document, [{
+              path: "$.revision",
+              message: "durable revision cannot be incremented safely",
+            }]),
+          }
+        : { allowed: true, revision };
+    };
+
+    const reduceCommands = (
+      current: MutableWorkbenchStoreState,
+      commands: readonly WorkbenchCommand[],
+    ): WorkbenchMutationResult => {
+      const eligibility = mutationEligibility(current);
+      if (!eligibility.allowed) return eligibility.result;
       if (commands.length === 0) {
         return rejected(current.document, [{
           path: "$.command",
           message: "a workbench transaction requires at least one command",
         }]);
       }
-      const revision = current.is_dirty
-        ? current.document.revision
-        : nextRevision(current.durable_revision);
-      if (revision === null) {
-        return rejected(current.document, [{
-          path: "$.revision",
-          message: "durable revision cannot be incremented safely",
-        }]);
-      }
 
       let candidate: WorkbenchDocumentV1 = {
         ...current.document,
-        revision,
+        revision: eligibility.revision,
         saved_at: now(),
       };
       for (const command of commands) {
@@ -312,21 +330,9 @@ export function createWorkbenchStore(
           }], true);
           return current;
         }
-        if (current.loading || current.read_only) {
-          outcome = rejected(current.document, [{
-            path: "$.durability",
-            message: current.loading ? "workbench is loading" : "workbench is read-only",
-          }]);
-          return current;
-        }
-        const revision = current.is_dirty
-          ? current.document.revision
-          : nextRevision(current.durable_revision);
-        if (revision === null) {
-          outcome = rejected(current.document, [{
-            path: "$.revision",
-            message: "durable revision cannot be incremented safely",
-          }]);
+        const eligibility = mutationEligibility(current);
+        if (!eligibility.allowed) {
+          outcome = eligibility.result;
           return current;
         }
         let defaultDocument: WorkbenchDocumentV1;
@@ -346,7 +352,7 @@ export function createWorkbenchStore(
         }
         const candidate: WorkbenchDocumentV1 = {
           ...cloneAndFreezeDocument(defaultDocument),
-          revision,
+          revision: eligibility.revision,
           saved_at: now(),
         };
         const result = applyWorkbenchCommand(candidate, {

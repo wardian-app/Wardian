@@ -548,6 +548,37 @@ describe("createWorkbenchStore", () => {
     expect(store.getState().is_dirty).toBe(false);
   });
 
+  it("rejects reset beyond a pending MAX_SAFE_INTEGER snapshot without any state change", () => {
+    const initial = {
+      ...makeSingleGroupDocument(),
+      revision: Number.MAX_SAFE_INTEGER - 1,
+    };
+    const store = createWorkbenchStore({ initial_document: initial });
+    store.getState().set_launcher_open(true);
+    store.getState().set_zoomed_group_id("group-1");
+    expect(store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-1") },
+    ]).accepted).toBe(true);
+    expect(store.getState().begin_pending_save("max-reset-request")).toBe(true);
+    const before = store.getState();
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => {
+      notifications += 1;
+    });
+
+    const result = store.getState().reset_document();
+
+    unsubscribe();
+    expect(result.accepted).toBe(false);
+    expect(result.stale).toBe(false);
+    expect(store.getState()).toBe(before);
+    expect(store.getState().document).toBe(before.document);
+    expect(store.getState().launcher_open).toBe(true);
+    expect(store.getState().zoomed_group_id).toBe("group-1");
+    expect(store.getState().transaction_version).toBe(before.transaction_version);
+    expect(notifications).toBe(0);
+  });
+
   it("reconciles zoom atomically when a document mutation removes its group", () => {
     const document = {
       ...makeSingleGroupDocument(),
