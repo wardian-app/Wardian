@@ -167,6 +167,7 @@ wardian library star <section/path>
 wardian library unstar <section/path>
 wardian library tags <section/path> --set <tag> [--set <tag>...]
 wardian library deploy <skills/path> --targets user:global,class:Reviewer
+wardian library deploy <skills/path> --clear
 wardian library deployments <skills/path>
 wardian library orphans
 wardian library orphan delete --target class:Reviewer --skill old-planner
@@ -280,8 +281,10 @@ Review the current patch and return findings first.
 EOF
 wardian library star prompts/review.md
 wardian library tags prompts/review.md --set review --set daily
+wardian library list --flat
 wardian library deploy skills/review/planner --targets user:global,class:Reviewer
 wardian library deployments skills/review/planner
+wardian library deploy skills/review/planner --clear
 wardian library read classes/Reviewer
 ```
 
@@ -295,12 +298,14 @@ Review the current patch and return findings first.
 "@ | wardian library create prompts/review.md --stdin
 wardian library star prompts/review.md
 wardian library tags prompts/review.md --set review --set daily
+wardian library list --flat
 wardian library deploy skills/review/planner --targets user:global,class:Reviewer
 wardian library deployments skills/review/planner
+wardian library deploy skills/review/planner --clear
 wardian library read classes/Reviewer
 ```
 
-`wardian library` is a disk-backed authoring surface for reusable assets. It can list, show, read, create, edit, move, delete, tag, star, and deploy Library entries without the desktop app running. `deploy --targets` requires a non-empty list of existing targets, so typos do not create class or agent deployment directories. Workflow entries under `library/workflows` are blueprint files only: use `wardian workflow validate`, `wardian workflow parse`, `wardian workflow normalize`, `wardian workflow exec`, `wardian workflow schedule`, and `wardian workflow runs` for workflow-specific behavior.
+`wardian library` is a disk-backed authoring surface for reusable assets. It can list, show, read, create, edit, move, delete, tag, star, and deploy Library entries without the desktop app running. `list --flat` emits entry rows only, including when no section is supplied. Prompt and workflow refs must end in `.md`, and skills cannot contain other skills. `deploy --targets` requires existing targets and deduplicates repeated refs; use explicit `deploy --clear` to remove the final target safely. Class definitions and instruction files initialize on first class access. Workflow entries under `library/workflows` are blueprint files only: use `wardian workflow validate`, `wardian workflow parse`, `wardian workflow normalize`, `wardian workflow exec`, `wardian workflow schedule`, and `wardian workflow runs` for workflow-specific behavior.
 
 Use `conversation list` and `conversation show <conversation-id>` to inspect durable agent-owned conversation archives. Inside a Wardian-managed agent terminal, `conversation list` defaults to that agent through `WARDIAN_SESSION_ID`. Outside a managed agent terminal, pass `--agent <agent-id-or-name>` or `--scope all`. `show` returns the manifest and agent-readable `conversation.jsonl` narrative, not provider-private raw logs. Wardian refreshes `turns.jsonl` whenever it refreshes the normalized archive, including open conversations, so readers can use `manifest.json` plus `turns.jsonl` as the cheap per-request index and fall back to `conversation.jsonl` only for full detail. A `turns.jsonl` row means one user-originated request plus following assistant, tool, and lifecycle records until the next user-originated request or boundary; provider tool-call IDs do not create separate turn rows. Context rows such as AGENTS.md injections, goal continuations, and lifecycle-only records are typed in `request.kind` so agents can skip them when building summaries. Agents and external tools should use this CLI surface or bounded reads of `agents/<agent-id>/conversations/index.jsonl`; do not recursively crawl under `agents/*`, because agent directories can contain worktrees, provider caches, screenshots, and dependencies. Direct readers must treat `index.jsonl` as append-only upsert history and keep the latest row per `conversation_id`.
 

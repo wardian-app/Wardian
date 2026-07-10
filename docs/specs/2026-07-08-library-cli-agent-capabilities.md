@@ -1,6 +1,6 @@
 # Library CLI Agent Capabilities
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-07-08
 
 ## Context and Problem Statement
@@ -64,6 +64,7 @@ wardian library tags <entry-ref> --set <tag>...
 
 wardian library deployments <skills/path>
 wardian library deploy <skills/path> --targets <target-list>
+wardian library deploy <skills/path> --clear
 wardian library orphans
 wardian library orphan delete --target <target> --skill <name>
 
@@ -76,16 +77,19 @@ wardian library restore-default <classes/name>
 user:global,class:Reviewer,agent:<agent-id>
 ```
 
-The target list must name at least one existing target. `class:<ClassName>`
+The target list must name at least one existing target. Duplicate targets are
+collapsed in first-seen order before reconciliation. `class:<ClassName>`
 must match a saved or initialized class, and `agent:<agent-id>` must match a
 known persisted or live agent id.
 
 ### 3. Read, Show, Create, and Write Semantics
 
 `list` returns Library index data. Without `--flat`, it returns tree-shaped JSON
-for the requested section or all sections. With `--flat`, it returns agent-
-friendly rows with `entry_ref`, `section`, `kind`, `name`, `description`,
-`tags`, `is_starred`, `deployment_count`, and any entry error.
+for the requested section or all sections. With `--flat`, it omits trees,
+deployments, and orphans and returns only agent-friendly `entries` rows with
+`entry_ref`, `section`, `kind`, `name`, `description`, `tags`, `is_starred`,
+`deployment_count`, and any entry error. Unscoped `list --flat` combines entries
+from every section in deterministic section order.
 
 `show <entry-ref>` returns JSON metadata and resolved paths. It does not emit raw
 content unless `--content` is set. For workflow entries, the response includes an
@@ -95,8 +99,9 @@ absolute `workflow_path` that can be passed to `wardian workflow ...`.
 can be piped directly into tools or another command.
 
 `create <entry-ref>` creates a new entry and fails with `already_exists` if the
-entry exists. Parent directories are created as needed for nested skills,
-prompts, and workflows.
+entry exists. Parent directories are created as needed for nested paths.
+Prompts and workflows require `.md` refs. Skill groups may contain skills, but a
+skill directory containing `SKILL.md` cannot itself contain another skill.
 
 `write <entry-ref>` replaces content for an existing entry and fails with
 `not_found` if the entry does not exist. There is no separate `save` command.
@@ -104,12 +109,16 @@ prompts, and workflows.
 ### 4. Section-Specific Rules
 
 Skills are directories containing `SKILL.md`. `create skills/...` writes the
-provided content to that file through the core Library content mapping.
+provided content to that file through the core Library content mapping. A skill
+cannot be nested inside another skill, and a group containing descendant skills
+cannot be converted into a skill.
 
-Prompts and workflows are markdown files. The CLI writes the file content
-directly at the section-relative path.
+Prompts and workflows are `.md` files. The CLI writes the file content directly
+at the section-relative path.
 
 Classes are flat Library entries backed by `<wardian-home>/classes/<Name>/`.
+First CLI access initializes bundled class definitions, `AGENTS.md`, and
+provider instruction stubs when the desktop app has not initialized them yet.
 `create classes/<Name>` creates the class directory, writes `AGENTS.md`, and
 creates provider compatibility stubs in the same shape the desktop app uses.
 `move classes/...` is not supported in this slice because class identity is
@@ -158,14 +167,24 @@ means "make these the complete desired targets for this skill." The CLI calls
 `wardian_core::library::set_skill_deployments`, so it adds missing targets and
 removes targets not present in the supplied non-empty list.
 
+The explicit command:
+
+```bash
+wardian library deploy skills/review/planner --clear
+```
+
+reconciles to an empty desired set. Empty `--targets` values remain invalid so
+an unset shell variable cannot remove deployments accidentally.
+
 `wardian library deployments <skills/path>` reports the current target list for
 one skill. `wardian library orphans` reports unresolved deployed skill
 directories. `wardian library orphan delete` removes one unresolved deployment
-directory and requires both the target and deployed skill directory name.
+directory and requires both the target and deployed skill directory name. The
+delete operation rechecks that exact tuple against the current orphan scan and
+refuses to remove a healthy deployment.
 
 The CLI does not add separate `deployments add`, `deployments remove`, or
-`undeploy` verbs in this slice. It also rejects empty target lists so an unset
-shell variable cannot accidentally clear every deployment for a skill.
+`undeploy` verbs. `--clear` is the only explicit empty-set operation.
 
 ### 7. Metadata Model
 
@@ -253,11 +272,10 @@ junction or symlink behavior. Browser E2E cannot prove those filesystem details.
   the Library CLI does not become a second workflow runtime.
 - **Positive:** Set-based deployment matches the core engine and avoids a
   proliferation of add/remove/undeploy aliases.
-- **Negative:** Undeploy-all is deferred instead of being encoded as an empty
-  `--targets` value, which keeps typo and unset-variable failures safer for
-  agents.
+- **Positive:** Explicit `--clear` supports undeploy-all without treating an
+  empty environment variable as destructive intent.
 - **Negative:** Raw metadata JSON mutation is deferred, so unusual metadata
   edits may still require direct file editing until a real use case justifies a
   broader command.
-- **Negative:** Class create/delete requires moving or extracting some
-  app-adjacent class logic before the CLI can remain thin and testable.
+- **Positive:** Shared class initialization and mutation helpers keep CLI and
+  desktop class state consistent without introducing Tauri dependencies.

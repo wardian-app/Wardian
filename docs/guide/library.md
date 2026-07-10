@@ -121,6 +121,7 @@ Agents can use `wardian library` to inspect and edit reusable Library assets
 from a terminal without opening the desktop app:
 
 ```bash
+wardian library list --flat
 wardian library list skills --flat
 wardian library show prompts/review.md --content
 wardian library read classes/Reviewer
@@ -128,14 +129,21 @@ wardian library create skills/review/planner --stdin
 wardian library write prompts/review.md --file <prompt-file.md>
 wardian library tags prompts/review.md --set review --set daily
 wardian library deploy skills/review/planner --targets user:global,class:Reviewer,agent:<agent-id>
+wardian library deploy skills/review/planner --clear
 wardian library orphans
 wardian library restore-default classes/Reviewer
 ```
 
 `read` emits raw markdown for the entry. `show` emits JSON metadata and
-resolved paths, with optional content via `--content`. `deploy --targets`
-reconciles the supplied non-empty target list as the complete desired
-deployment set for that skill; class and agent targets must already exist.
+resolved paths, with optional content via `--content`. `list --flat` emits only
+entry rows; without a section it combines every section. Prompt and workflow
+refs must end in `.md`, and a skill cannot contain another skill.
+
+`deploy --targets` deduplicates and reconciles the supplied non-empty target
+list as the complete desired deployment set for that skill; class and agent
+targets must already exist. Use explicit `deploy --clear` to remove every
+deployment. Empty `--targets` remains invalid. Default class definitions and
+instruction files initialize automatically on first CLI class access.
 
 Library workflow commands author blueprint files only. Use the `wardian
 workflow` namespace to validate, parse, normalize, execute, schedule, or

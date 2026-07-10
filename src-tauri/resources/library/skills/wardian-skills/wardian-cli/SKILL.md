@@ -249,22 +249,56 @@ Return findings first, then tests run, then any residual risk.
 "@ | wardian send --stdin --to reviewer-a1 --wait-until idle --timeout 10m
 ```
 
+## Library
+
+Use `wardian library` to inspect and contribute reusable agent assets without
+opening the desktop app:
+
+```bash
+wardian library list --flat
+wardian library list skills --flat
+wardian library show prompts/review.md --content
+wardian library read classes/Reviewer
+wardian library create skills/review/planner --stdin
+wardian library write prompts/review.md --file <prompt-file.md>
+wardian library tags prompts/review.md --set review --set daily
+wardian library deploy skills/review/planner --targets user:global,class:Reviewer,agent:<agent-id>
+wardian library deployments skills/review/planner
+wardian library deploy skills/review/planner --clear
+wardian library orphans
+```
+
+Refs are section-qualified: `skills/<path>`, `prompts/<path>.md`,
+`classes/<Name>`, or `workflows/<path>.md`. Prompts and workflows require the
+`.md` extension. Skills are directories containing `SKILL.md`; do not place one
+skill inside another skill. Default class files initialize on first class
+access.
+
+`deploy --targets` treats the non-empty, deduplicated list as the complete
+desired set. Use explicit `--clear` to remove every deployment; never pass an
+empty variable to `--targets`. `orphan delete` only removes a deployment that
+the current scan still reports as orphaned.
+
+Library workflow commands author blueprint files only. Use the `wardian
+workflow` commands below for workflow-specific behavior.
+
 ## Workflows
 
 ```bash
-wardian workflow list
-wardian workflow show <id-or-name>
-wardian workflow run <id>
-wardian workflow stop <run-instance-id>
+wardian workflow node-types
+wardian workflow validate <path-to-workflow.md>
+wardian workflow parse <path-to-workflow.md>
+wardian workflow normalize <path-to-workflow.md> --write
+wardian workflow exec <path-to-workflow.md>
+wardian workflow runs
+wardian workflow run-show <blueprint-id> <run-id>
+wardian workflow replay <blueprint-id> <run-id>
+wardian workflow schedule list
 ```
 
-`workflow list` and `workflow show` try the running app first, then read
-workflow JSON files from disk when the app is unavailable. `workflow run` and
-`workflow stop` require the running app.
-
-Malformed workflow files may be reported as warnings or omitted depending on
-the CLI version. If `show` cannot find a workflow that exists on disk, inspect
-the workflow JSON for parse errors.
+`workflow validate`, `parse`, `normalize`, `runs`, `run-show`, and `replay` are
+disk-backed. Live `workflow exec` and schedule actions that launch a run require
+the desktop app for the same `WARDIAN_HOME`.
 
 ## Teams And Watchlists
 
