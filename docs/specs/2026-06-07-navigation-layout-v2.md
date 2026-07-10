@@ -1,7 +1,12 @@
 # Navigation and Layout V2
 
-- **Status:** Exploratory
+- **Status:** Deprecated
 - **Date:** 2026-06-07
+- **Superseded by:** `docs/specs/2026-07-10-workbench-navigation-system.md`
+
+> This exploratory Site/Cohort/Perspective model is not an implementation
+> contract. The approved Workbench Navigation spec supersedes its product model,
+> navigation boundary, terminal behavior, persistence design, and delivery plan.
 
 ## Context and Problem Statement
 
