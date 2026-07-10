@@ -334,16 +334,16 @@ stores and updating `LibraryView`.
 - panels: `data-testid="surface-panel"`, `data-surface-id`, `data-surface-type`, optional `data-resource-key`
 - launcher: `role="dialog"` named `Open Surface`; choices `role="option"` + `data-surface-type`
 
-- [ ] **Step 1: Write failing adapter/host tests** for model-to-layout projection, tab/group events translated to `WorkbenchCommand`, no layout-library JSON, empty-group derived Home, stable keyed panel instances, group zoom outside the document, close guards, deterministic Close/Join Group, and safe-mode one-group rendering.
-- [ ] **Step 2: Write failing launcher/command tests** for `+`, recent/reopen, type groups, singleton focus, explicit Open to Side, Quick Open, command palette actions, editable-element suppression, terminal shortcut precedence, and ARIA focus restoration.
-- [ ] **Step 3: Run** the focused files. **Expected:** FAIL on missing components.
-- [ ] **Step 4: Implement the production adapter.** Reconcile model deltas idempotently and suppress feedback loops with an adapter transaction token. Dockview panel IDs equal `surface_id`; group IDs are Wardian group IDs.
-- [ ] **Step 5: Implement Home/Open Surface and commands.** Include Agents Overview, Dashboard, Queue, Graph, Garden, Library, Workflows, and Agent Session only when a resource is supplied. File Editor/Browser appear only as disabled/reserved contributions until implemented.
-- [ ] **Step 6: Implement keyboard/accessibility.** Cover next/previous tab, next/previous group, split right/down, move tab, close, reopen, zoom, launcher, dock focus, keyboard-adjustable separators, roving tab focus, and drag alternatives.
-- [ ] **Step 7: Theme entirely through Wardian variables.** Do not ship Dockview's visual theme as product styling.
-- [ ] **Step 8: Mount behind `VITE_WARDIAN_WORKBENCH=1`** while leaving the old central router untouched for comparison. The workbench branch reads the same shared resource data; do not duplicate backend subscriptions.
-- [ ] **Step 9: Run** focused tests, `npm run lint`, `npm run build`, and the promoted adapter browser proof. **Expected:** PASS.
-- [ ] **Step 10: Commit** `feat(workbench): add tabbed split workbench host`.
+- [x] **Step 1: Write failing adapter/host tests** for model-to-layout projection, tab/group events translated to `WorkbenchCommand`, no layout-library JSON, empty-group derived Home, stable keyed panel instances, group zoom outside the document, close guards, deterministic Close/Join Group, and safe-mode one-group rendering.
+- [x] **Step 2: Write failing launcher/command tests** for `+`, recent/reopen, type groups, singleton focus, explicit Open to Side, Quick Open, command palette actions, editable-element suppression, terminal shortcut precedence, and ARIA focus restoration.
+- [x] **Step 3: Run** the focused files. **Expected:** FAIL on missing components.
+- [x] **Step 4: Implement the production adapter.** Reconcile model deltas idempotently and suppress feedback loops with an adapter transaction token. Dockview panel IDs equal `surface_id`; group IDs are Wardian group IDs.
+- [x] **Step 5: Implement Home/Open Surface and commands.** Include Agents Overview, Dashboard, Queue, Graph, Garden, Library, Workflows, and Agent Session only when a resource is supplied. File Editor/Browser appear only as disabled/reserved contributions until implemented.
+- [x] **Step 6: Implement keyboard/accessibility.** Cover next/previous tab, next/previous group, split right/down, move tab, close, reopen, zoom, launcher, dock focus, keyboard-adjustable separators, roving tab focus, and drag alternatives.
+- [x] **Step 7: Theme entirely through Wardian variables.** Do not ship Dockview's visual theme as product styling.
+- [x] **Step 8: Mount behind `VITE_WARDIAN_WORKBENCH=1`** while leaving the old central router untouched for comparison. The workbench branch reads the same shared resource data; do not duplicate backend subscriptions.
+- [x] **Step 9: Run** focused tests, `npm run lint`, `npm run build`, and the promoted adapter browser proof. **Expected:** PASS.
+- [x] **Step 10: Commit** `feat(workbench): add tabbed split workbench host`.
 
 ## Phase 2 — Make terminal presentation safe before duplication
 
