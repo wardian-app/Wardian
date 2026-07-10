@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use super::section::LibrarySectionId;
 use crate::models::LibraryItemMetadata;
 use crate::paths::library_metadata_path_for_home;
-use super::section::LibrarySectionId;
 
 const SECTION_PREFIXES: [&str; 4] = ["skills/", "prompts/", "workflows/", "classes/"];
 
@@ -24,7 +24,10 @@ impl MetadataStore {
         let mut items = BTreeMap::new();
         let mut migrated = false;
         for (key, value) in raw {
-            if SECTION_PREFIXES.iter().any(|prefix| key.starts_with(prefix)) {
+            if SECTION_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            {
                 items.insert(key, value);
             } else if let Some(qualified) = qualify_legacy_key(home, &key) {
                 migrated = true;
@@ -61,11 +64,7 @@ impl MetadataStore {
 
     pub fn save(&self, home: &Path) -> Result<(), String> {
         let path = library_metadata_path_for_home(home);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let json = serde_json::to_string_pretty(&self.items).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| e.to_string())
+        crate::atomic_file::write_json_atomic(&path, &self.items).map_err(|e| e.to_string())
     }
 }
 
@@ -88,14 +87,25 @@ mod tests {
     use std::fs;
 
     fn meta(id: &str) -> LibraryItemMetadata {
-        LibraryItemMetadata { id: id.to_string(), tags: vec![], is_starred: true, last_used: None }
+        LibraryItemMetadata {
+            id: id.to_string(),
+            tags: vec![],
+            is_starred: true,
+            last_used: None,
+        }
     }
 
     #[test]
     fn migrates_legacy_keys_by_probing_sections() {
         let temp = tempfile::tempdir().expect("temp");
         let home = temp.path();
-        fs::create_dir_all(home.join("library").join("skills").join("dev").join("planner")).unwrap();
+        fs::create_dir_all(
+            home.join("library")
+                .join("skills")
+                .join("dev")
+                .join("planner"),
+        )
+        .unwrap();
         fs::create_dir_all(home.join("library").join("prompts")).unwrap();
         fs::write(home.join("library").join("prompts").join("greet.md"), "hi").unwrap();
         let legacy = serde_json::json!({
@@ -103,11 +113,21 @@ mod tests {
             "greet.md": {"id": "p1", "tags": [], "is_starred": false, "last_used": null},
             "ghost.md": {"id": "g1", "tags": [], "is_starred": false, "last_used": null}
         });
-        fs::write(home.join("library").join("library.json"), legacy.to_string()).unwrap();
+        fs::write(
+            home.join("library").join("library.json"),
+            legacy.to_string(),
+        )
+        .unwrap();
 
         let store = MetadataStore::load(home);
-        assert_eq!(store.get("skills/dev/planner").expect("skill migrated").id, "s1");
-        assert_eq!(store.get("prompts/greet.md").expect("prompt migrated").id, "p1");
+        assert_eq!(
+            store.get("skills/dev/planner").expect("skill migrated").id,
+            "s1"
+        );
+        assert_eq!(
+            store.get("prompts/greet.md").expect("prompt migrated").id,
+            "p1"
+        );
         assert!(store.get("ghost.md").is_none(), "unresolvable keys drop");
 
         // Migration writes back once: reloading needs no probing.
@@ -125,5 +145,23 @@ mod tests {
         assert_eq!(store.get("skills/new").expect("moved").id, "m1");
         store.save(temp.path()).expect("save");
         assert!(MetadataStore::load(temp.path()).get("skills/new").is_some());
+    }
+
+    #[test]
+    fn save_replaces_metadata_with_complete_pretty_json() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("library").join("library.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("metadata dir");
+        fs::write(&path, "truncated").expect("old metadata");
+        let mut store = MetadataStore::default();
+        store.set("skills/planner".into(), meta("planner"));
+
+        store.save(temp.path()).expect("save metadata");
+
+        let raw = fs::read_to_string(&path).expect("metadata json");
+        assert!(raw.starts_with("{\n"));
+        assert!(raw.ends_with("\n"));
+        serde_json::from_str::<serde_json::Value>(&raw).expect("valid metadata json");
+        assert!(!path.with_file_name(".library.json.tmp").exists());
     }
 }

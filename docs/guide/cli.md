@@ -123,6 +123,8 @@ wardian agent kill <name-or-uuid>
 wardian agent pause <name-or-uuid>
 wardian agent resume <name-or-uuid>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
+wardian agent update <name-or-uuid> --class Reviewer
+wardian agent update <name-or-uuid> --workspace <absolute-workspace-path>
 wardian agent clone <name-or-uuid> --name coder-a2
 wardian agent worktree list
 wardian agent worktree enable <name-or-uuid> --name review-fixes
@@ -156,6 +158,22 @@ wardian workflow runs
 wardian workflow run-show <blueprint-id> <run-id>
 wardian workflow replay <blueprint-id> <run-id>
 wardian workflow schedule list
+wardian library list [skills|prompts|classes|workflows|mcps] [--flat]
+wardian library show <section/path> [--content]
+wardian library read <section/path>
+wardian library create <section/path> --stdin
+wardian library write <section/path> --file <path>
+wardian library move <section/path> <section/new-path>
+wardian library delete <section/path>
+wardian library star <section/path>
+wardian library unstar <section/path>
+wardian library tags <section/path> --set <tag> [--set <tag>...]
+wardian library deploy <skills/path> --targets user:global,class:Reviewer
+wardian library deploy <skills/path> --clear
+wardian library deployments <skills/path>
+wardian library orphans
+wardian library orphan delete --target class:Reviewer --skill old-planner
+wardian library restore-default classes/Reviewer
 wardian conversation list
 wardian conversation list --agent <agent-id-or-name>
 wardian conversation list --scope all
@@ -255,13 +273,60 @@ By default, `workflow exec` is a live-control command: it requires the desktop a
 
 Use `workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and `workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under `<wardian-home>/logs/workflows`.
 
+Author and deploy Library assets from an agent terminal:
+
+```bash
+cat <<'EOF' | wardian library create prompts/review.md --stdin
+# Review
+
+Review the current patch and return findings first.
+EOF
+wardian library star prompts/review.md
+wardian library tags prompts/review.md --set review --set daily
+wardian library list --flat
+wardian library deploy skills/review/planner --targets user:global,class:Reviewer
+wardian library deployments skills/review/planner
+wardian library deploy skills/review/planner --clear
+wardian library read classes/Reviewer
+```
+
+PowerShell:
+
+```powershell
+@"
+# Review
+
+Review the current patch and return findings first.
+"@ | wardian library create prompts/review.md --stdin
+wardian library star prompts/review.md
+wardian library tags prompts/review.md --set review --set daily
+wardian library list --flat
+wardian library deploy skills/review/planner --targets user:global,class:Reviewer
+wardian library deployments skills/review/planner
+wardian library deploy skills/review/planner --clear
+wardian library read classes/Reviewer
+```
+
+`wardian library` is a disk-backed authoring surface for reusable assets. It can list, show, read, create, edit, move, delete, tag, star, and deploy Library entries without the desktop app running. `list --flat` emits entry rows only, including when no section is supplied. Prompt and workflow refs must end in `.md`, and skills cannot contain other skills. `deploy --targets` requires existing targets and deduplicates repeated refs; use explicit `deploy --clear` to remove the final target safely. Class definitions and instruction files initialize on first class access. Workflow entries under `library/workflows` are blueprint files only: use `wardian workflow validate`, `wardian workflow parse`, `wardian workflow normalize`, `wardian workflow exec`, `wardian workflow schedule`, and `wardian workflow runs` for workflow-specific behavior.
+
 Use `conversation list` and `conversation show <conversation-id>` to inspect durable agent-owned conversation archives. Inside a Wardian-managed agent terminal, `conversation list` defaults to that agent through `WARDIAN_SESSION_ID`. Outside a managed agent terminal, pass `--agent <agent-id-or-name>` or `--scope all`. `show` returns the manifest and agent-readable `conversation.jsonl` narrative, not provider-private raw logs. Wardian refreshes `turns.jsonl` whenever it refreshes the normalized archive, including open conversations, so readers can use `manifest.json` plus `turns.jsonl` as the cheap per-request index and fall back to `conversation.jsonl` only for full detail. A `turns.jsonl` row means one user-originated request plus following assistant, tool, and lifecycle records until the next user-originated request or boundary; provider tool-call IDs do not create separate turn rows. Context rows such as AGENTS.md injections, goal continuations, and lifecycle-only records are typed in `request.kind` so agents can skip them when building summaries. Agents and external tools should use this CLI surface or bounded reads of `agents/<agent-id>/conversations/index.jsonl`; do not recursively crawl under `agents/*`, because agent directories can contain worktrees, provider caches, screenshots, and dependencies. Direct readers must treat `index.jsonl` as append-only upsert history and keep the latest row per `conversation_id`.
 
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
 
-`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `conversation list`, `conversation show`, `team`, and `watchlist` can run from disk without the desktop app.
+`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `library`, `conversation list`, `conversation show`, `team`, and `watchlist` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
+
+`agent update <target>` changes an existing agent through the running app. Use
+`--class <ClassName>` to assign an existing class and regenerate the agent's
+instruction include directories. Use `--workspace <absolute-path>` when an
+ordinary agent's workspace folder was moved or renamed; the destination must
+already exist. Both flags can be supplied together and are committed to live
+and persisted state as one update. The JSON response reports `updated_fields`
+and `restart_required`. Wardian does not interrupt a running provider process,
+so restart the agent when `restart_required` is true before relying on the new
+class instructions or working directory. Managed worktree agents must use
+`agent worktree join` or `agent worktree disable` instead.
 
 `agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel and force a fresh agent session after changing the runtime workspace. `disable` removes the assignment only; it does not delete the physical worktree folder.
 

@@ -43,6 +43,7 @@ use crate::state::{ActiveAgent, AppState};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager};
+use wardian_core::conversations::write_json_atomic;
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
@@ -567,14 +568,18 @@ pub(crate) fn state_configs_snapshot(
     configs
 }
 
+pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), String> {
+    let app_dir = get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    std::fs::create_dir_all(&app_dir).map_err(|error| error.to_string())?;
+    let settings_dir = app_dir.join("settings");
+    std::fs::create_dir_all(&settings_dir).map_err(|error| error.to_string())?;
+    write_json_atomic(&settings_dir.join("state.json"), configs)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
-    if let Ok(json) = serde_json::to_string_pretty(&configs) {
-        if let Some(app_dir) = get_wardian_home() {
-            let _ = std::fs::create_dir_all(&app_dir);
-            let _ = std::fs::create_dir_all(app_dir.join("settings"));
-            let state_path = app_dir.join("settings/state.json");
-            let _ = std::fs::write(state_path, json);
-        }
+    if let Err(error) = try_save_state_snapshot(configs) {
+        log_debug(&format!("[WARDIAN] Failed to persist state snapshot: {error}"));
     }
 }
 
@@ -905,6 +910,49 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn try_save_state_snapshot_reports_write_failures() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let blocked_home = temp.path().join("blocked-home");
+        std::fs::write(&blocked_home, "not a directory").expect("create blocking file");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        unsafe { std::env::set_var("WARDIAN_HOME", &blocked_home) };
+
+        let result = try_save_state_snapshot(&[AgentConfig::default()]);
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("WARDIAN_HOME", value) },
+            None => unsafe { std::env::remove_var("WARDIAN_HOME") },
+        }
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_save_state_snapshot_replaces_existing_state_atomically() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path().join("wardian-home");
+        std::fs::create_dir_all(home.join("settings")).expect("create settings dir");
+        std::fs::write(home.join("settings/state.json"), r#"[{"session_id":"old"}]"#)
+            .expect("seed old snapshot");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        unsafe { std::env::set_var("WARDIAN_HOME", &home) };
+
+        try_save_state_snapshot(&[AgentConfig::default()]).expect("atomic snapshot write");
+
+        let contents =
+            std::fs::read_to_string(home.join("settings/state.json")).expect("read snapshot");
+        let configs: Vec<AgentConfig> = serde_json::from_str(&contents).expect("parse snapshot");
+        assert_eq!(configs.len(), 1);
+        assert!(!home.join("settings/.state.json.tmp").exists());
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("WARDIAN_HOME", value) },
+            None => unsafe { std::env::remove_var("WARDIAN_HOME") },
+        }
+    }
 
     #[test]
     fn antigravity_interactive_launch_supplies_empty_prompt_value() {

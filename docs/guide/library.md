@@ -115,6 +115,50 @@ with the same scoping skills use. It ships empty and read-only in this
 release — selecting it shows an explanatory stub instead of a list or editor.
 No `library/mcps` directory is created until the real feature lands.
 
+## Agent CLI Access
+
+Agents can use `wardian library` to inspect and edit reusable Library assets
+from a terminal without opening the desktop app:
+
+```bash
+wardian library list --flat
+wardian library list skills --flat
+wardian library show prompts/review.md --content
+wardian library read classes/Reviewer
+wardian library create skills/review/planner --stdin
+wardian library write prompts/review.md --file <prompt-file.md>
+wardian library tags prompts/review.md --set review --set daily
+wardian library deploy skills/review/planner --targets user:global,class:Reviewer,agent:<agent-id>
+wardian library deploy skills/review/planner --clear
+wardian library orphans
+wardian library restore-default classes/Reviewer
+```
+
+`read` emits raw markdown for the entry. `show` emits JSON metadata and
+resolved paths, with optional content via `--content`. `list --flat` emits only
+entry rows; without a section it combines every section. Prompt and workflow
+refs must end in `.md`, and a skill cannot contain another skill.
+
+`deploy --targets` deduplicates and reconciles the supplied non-empty target
+list as the complete desired deployment set for that skill; class and agent
+targets must already exist. Use explicit `deploy --clear` to remove every
+deployment. Empty `--targets` remains invalid. Default class definitions and
+instruction files initialize automatically on first CLI class access.
+
+Library class commands author class definitions; they do not assign a class to
+an existing agent. With the desktop app running, use
+`wardian agent update <name-or-uuid> --class <ClassName>` to update live and
+persisted agent state.
+The response tells you whether the provider process must be restarted before it
+uses the new instructions. The same command accepts
+`--workspace <absolute-workspace-path>` when an ordinary agent's workspace
+folder was moved or renamed. Managed worktrees remain on the
+`wardian agent worktree` surface.
+
+Library workflow commands author blueprint files only. Use the `wardian
+workflow` namespace to validate, parse, normalize, execute, schedule, or
+inspect workflow runs.
+
 ## Folder Organization and Drag-to-Move
 
 Skills, prompts, and workflows can be organized into folders on disk:
