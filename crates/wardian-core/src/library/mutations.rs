@@ -54,6 +54,10 @@ pub fn validate_entry_destination(
 }
 
 fn validate_skill_destination(home: &Path, target: &Path, rel: &str) -> Result<(), String> {
+    if target.exists() && !target.is_dir() {
+        return Err(format!("A skill path must be a directory: {rel}"));
+    }
+
     let root = LibrarySectionId::Skills.root_for_home(home);
     let relative = target
         .strip_prefix(&root)

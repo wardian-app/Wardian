@@ -199,6 +199,15 @@ fn rejects_unindexable_entry_shapes_without_hiding_existing_entries() {
     assert!(!home.path().join("library/prompts/audit").exists());
     assert!(!home.path().join("library/workflows/audit.txt").exists());
 
+    std::fs::create_dir_all(home.path().join("library/skills")).unwrap();
+    std::fs::write(home.path().join("library/skills/occupied"), "not a skill").unwrap();
+    let occupied = assert_failure_json(run(
+        home.path(),
+        &["library", "create", "skills/occupied", "--stdin"],
+        Some("# Occupied\n"),
+    ));
+    assert_eq!(occupied["error"]["code"], "invalid_ref");
+
     assert_success_json(run(
         home.path(),
         &["library", "create", "skills/parent", "--stdin"],
