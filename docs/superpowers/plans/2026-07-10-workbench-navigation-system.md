@@ -55,10 +55,10 @@
 | #522 | `Implement workbench recovery, reset, placeholders, and safe mode` |
 | #523 | `Cut over workbench navigation, migrate tests/docs, and verify release readiness` |
 
-- [ ] **Step 1: Rewrite #513** to link the approved spec and this plan; state explicitly that Sites/Cohorts are rejected as foundational navigation concepts and Teams/watchlists remain independent.
-- [ ] **Step 2: Rewrite every child body.** Begin with `Parent epic: #513` and `Rebaselined on 2026-07-10`; remove superseded Site/Cohort acceptance criteria; link the corresponding plan tasks and copy concrete testable outcomes.
-- [ ] **Step 3: Preserve labels and open state.** Do not close/recreate issues for bookkeeping and do not claim completion before code/tests land.
-- [ ] **Step 4: Re-read all 11 live issues with `gh issue view`** and verify titles, spec/plan links, dependency order, and no stale `HabitatLayout`, Site, Cohort, or Perspective implementation requirement.
+- [x] **Step 1: Rewrite #513** to link the approved spec and this plan; state explicitly that Sites/Cohorts are rejected as foundational navigation concepts and Teams/watchlists remain independent.
+- [x] **Step 2: Rewrite every child body.** Begin with `Parent epic: #513` and `Rebaselined on 2026-07-10`; remove superseded Site/Cohort acceptance criteria; link the corresponding plan tasks and copy concrete testable outcomes.
+- [x] **Step 3: Preserve labels and open state.** Do not close/recreate issues for bookkeeping and do not claim completion before code/tests land.
+- [x] **Step 4: Re-read all 11 live issues with `gh issue view`** and verify titles, spec/plan links, dependency order, and no stale `HabitatLayout`, Site, Cohort, or Perspective implementation requirement.
 
 ## Phase 0 — Prove the adapter and freeze contracts
 
