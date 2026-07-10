@@ -353,7 +353,7 @@ pub fn read_jsonl_records<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Resu
     Ok(records)
 }
 
-pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+pub fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> io::Result<()> {
     crate::atomic_file::write_json_atomic(path, value)
 }
 
