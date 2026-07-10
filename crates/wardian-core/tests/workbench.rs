@@ -17,6 +17,17 @@ fn fixture_document() -> WorkbenchDocumentV1 {
     serde_json::from_value(fixture_value()).unwrap()
 }
 
+fn assert_raw_primary_is_corrupt(raw: impl AsRef<[u8]>) {
+    let home = tempfile::tempdir().unwrap();
+    let primary_path = workbench_path_for_home(home.path());
+    std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+    std::fs::write(primary_path, raw).unwrap();
+
+    let loaded = load_workbench_for_home(home.path()).unwrap();
+    assert_eq!(loaded.source, WorkbenchLoadSource::Default);
+    assert!(loaded.notice.is_some());
+}
+
 fn nested_root(depth: usize) -> Value {
     let mut node = json!({ "kind": "group", "group_id": "group-main" });
     for index in 1..depth {
@@ -343,6 +354,74 @@ fn workbench_load_rejects_oversized_raw_v1_and_honors_future_backup() {
 }
 
 #[test]
+fn workbench_load_rejects_duplicate_keys_before_schema_classification() {
+    let default = serde_json::to_string(&WorkbenchDocumentV1::default_document()).unwrap();
+
+    let duplicate_top_level =
+        default.replacen(r#""revision":0"#, r#""revision":0,"revision":0"#, 1);
+    assert_raw_primary_is_corrupt(duplicate_top_level);
+
+    for duplicate_schema in [
+        default.replacen(
+            r#""schema_version":1"#,
+            r#""schema_version":2,"schema_version":1"#,
+            1,
+        ),
+        default.replacen(
+            r#""schema_version":1"#,
+            r#""schema_version":1,"schema_version":2"#,
+            1,
+        ),
+    ] {
+        assert_raw_primary_is_corrupt(duplicate_schema);
+    }
+
+    let duplicate_nested = default.replacen(
+        r#""group_id":"group-1","surface_ids"#,
+        r#""group_id":"group-1","group_id":"group-1","surface_ids"#,
+        1,
+    );
+    assert_raw_primary_is_corrupt(duplicate_nested);
+
+    let duplicate_group_record = default.replacen(
+        r#""groups":{"group-1":"#,
+        r#""groups":{"group-1":{"group_id":"group-1","surface_ids":[],"active_surface_id":null},"group-1":"#,
+        1,
+    );
+    assert_raw_primary_is_corrupt(duplicate_group_record);
+
+    let duplicate_opaque_state = include_str!("fixtures/workbench-v1.json").replacen(
+        r#""mode": "auto","#,
+        r#""mode": "auto", "mode": "grid","#,
+        1,
+    );
+    assert_raw_primary_is_corrupt(duplicate_opaque_state);
+}
+
+#[test]
+fn workbench_load_rejects_negative_zero_before_numeric_normalization() {
+    let default = serde_json::to_string(&WorkbenchDocumentV1::default_document()).unwrap();
+    assert_raw_primary_is_corrupt(default.replacen(r#""revision":0"#, r#""revision":-0"#, 1));
+
+    let fixture = include_str!("fixtures/workbench-v1.json");
+    assert_raw_primary_is_corrupt(fixture.replacen(
+        r#""state_schema_version": 1"#,
+        r#""state_schema_version": -0"#,
+        1,
+    ));
+    assert_raw_primary_is_corrupt(fixture.replacen(
+        r#""previous_index": 1"#,
+        r#""previous_index": -0"#,
+        1,
+    ));
+    assert_raw_primary_is_corrupt(fixture.replacen(
+        r#""focused_agent_id": null"#,
+        r#""focused_agent_id": -0"#,
+        1,
+    ));
+}
+
+#[test]
 fn workbench_save_enforces_cas_and_idempotent_request_semantics() {
     let home = tempfile::tempdir().unwrap();
     let initial = load_workbench_for_home(home.path()).unwrap();
@@ -666,18 +745,27 @@ fn workbench_load_cleans_owned_stale_temps_and_reset_preserves_other_files() {
     let settings = home.path().join("settings");
     std::fs::create_dir_all(&settings).unwrap();
     let primary_temp = settings.join(".workbench.json.tmp");
-    let backup_temp = settings.join(".workbench.backup.json.deadbeef.tmp");
+    let backup_temp = settings.join(".workbench.backup.json.0123456789abcdef0123456789ABCDEF.tmp");
+    let user_copy_temp = settings.join(".workbench.json.user-copy.tmp");
+    let short_uuid_temp = settings.join(".workbench.backup.json.deadbeef.tmp");
+    let malformed_uuid_temp = settings.join(".workbench.json.0123456789abcdef0123456789abcdeg.tmp");
     let unrelated_temp = settings.join(".other.json.tmp");
     let sentinel = home.path().join("agents").join("keep.txt");
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     std::fs::write(&primary_temp, b"stale").unwrap();
     std::fs::write(&backup_temp, b"stale").unwrap();
+    std::fs::write(&user_copy_temp, b"keep").unwrap();
+    std::fs::write(&short_uuid_temp, b"keep").unwrap();
+    std::fs::write(&malformed_uuid_temp, b"keep").unwrap();
     std::fs::write(&unrelated_temp, b"keep").unwrap();
     std::fs::write(&sentinel, b"domain data").unwrap();
 
     let initial = load_workbench_for_home(home.path()).unwrap();
     assert!(!primary_temp.exists());
     assert!(!backup_temp.exists());
+    assert!(user_copy_temp.exists());
+    assert!(short_uuid_temp.exists());
+    assert!(malformed_uuid_temp.exists());
     assert!(unrelated_temp.exists());
 
     let request = WorkbenchResetRequest {

@@ -134,18 +134,31 @@ pub(crate) fn cleanup_atomic_temps(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     let legacy_name = format!(".{file_name}.tmp");
-    let unique_prefix = format!(".{file_name}.");
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let owned =
-            name == legacy_name || (name.starts_with(&unique_prefix) && name.ends_with(".tmp"));
+        let owned = name
+            .to_str()
+            .is_some_and(|name| is_owned_atomic_temp_name(name, file_name, &legacy_name));
         if owned && entry.file_type()?.is_file() {
             fs::remove_file(entry.path())?;
         }
     }
     Ok(())
+}
+
+fn is_owned_atomic_temp_name(name: &str, target_name: &str, legacy_name: &str) -> bool {
+    if name == legacy_name {
+        return true;
+    }
+    let prefix = format!(".{target_name}.");
+    let Some(identifier) = name
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    identifier.len() == 32 && identifier.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(not(windows))]
@@ -198,6 +211,57 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workbench_owned_atomic_temp_names_require_the_exact_legacy_or_uuid_grammar() {
+        let target = "workbench.json";
+        let legacy = ".workbench.json.tmp";
+        assert!(super::is_owned_atomic_temp_name(legacy, target, legacy));
+        assert!(super::is_owned_atomic_temp_name(
+            ".workbench.json.0123456789abcdef0123456789ABCDEF.tmp",
+            target,
+            legacy,
+        ));
+        for name in [
+            ".workbench.json.user-copy.tmp",
+            ".workbench.json.deadbeef.tmp",
+            ".workbench.json.0123456789abcdef0123456789abcdeg.tmp",
+            ".workbench.json.0123456789abcdef0123456789abcde.tmp",
+        ] {
+            assert!(!super::is_owned_atomic_temp_name(name, target, legacy));
+        }
+    }
+
+    #[test]
+    fn workbench_temp_cleanup_preserves_directories_and_symbolic_links() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("workbench.json");
+        let directory = temp
+            .path()
+            .join(".workbench.json.0123456789abcdef0123456789abcdef.tmp");
+        std::fs::create_dir(&directory).expect("temp-shaped directory");
+
+        let target = temp.path().join("user-copy.json");
+        std::fs::write(&target, b"keep").expect("symlink target");
+        let link = temp
+            .path()
+            .join(".workbench.json.fedcba9876543210fedcba9876543210.tmp");
+        #[cfg(unix)]
+        let link_created = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let link_created = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+
+        super::cleanup_atomic_temps(&path).expect("cleanup");
+
+        assert!(directory.is_dir());
+        assert_eq!(std::fs::read(&target).expect("target remains"), b"keep");
+        if link_created {
+            assert!(std::fs::symlink_metadata(&link)
+                .expect("link remains")
+                .file_type()
+                .is_symlink());
+        }
+    }
+
     #[test]
     fn write_json_atomic_replaces_existing_json_and_removes_temp_file() {
         let temp = tempfile::tempdir().expect("temp dir");

@@ -13,17 +13,22 @@ use crate::{
     paths::{workbench_backup_path_for_home, workbench_path_for_home},
 };
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor},
+    Deserialize, Serialize,
+};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
-    fs, io,
+    collections::{HashMap, HashSet, VecDeque},
+    ffi::OsString,
+    fmt, fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
 use thiserror::Error;
 
 const MAX_REQUEST_LEDGER_ENTRIES_PER_HOME: usize = 256;
+const MAX_REQUEST_LEDGER_HOMES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,14 +153,36 @@ struct HomeRequestLedger {
     order: VecDeque<String>,
 }
 
+#[derive(Debug, Default)]
+struct RequestLedgers {
+    homes: HashMap<PathBuf, HomeRequestLedger>,
+    order: VecDeque<PathBuf>,
+}
+
+impl RequestLedgers {
+    fn touch_home(&mut self, home: &Path) {
+        self.order.retain(|known| known != home);
+        self.order.push_back(home.to_path_buf());
+    }
+
+    fn prune_homes(&mut self) {
+        while self.homes.len() > MAX_REQUEST_LEDGER_HOMES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.homes.remove(&oldest);
+        }
+    }
+}
+
 static HOME_LOCKS: Lazy<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static REQUEST_LEDGERS: Lazy<Mutex<HashMap<PathBuf, HomeRequestLedger>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static REQUEST_LEDGERS: Lazy<Mutex<RequestLedgers>> =
+    Lazy::new(|| Mutex::new(RequestLedgers::default()));
 
 /// Loads the primary, last-known-good backup, or deterministic default for a home.
 pub fn load_workbench_for_home(home: &Path) -> Result<WorkbenchLoadResult, WorkbenchIoError> {
-    let home_key = home.to_path_buf();
+    let home_key = normalized_home_key(home);
     let home_lock = home_lock(&home_key);
     let _guard = lock_unpoisoned(&home_lock);
     resolved_to_load_result(resolve_state(&home_key)?)
@@ -166,7 +193,7 @@ pub fn save_workbench_for_home(
     home: &Path,
     request: WorkbenchSaveRequest,
 ) -> Result<WorkbenchSaveResult, WorkbenchIoError> {
-    let home_key = home.to_path_buf();
+    let home_key = normalized_home_key(home);
     let home_lock = home_lock(&home_key);
     let _guard = lock_unpoisoned(&home_lock);
     save_workbench_locked(&home_key, request)
@@ -177,7 +204,7 @@ pub fn reset_workbench_for_home(
     home: &Path,
     request: WorkbenchResetRequest,
 ) -> Result<WorkbenchResetResult, WorkbenchIoError> {
-    let home_key = home.to_path_buf();
+    let home_key = normalized_home_key(home);
     let home_lock = home_lock(&home_key);
     let _guard = lock_unpoisoned(&home_lock);
     reset_workbench_locked(&home_key, request)
@@ -484,6 +511,9 @@ fn classify_slot(path: &Path) -> Result<SlotState, WorkbenchIoError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(SlotState::Missing),
         Err(error) => return Err(error.into()),
     };
+    if strict_json_preflight(&bytes).is_err() {
+        return Ok(SlotState::Invalid);
+    }
     let value: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(value) => value,
         Err(_) => return Ok(SlotState::Invalid),
@@ -516,6 +546,163 @@ fn classify_slot(path: &Path) -> Result<SlotState, WorkbenchIoError> {
         bytes,
         token,
     })
+}
+
+struct StrictJsonSeed;
+
+impl<'de> DeserializeSeed<'de> for StrictJsonSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonVisitor)
+    }
+}
+
+struct StrictJsonVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an unambiguous JSON value")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        if value == 0.0 && value.is_sign_negative() {
+            Err(E::custom("negative zero is not canonical JSON state"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element_seed(StrictJsonSeed)?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(A::Error::custom("duplicate JSON object key"));
+            }
+            map.next_value_seed(StrictJsonSeed)?;
+        }
+        Ok(())
+    }
+}
+
+fn strict_json_preflight(bytes: &[u8]) -> Result<(), ()> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    StrictJsonSeed
+        .deserialize(&mut deserializer)
+        .map_err(|_| ())?;
+    deserializer.end().map_err(|_| ())?;
+    if contains_negative_zero_lexeme(bytes) {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn contains_negative_zero_lexeme(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => index = (index + 2).min(bytes.len()),
+                    b'"' => {
+                        index += 1;
+                        break;
+                    }
+                    _ => index += 1,
+                }
+            }
+            continue;
+        }
+        let negative = bytes[index] == b'-';
+        let starts_number = bytes[index].is_ascii_digit()
+            || (negative && bytes.get(index + 1).is_some_and(u8::is_ascii_digit));
+        if !starts_number {
+            index += 1;
+            continue;
+        }
+
+        let mut cursor = index + usize::from(negative);
+        let mut nonzero_significand = false;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            nonzero_significand |= bytes[cursor] != b'0';
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'.') {
+            cursor += 1;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                nonzero_significand |= bytes[cursor] != b'0';
+                cursor += 1;
+            }
+        }
+        if negative && !nonzero_significand {
+            return true;
+        }
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(*byte, b'e' | b'E'))
+        {
+            cursor += 1;
+            if bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(*byte, b'+' | b'-'))
+            {
+                cursor += 1;
+            }
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cursor += 1;
+            }
+        }
+        index = cursor;
+    }
+    false
 }
 
 fn persist_bytes(
@@ -685,8 +872,51 @@ fn reset_retry_token_matches(
     Ok(token_for(&default_bytes) == expected_token)
 }
 
+fn normalized_home_key(home: &Path) -> PathBuf {
+    let absolute = if home.is_absolute() {
+        home.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(home))
+            .unwrap_or_else(|_| home.to_path_buf())
+    };
+    let mut lexical = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            _ => lexical.push(component.as_os_str()),
+        }
+    }
+    if let Ok(canonical) = fs::canonicalize(&lexical) {
+        return canonical;
+    }
+
+    let mut probe = lexical.as_path();
+    let mut suffix = Vec::<OsString>::new();
+    loop {
+        if let Ok(mut canonical) = fs::canonicalize(probe) {
+            for component in suffix.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+        let Some(name) = probe.file_name() else {
+            return lexical;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = probe.parent() else {
+            return lexical;
+        };
+        probe = parent;
+    }
+}
+
 fn home_lock(home: &Path) -> Arc<Mutex<()>> {
     let mut locks = lock_unpoisoned(&HOME_LOCKS);
+    locks.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = locks.get(home).and_then(Weak::upgrade) {
         return lock;
     }
@@ -696,15 +926,22 @@ fn home_lock(home: &Path) -> Arc<Mutex<()>> {
 }
 
 fn ledger_entry(home: &Path, request_id: &str) -> Option<RequestLedgerEntry> {
-    lock_unpoisoned(&REQUEST_LEDGERS)
+    let mut ledgers = lock_unpoisoned(&REQUEST_LEDGERS);
+    let entry = ledgers
+        .homes
         .get(home)
         .and_then(|ledger| ledger.entries.get(request_id))
-        .cloned()
+        .cloned();
+    if ledgers.homes.contains_key(home) {
+        ledgers.touch_home(home);
+    }
+    entry
 }
 
 fn remember_request(home: &Path, request_id: String, entry: RequestLedgerEntry) {
     let mut ledgers = lock_unpoisoned(&REQUEST_LEDGERS);
-    let ledger = ledgers.entry(home.to_path_buf()).or_default();
+    ledgers.touch_home(home);
+    let ledger = ledgers.homes.entry(home.to_path_buf()).or_default();
     if !ledger.entries.contains_key(&request_id) {
         ledger.order.push_back(request_id.clone());
     }
@@ -714,6 +951,7 @@ fn remember_request(home: &Path, request_id: String, entry: RequestLedgerEntry) 
             ledger.entries.remove(&oldest);
         }
     }
+    ledgers.prune_homes();
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -739,6 +977,41 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn strict_json_preflight_rejects_ambiguity_without_misreading_exponent_signs() {
+        assert!(strict_json_preflight(br#"{"value":1e-0}"#).is_ok());
+        assert!(strict_json_preflight(br#"{"value":-0}"#).is_err());
+        assert!(strict_json_preflight(br#"{"value":1,"value":2}"#).is_err());
+        assert!(strict_json_preflight(br#"{"value":1} true"#).is_err());
+    }
+
+    #[test]
+    fn normalized_home_keys_share_locks_and_outer_ledgers_are_bounded() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let alias = home.join("..").join("home").join(".");
+        let canonical_key = normalized_home_key(&home);
+        let alias_key = normalized_home_key(&alias);
+        assert_eq!(canonical_key, alias_key);
+        let canonical_lock = home_lock(&canonical_key);
+        let alias_lock = home_lock(&alias_key);
+        assert!(Arc::ptr_eq(&canonical_lock, &alias_lock));
+
+        let mut ledgers = RequestLedgers::default();
+        for index in 0..=MAX_REQUEST_LEDGER_HOMES {
+            let key = PathBuf::from(format!("home-{index}"));
+            ledgers.touch_home(&key);
+            ledgers.homes.insert(key, HomeRequestLedger::default());
+            ledgers.prune_homes();
+        }
+        assert_eq!(ledgers.homes.len(), MAX_REQUEST_LEDGER_HOMES);
+        assert!(!ledgers.homes.contains_key(Path::new("home-0")));
+        assert!(ledgers
+            .homes
+            .contains_key(Path::new(&format!("home-{MAX_REQUEST_LEDGER_HOMES}"))));
     }
 
     fn crash_points() -> Vec<AtomicFaultPoint> {
