@@ -144,14 +144,14 @@ export function validateWorkbenchDocument(value: unknown): WorkbenchValidationRe
 export function applyWorkbenchCommand(document: WorkbenchDocumentV1, command: WorkbenchCommand): WorkbenchCommandResult;
 ```
 
-- [ ] **Step 1: Add exact V1 DTO types** from the spec to `src/types/index.ts`, including node/group/surface/closed/shell records and validation/result types. All properties remain `snake_case`.
-- [ ] **Step 2: Write failing tests** for the default empty group/Home derivation, open/focus, close/reopen (20-entry cap), split/move/join/close-group behavior, ratio clamp/rejection, shell update allowlist, duplicate/missing references, cycles, 64-node depth, state/document byte limits, and unknown opaque state preservation.
-- [ ] **Step 3: Run** `npm run test -- src/features/workbench/workbenchModel.test.ts`. **Expected:** FAIL on missing implementation.
-- [ ] **Step 4: Implement validation and immutable commands.** Validate both pre-state and post-state; return the original object on failure; never silently normalize corrupt state.
-- [ ] **Step 5: Add deterministic randomized command sequences** (fixed PRNG seed, at least 10,000 operations across several seeds). After every accepted operation assert unique IDs, one tree reference per group, one tab reference per open surface, valid active IDs, no cycles, bounded ratios, and no lost surfaces outside `recently_closed`.
-- [ ] **Step 6: Add the shared JSON fixture** and a frontend contract test that parses it into the exact V1 DTO.
-- [ ] **Step 7: Run** the focused test and `npm run lint`. **Expected:** PASS with zero `any`.
-- [ ] **Step 8: Commit** `feat(workbench): add canonical workbench model`.
+- [x] **Step 1: Add exact V1 DTO types** from the spec to `src/types/index.ts`, including node/group/surface/closed/shell records and validation/result types. All properties remain `snake_case`.
+- [x] **Step 2: Write failing tests** for the default empty group/Home derivation, open/focus, close/reopen (20-entry cap), split/move/join/close-group behavior, ratio clamp/rejection, shell update allowlist, duplicate/missing references, cycles, 64-node depth, state/document byte limits, and unknown opaque state preservation.
+- [x] **Step 3: Run** `npm run test -- src/features/workbench/workbenchModel.test.ts`. **Expected:** FAIL on missing implementation.
+- [x] **Step 4: Implement validation and immutable commands.** Validate both pre-state and post-state; return the original object on failure; never silently normalize corrupt state.
+- [x] **Step 5: Add deterministic randomized command sequences** (fixed PRNG seed, at least 10,000 operations across several seeds). After every accepted operation assert unique IDs, one tree reference per group, one tab reference per open surface, valid active IDs, no cycles, bounded ratios, and no lost surfaces outside `recently_closed`.
+- [x] **Step 6: Add the shared JSON fixture** and a frontend contract test that parses it into the exact V1 DTO.
+- [x] **Step 7: Run** the focused test and `npm run lint`. **Expected:** PASS with zero `any`.
+- [x] **Step 8: Commit** `feat(workbench): add canonical workbench model`.
 
 ### Task 3: Add the surface registry, navigation service, and canonical store
 
