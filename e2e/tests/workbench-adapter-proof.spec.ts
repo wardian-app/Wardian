@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 type ProofModelSnapshot = {
+  active_group_id: string;
   groups: Array<{ group_id: string; surface_ids: string[] }>;
 };
 
@@ -117,6 +118,29 @@ test("Dockview remains a Wardian-driven, replaceable workbench renderer", async 
   const tabs = proof.getByRole("tab");
   await expect(tabs.filter({ hasText: "Terminal Owner" })).toHaveAttribute("aria-selected", "true");
   expect(await tabs.evaluateAll((elements) => elements.every((element) => element.getAttribute("role") === "tab"))).toBe(true);
+  const tabRelationships = await tabs.evaluateAll((elements) => elements.map((tab) => {
+    const controlsId = tab.getAttribute("aria-controls");
+    const controlledPanel = controlsId ? document.getElementById(controlsId) : null;
+    return {
+      tab_id: tab.id,
+      controls_id: controlsId,
+      selected: tab.getAttribute("aria-selected") === "true",
+      controlled_panel_exists: controlledPanel !== null,
+      controlled_panel_role: controlledPanel?.getAttribute("role") ?? null,
+      controlled_panel_labelled_by: controlledPanel?.getAttribute("aria-labelledby") ?? null,
+    };
+  }));
+  expect(tabRelationships.every((relationship) => relationship.controls_id)).toBe(true);
+  expect(tabRelationships.every((relationship) => relationship.controlled_panel_exists)).toBe(true);
+  expect(tabRelationships.every((relationship) => relationship.controlled_panel_role === "tabpanel")).toBe(true);
+  expect(new Set(tabRelationships.map((relationship) => relationship.controls_id)).size).toBe(4);
+  for (const controlsId of new Set(tabRelationships.map((relationship) => relationship.controls_id))) {
+    const groupRelationships = tabRelationships.filter((relationship) => relationship.controls_id === controlsId);
+    const selectedRelationships = groupRelationships.filter((relationship) => relationship.selected);
+    expect(selectedRelationships).toHaveLength(1);
+    expect(selectedRelationships[0].controlled_panel_labelled_by).toBe(selectedRelationships[0].tab_id);
+  }
+  await expect(proof.locator('[role="tabpanel"]')).toHaveCount(4);
 
   const terminalHosts = proof.locator('[data-testid^="proof-terminal-host-"]');
   await expect(terminalHosts).toHaveCount(4);
@@ -147,12 +171,31 @@ test("Dockview remains a Wardian-driven, replaceable workbench renderer", async 
   await page.keyboard.press("Control+]");
   await expect(tabs.filter({ hasText: "Graph" })).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("F6");
-  const focusedGroupId = await page.evaluate(() => {
+  await expect.poll(async () => page.evaluate(() => {
+    const descriptor = document.activeElement
+      ?.closest('[role="tab"]')
+      ?.querySelector<HTMLElement>("[data-group-id][data-surface-id]");
+    return descriptor?.dataset.groupId ?? null;
+  })).toBe("proof-group-2");
+  const focusedTab = await page.evaluate(() => {
     const active = document.activeElement;
-    return active?.querySelector<HTMLElement>("[data-group-id]")?.dataset.groupId
-      ?? (active instanceof HTMLElement ? active.dataset.groupId : undefined);
+    const tab = active instanceof HTMLElement && active.matches('[role="tab"]')
+      ? active
+      : active?.closest('[role="tab"]');
+    const descriptor = tab?.querySelector<HTMLElement>("[data-group-id][data-surface-id]");
+    return {
+      tab_id: tab?.id ?? null,
+      group_id: descriptor?.dataset.groupId ?? null,
+      surface_id: descriptor?.dataset.surfaceId ?? null,
+    };
   });
-  expect(focusedGroupId).not.toBe("proof-group-1");
+  const focusModel = await page.evaluate(() => window.__WARDIAN_WORKBENCH_PROOF__?.getModel());
+  expect(focusedTab.tab_id).toMatch(/^dv-tab-/);
+  expect(focusedTab.group_id).toBe("proof-group-2");
+  expect(focusedTab.surface_id).toBe("garden");
+  const focusedGroup = focusModel?.groups.find((group) => group.group_id === focusedTab.group_id);
+  expect(focusedGroup).toBeDefined();
+  expect(focusedGroup?.surface_ids).toContain(focusedTab.surface_id);
 
   await proof.locator('[data-testid="proof-surface-terminal-owner"]').evaluate((surface) => {
     window.__proofOwnerSurface = surface;
@@ -174,12 +217,28 @@ test("Dockview remains a Wardian-driven, replaceable workbench renderer", async 
     (surface) => window.__proofOwnerSurface === surface,
   )).toBe(true);
 
+  await page.evaluate(() => window.__WARDIAN_WORKBENCH_PROOF__?.commands
+    .moveSurface("terminal-owner", "proof-group-1"));
+  await expect.poll(async () => page.evaluate(() => {
+    const model = window.__WARDIAN_WORKBENCH_PROOF__?.getModel();
+    const group1 = model?.groups.find((group) => group.group_id === "proof-group-1");
+    const group2 = model?.groups.find((group) => group.group_id === "proof-group-2");
+    return group1?.surface_ids.includes("terminal-owner") === true
+      && group2?.surface_ids.includes("terminal-owner") === false;
+  })).toBe(true);
+  const ownerBeforeKeyboard = proof.locator('[data-testid="proof-surface-terminal-owner"]');
+  await expect(ownerBeforeKeyboard).toHaveAttribute("data-mount-count", "1");
   await tabs.filter({ hasText: "Terminal Owner" }).focus();
   await page.keyboard.press("Alt+Shift+ArrowRight");
   await expect.poll(async () => page.evaluate(() => {
     const model = window.__WARDIAN_WORKBENCH_PROOF__?.getModel() as ProofModelSnapshot | undefined;
-    return model?.groups.find((group) => group.group_id === "proof-group-2")?.surface_ids.includes("terminal-owner") ?? false;
+    const group1 = model?.groups.find((group) => group.group_id === "proof-group-1");
+    const group2 = model?.groups.find((group) => group.group_id === "proof-group-2");
+    return group1?.surface_ids.includes("terminal-owner") === false
+      && group2?.surface_ids.includes("terminal-owner") === true;
   })).toBe(true);
+  expect(await ownerBeforeKeyboard.evaluate((surface) => window.__proofOwnerSurface === surface)).toBe(true);
+  await expect(ownerBeforeKeyboard).toHaveAttribute("data-mount-count", "1");
 
   await tabs.filter({ hasText: "Graph" }).click();
   await expect.poll(async () => page.evaluate(() => (
@@ -223,6 +282,9 @@ declare global {
         surface_mounts: Record<string, number>;
       };
       getModel: () => ProofModelSnapshot;
+      commands: {
+        moveSurface: (surfaceId: string, targetGroupId: string) => void;
+      };
     };
   }
 }

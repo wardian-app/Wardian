@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "measured_at": "2026-07-10T10:22:30.792Z",
+  "schema_version": 2,
+  "measured_at": "2026-07-10T10:46:35.500Z",
   "environment": {
     "platform": "win32",
     "arch": "x64",
@@ -143,89 +143,93 @@
   "runtime": {
     "browser_version": "147.0.7727.15",
     "startup_measurement": "fresh browser context after Vite transform warm-up",
-    "startup_ms": 118.87,
-    "heavy_renderers_ready_ms": 234.39,
+    "startup_ms": 116.94,
+    "heavy_renderers_ready_ms": 243.04,
     "tab_switch_ms": {
       "samples": [
-        23.5,
-        26.6,
-        29.8,
-        29.8,
-        32.3,
-        32.5,
+        27.9,
+        29.4,
+        31.9,
+        32.4,
+        32.9,
+        32.9,
         33,
-        33,
-        33,
+        33.1,
+        33.3,
+        33.3,
         33.4,
-        34,
-        34,
-        34.1,
-        34.2,
-        37.3,
-        39.3
+        33.7,
+        33.8,
+        33.9,
+        34.6,
+        38.8
       ],
-      "median": 33,
-      "p95": 39.3,
-      "max": 39.3
+      "median": 33.1,
+      "p95": 38.8,
+      "max": 38.8
     },
     "drag_ms": {
       "samples": [
-        281.4,
-        281.47,
-        285.52
+        274.33,
+        277.98,
+        291.04
       ],
-      "median": 281.47,
-      "p95": 285.52,
-      "max": 285.52
+      "median": 277.98,
+      "p95": 291.04,
+      "max": 291.04
     },
-    "terminal_output_500_lines_ms": 22.4,
+    "terminal_output_500_lines_ms": 16.3,
     "react_commit_measurement": "model publish to React layout effect",
-    "react_commit_count": 31,
+    "react_commit_count": 29,
     "react_commits": {
       "samples": [
         0.3,
         0.3,
-        0.3,
-        0.3,
-        0.4,
         0.4,
         0.8,
         0.8,
         0.9,
         0.9,
         1,
+        1.1,
+        1.1,
+        1.1,
         1.2,
         1.2,
-        1.3,
-        1.3,
-        1.3,
+        1.2,
+        1.4,
+        1.4,
         1.5,
         1.5,
+        1.6,
+        1.6,
+        1.7,
+        1.7,
         1.7,
         1.8,
-        1.9,
-        2.2,
-        2.2,
-        2.2,
-        2.3,
-        2.4,
-        2.7,
-        2.8,
-        5.8,
-        13.1,
-        13.1
+        1.8,
+        2.9,
+        7.3,
+        7.5,
+        10.9
       ],
-      "median": 1.3,
-      "p95": 13.1,
-      "max": 13.1
+      "median": 1.4,
+      "p95": 7.5,
+      "max": 10.9
     },
     "model_command_ms": {
       "samples": [
+        0,
+        0.1,
+        0.1,
         0.2,
         0.2,
-        0.2,
-        0.2,
-        0.2,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
         0.3,
         0.3,
         0.3,
@@ -233,24 +237,23 @@
         0.3,
         0.4,
         0.4,
-        0.4,
-        0.4,
-        0.5,
-        0.5,
         0.6,
         0.6,
+        0.8,
+        0.9,
         1,
-        1,
-        1.1,
-        1.5
+        1.3,
+        1.4
       ],
-      "median": 0.4,
-      "p95": 1.1,
-      "max": 1.5
+      "median": 0.3,
+      "p95": 1.3,
+      "max": 1.4
     },
     "renderer_counts": {
       "mounted_surfaces": 20,
       "mounted_terminal_hosts": 4,
+      "mounted_terminal_owners": 1,
+      "mounted_terminal_mirrors": 3,
       "mounted_graph_wrappers": 1,
       "mounted_garden_wrappers": 1,
       "canvas_elements": 18,
@@ -306,5 +309,83 @@
     "dockview_serialization_reference_count": 0,
     "renderer_mode": "always",
     "production_route_present": false
+  },
+  "promotion": {
+    "schema_version": 1,
+    "passed": true,
+    "checks": [
+      {
+        "metric": "bundle_delta_raw_bytes",
+        "observed": 117598,
+        "operator": "<=",
+        "limit": 160000,
+        "unit": "bytes",
+        "passed": true
+      },
+      {
+        "metric": "bundle_delta_gzip_bytes",
+        "observed": 13493,
+        "operator": "<=",
+        "limit": 20000,
+        "unit": "bytes",
+        "passed": true
+      },
+      {
+        "metric": "startup_ms",
+        "observed": 116.94,
+        "operator": "<=",
+        "limit": 650,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "heavy_renderers_ready_ms",
+        "observed": 243.04,
+        "operator": "<=",
+        "limit": 700,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "tab_switch_p95_ms",
+        "observed": 38.8,
+        "operator": "<=",
+        "limit": 60,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "model_command_p95_ms",
+        "observed": 1.3,
+        "operator": "<=",
+        "limit": 5,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "react_commit_p95_ms",
+        "observed": 7.5,
+        "operator": "<=",
+        "limit": 16.7,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "pointer_drag_p95_ms",
+        "observed": 291.04,
+        "operator": "<=",
+        "limit": 350,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "terminal_output_500_lines_ms",
+        "observed": 16.3,
+        "operator": "<=",
+        "limit": 35,
+        "unit": "ms",
+        "passed": true
+      }
+    ]
   }
 }

@@ -26,7 +26,10 @@ The browser proof mounts the module through a same-origin test document served
 by Vite. `App.tsx` is unchanged, there is no `?workbench-proof=1` or other
 prototype navigation route, and a production build cannot reach the harness.
 Every proof command ran with an explicit OS-temp `WARDIAN_HOME` named
-`wardian-workbench-proof-*`.
+`wardian-workbench-proof-*`. The measurement command canonicalizes the nearest
+existing parent before any directory creation, rejects relative paths, the
+profile and production home, the workspace root, and symlink or junction
+escapes. `--self-test` exercises those guards without running a browser build.
 
 ## Candidate facts
 
@@ -74,13 +77,13 @@ well as Dockview.
 |---|---:|---:|---|
 | Production bundle delta, raw | +117,598 bytes | +160,000 bytes | Accept |
 | Production bundle delta, gzip | +13,493 bytes | +20,000 bytes | Accept |
-| 20-tab/four-group ready | 118.87 ms | 650 ms | Accept |
-| Heavy renderers ready | 234.39 ms | 700 ms | Accept |
-| Tab switch median / p95 | 33.0 / 39.3 ms | 60 ms p95 | Accept |
-| Model command median / p95 | 0.4 / 1.1 ms | 5 ms p95 | Accept |
-| React publish-to-layout-effect median / p95 | 1.3 / 13.1 ms | 16.7 ms p95 | Accept |
-| Real pointer drag median / p95 | 281.47 / 285.52 ms | 350 ms p95 | Accept |
-| 500-line output fanout to four xterms | 22.4 ms | 35 ms | Accept |
+| 20-tab/four-group ready | 116.94 ms | 650 ms | Accept |
+| Heavy renderers ready | 243.04 ms | 700 ms | Accept |
+| Tab switch median / p95 | 33.1 / 38.8 ms | 60 ms p95 | Accept |
+| Model command median / p95 | 0.3 / 1.3 ms | 5 ms p95 | Accept |
+| React publish-to-layout-effect median / p95 | 1.4 / 7.5 ms | 16.7 ms p95 | Accept |
+| Real pointer drag median / p95 | 277.98 / 291.04 ms | 350 ms p95 | Accept |
+| 500-line output fanout to four xterms | 16.3 ms | 35 ms | Accept |
 
 Startup uses a fresh browser context after warming Vite's source-transformation
 cache, so it does not count one-time dev-server compilation as renderer startup.
@@ -89,6 +92,13 @@ the model convergence wait; it is an end-to-end interaction number rather than
 an isolated Dockview handler cost. These ceilings are initial same-machine
 regression alarms, not cross-device product promises. CI or supported-device
 baselines should replace them when those environments are selected.
+
+The baseline uses schema version 2 and records every ceiling as a
+machine-readable `promotion.checks` entry. The command validates non-empty,
+finite timing samples, exact fixture and renderer counts, WebGL observations,
+surface lifecycle, accessibility counts, and the serialization boundary before
+writing the baseline. Missing or invalid evidence and any failed ceiling exit
+non-zero instead of emitting a zero-filled or passing result.
 
 ## Renderer and terminal observations
 
@@ -110,9 +120,13 @@ real-provider test responsibilities.
 ## Accessibility findings
 
 Dockview rendered 20 `role="tab"` elements in four `role="tablist"` elements.
-Each group had one selected tab and one roving `tabindex="0"`. `Ctrl+]` tab
-traversal and `F6` group traversal worked, and pointer movement had a tested
-keyboard command equivalent.
+Each tab's `aria-controls` target existed and resolved to one of exactly four
+Dockview-owned `role="tabpanel"` elements. Each group had one selected tab, one
+roving `tabindex="0"`, and an active panel labelled by that selected tab.
+`Ctrl+]` tab traversal worked, and deterministic `F6` traversal moved focus
+from group 1's Graph tab to group 2's Garden tab. Pointer movement and the
+separate `Alt+Shift+ArrowRight` model command both moved the terminal owner from
+group 1 to group 2 without changing renderer identity or mount count.
 
 The gap is split separators: three Dockview sash elements exposed neither
 `role="separator"` nor `aria-valuenow`. This is fixable within the replaceable

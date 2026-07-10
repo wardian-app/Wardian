@@ -13,31 +13,47 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const baselinePath = path.join(repoRoot, "docs", "research", "workbench-navigation", "dockview-baseline.json");
 const harnessPath = path.join(repoRoot, "src", "layout", "workbench", "proof", "DockviewEvaluationHarness.tsx");
 const viteConfigPath = path.join(repoRoot, "vite.config.ts");
+const PROMOTION_THRESHOLDS = Object.freeze({
+  bundle_delta_raw_bytes: { limit: 160000, unit: "bytes" },
+  bundle_delta_gzip_bytes: { limit: 20000, unit: "bytes" },
+  startup_ms: { limit: 650, unit: "ms" },
+  heavy_renderers_ready_ms: { limit: 700, unit: "ms" },
+  tab_switch_p95_ms: { limit: 60, unit: "ms" },
+  model_command_p95_ms: { limit: 5, unit: "ms" },
+  react_commit_p95_ms: { limit: 16.7, unit: "ms" },
+  pointer_drag_p95_ms: { limit: 350, unit: "ms" },
+  terminal_output_500_lines_ms: { limit: 35, unit: "ms" },
+});
 
 function resolveIsolatedWardianHome(rawValue) {
   if (typeof rawValue !== "string" || rawValue.trim() === "") {
     throw new Error("WARDIAN_HOME is required and must name an isolated temporary directory");
   }
-  const normalized = path.resolve(rawValue.trim());
-  const profileRoot = path.resolve(os.homedir());
-  const productionHome = path.resolve(profileRoot, ".wardian");
-  if (samePath(normalized, profileRoot)) {
+  const trimmed = rawValue.trim();
+  if (!path.isAbsolute(trimmed)) {
+    throw new Error("WARDIAN_HOME must be an absolute path; relative paths are rejected");
+  }
+  const normalized = path.normalize(trimmed);
+  const profileRoot = canonicalizePath(path.resolve(os.homedir()));
+  const productionHome = canonicalizePath(path.resolve(os.homedir(), ".wardian"));
+  const workspaceRoot = canonicalizePath(repoRoot);
+  if (samePath(normalized, path.resolve(os.homedir()))) {
     throw new Error("WARDIAN_HOME must not resolve to the user profile root");
   }
-  if (samePath(normalized, productionHome)) {
+  if (samePath(normalized, path.resolve(os.homedir(), ".wardian"))) {
     throw new Error("WARDIAN_HOME must not resolve to the production Wardian home");
   }
-  const resolved = fsSync.existsSync(normalized) ? fsSync.realpathSync.native(normalized) : normalized;
+  const resolved = canonicalizePath(normalized);
   if (samePath(resolved, profileRoot)) {
     throw new Error("WARDIAN_HOME must not resolve to the user profile root");
   }
   if (samePath(resolved, productionHome)) {
     throw new Error("WARDIAN_HOME must not resolve to the production Wardian home");
   }
-  const normalizedTempRoot = path.resolve(os.tmpdir());
-  const tempRoot = fsSync.existsSync(normalizedTempRoot)
-    ? fsSync.realpathSync.native(normalizedTempRoot)
-    : normalizedTempRoot;
+  if (samePath(resolved, workspaceRoot)) {
+    throw new Error("WARDIAN_HOME must not resolve to the Wardian workspace root");
+  }
+  const tempRoot = canonicalizePath(path.resolve(os.tmpdir()));
   const relativeToTemp = path.relative(tempRoot, resolved);
   const insideTemp = relativeToTemp !== ""
     && !relativeToTemp.startsWith(`..${path.sep}`)
@@ -49,6 +65,25 @@ function resolveIsolatedWardianHome(rawValue) {
     );
   }
   return resolved;
+}
+
+function canonicalizePath(candidate) {
+  const absolute = path.normalize(candidate);
+  if (!path.isAbsolute(absolute)) {
+    throw new Error(`Cannot canonicalize a non-absolute path: ${candidate}`);
+  }
+  const missingSegments = [];
+  let existingAncestor = absolute;
+  while (!fsSync.existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor);
+    if (samePath(parent, existingAncestor)) {
+      throw new Error(`No existing ancestor was found for path: ${candidate}`);
+    }
+    missingSegments.unshift(path.basename(existingAncestor));
+    existingAncestor = parent;
+  }
+  const canonicalAncestor = fsSync.realpathSync.native(existingAncestor);
+  return path.resolve(canonicalAncestor, ...missingSegments);
 }
 
 function samePath(left, right) {
@@ -265,6 +300,8 @@ async function measureRuntime() {
         renderer_counts: {
           mounted_surfaces: Object.keys(runtime.metrics.surface_mounts).length,
           mounted_terminal_hosts: document.querySelectorAll('[data-testid^="proof-terminal-host-"]').length,
+          mounted_terminal_owners: document.querySelectorAll('[data-terminal-mode="owner"]').length,
+          mounted_terminal_mirrors: document.querySelectorAll('[data-terminal-mode="mirror"]').length,
           mounted_graph_wrappers: document.querySelectorAll('[data-testid="proof-graph-wrapper"]').length,
           mounted_garden_wrappers: document.querySelectorAll('[data-testid="proof-garden-wrapper"]').length,
           canvas_elements: document.querySelectorAll("canvas").length,
@@ -291,13 +328,13 @@ async function measureRuntime() {
       startup_measurement: "fresh browser context after Vite transform warm-up",
       startup_ms: round(startupMs),
       heavy_renderers_ready_ms: round(heavyRenderersReadyMs),
-      tab_switch_ms: summarize(tabSwitchMs),
-      drag_ms: summarize(dragMs),
+      tab_switch_ms: summarize(tabSwitchMs, "tab switch"),
+      drag_ms: summarize(dragMs, "pointer drag"),
       terminal_output_500_lines_ms: round(terminalOutputMs),
       react_commit_measurement: "model publish to React layout effect",
       react_commit_count: observed.metrics.react_commit_count,
-      react_commits: summarize(observed.metrics.react_commit_duration_ms),
-      model_command_ms: summarize(observed.metrics.model_command_duration_ms),
+      react_commits: summarize(observed.metrics.react_commit_duration_ms, "React commit"),
+      model_command_ms: summarize(observed.metrics.model_command_duration_ms, "model command"),
       renderer_counts: observed.renderer_counts,
       surface_mounts: observed.metrics.surface_mounts,
       surface_unmounts: observed.metrics.surface_unmounts,
@@ -381,9 +418,16 @@ function proofHostHtml() {
     </html>`;
 }
 
-function summarize(values) {
-  const samples = values.map(round).sort((left, right) => left - right);
-  if (samples.length === 0) return { samples: [], median: 0, p95: 0, max: 0 };
+function summarize(values, label = "timing") {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error(`${label} samples must be a non-empty array`);
+  }
+  const samples = values.map((value, index) => {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`${label} sample ${index} must be a finite non-negative number`);
+    }
+    return round(value);
+  }).sort((left, right) => left - right);
   return {
     samples,
     median: percentile(samples, 0.5),
@@ -400,6 +444,340 @@ function round(value) {
   return Math.round(value * 100) / 100;
 }
 
+function validatePromotionBaseline(baseline) {
+  const validationErrors = [];
+  const scenario = baseline?.scenario ?? {};
+  const bundle = baseline?.bundle ?? {};
+  const runtime = baseline?.runtime ?? {};
+  const rendererCounts = runtime.renderer_counts ?? {};
+  const accessibility = runtime.accessibility ?? {};
+  const adapterBoundary = baseline?.adapter_boundary ?? {};
+  const expectExact = (actual, expected, label) => {
+    if (actual !== expected) {
+      validationErrors.push(`${label} must equal ${JSON.stringify(expected)}; received ${JSON.stringify(actual)}`);
+    }
+  };
+  const expectFinite = (value, label, minimum = 0) => {
+    if (!Number.isFinite(value) || value < minimum) {
+      validationErrors.push(`${label} must be a finite number >= ${minimum}; received ${JSON.stringify(value)}`);
+    }
+  };
+  const expectAtLeast = (actual, minimum, label) => {
+    if (!Number.isFinite(actual) || actual < minimum) {
+      validationErrors.push(`${label} must be >= ${minimum}; received ${JSON.stringify(actual)}`);
+    }
+  };
+
+  expectExact(baseline?.schema_version, 2, "schema_version");
+  expectExact(scenario.group_count, 4, "scenario.group_count");
+  expectExact(scenario.tab_count, 20, "scenario.tab_count");
+  expectExact(scenario.xterm_owner_count, 1, "scenario.xterm_owner_count");
+  expectExact(scenario.xterm_mirror_count, 3, "scenario.xterm_mirror_count");
+  expectExact(runtime.final_group_count, 4, "runtime.final_group_count");
+  expectExact(runtime.final_tab_count, 20, "runtime.final_tab_count");
+
+  expectFinite(bundle.production_delta_raw_bytes, "bundle.production_delta_raw_bytes");
+  expectFinite(bundle.production_delta_gzip_bytes, "bundle.production_delta_gzip_bytes");
+  expectFinite(runtime.startup_ms, "runtime.startup_ms");
+  expectFinite(runtime.heavy_renderers_ready_ms, "runtime.heavy_renderers_ready_ms");
+  expectFinite(runtime.terminal_output_500_lines_ms, "runtime.terminal_output_500_lines_ms");
+
+  const timingSummaries = [
+    [runtime.tab_switch_ms, "runtime.tab_switch_ms"],
+    [runtime.drag_ms, "runtime.drag_ms"],
+    [runtime.react_commits, "runtime.react_commits"],
+    [runtime.model_command_ms, "runtime.model_command_ms"],
+  ];
+  for (const [summary, label] of timingSummaries) {
+    if (!summary || typeof summary !== "object") {
+      validationErrors.push(`${label} must be a timing summary`);
+      continue;
+    }
+    try {
+      const expectedSummary = summarize(summary.samples, label);
+      for (const field of ["median", "p95", "max"]) {
+        expectFinite(summary[field], `${label}.${field}`);
+        if (Number.isFinite(summary[field]) && summary[field] !== expectedSummary[field]) {
+          validationErrors.push(
+            `${label}.${field} must match its samples; expected ${expectedSummary[field]}, received ${summary[field]}`,
+          );
+        }
+      }
+    } catch (error) {
+      validationErrors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  if (Array.isArray(runtime.react_commits?.samples)) {
+    expectExact(runtime.react_commit_count, runtime.react_commits.samples.length, "runtime.react_commit_count");
+  }
+
+  expectExact(rendererCounts.mounted_surfaces, 20, "runtime.renderer_counts.mounted_surfaces");
+  expectExact(rendererCounts.mounted_terminal_hosts, 4, "runtime.renderer_counts.mounted_terminal_hosts");
+  expectExact(rendererCounts.mounted_terminal_owners, 1, "runtime.renderer_counts.mounted_terminal_owners");
+  expectExact(rendererCounts.mounted_terminal_mirrors, 3, "runtime.renderer_counts.mounted_terminal_mirrors");
+  expectExact(rendererCounts.mounted_graph_wrappers, 1, "runtime.renderer_counts.mounted_graph_wrappers");
+  expectExact(rendererCounts.mounted_garden_wrappers, 1, "runtime.renderer_counts.mounted_garden_wrappers");
+  expectAtLeast(rendererCounts.canvas_elements, 4, "runtime.renderer_counts.canvas_elements");
+  expectAtLeast(rendererCounts.webgl_canvases, 4, "runtime.renderer_counts.webgl_canvases");
+  expectExact(runtime.terminal_webgl_loaded, 4, "runtime.terminal_webgl_loaded");
+  expectExact(runtime.terminal_webgl_failures, 0, "runtime.terminal_webgl_failures");
+
+  const surfaceMounts = runtime.surface_mounts;
+  if (!surfaceMounts || typeof surfaceMounts !== "object" || Array.isArray(surfaceMounts)) {
+    validationErrors.push("runtime.surface_mounts must be an object");
+  } else {
+    expectExact(Object.keys(surfaceMounts).length, 20, "runtime.surface_mounts entry count");
+    for (const [surfaceId, mountCount] of Object.entries(surfaceMounts)) {
+      expectExact(mountCount, 1, `runtime.surface_mounts.${surfaceId}`);
+    }
+  }
+  const surfaceUnmounts = runtime.surface_unmounts;
+  if (!surfaceUnmounts || typeof surfaceUnmounts !== "object" || Array.isArray(surfaceUnmounts)) {
+    validationErrors.push("runtime.surface_unmounts must be an object");
+  } else {
+    expectExact(Object.keys(surfaceUnmounts).length, 0, "runtime.surface_unmounts entry count");
+  }
+  const terminalWrites = runtime.terminal_write_chars;
+  if (!terminalWrites || typeof terminalWrites !== "object" || Array.isArray(terminalWrites)) {
+    validationErrors.push("runtime.terminal_write_chars must be an object");
+  } else {
+    expectExact(Object.keys(terminalWrites).length, 4, "runtime.terminal_write_chars entry count");
+    for (const terminalId of ["terminal-owner", "terminal-mirror-1", "terminal-mirror-2", "terminal-mirror-3"]) {
+      expectFinite(terminalWrites[terminalId], `runtime.terminal_write_chars.${terminalId}`, 1);
+    }
+  }
+
+  expectExact(accessibility.tab_count, 20, "runtime.accessibility.tab_count");
+  expectExact(accessibility.tablist_count, 4, "runtime.accessibility.tablist_count");
+  expectExact(accessibility.selected_tab_count, 4, "runtime.accessibility.selected_tab_count");
+  expectExact(accessibility.roving_tabstop_count, 4, "runtime.accessibility.roving_tabstop_count");
+  expectExact(adapterBoundary.dockview_json_persisted, false, "adapter_boundary.dockview_json_persisted");
+  expectExact(
+    adapterBoundary.dockview_serialization_reference_count,
+    0,
+    "adapter_boundary.dockview_serialization_reference_count",
+  );
+
+  const thresholdObservations = {
+    bundle_delta_raw_bytes: bundle.production_delta_raw_bytes,
+    bundle_delta_gzip_bytes: bundle.production_delta_gzip_bytes,
+    startup_ms: runtime.startup_ms,
+    heavy_renderers_ready_ms: runtime.heavy_renderers_ready_ms,
+    tab_switch_p95_ms: runtime.tab_switch_ms?.p95,
+    model_command_p95_ms: runtime.model_command_ms?.p95,
+    react_commit_p95_ms: runtime.react_commits?.p95,
+    pointer_drag_p95_ms: runtime.drag_ms?.p95,
+    terminal_output_500_lines_ms: runtime.terminal_output_500_lines_ms,
+  };
+  for (const [metric, value] of Object.entries(thresholdObservations)) {
+    expectFinite(value, `promotion.${metric}`);
+  }
+
+  if (validationErrors.length > 0) {
+    throw new Error(`Invalid workbench measurement:\n${JSON.stringify({ validation_errors: validationErrors }, null, 2)}`);
+  }
+
+  const checks = Object.entries(PROMOTION_THRESHOLDS).map(([metric, threshold]) => {
+    const observed = thresholdObservations[metric];
+    return {
+      metric,
+      observed,
+      operator: "<=",
+      limit: threshold.limit,
+      unit: threshold.unit,
+      passed: observed <= threshold.limit,
+    };
+  });
+  const promotion = {
+    schema_version: 1,
+    passed: checks.every((check) => check.passed),
+    checks,
+  };
+  if (!promotion.passed) {
+    throw new Error(`Workbench promotion threshold failure:\n${JSON.stringify({ promotion }, null, 2)}`);
+  }
+  return promotion;
+}
+
+function createSelfTestBaseline() {
+  const surfaceIds = [
+    "terminal-owner", "terminal-mirror-1", "terminal-mirror-2", "terminal-mirror-3",
+    ...Array.from({ length: 16 }, (_, index) => `surface-${index + 1}`),
+  ];
+  const timing = () => summarize([1, 2, 3], "self-test timing");
+  return {
+    schema_version: 2,
+    scenario: {
+      group_count: 4,
+      tab_count: 20,
+      xterm_owner_count: 1,
+      xterm_mirror_count: 3,
+    },
+    bundle: {
+      production_delta_raw_bytes: 1000,
+      production_delta_gzip_bytes: 500,
+    },
+    runtime: {
+      startup_ms: 10,
+      heavy_renderers_ready_ms: 20,
+      tab_switch_ms: timing(),
+      drag_ms: timing(),
+      terminal_output_500_lines_ms: 5,
+      react_commit_count: 3,
+      react_commits: timing(),
+      model_command_ms: timing(),
+      renderer_counts: {
+        mounted_surfaces: 20,
+        mounted_terminal_hosts: 4,
+        mounted_terminal_owners: 1,
+        mounted_terminal_mirrors: 3,
+        mounted_graph_wrappers: 1,
+        mounted_garden_wrappers: 1,
+        canvas_elements: 8,
+        webgl_canvases: 4,
+      },
+      surface_mounts: Object.fromEntries(surfaceIds.map((surfaceId) => [surfaceId, 1])),
+      surface_unmounts: {},
+      terminal_write_chars: {
+        "terminal-owner": 100,
+        "terminal-mirror-1": 100,
+        "terminal-mirror-2": 100,
+        "terminal-mirror-3": 100,
+      },
+      terminal_webgl_loaded: 4,
+      terminal_webgl_failures: 0,
+      accessibility: {
+        tab_count: 20,
+        tablist_count: 4,
+        selected_tab_count: 4,
+        roving_tabstop_count: 4,
+      },
+      final_group_count: 4,
+      final_tab_count: 20,
+    },
+    adapter_boundary: {
+      dockview_json_persisted: false,
+      dockview_serialization_reference_count: 0,
+    },
+  };
+}
+
+function expectSynchronousFailure(label, action, pattern) {
+  let failure;
+  try {
+    action();
+  } catch (error) {
+    failure = error;
+  }
+  if (!failure) {
+    throw new Error(`Self-test expected failure: ${label}`);
+  }
+  const message = failure instanceof Error ? failure.message : String(failure);
+  if (pattern && !pattern.test(message)) {
+    throw new Error(`Self-test ${label} failed with an unexpected error: ${message}`);
+  }
+}
+
+async function runSelfTest() {
+  const passed = [];
+  expectSynchronousFailure(
+    "relative WARDIAN_HOME",
+    () => resolveIsolatedWardianHome("wardian-workbench-proof-relative"),
+    /absolute path/,
+  );
+  passed.push("relative-home-rejected");
+
+  expectSynchronousFailure(
+    "workspace-root WARDIAN_HOME",
+    () => resolveIsolatedWardianHome(repoRoot),
+    /workspace root/,
+  );
+  passed.push("workspace-root-rejected");
+
+  const safeMissingHome = path.join(
+    path.resolve(os.tmpdir()),
+    `wardian-workbench-proof-self-test-${process.pid}-${Date.now()}`,
+  );
+  const resolvedSafeMissingHome = resolveIsolatedWardianHome(safeMissingHome);
+  if (!samePath(resolvedSafeMissingHome, canonicalizePath(safeMissingHome))) {
+    throw new Error("Self-test failed to canonicalize a missing isolated WARDIAN_HOME safely");
+  }
+  passed.push("missing-final-path-canonicalized");
+
+  const linkRoot = await fs.mkdtemp(path.join(path.resolve(os.tmpdir()), "wardian-workbench-path-test-"));
+  const escapeLink = path.join(linkRoot, "workspace-link");
+  try {
+    await fs.symlink(repoRoot, escapeLink, process.platform === "win32" ? "junction" : "dir");
+    expectSynchronousFailure(
+      "symlink or junction parent escape",
+      () => resolveIsolatedWardianHome(
+        path.join(escapeLink, `wardian-workbench-proof-escape-${process.pid}`),
+      ),
+      /OS temp root/,
+    );
+    passed.push("canonical-parent-escape-rejected");
+  } finally {
+    try {
+      await fs.unlink(escapeLink);
+    } catch (error) {
+      if (fsSync.existsSync(escapeLink)) {
+        await fs.rmdir(escapeLink);
+      } else if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
+    await fs.rmdir(linkRoot);
+  }
+
+  expectSynchronousFailure("empty timing samples", () => summarize([], "self-test"), /non-empty/);
+  passed.push("empty-samples-rejected");
+
+  const validBaseline = createSelfTestBaseline();
+  const promotion = validatePromotionBaseline(validBaseline);
+  if (!promotion.passed || promotion.checks.length !== Object.keys(PROMOTION_THRESHOLDS).length) {
+    throw new Error("Self-test valid baseline did not produce complete passing promotion checks");
+  }
+  passed.push("valid-baseline-passed");
+
+  const missingSamples = structuredClone(validBaseline);
+  missingSamples.runtime.react_commits.samples = [];
+  expectSynchronousFailure(
+    "missing timing samples",
+    () => validatePromotionBaseline(missingSamples),
+    /non-empty array/,
+  );
+  passed.push("missing-metrics-rejected");
+
+  const nonFiniteSamples = structuredClone(validBaseline);
+  nonFiniteSamples.runtime.model_command_ms.samples[0] = Number.NaN;
+  expectSynchronousFailure(
+    "non-finite timing samples",
+    () => validatePromotionBaseline(nonFiniteSamples),
+    /finite non-negative/,
+  );
+  passed.push("non-finite-metrics-rejected");
+
+  const wrongFixtureCount = structuredClone(validBaseline);
+  wrongFixtureCount.scenario.tab_count = 19;
+  expectSynchronousFailure(
+    "wrong fixture count",
+    () => validatePromotionBaseline(wrongFixtureCount),
+    /scenario\.tab_count/,
+  );
+  passed.push("fixture-count-mismatch-rejected");
+
+  const failedThreshold = structuredClone(validBaseline);
+  failedThreshold.bundle.production_delta_raw_bytes = PROMOTION_THRESHOLDS.bundle_delta_raw_bytes.limit + 1;
+  expectSynchronousFailure(
+    "failed promotion threshold",
+    () => validatePromotionBaseline(failedThreshold),
+    /threshold failure/,
+  );
+  passed.push("threshold-failure-rejected");
+
+  process.stdout.write(`${JSON.stringify({ self_test: "passed", checks: passed }, null, 2)}\n`);
+}
+
 async function main() {
   const wardianHome = resolveIsolatedWardianHome(process.env.WARDIAN_HOME);
   await fs.mkdir(wardianHome, { recursive: true });
@@ -410,7 +788,7 @@ async function main() {
   const bundle = await measureBundles(wardianHome);
   const runtime = await measureRuntime();
   const baseline = {
-    schema_version: 1,
+    schema_version: 2,
     measured_at: new Date().toISOString(),
     environment: {
       platform: process.platform,
@@ -448,6 +826,7 @@ async function main() {
       production_route_present: false,
     },
   };
+  baseline.promotion = validatePromotionBaseline(baseline);
   await fs.mkdir(path.dirname(baselinePath), { recursive: true });
   await fs.writeFile(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
   process.stdout.write(`${JSON.stringify({
@@ -460,10 +839,12 @@ async function main() {
     react_commit_p95_ms: runtime.react_commits.p95,
     mounted_surfaces: runtime.renderer_counts.mounted_surfaces,
     webgl_canvases: runtime.renderer_counts.webgl_canvases,
+    promotion_passed: baseline.promotion.passed,
   }, null, 2)}\n`);
 }
 
-main().catch((error) => {
+const operation = process.argv.includes("--self-test") ? runSelfTest : main;
+operation().catch((error) => {
   process.stderr.write(`workbench performance proof failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
   process.exitCode = 1;
 });

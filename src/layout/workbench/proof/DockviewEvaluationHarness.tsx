@@ -377,8 +377,6 @@ function ProofSurfacePanel({ api, params }: IDockviewPanelProps<ProofPanelParams
   return (
     <section
       id={`proof-panel-${params.surface_id}`}
-      role="tabpanel"
-      aria-label={params.title}
       data-testid={`proof-surface-${params.surface_id}`}
       data-surface-id={params.surface_id}
       data-surface-kind={params.kind}
@@ -719,6 +717,41 @@ export function DockviewEvaluationHarness({
     event.preventDefault();
     moveSurface(panelId, event.group.id);
   }, [moveSurface]);
+
+  const focusNextGroupTab = useCallback((originGroupId?: string) => {
+    const currentModel = modelRef.current;
+    const currentIndex = currentModel.groups.findIndex(
+      (group) => group.group_id === (originGroupId ?? currentModel.active_group_id),
+    );
+    const nextGroup = currentModel.groups[(currentIndex + 1) % currentModel.groups.length];
+    const surfaceId = nextGroup?.active_surface_id ?? nextGroup?.surface_ids[0];
+    if (!nextGroup || !surfaceId) throw new Error("Proof group traversal target is unavailable");
+    window.requestAnimationFrame(() => {
+      activateSurface(surfaceId);
+      const descriptor = [...document.querySelectorAll<HTMLElement>(".workbench-proof-tab")].find(
+        (tab) => tab.dataset.groupId === nextGroup.group_id && tab.dataset.surfaceId === surfaceId,
+      );
+      const tab = descriptor?.closest<HTMLElement>('[role="tab"]');
+      if (!tab) throw new Error(`Proof group traversal tab is unavailable: ${nextGroup.group_id}/${surfaceId}`);
+      tab.focus();
+    });
+  }, [activateSurface]);
+
+  useEffect(() => {
+    const handleGroupNavigation = (event: KeyboardEvent) => {
+      if (event.key !== "F6" || !(event.target instanceof Element)) return;
+      const proofRoot = document.querySelector('[data-testid="workbench-proof"]');
+      if (!proofRoot?.contains(event.target)) return;
+      const descriptor = event.target
+        .closest('[role="tab"]')
+        ?.querySelector<HTMLElement>("[data-group-id][data-surface-id]");
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      focusNextGroupTab(descriptor?.dataset.groupId);
+    };
+    window.addEventListener("keydown", handleGroupNavigation, true);
+    return () => window.removeEventListener("keydown", handleGroupNavigation, true);
+  }, [focusNextGroupTab]);
 
   useEffect(() => () => {
     eventDisposablesRef.current.forEach((disposable) => disposable.dispose());
