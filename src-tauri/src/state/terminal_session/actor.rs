@@ -342,6 +342,28 @@ impl TerminalSessionBroker {
         .await
     }
 
+    pub async fn begin_owner_resync(
+        &self,
+        request: TerminalOwnerResyncBeginRequest,
+    ) -> Result<TerminalOwnerResyncBeginResult, TerminalBrokerError> {
+        let session_id = request.session_id.clone();
+        self.request(&session_id, move |reply| {
+            TerminalSessionMessage::BeginOwnerResync { request, reply }
+        })
+        .await
+    }
+
+    pub async fn ack_owner_resync(
+        &self,
+        request: TerminalOwnerResyncAckRequest,
+    ) -> Result<TerminalOwnerResyncAckResult, TerminalBrokerError> {
+        let session_id = request.session_id.clone();
+        self.request(&session_id, move |reply| {
+            TerminalSessionMessage::AckOwnerResync { request, reply }
+        })
+        .await
+    }
+
     pub async fn send_input(
         &self,
         request: TerminalInputRequest,
@@ -479,6 +501,36 @@ impl TerminalSessionBroker {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) async fn external_command_capacity_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<usize, TerminalBrokerError> {
+        Ok(self.session_handle(session_id).await?.tx.capacity())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn block_actor_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<std::sync::mpsc::Sender<()>, TerminalBrokerError> {
+        let handle = self.session_handle(session_id).await?;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        handle
+            .tx
+            .send(TerminalSessionMessage::TestBlock {
+                entered: entered_tx,
+                release: release_rx,
+            })
+            .await
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
+        entered_rx
+            .await
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
+        Ok(release_tx)
+    }
+
     fn spawn_actor(
         &self,
         session_id: String,
@@ -488,6 +540,7 @@ impl TerminalSessionBroker {
         geometry: TerminalGeometry,
     ) -> TerminalSessionHandle {
         let (tx, rx) = mpsc::channel(TERMINAL_SESSION_ACTOR_CAPACITY);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let lease_epoch = Arc::new(AtomicU64::new(lease_epoch_value));
         let latest_sequence = Arc::new(AtomicU64::new(0));
         let terminated = Arc::new(AtomicBool::new(false));
@@ -499,12 +552,12 @@ impl TerminalSessionBroker {
             terminated.clone(),
             runtime,
             geometry,
-            tx.clone(),
+            control_tx,
             self.wake_tx.clone(),
             self.lifecycle_tx.clone(),
             self.timer.clone(),
         );
-        let task = tokio::spawn(actor.run(rx));
+        let task = tokio::spawn(actor.run(rx, control_rx));
         let abort_handle = task.abort_handle();
         drop(task);
         TerminalSessionHandle {
@@ -526,23 +579,27 @@ impl TerminalSessionBroker {
         if handle.terminated.load(Ordering::SeqCst) {
             return;
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if handle
-            .tx
-            .send(TerminalSessionMessage::Shutdown {
-                lifecycle,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            handle.terminated.store(true, Ordering::SeqCst);
-            return;
-        }
         let timeout = self.timer.sleep(ACTOR_SHUTDOWN_TIMEOUT);
+        let shutdown_tx = handle.tx.clone();
+        let shutdown = async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            shutdown_tx
+                .send(TerminalSessionMessage::Shutdown {
+                    lifecycle,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| ())?;
+            reply_rx.await.map_err(|_| ())
+        };
         tokio::pin!(timeout);
+        tokio::pin!(shutdown);
         tokio::select! {
-            _ = reply_rx => {}
+            result = &mut shutdown => {
+                if result.is_err() {
+                    handle.terminated.store(true, Ordering::SeqCst);
+                }
+            }
             _ = &mut timeout => {
                 eprintln!(
                     "[Wardian] terminal session actor {session_id} did not stop within two seconds; aborting"
@@ -694,6 +751,26 @@ enum TerminalSessionMessage {
         runtime_generation: u64,
         reply: BrokerReply<TerminalBrokerState>,
     },
+    BeginOwnerResync {
+        request: TerminalOwnerResyncBeginRequest,
+        reply: BrokerReply<TerminalOwnerResyncBeginResult>,
+    },
+    AckOwnerResync {
+        request: TerminalOwnerResyncAckRequest,
+        reply: BrokerReply<TerminalOwnerResyncAckResult>,
+    },
+    #[cfg(test)]
+    TestBlock {
+        entered: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
+    Shutdown {
+        lifecycle: TerminalSessionLifecycleEvent,
+        reply: oneshot::Sender<()>,
+    },
+}
+
+enum TerminalSessionControlMessage {
     ActivationTimeout {
         runtime_generation: u64,
         lease_epoch: u64,
@@ -701,10 +778,6 @@ enum TerminalSessionMessage {
     },
     FlushWake {
         runtime_generation: u64,
-    },
-    Shutdown {
-        lifecycle: TerminalSessionLifecycleEvent,
-        reply: oneshot::Sender<()>,
     },
 }
 
@@ -729,6 +802,14 @@ struct CompletedActivation {
     result: TerminalActivationAckResult,
 }
 
+struct PendingOwnerResync {
+    presentation_id: String,
+    runtime_generation: u64,
+    lease_epoch: u64,
+    resync_id: String,
+    begin_result: TerminalOwnerResyncBeginResult,
+}
+
 struct TerminalSessionActor {
     session_id: String,
     runtime_generation: u64,
@@ -743,15 +824,17 @@ struct TerminalSessionActor {
     consumers: HashMap<String, ConsumerRecord>,
     owner_presentation_id: Option<String>,
     pending_activation: Option<PendingActivation>,
+    pending_owner_resync: Option<PendingOwnerResync>,
     completed_activation: Option<CompletedActivation>,
     lease_epoch: u64,
     stream_sequence: u64,
     interaction_sequence: u64,
     activation_sequence: u64,
+    resync_sequence: u64,
     snapshot_sequence: u64,
     geometry: TerminalGeometry,
     wake_pending: bool,
-    command_tx: mpsc::Sender<TerminalSessionMessage>,
+    control_tx: mpsc::UnboundedSender<TerminalSessionControlMessage>,
     wake_tx: broadcast::Sender<TerminalEventsReady>,
     lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
     timer: Arc<dyn TerminalTimer>,
@@ -767,7 +850,7 @@ impl TerminalSessionActor {
         terminated: Arc<AtomicBool>,
         runtime: TerminalRuntimeHandles,
         geometry: TerminalGeometry,
-        command_tx: mpsc::Sender<TerminalSessionMessage>,
+        control_tx: mpsc::UnboundedSender<TerminalSessionControlMessage>,
         wake_tx: broadcast::Sender<TerminalEventsReady>,
         lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
         timer: Arc<dyn TerminalTimer>,
@@ -787,29 +870,48 @@ impl TerminalSessionActor {
             consumers: HashMap::new(),
             owner_presentation_id: None,
             pending_activation: None,
+            pending_owner_resync: None,
             completed_activation: None,
             lease_epoch: initial_lease_epoch,
             stream_sequence: 0,
             interaction_sequence: 0,
             activation_sequence: 0,
+            resync_sequence: 0,
             snapshot_sequence: 0,
             geometry,
             wake_pending: false,
-            command_tx,
+            control_tx,
             wake_tx,
             lifecycle_tx,
             timer,
         }
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<TerminalSessionMessage>) {
+    async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<TerminalSessionMessage>,
+        mut control_rx: mpsc::UnboundedReceiver<TerminalSessionControlMessage>,
+    ) {
         let mut shutdown = None;
-        while let Some(message) = rx.recv().await {
-            if let TerminalSessionMessage::Shutdown { lifecycle, reply } = message {
-                shutdown = Some((lifecycle, reply));
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                control = control_rx.recv() => {
+                    if let Some(control) = control {
+                        self.handle_control(control).await;
+                    }
+                }
+                message = rx.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if let TerminalSessionMessage::Shutdown { lifecycle, reply } = message {
+                        shutdown = Some((lifecycle, reply));
+                        break;
+                    }
+                    self.handle_message(message).await;
+                }
             }
-            self.handle_message(message).await;
         }
 
         let lifecycle = shutdown
@@ -819,6 +921,7 @@ impl TerminalSessionActor {
             });
         self.runtime_state = TerminalRuntimeState::Terminated;
         self.pending_activation = None;
+        self.pending_owner_resync = None;
         self.consumers.clear();
         self.terminated.store(true, Ordering::SeqCst);
         let _ = self.wake_tx.send(TerminalEventsReady {
@@ -933,7 +1036,26 @@ impl TerminalSessionActor {
                 let result = self.pause(&session_id, runtime_generation);
                 let _ = reply.send(result);
             }
-            TerminalSessionMessage::ActivationTimeout {
+            TerminalSessionMessage::BeginOwnerResync { request, reply } => {
+                let result = self.begin_owner_resync(request);
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::AckOwnerResync { request, reply } => {
+                let result = self.ack_owner_resync(request);
+                let _ = reply.send(result);
+            }
+            #[cfg(test)]
+            TerminalSessionMessage::TestBlock { entered, release } => {
+                let _ = entered.send(());
+                let _ = tokio::task::spawn_blocking(move || release.recv()).await;
+            }
+            TerminalSessionMessage::Shutdown { .. } => unreachable!("handled by actor loop"),
+        }
+    }
+
+    async fn handle_control(&mut self, control: TerminalSessionControlMessage) {
+        match control {
+            TerminalSessionControlMessage::ActivationTimeout {
                 runtime_generation,
                 lease_epoch,
                 activation_id,
@@ -941,7 +1063,7 @@ impl TerminalSessionActor {
                 self.activation_timeout(runtime_generation, lease_epoch, &activation_id)
                     .await;
             }
-            TerminalSessionMessage::FlushWake { runtime_generation } => {
+            TerminalSessionControlMessage::FlushWake { runtime_generation } => {
                 if runtime_generation == self.runtime_generation {
                     self.wake_pending = false;
                     let _ = self.wake_tx.send(TerminalEventsReady {
@@ -951,7 +1073,6 @@ impl TerminalSessionActor {
                     });
                 }
             }
-            TerminalSessionMessage::Shutdown { .. } => unreachable!("handled by actor loop"),
         }
     }
 
@@ -1038,6 +1159,13 @@ impl TerminalSessionActor {
                 last_geometry_sequence,
             },
         );
+        if self
+            .pending_owner_resync
+            .as_ref()
+            .is_some_and(|pending| pending.presentation_id == state.presentation_id)
+        {
+            self.pending_owner_resync = None;
+        }
         let initial_snapshot = self.snapshot();
         Ok(TerminalPresentationRegistrationResult {
             presentation: state,
@@ -1086,6 +1214,13 @@ impl TerminalSessionActor {
                 self.rollback_pending(pending).await?;
             }
         }
+        if self
+            .pending_owner_resync
+            .as_ref()
+            .is_some_and(|pending| pending.presentation_id == request.presentation_id)
+        {
+            self.pending_owner_resync = None;
+        }
         Ok(TerminalPresentationUpdateResult {
             presentation,
             broker_state: self.broker_state(),
@@ -1103,6 +1238,13 @@ impl TerminalSessionActor {
         self.presentations
             .remove(presentation_id)
             .ok_or(TerminalBrokerError::PresentationNotFound)?;
+        if self
+            .pending_owner_resync
+            .as_ref()
+            .is_some_and(|pending| pending.presentation_id == presentation_id)
+        {
+            self.pending_owner_resync = None;
+        }
 
         if self
             .pending_activation
@@ -1277,6 +1419,122 @@ impl TerminalSessionActor {
         Ok(result)
     }
 
+    fn begin_owner_resync(
+        &mut self,
+        request: TerminalOwnerResyncBeginRequest,
+    ) -> Result<TerminalOwnerResyncBeginResult, TerminalBrokerError> {
+        self.ensure_session(&request.session_id)?;
+        if request.runtime_generation != self.runtime_generation {
+            return Ok(
+                self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::GenerationChanged)
+            );
+        }
+        if self.runtime_state != TerminalRuntimeState::Live {
+            return Ok(
+                self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::RuntimeUnavailable)
+            );
+        }
+        if self.pending_activation.is_some() {
+            return Ok(
+                self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::PendingActivation)
+            );
+        }
+        if let Some(pending) = self.pending_owner_resync.as_ref() {
+            if pending.presentation_id == request.presentation_id
+                && pending.runtime_generation == request.runtime_generation
+                && pending.lease_epoch == request.lease_epoch
+            {
+                return Ok(pending.begin_result.clone());
+            }
+        }
+        if self.owner_presentation_id.as_deref() != Some(&request.presentation_id) {
+            return Ok(self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::NotOwner));
+        }
+        if request.lease_epoch != self.lease_epoch {
+            return Ok(
+                self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::LeaseEpochChanged)
+            );
+        }
+        let Some(record) = self.presentations.get(&request.presentation_id) else {
+            return Ok(self
+                .rejected_owner_resync_begin(TerminalLeaseRejectionReason::PresentationNotFound));
+        };
+        if !record.state.requires_resync {
+            return Ok(
+                self.rejected_owner_resync_begin(TerminalLeaseRejectionReason::ResyncNotRequired)
+            );
+        }
+        if !self.presentation_is_eligible(&request.presentation_id) {
+            return Ok(self.rejected_owner_resync_begin(
+                TerminalLeaseRejectionReason::PresentationIneligible,
+            ));
+        }
+
+        self.resync_sequence = self.resync_sequence.saturating_add(1);
+        let resync_id = format!(
+            "terminal-owner-resync-{}-{}-{}",
+            self.runtime_generation, self.lease_epoch, self.resync_sequence
+        );
+        let snapshot = self.snapshot();
+        let begin_result = TerminalOwnerResyncBeginResult {
+            decision: self.accepted_decision(),
+            resync_id: Some(resync_id.clone()),
+            sequence_barrier: snapshot.sequence_barrier,
+            snapshot: Some(snapshot),
+        };
+        self.pending_owner_resync = Some(PendingOwnerResync {
+            presentation_id: request.presentation_id,
+            runtime_generation: self.runtime_generation,
+            lease_epoch: self.lease_epoch,
+            resync_id,
+            begin_result: begin_result.clone(),
+        });
+        Ok(begin_result)
+    }
+
+    fn ack_owner_resync(
+        &mut self,
+        request: TerminalOwnerResyncAckRequest,
+    ) -> Result<TerminalOwnerResyncAckResult, TerminalBrokerError> {
+        self.ensure_session(&request.session_id)?;
+        let matches_pending = self.pending_owner_resync.as_ref().is_some_and(|pending| {
+            pending.presentation_id == request.presentation_id
+                && pending.runtime_generation == request.runtime_generation
+                && pending.lease_epoch == request.lease_epoch
+                && pending.resync_id == request.resync_id
+        });
+        if !matches_pending {
+            return Ok(
+                self.rejected_owner_resync_ack(TerminalLeaseRejectionReason::StaleOwnerResync)
+            );
+        }
+        if request.runtime_generation != self.runtime_generation {
+            return Ok(
+                self.rejected_owner_resync_ack(TerminalLeaseRejectionReason::GenerationChanged)
+            );
+        }
+        if request.lease_epoch != self.lease_epoch {
+            return Ok(
+                self.rejected_owner_resync_ack(TerminalLeaseRejectionReason::LeaseEpochChanged)
+            );
+        }
+        if self.owner_presentation_id.as_deref() != Some(&request.presentation_id) {
+            return Ok(self.rejected_owner_resync_ack(TerminalLeaseRejectionReason::NotOwner));
+        }
+        if !self.presentation_is_eligible(&request.presentation_id) {
+            return Ok(self
+                .rejected_owner_resync_ack(TerminalLeaseRejectionReason::PresentationIneligible));
+        }
+        if let Some(record) = self.presentations.get_mut(&request.presentation_id) {
+            record.state.requires_resync = false;
+        }
+        self.pending_owner_resync = None;
+        Ok(TerminalOwnerResyncAckResult {
+            decision: self.accepted_decision(),
+            broker_state: self.broker_state(),
+        })
+    }
+
     async fn send_input(
         &mut self,
         request: TerminalInputRequest,
@@ -1402,6 +1660,18 @@ impl TerminalSessionActor {
             request.max_events,
             request.max_bytes,
         );
+        if events.is_empty() && request.after_sequence < self.stream_sequence {
+            let snapshot = self.snapshot();
+            return Ok(TerminalEventBatch {
+                status: TerminalEventBatchStatus::Gap,
+                runtime_generation: self.runtime_generation,
+                events: Vec::new(),
+                next_sequence: snapshot.sequence_barrier,
+                available_from_sequence,
+                latest_sequence: self.stream_sequence,
+                recovery_snapshot: Some(snapshot),
+            });
+        }
         let next_sequence = events
             .last()
             .map_or(request.after_sequence, |event| event.sequence);
@@ -1455,6 +1725,7 @@ impl TerminalSessionActor {
         self.ensure_generation(runtime_generation)?;
         if self.runtime_state == TerminalRuntimeState::Live {
             self.runtime_state = TerminalRuntimeState::Paused;
+            self.pending_owner_resync = None;
             self.emit_event(TerminalBrokerEventKind::Lifecycle {
                 lifecycle: TerminalSessionLifecycleEvent::RuntimePaused,
             });
@@ -1625,31 +1896,28 @@ impl TerminalSessionActor {
         }
         self.wake_pending = true;
         let timer = self.timer.clone();
-        let tx = self.command_tx.clone();
+        let control_tx = self.control_tx.clone();
         let runtime_generation = self.runtime_generation;
         let delay = timer.sleep(EVENT_WAKE_COALESCE);
         tokio::spawn(async move {
             delay.await;
-            let _ = tx
-                .send(TerminalSessionMessage::FlushWake { runtime_generation })
-                .await;
+            let _ =
+                control_tx.send(TerminalSessionControlMessage::FlushWake { runtime_generation });
         });
     }
 
     fn schedule_activation_timeout(&self, lease_epoch: u64, activation_id: String) {
         let timer = self.timer.clone();
-        let tx = self.command_tx.clone();
+        let control_tx = self.control_tx.clone();
         let runtime_generation = self.runtime_generation;
         let delay = timer.sleep(ACTIVATION_TIMEOUT);
         tokio::spawn(async move {
             delay.await;
-            let _ = tx
-                .send(TerminalSessionMessage::ActivationTimeout {
-                    runtime_generation,
-                    lease_epoch,
-                    activation_id,
-                })
-                .await;
+            let _ = control_tx.send(TerminalSessionControlMessage::ActivationTimeout {
+                runtime_generation,
+                lease_epoch,
+                activation_id,
+            });
         });
     }
 
@@ -1687,6 +1955,7 @@ impl TerminalSessionActor {
         self.lease_epoch_shared
             .store(self.lease_epoch, Ordering::SeqCst);
         self.completed_activation = None;
+        self.pending_owner_resync = None;
     }
 
     fn accepted_decision(&self) -> TerminalLeaseDecision {
@@ -1723,6 +1992,28 @@ impl TerminalSessionActor {
             decision: self.rejected_decision(reason),
             broker_state: self.broker_state(),
             snapshot: None,
+        }
+    }
+
+    fn rejected_owner_resync_begin(
+        &self,
+        reason: TerminalLeaseRejectionReason,
+    ) -> TerminalOwnerResyncBeginResult {
+        TerminalOwnerResyncBeginResult {
+            decision: self.rejected_decision(reason),
+            resync_id: None,
+            snapshot: None,
+            sequence_barrier: self.stream_sequence,
+        }
+    }
+
+    fn rejected_owner_resync_ack(
+        &self,
+        reason: TerminalLeaseRejectionReason,
+    ) -> TerminalOwnerResyncAckResult {
+        TerminalOwnerResyncAckResult {
+            decision: self.rejected_decision(reason),
+            broker_state: self.broker_state(),
         }
     }
 
@@ -1778,7 +2069,10 @@ fn clamp_geometry(geometry: TerminalGeometry, client_kind: TerminalClientKind) -
 }
 
 fn validate_id(value: &str, field: &'static str) -> Result<(), TerminalBrokerError> {
-    if value.trim().is_empty() || value.chars().any(char::is_whitespace) {
+    if value.trim().is_empty()
+        || value.len() > MAX_TERMINAL_IDENTIFIER_BYTES
+        || value.chars().any(char::is_whitespace)
+    {
         Err(TerminalBrokerError::InvalidRequest(field))
     } else {
         Ok(())

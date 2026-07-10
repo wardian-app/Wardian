@@ -70,7 +70,10 @@ fn enforce_serialized_limit(snapshot: &mut TerminalSnapshot) {
         }
         snapshot.visible_grid.truncate(target);
     }
-    debug_assert!(serialized_len(snapshot) <= MAX_SNAPSHOT_BYTES);
+    assert!(
+        serialized_len(snapshot) <= MAX_SNAPSHOT_BYTES,
+        "terminal snapshot exceeded the serialized payload limit"
+    );
 }
 
 fn serialized_len(snapshot: &TerminalSnapshot) -> usize {

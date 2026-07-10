@@ -591,6 +591,8 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
 
 // --- Authoritative terminal session broker DTOs ---------------------------
 
+export const MAX_TERMINAL_IDENTIFIER_BYTES = 512;
+
 export type TerminalGeometry = {
     rows: number;
     cols: number;
@@ -707,6 +709,8 @@ export type TerminalLeaseRejectionReason =
     | "pending_activation"
     | "not_owner"
     | "stale_activation"
+    | "resync_not_required"
+    | "stale_owner_resync"
     | "stale_geometry_sequence";
 
 export type TerminalLeaseDecision = {
@@ -728,6 +732,33 @@ export type TerminalActivationAckResult = {
     decision: TerminalLeaseDecision;
     broker_state: TerminalBrokerState;
     snapshot: TerminalSnapshot | null;
+};
+
+export type TerminalOwnerResyncBeginRequest = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    lease_epoch: number;
+};
+
+export type TerminalOwnerResyncBeginResult = {
+    decision: TerminalLeaseDecision;
+    resync_id: string | null;
+    snapshot: TerminalSnapshot | null;
+    sequence_barrier: number;
+};
+
+export type TerminalOwnerResyncAckRequest = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    lease_epoch: number;
+    resync_id: string;
+};
+
+export type TerminalOwnerResyncAckResult = {
+    decision: TerminalLeaseDecision;
+    broker_state: TerminalBrokerState;
 };
 
 export type TerminalInputRequest = {

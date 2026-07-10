@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Maximum UTF-8 byte length for externally supplied terminal identifiers.
+pub const MAX_TERMINAL_IDENTIFIER_BYTES: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalGeometry {
     pub rows: u16,
@@ -172,6 +175,8 @@ pub enum TerminalLeaseRejectionReason {
     PendingActivation,
     NotOwner,
     StaleActivation,
+    ResyncNotRequired,
+    StaleOwnerResync,
     StaleGeometrySequence,
 }
 
@@ -228,6 +233,37 @@ pub struct TerminalActivationAckResult {
     pub decision: TerminalLeaseDecision,
     pub broker_state: TerminalBrokerState,
     pub snapshot: Option<TerminalSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOwnerResyncBeginRequest {
+    pub session_id: String,
+    pub presentation_id: String,
+    pub runtime_generation: u64,
+    pub lease_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOwnerResyncBeginResult {
+    pub decision: TerminalLeaseDecision,
+    pub resync_id: Option<String>,
+    pub snapshot: Option<TerminalSnapshot>,
+    pub sequence_barrier: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOwnerResyncAckRequest {
+    pub session_id: String,
+    pub presentation_id: String,
+    pub runtime_generation: u64,
+    pub lease_epoch: u64,
+    pub resync_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOwnerResyncAckResult {
+    pub decision: TerminalLeaseDecision,
+    pub broker_state: TerminalBrokerState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

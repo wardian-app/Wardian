@@ -167,6 +167,24 @@ fn process_output(
     .expect("output thread")
 }
 
+async fn wait_for_external_capacity(broker: &TerminalSessionBroker, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if broker
+                .external_command_capacity_for_test("session-1")
+                .await
+                .expect("command capacity")
+                == expected
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("external command capacity never reached {expected}"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registration_is_passive_and_capability_cannot_escalate() {
     let timer = Arc::new(ManualTimer::default());
@@ -225,6 +243,55 @@ async fn registration_is_passive_and_capability_cannot_escalate() {
     assert!(matches!(
         mismatch,
         Err(TerminalBrokerError::InvalidIdentity)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identifiers_over_utf8_byte_limit_are_rejected_without_truncation() {
+    let timer = Arc::new(ManualTimer::default());
+    let broker = Arc::new(TerminalSessionBroker::with_timer(timer));
+    let oversized = "é".repeat(257);
+    assert_eq!(oversized.len(), 514);
+
+    let (oversized_runtime, _, _) = runtime();
+    let session_result = broker
+        .start_or_replace_runtime(&oversized, oversized_runtime, geometry(80, 24))
+        .await;
+    assert!(matches!(
+        session_result,
+        Err(TerminalBrokerError::InvalidRequest("session_id"))
+    ));
+
+    let (valid_runtime, _, _) = runtime();
+    let generation = broker
+        .start_or_replace_runtime("session-1", valid_runtime, geometry(80, 24))
+        .await
+        .expect("valid runtime");
+    let presentation_result = broker
+        .register_presentation(
+            registration(
+                &oversized,
+                TerminalClientKind::Desktop,
+                TerminalRequestedInteraction::Interactive,
+            ),
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await;
+    assert!(matches!(
+        presentation_result,
+        Err(TerminalBrokerError::InvalidRequest("presentation_id"))
+    ));
+    let consumer_result = broker
+        .subscribe(TerminalEventSubscriptionRequest {
+            session_id: "session-1".to_string(),
+            consumer_id: oversized,
+            client_kind: TerminalClientKind::Desktop,
+            runtime_generation: generation,
+        })
+        .await;
+    assert!(matches!(
+        consumer_result,
+        Err(TerminalBrokerError::InvalidRequest("consumer_id"))
     ));
 }
 
@@ -569,6 +636,10 @@ async fn suspended_owner_must_apply_activation_snapshot_before_input_resumes() {
         .await
         .expect("idempotent re-registration must not bypass resync");
     let before_resync = broker
+        .broker_state("session-1")
+        .await
+        .expect("state before passive resync");
+    let blocked = broker
         .send_input(TerminalInputRequest {
             lease: TerminalLeaseIdentity {
                 session_id: "session-1".to_string(),
@@ -576,29 +647,51 @@ async fn suspended_owner_must_apply_activation_snapshot_before_input_resumes() {
                 runtime_generation: generation,
                 lease_epoch: active.broker_state.lease_epoch,
             },
-            bytes: b"too early".to_vec(),
+            bytes: b"before resync".to_vec(),
         })
         .await
-        .expect("structured resync decision");
+        .expect("structured pre-resync decision");
     assert_eq!(
-        before_resync.reason,
+        blocked.reason,
         Some(TerminalLeaseRejectionReason::PresentationIneligible)
     );
+    let begin = broker
+        .begin_owner_resync(TerminalOwnerResyncBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "owner".to_string(),
+            runtime_generation: generation,
+            lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin passive owner resync");
+    assert_eq!(begin.decision.status, TerminalLeaseDecisionStatus::Accepted);
+    assert_eq!(begin.sequence_barrier, before_resync.stream_sequence);
+    let during_resync = broker
+        .broker_state("session-1")
+        .await
+        .expect("state during passive resync");
+    assert_eq!(during_resync, before_resync);
 
-    let resynced = activate(
-        &broker,
-        "owner",
-        generation,
-        active.broker_state.lease_epoch,
-    )
-    .await;
+    let ack = broker
+        .ack_owner_resync(TerminalOwnerResyncAckRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "owner".to_string(),
+            runtime_generation: generation,
+            lease_epoch: active.broker_state.lease_epoch,
+            resync_id: begin.resync_id.expect("broker resync id"),
+        })
+        .await
+        .expect("ack passive owner resync");
+    assert_eq!(ack.decision.status, TerminalLeaseDecisionStatus::Accepted);
+    assert_eq!(ack.broker_state, before_resync);
+
     let accepted = broker
         .send_input(TerminalInputRequest {
             lease: TerminalLeaseIdentity {
                 session_id: "session-1".to_string(),
                 presentation_id: "owner".to_string(),
                 runtime_generation: generation,
-                lease_epoch: resynced.broker_state.lease_epoch,
+                lease_epoch: active.broker_state.lease_epoch,
             },
             bytes: b"after resync".to_vec(),
         })
@@ -608,6 +701,87 @@ async fn suspended_owner_must_apply_activation_snapshot_before_input_resumes() {
     assert_eq!(
         input_rx.recv().await.as_deref(),
         Some(b"after resync".as_slice())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_takeover_invalidates_stale_owner_resync_ack() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    broker
+        .update_presentation(
+            TerminalPresentationUpdateRequest {
+                presentation_id: "owner".to_string(),
+                session_id: "session-1".to_string(),
+                runtime_generation: generation,
+                desired_geometry: Some(geometry(100, 30)),
+                visibility: TerminalVisibility::Visible,
+                render_state: TerminalRenderState::Suspended,
+                requested_interaction: TerminalRequestedInteraction::Interactive,
+                observed_lease_epoch: active.broker_state.lease_epoch,
+            },
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await
+        .expect("suspend owner");
+    broker
+        .update_presentation(
+            TerminalPresentationUpdateRequest {
+                presentation_id: "owner".to_string(),
+                session_id: "session-1".to_string(),
+                runtime_generation: generation,
+                desired_geometry: Some(geometry(100, 30)),
+                visibility: TerminalVisibility::Visible,
+                render_state: TerminalRenderState::Mounted,
+                requested_interaction: TerminalRequestedInteraction::Interactive,
+                observed_lease_epoch: active.broker_state.lease_epoch,
+            },
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await
+        .expect("remount owner");
+    let resync = broker
+        .begin_owner_resync(TerminalOwnerResyncBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "owner".to_string(),
+            runtime_generation: generation,
+            lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin owner resync");
+    let takeover = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin explicit takeover");
+    let stale = broker
+        .ack_owner_resync(TerminalOwnerResyncAckRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "owner".to_string(),
+            runtime_generation: generation,
+            lease_epoch: active.broker_state.lease_epoch,
+            resync_id: resync.resync_id.expect("resync id"),
+        })
+        .await
+        .expect("structured stale resync ack");
+    assert_eq!(
+        stale.decision.reason,
+        Some(TerminalLeaseRejectionReason::StaleOwnerResync)
+    );
+    assert_eq!(
+        stale
+            .broker_state
+            .pending_activation
+            .as_ref()
+            .map(|pending| pending.activation_id.as_str()),
+        takeover.activation_id.as_deref()
     );
 }
 
@@ -855,6 +1029,45 @@ async fn oversized_output_is_chunked_so_strict_batch_limits_always_progress() {
         .expect("second bounded chunk");
     assert_eq!(second.next_sequence, 2);
     assert_eq!(second.events.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_byte_batch_limit_returns_snapshot_recovery_instead_of_stalling() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer).await;
+    broker
+        .subscribe(TerminalEventSubscriptionRequest {
+            session_id: "session-1".to_string(),
+            consumer_id: "desktop".to_string(),
+            client_kind: TerminalClientKind::Desktop,
+            runtime_generation: generation,
+        })
+        .await
+        .expect("subscribe");
+    process_output(broker.clone(), generation, b"cannot fit".to_vec()).expect("output");
+
+    let recovery = broker
+        .read_events(TerminalEventReadRequest {
+            session_id: "session-1".to_string(),
+            consumer_id: "desktop".to_string(),
+            runtime_generation: generation,
+            after_sequence: 0,
+            max_events: 256,
+            max_bytes: 1,
+        })
+        .await
+        .expect("bounded recovery");
+    assert_eq!(recovery.status, TerminalEventBatchStatus::Gap);
+    assert_eq!(recovery.next_sequence, recovery.latest_sequence);
+    assert!(recovery.next_sequence > 0);
+    assert_eq!(
+        recovery
+            .recovery_snapshot
+            .as_ref()
+            .expect("recovery snapshot")
+            .sequence_barrier,
+        recovery.next_sequence
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1303,4 +1516,152 @@ async fn shutdown_timeout_aborts_actor_and_cancels_pending_calls() {
         pending_state.await.expect("pending state task"),
         Err(TerminalBrokerError::RuntimeTerminated)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_deadline_includes_waiting_to_enqueue_into_full_actor_queue() {
+    let timer = Arc::new(ManualTimer::default());
+    let broker = Arc::new(TerminalSessionBroker::with_timer(timer.clone()));
+    let (input_tx, _) = mpsc::channel(1);
+    let (resize_started_tx, resize_started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let runtime = TerminalRuntimeHandles::new(input_tx, move |_| {
+        let _ = resize_started_tx.send(());
+        let _ = release_rx.lock().expect("release lock").recv();
+        Ok(())
+    });
+    let generation = broker
+        .start_or_replace_runtime("session-1", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    let mut owner_registration = registration(
+        "owner",
+        TerminalClientKind::Desktop,
+        TerminalRequestedInteraction::Interactive,
+    );
+    owner_registration.desired_geometry = Some(geometry(80, 24));
+    broker
+        .register_presentation(
+            owner_registration,
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await
+        .expect("register owner");
+    let active = activate(&broker, "owner", generation, 0).await;
+    let resize_broker = broker.clone();
+    let resize = tokio::spawn(async move {
+        resize_broker
+            .resize(TerminalGeometryRequest {
+                lease: TerminalLeaseIdentity {
+                    session_id: "session-1".to_string(),
+                    presentation_id: "owner".to_string(),
+                    runtime_generation: generation,
+                    lease_epoch: active.broker_state.lease_epoch,
+                },
+                geometry_sequence: 1,
+                geometry: geometry(81, 25),
+            })
+            .await
+    });
+    tokio::task::spawn_blocking(move || resize_started_rx.recv().expect("resize started"))
+        .await
+        .expect("resize start waiter");
+
+    let mut output_threads = Vec::new();
+    for index in 0..TERMINAL_SESSION_ACTOR_CAPACITY {
+        let output_broker = broker.clone();
+        output_threads.push(std::thread::spawn(move || {
+            output_broker.process_output_blocking(
+                "session-1",
+                generation,
+                vec![(index % 251) as u8],
+            )
+        }));
+    }
+    wait_for_external_capacity(&broker, 0).await;
+    let terminate_broker = broker.clone();
+    let terminate = tokio::spawn(async move {
+        terminate_broker
+            .terminate_runtime("session-1", generation)
+            .await
+    });
+    timer.wait_for_sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        broker
+            .external_command_capacity_for_test("session-1")
+            .await
+            .expect("still saturated"),
+        0
+    );
+    timer.fire(Duration::from_secs(2)).await;
+    terminate
+        .await
+        .expect("terminate task")
+        .expect("deadline abort");
+    release_tx.send(()).expect("release native resize");
+    assert!(matches!(
+        resize.await.expect("resize task"),
+        Err(TerminalBrokerError::RuntimeTerminated)
+    ));
+    for thread in output_threads {
+        assert!(matches!(
+            thread.join().expect("output thread"),
+            Err(TerminalBrokerError::RuntimeTerminated)
+        ));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+
+    let release = broker
+        .block_actor_for_test("session-1")
+        .await
+        .expect("block actor");
+    let state_broker = broker.clone();
+    let first_queued_state =
+        tokio::spawn(async move { state_broker.broker_state("session-1").await });
+    wait_for_external_capacity(&broker, TERMINAL_SESSION_ACTOR_CAPACITY - 1).await;
+    let mut output_threads = Vec::new();
+    for index in 0..(TERMINAL_SESSION_ACTOR_CAPACITY - 1) {
+        let output_broker = broker.clone();
+        output_threads.push(std::thread::spawn(move || {
+            output_broker.process_output_blocking(
+                "session-1",
+                generation,
+                vec![(index % 251) as u8],
+            )
+        }));
+    }
+    wait_for_external_capacity(&broker, 0).await;
+    timer.fire(Duration::from_secs(5)).await;
+    release.send(()).expect("release actor");
+
+    let state = first_queued_state
+        .await
+        .expect("state task")
+        .expect("queued state response");
+    assert!(state.pending_activation.is_none());
+    assert_eq!(state.owner_presentation_id.as_deref(), Some("owner"));
+    for thread in output_threads {
+        thread
+            .join()
+            .expect("output thread")
+            .expect("output retained");
+    }
 }
