@@ -234,6 +234,23 @@ async fn wait_for_ack_reservation_count(
     .unwrap_or_else(|_| panic!("ack reservation count never reached {expected}"));
 }
 
+async fn wait_for_activation_deadline_elapsed(broker: &TerminalSessionBroker, activation_id: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if broker
+                .activation_deadline_has_elapsed_for_test("session-1", activation_id)
+                .await
+                .expect("activation deadline diagnostic")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("activation deadline never elapsed");
+}
+
 async fn wait_for_live_sleep_count(timer: &ManualTimer, duration: Duration, expected: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2006,6 +2023,79 @@ async fn postdeadline_ack_is_rejected_before_timeout_notification_is_processed()
         Some("owner")
     );
     assert!(rejected.broker_state.pending_activation.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn late_ack_cannot_rollback_an_earlier_ack_held_before_send() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let pending = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+    let activation_id = pending.activation_id.expect("activation id");
+    let ack_request = TerminalActivationAckRequest {
+        session_id: "session-1".to_string(),
+        presentation_id: "takeover".to_string(),
+        runtime_generation: generation,
+        lease_epoch: pending.decision.lease_epoch,
+        activation_id: activation_id.clone(),
+    };
+    let (classified, release_early) = broker
+        .gate_next_ack_after_classification_for_test("session-1")
+        .await
+        .expect("install ack classification gate");
+    let early_broker = broker.clone();
+    let early_request = ack_request.clone();
+    let early = tokio::spawn(async move { early_broker.ack_activation(early_request).await });
+    tokio::time::timeout(Duration::from_secs(5), classified)
+        .await
+        .expect("early ack never reached classification gate")
+        .expect("early ack classification signal");
+    wait_for_ack_reservation_count(&broker, &activation_id, 1).await;
+
+    timer.fire(Duration::from_secs(5)).await;
+    wait_for_activation_deadline_elapsed(&broker, &activation_id).await;
+    let late = broker
+        .ack_activation(ack_request)
+        .await
+        .expect("structured late ack");
+    assert_eq!(late.decision.status, TerminalLeaseDecisionStatus::Rejected);
+    assert_eq!(
+        late.decision.reason,
+        Some(TerminalLeaseRejectionReason::StaleActivation)
+    );
+    assert_eq!(
+        late.broker_state
+            .pending_activation
+            .as_ref()
+            .map(|pending| pending.activation_id.as_str()),
+        Some(activation_id.as_str())
+    );
+    assert!(late.broker_state.owner_presentation_id.is_none());
+
+    release_early.send(()).expect("release early ack");
+    let committed = early
+        .await
+        .expect("early ack task")
+        .expect("early ack after release");
+    assert_eq!(
+        committed.decision.status,
+        TerminalLeaseDecisionStatus::Accepted
+    );
+    assert_eq!(
+        committed.broker_state.owner_presentation_id.as_deref(),
+        Some("takeover")
+    );
+    assert!(committed.broker_state.pending_activation.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

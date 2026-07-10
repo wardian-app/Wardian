@@ -178,6 +178,12 @@ struct TerminalControlState {
     wake_due: bool,
 }
 
+#[cfg(test)]
+struct AckClassificationGate {
+    classified: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
 /// Constant-space priority state shared by broker callers, timer tasks, and the actor.
 ///
 /// The synchronous mutex is held only for state transitions, never across an await. It
@@ -187,6 +193,8 @@ struct TerminalControlState {
 struct TerminalControlPlane {
     state: Mutex<TerminalControlState>,
     notify: Notify,
+    #[cfg(test)]
+    ack_classification_gate: Mutex<Option<AckClassificationGate>>,
 }
 
 struct DueControlSignals {
@@ -314,6 +322,27 @@ impl TerminalControlPlane {
         }
     }
 
+    fn claim_unreserved_activation_timeout(&self, key: &ActivationKey) -> bool {
+        let mut state = self.state.lock().expect("terminal control lock");
+        let Some(activation) = state
+            .activation
+            .as_mut()
+            .filter(|activation| activation.key == *key)
+        else {
+            return false;
+        };
+        if !activation.deadline_elapsed
+            || activation.ack_reservations != 0
+            || !activation.timeout_due
+        {
+            return false;
+        }
+        // The late ack is taking responsibility for the already-due rollback.
+        // Clear the coalesced due bit so a delayed notification becomes a no-op.
+        activation.timeout_due = false;
+        true
+    }
+
     fn clear(&self) {
         *self.state.lock().expect("terminal control lock") = TerminalControlState::default();
     }
@@ -348,6 +377,48 @@ impl TerminalControlPlane {
                 .activation
                 .is_some(),
         )
+    }
+
+    #[cfg(test)]
+    fn activation_deadline_has_elapsed(&self, activation_id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("terminal control lock")
+            .activation
+            .as_ref()
+            .is_some_and(|activation| {
+                activation.key.activation_id == activation_id && activation.deadline_elapsed
+            })
+    }
+
+    #[cfg(test)]
+    fn gate_next_ack_after_classification(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (classified_tx, classified_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self
+            .ack_classification_gate
+            .lock()
+            .expect("ack classification gate lock") = Some(AckClassificationGate {
+            classified: classified_tx,
+            release: release_rx,
+        });
+        (classified_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    async fn wait_after_ack_classification(&self, arrival: &ActivationAckArrival) {
+        if !arrival.matching_before_deadline() {
+            return;
+        }
+        let gate = self
+            .ack_classification_gate
+            .lock()
+            .expect("ack classification gate lock")
+            .take();
+        if let Some(gate) = gate {
+            let _ = gate.classified.send(());
+            let _ = gate.release.await;
+        }
     }
 }
 
@@ -593,6 +664,8 @@ impl TerminalSessionBroker {
             return Err(TerminalBrokerError::RuntimeTerminated);
         }
         let arrival = handle.control.classify_activation_ack(&request);
+        #[cfg(test)]
+        handle.control.wait_after_ack_classification(&arrival).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .tx
@@ -821,6 +894,31 @@ impl TerminalSessionBroker {
         let handle = self.session_handle(session_id).await?;
         handle.control.notify.notified().await;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn activation_deadline_has_elapsed_for_test(
+        &self,
+        session_id: &str,
+        activation_id: &str,
+    ) -> Result<bool, TerminalBrokerError> {
+        Ok(self
+            .session_handle(session_id)
+            .await?
+            .control
+            .activation_deadline_has_elapsed(activation_id))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn gate_next_ack_after_classification_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<(oneshot::Receiver<()>, oneshot::Sender<()>), TerminalBrokerError> {
+        Ok(self
+            .session_handle(session_id)
+            .await?
+            .control
+            .gate_next_ack_after_classification())
     }
 
     #[cfg(test)]
@@ -1678,8 +1776,10 @@ impl TerminalSessionActor {
     ) -> Result<TerminalActivationAckResult, TerminalBrokerError> {
         self.ensure_session(&request.session_id)?;
         if arrival.matching_after_deadline() {
-            self.activation_timeout(&ActivationKey::from_ack(&request))
-                .await;
+            let key = ActivationKey::from_ack(&request);
+            if self.control.claim_unreserved_activation_timeout(&key) {
+                self.activation_timeout(&key).await;
+            }
             return Ok(self.rejected_ack(TerminalLeaseRejectionReason::StaleActivation));
         }
         if let Some(completed) = self.completed_activation.as_ref() {
