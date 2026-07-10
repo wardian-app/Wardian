@@ -3,6 +3,8 @@
 - **Status:** Implemented
 - **Date:** 2026-07-03
 - **Area:** Frontend terminal input, OpenCode provider behavior
+- **Superseded in part:** The 2026-07-07 mouse-tracking suppression decision is
+  superseded by `2026-07-09-opencode-terminal-protocol-ownership.md`.
 
 ## Context
 
@@ -28,7 +30,7 @@ does not change xterm stdin. OpenCode-specific safety remains in
 `filterProviderTerminalInput`, which strips passive mouse-motion reports while
 preserving typed input and non-motion mouse packets such as wheel reports.
 
-Update 2026-07-07: OpenCode's TUI can emit xterm mouse-tracking enables
+Update 2026-07-07 (superseded 2026-07-09): OpenCode's TUI can emit xterm mouse-tracking enables
 (`ESC[?1000h`, `ESC[?1002h`, `ESC[?1003h`, `ESC[?1006h`, and `ESC[?1016h`).
 When those toggles reach xterm.js, plain drag gestures are converted into mouse
 protocol input instead of normal text selection. Wardian now strips those
