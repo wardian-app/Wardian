@@ -444,15 +444,15 @@ wake; broadcast lag becomes a Gap response, not socket-local buffering. Runtime
 termination resolves pending calls with `Terminated`, closes consumers, and
 awaits the actor for up to two seconds before a logged abort.
 
-- [ ] **Step 1: Add exact common DTOs** for registration/update, server-derived capability, broker state, generation/epoch, begin/ack activation, snapshot, replay events, geometry sequence, structured lease decisions, and lifecycle events. Mirror them in `src/types/index.ts` with `snake_case` fields.
-- [ ] **Step 2: Write failing actor tests** for passive registration, client capability downgrade/no escalation, separate local/remote limits, first-owner bootstrap, begin/begin and ack/ack idempotency, superseding begin, stale ack, five-second timeout rollback, disconnect during pending, owner-loss promotion by server sequence, hidden/read-only/suspended ineligibility, zero-presentation lifetime, bounded-channel backpressure, pending-call cancellation, and two-second shutdown.
-- [ ] **Step 3: Write failing stream tests** for subscribe/initial snapshot, cursor batching limits, per-consumer acknowledgement, unsubscribe, shared-ring independent consumers, 16 ms coalesced wake-up, 4,096-event/1 MiB replay limits, gap snapshot recovery, generation change, termination, split UTF-8 frames, stale-generation output rejection, concurrent output/geometry ordering, and generation reset.
-- [ ] **Step 4: Run** `cargo test -p Wardian terminal_session -- --test-threads=1`. **Expected:** FAIL on missing module.
-- [ ] **Step 5: Implement the actor and broker.** Use a test-injected timeout/clock. Effective interaction is derived from trusted desktop identity or authenticated remote policy; registration JSON can only request read-only downgrade.
-- [ ] **Step 6: Implement two-phase activation.** Freeze old/new input during pending; return snapshot/barrier; accept `ack` only for matching session/presentation/generation/epoch/activation; apply one desired geometry at commit; timeout reactivates an eligible prior owner at the new epoch.
-- [ ] **Step 7: Implement ordered geometry events.** Native resize and parser resize commit through the actor, followed by a geometry snapshot barrier before later bytes. Reject stale `geometry_sequence`.
-- [ ] **Step 8: Run** focused tests, `cargo fmt --all -- --check`, and `cargo clippy --workspace -- -D warnings`. **Expected:** PASS.
-- [ ] **Step 9: Commit** `feat(terminal): add authoritative session broker`.
+- [x] **Step 1: Add exact common DTOs** for registration/update, server-derived capability, broker state, generation/epoch, begin/ack activation, snapshot, replay events, geometry sequence, structured lease decisions, and lifecycle events. Mirror them in `src/types/index.ts` with `snake_case` fields.
+- [x] **Step 2: Write failing actor tests** for passive registration, client capability downgrade/no escalation, separate local/remote limits, first-owner bootstrap, begin/begin and ack/ack idempotency, superseding begin, stale ack, five-second timeout rollback, disconnect during pending, owner-loss promotion by server sequence, hidden/read-only/suspended ineligibility, zero-presentation lifetime, bounded-channel backpressure, pending-call cancellation, and two-second shutdown.
+- [x] **Step 3: Write failing stream tests** for subscribe/initial snapshot, cursor batching limits, per-consumer acknowledgement, unsubscribe, shared-ring independent consumers, 16 ms coalesced wake-up, 4,096-event/1 MiB replay limits, gap snapshot recovery, generation change, termination, split UTF-8 frames, stale-generation output rejection, concurrent output/geometry ordering, and generation reset.
+- [x] **Step 4: Run** `cargo test -p Wardian terminal_session -- --test-threads=1`. **Expected:** FAIL on missing module.
+- [x] **Step 5: Implement the actor and broker.** Use a test-injected timeout/clock. Effective interaction is derived from trusted desktop identity or authenticated remote policy; registration JSON can only request read-only downgrade.
+- [x] **Step 6: Implement two-phase activation.** Freeze old/new input during pending; return snapshot/barrier; accept `ack` only for matching session/presentation/generation/epoch/activation; apply one desired geometry at commit; timeout reactivates an eligible prior owner at the new epoch.
+- [x] **Step 7: Implement ordered geometry events.** Native resize and parser resize commit through the actor, followed by a geometry snapshot barrier before later bytes. Reject stale `geometry_sequence`.
+- [x] **Step 8: Run** focused tests, `cargo fmt --all -- --check`, and `cargo clippy --workspace -- -D warnings`. **Expected:** PASS.
+- [x] **Step 9: Commit** `feat(terminal): add authoritative session broker`.
 
 ### Task 8: Integrate PTY lifecycle, desktop IPC, and independent xterm presentations
 
