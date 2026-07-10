@@ -45,6 +45,16 @@ function createAdapter(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -317,6 +327,91 @@ describe("useWorkbenchPersistence", () => {
     expect(store.getState().durable_token).toBe("replacement-token");
     expect(store.getState().conflict).toBeNull();
   });
+
+  it.each([
+    ["use_disk", "unmount"],
+    ["use_disk", "disable"],
+    ["replace_disk", "unmount"],
+    ["replace_disk", "disable"],
+  ] as const)(
+    "cancels stale %s recovery after %s before its disk reload resolves",
+    async (action, cancellation) => {
+      const reload = deferred<WorkbenchLoadResult>();
+      const load = vi.fn()
+        .mockResolvedValueOnce(primaryLoad())
+        .mockImplementationOnce(() => reload.promise);
+      const save = vi.fn().mockResolvedValue({
+        outcome: "revision_conflict",
+        durable_revision: 4,
+        durable_token: "disk-token",
+        request_id: "recovery-save",
+      } satisfies WorkbenchSaveResult);
+      const reset = vi.fn();
+      const adapter = createAdapter({ load, save, reset });
+      const legacyStorage = {
+        getItem: vi.fn().mockReturnValue(null),
+        removeItem: vi.fn(),
+      };
+      const store = createWorkbenchStore({ loading: true });
+      const { result, rerender, unmount } = renderHook(
+        ({ enabled }: { enabled: boolean }) => useWorkbenchPersistence({
+          enabled,
+          adapter,
+          store,
+          legacy_storage: legacyStorage,
+          request_id: () => "recovery-save",
+        }),
+        { initialProps: { enabled: true } },
+      );
+      await waitFor(() => expect(result.current.status).toBe("ready"));
+      act(() => store.getState().set_conflict("revision_conflict"));
+      await waitFor(() => expect(result.current.conflict).toBe("revision_conflict"));
+
+      let recovery!: Promise<boolean>;
+      act(() => {
+        recovery = result.current[action]();
+      });
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+      if (cancellation === "unmount") {
+        unmount();
+      } else {
+        rerender({ enabled: false });
+        await waitFor(() => expect(result.current.status).toBe("disabled"));
+      }
+      const cancelledState = store.getState();
+      const cancelledStatus = cancellation === "disable" ? result.current : null;
+
+      reload.resolve({
+        source: "primary",
+        document: {
+          ...makeSingleGroupDocument([makeSurface("stale-disk")]),
+          revision: 4,
+        },
+        notice: "stale reload",
+        durable_revision: 4,
+        durable_token: "disk-token",
+      });
+      await expect(recovery).resolves.toBe(false);
+
+      expect(store.getState()).toBe(cancelledState);
+      if (cancelledStatus !== null) {
+        expect(result.current).toMatchObject({
+          status: cancelledStatus.status,
+          source: cancelledStatus.source,
+          notice: cancelledStatus.notice,
+          conflict: cancelledStatus.conflict,
+          save_error: cancelledStatus.save_error,
+          is_dirty: cancelledStatus.is_dirty,
+          save_pending: cancelledStatus.save_pending,
+          resolving_conflict: cancelledStatus.resolving_conflict,
+        });
+      }
+      expect(save).not.toHaveBeenCalled();
+      expect(reset).not.toHaveBeenCalled();
+      expect(legacyStorage.removeItem).not.toHaveBeenCalled();
+    },
+  );
 
   it("removes wardian-layout only after the migrated document is durably acknowledged", async () => {
     let resolveSave!: (result: WorkbenchSaveResult) => void;

@@ -103,7 +103,9 @@ export function useWorkbenchPersistence(
   }
   const store = storeRef.current;
   const queueRef = useRef<WorkbenchSaveQueue | null>(null);
-  const resolutionInFlightRef = useRef(false);
+  const effectGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const resolutionInFlightRef = useRef<number | null>(null);
   const requestIdRef = useRef(options.request_id ?? (() => crypto.randomUUID()));
   requestIdRef.current = options.request_id ?? requestIdRef.current;
   const legacyStorageRef = useRef(options.legacy_storage);
@@ -115,9 +117,24 @@ export function useWorkbenchPersistence(
   const shellProjectionRef = useRef(options.shell_projection);
   shellProjectionRef.current = options.shell_projection;
   const [hookStatus, setHookStatus] = useState<HookStatus>(() => initialStatus(options.enabled));
+  const isCurrentGeneration = useCallback((generation: number): boolean => (
+    mountedRef.current && effectGenerationRef.current === generation
+  ), []);
 
   useEffect(() => {
-    let cancelled = false;
+    const generation = effectGenerationRef.current + 1;
+    effectGenerationRef.current = generation;
+    mountedRef.current = true;
+    resolutionInFlightRef.current = null;
+    const isCurrentEffect = (): boolean => isCurrentGeneration(generation);
+    const invalidateEffect = (): void => {
+      if (effectGenerationRef.current !== generation) return;
+      mountedRef.current = false;
+      effectGenerationRef.current = generation + 1;
+      if (resolutionInFlightRef.current === generation) {
+        resolutionInFlightRef.current = null;
+      }
+    };
     let unsubscribeStore: (() => void) | null = null;
     let unsubscribeShell: (() => void) | null = null;
     let projectingShell = false;
@@ -125,32 +142,38 @@ export function useWorkbenchPersistence(
     queueRef.current = null;
 
     if (!options.enabled) {
-      store.getState().set_loading(false);
-      setHookStatus(initialStatus(false));
-      return;
+      if (isCurrentEffect()) store.getState().set_loading(false);
+      if (isCurrentEffect()) setHookStatus(initialStatus(false));
+      return invalidateEffect;
     }
 
-    store.getState().set_loading(true);
-    setHookStatus(initialStatus(true));
+    if (isCurrentEffect()) store.getState().set_loading(true);
+    if (isCurrentEffect()) setHookStatus(initialStatus(true));
 
     void Promise.all([options.adapter.boot(), options.adapter.load()])
       .then(([boot, loaded]) => {
-        if (cancelled) return;
+        if (!isCurrentEffect()) return;
         if (loaded.source === "future_schema") {
+          if (!isCurrentEffect()) return;
           store.getState().set_conflict("future_schema");
+          if (!isCurrentEffect()) return;
           store.getState().set_read_only(true);
+          if (!isCurrentEffect()) return;
           store.getState().set_loading(false);
         } else {
           if (
             loaded.document === null
             || loaded.durable_revision === null
             || loaded.durable_token === null
-            || !store.getState().adopt_durable_state({
-              document: loaded.document,
-              durable_revision: loaded.durable_revision,
-              durable_token: loaded.durable_token,
-            })
           ) {
+            throw new Error("backend returned an invalid workbench load result");
+          }
+          if (!isCurrentEffect()) return;
+          if (!store.getState().adopt_durable_state({
+            document: loaded.document,
+            durable_revision: loaded.durable_revision,
+            durable_token: loaded.durable_token,
+          })) {
             throw new Error("backend returned an invalid workbench load result");
           }
           let captureMigrationEnvelope = false;
@@ -171,6 +194,7 @@ export function useWorkbenchPersistence(
               viewport,
               initialViewModeRef.current,
             );
+            if (!isCurrentEffect()) return;
             const migrated = store.getState().apply_commands([
               { type: "update_shell", patch: migration.shell_patch },
               { type: "open_surface", surface: migration.initial_surface },
@@ -180,6 +204,7 @@ export function useWorkbenchPersistence(
             }
             captureMigrationEnvelope = true;
           }
+          if (!isCurrentEffect()) return;
           const queue = createWorkbenchSaveQueue({
             store,
             adapter: options.adapter,
@@ -199,6 +224,10 @@ export function useWorkbenchPersistence(
               }
             },
           });
+          if (!isCurrentEffect()) {
+            void queue.shutdown();
+            return;
+          }
           queueRef.current = queue;
           if (captureMigrationEnvelope) void queue.flush();
           const shellProjection = shellProjectionRef.current;
@@ -210,9 +239,10 @@ export function useWorkbenchPersistence(
               projectingShell = false;
             }
             unsubscribeShell = shellProjection.subscribe(() => {
-              if (cancelled || projectingShell) return;
+              if (!isCurrentEffect() || projectingShell) return;
               const projectedShell = shellProjection.read();
               if (shellEquals(projectedShell, store.getState().document.shell)) return;
+              if (!isCurrentEffect()) return;
               store.getState().apply_commands([
                 { type: "update_shell", patch: projectedShell },
               ]);
@@ -224,7 +254,7 @@ export function useWorkbenchPersistence(
           state: ReturnType<WorkbenchStore["getState"]>,
           previous: ReturnType<WorkbenchStore["getState"]>,
         ): void => {
-          if (cancelled) return;
+          if (!isCurrentEffect()) return;
           const shellProjection = shellProjectionRef.current;
           if (
             shellProjection
@@ -238,6 +268,7 @@ export function useWorkbenchPersistence(
               projectingShell = false;
             }
           }
+          if (!isCurrentEffect()) return;
           setHookStatus((current) => ({
             ...current,
             conflict: state.conflict,
@@ -246,8 +277,10 @@ export function useWorkbenchPersistence(
             save_pending: state.save_pending,
           }));
         };
+        if (!isCurrentEffect()) return;
         unsubscribeStore = store.subscribe(publishStoreStatus);
         const state = store.getState();
+        if (!isCurrentEffect()) return;
         setHookStatus({
           status: "ready",
           safe_mode: boot.safe_mode,
@@ -261,10 +294,13 @@ export function useWorkbenchPersistence(
         });
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (!isCurrentEffect()) return;
         const message = error instanceof Error ? error.message : String(error);
+        if (!isCurrentEffect()) return;
         store.getState().set_loading(false);
+        if (!isCurrentEffect()) return;
         store.getState().set_save_error(message);
+        if (!isCurrentEffect()) return;
         setHookStatus({
           status: "error",
           safe_mode: false,
@@ -279,43 +315,51 @@ export function useWorkbenchPersistence(
       });
 
     return () => {
-      cancelled = true;
+      invalidateEffect();
       unsubscribeStore?.();
       unsubscribeShell?.();
       if (queueRef.current !== null) void queueRef.current.shutdown();
       queueRef.current = null;
     };
-  }, [options.adapter, options.enabled, store]);
+  }, [isCurrentGeneration, options.adapter, options.enabled, store]);
 
-  const flush = useCallback(
-    () => queueRef.current?.flush() ?? Promise.resolve(),
-    [],
-  );
+  const flush = useCallback(async (): Promise<void> => {
+    await queueRef.current?.flush();
+  }, []);
   const reset = useCallback(
     () => queueRef.current?.reset() ?? Promise.resolve(false),
     [],
   );
   const useDisk = useCallback(async (): Promise<boolean> => {
+    const generation = effectGenerationRef.current;
     if (
-      resolutionInFlightRef.current
+      !options.enabled
+      || !isCurrentGeneration(generation)
+      || resolutionInFlightRef.current !== null
       || store.getState().conflict !== "revision_conflict"
     ) return false;
-    resolutionInFlightRef.current = true;
+    resolutionInFlightRef.current = generation;
+    if (!isCurrentGeneration(generation)) return false;
     setHookStatus((current) => ({ ...current, resolving_conflict: true }));
     try {
       let loaded: WorkbenchLoadResult;
       try {
         loaded = await options.adapter.load();
       } catch (error: unknown) {
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_save_error(
           error instanceof Error ? error.message : String(error),
         );
         return false;
       }
+      if (!isCurrentGeneration(generation)) return false;
       if (store.getState().conflict !== "revision_conflict") return false;
       if (loaded.source === "future_schema") {
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_conflict("future_schema");
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_read_only(true);
+        if (!isCurrentGeneration(generation)) return false;
         setHookStatus((current) => ({
           ...current,
           source: loaded.source,
@@ -328,12 +372,14 @@ export function useWorkbenchPersistence(
         loaded.document === null
         || loaded.durable_revision === null
         || loaded.durable_token === null
-        || !store.getState().adopt_durable_state({
-          document: loaded.document,
-          durable_revision: loaded.durable_revision,
-          durable_token: loaded.durable_token,
-        })
       ) return false;
+      if (!isCurrentGeneration(generation)) return false;
+      if (!store.getState().adopt_durable_state({
+        document: loaded.document,
+        durable_revision: loaded.durable_revision,
+        durable_token: loaded.durable_token,
+      })) return false;
+      if (!isCurrentGeneration(generation)) return false;
       setHookStatus((current) => ({
         ...current,
         source: loaded.source,
@@ -343,31 +389,44 @@ export function useWorkbenchPersistence(
       }));
       return true;
     } finally {
-      resolutionInFlightRef.current = false;
-      setHookStatus((current) => ({ ...current, resolving_conflict: false }));
+      if (resolutionInFlightRef.current === generation) {
+        resolutionInFlightRef.current = null;
+        if (isCurrentGeneration(generation)) {
+          setHookStatus((current) => ({ ...current, resolving_conflict: false }));
+        }
+      }
     }
-  }, [options.adapter, store]);
+  }, [isCurrentGeneration, options.adapter, options.enabled, store]);
   const replaceDisk = useCallback(async (): Promise<boolean> => {
+    const generation = effectGenerationRef.current;
     if (
-      resolutionInFlightRef.current
+      !options.enabled
+      || !isCurrentGeneration(generation)
+      || resolutionInFlightRef.current !== null
       || store.getState().conflict !== "revision_conflict"
     ) return false;
-    resolutionInFlightRef.current = true;
+    resolutionInFlightRef.current = generation;
+    if (!isCurrentGeneration(generation)) return false;
     setHookStatus((current) => ({ ...current, resolving_conflict: true }));
     try {
       let loaded: WorkbenchLoadResult;
       try {
         loaded = await options.adapter.load();
       } catch (error: unknown) {
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_save_error(
           error instanceof Error ? error.message : String(error),
         );
         return false;
       }
+      if (!isCurrentGeneration(generation)) return false;
       if (store.getState().conflict !== "revision_conflict") return false;
       if (loaded.source === "future_schema") {
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_conflict("future_schema");
+        if (!isCurrentGeneration(generation)) return false;
         store.getState().set_read_only(true);
+        if (!isCurrentGeneration(generation)) return false;
         setHookStatus((current) => ({
           ...current,
           source: loaded.source,
@@ -380,12 +439,14 @@ export function useWorkbenchPersistence(
         loaded.document === null
         || loaded.durable_revision === null
         || loaded.durable_token === null
-        || !store.getState().rebase_working_onto_durable({
-          document: loaded.document,
-          durable_revision: loaded.durable_revision,
-          durable_token: loaded.durable_token,
-        })
       ) return false;
+      if (!isCurrentGeneration(generation)) return false;
+      if (!store.getState().rebase_working_onto_durable({
+        document: loaded.document,
+        durable_revision: loaded.durable_revision,
+        durable_token: loaded.durable_token,
+      })) return false;
+      if (!isCurrentGeneration(generation)) return false;
       setHookStatus((current) => ({
         ...current,
         source: loaded.source,
@@ -393,13 +454,21 @@ export function useWorkbenchPersistence(
         conflict: null,
         save_error: null,
       }));
-      await queueRef.current?.flush();
-      return true;
+      if (!isCurrentGeneration(generation)) return false;
+      const queue = queueRef.current;
+      if (queue === null || queueRef.current !== queue) return false;
+      const accepted = await queue.flush();
+      if (!isCurrentGeneration(generation)) return false;
+      return accepted;
     } finally {
-      resolutionInFlightRef.current = false;
-      setHookStatus((current) => ({ ...current, resolving_conflict: false }));
+      if (resolutionInFlightRef.current === generation) {
+        resolutionInFlightRef.current = null;
+        if (isCurrentGeneration(generation)) {
+          setHookStatus((current) => ({ ...current, resolving_conflict: false }));
+        }
+      }
     }
-  }, [options.adapter, store]);
+  }, [isCurrentGeneration, options.adapter, options.enabled, store]);
   const exportLocalJson = useCallback((): WorkbenchLocalExport => ({
     filename: "wardian-workbench-local.json",
     mime_type: "application/json",

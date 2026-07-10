@@ -394,7 +394,8 @@ export type WorkbenchPendingSaveEnvelope = {
 };
 
 export type WorkbenchSaveQueue = {
-  flush: () => Promise<void>;
+  /** Resolves true only when an existing or newly-created save was submitted. */
+  flush: () => Promise<boolean>;
   reset: () => Promise<boolean>;
   shutdown: () => Promise<void>;
 };
@@ -548,16 +549,16 @@ export function createWorkbenchSaveQueue(
     return pending.promise;
   };
 
-  const flush = async (allowDuringShutdown = false): Promise<void> => {
+  const flush = async (allowDuringShutdown = false): Promise<boolean> => {
     cancelTimer();
-    if (resetInFlight || (shuttingDown && !allowDuringShutdown)) return;
+    if (resetInFlight || (shuttingDown && !allowDuringShutdown)) return false;
     if (active !== null) {
       await sendActive(active);
-      return;
+      return true;
     }
-    if (disposed || !eligible()) return;
+    if (disposed || !eligible()) return false;
     const requestId = createRequestId();
-    if (!options.store.getState().begin_pending_save(requestId)) return;
+    if (!options.store.getState().begin_pending_save(requestId)) return false;
     const state = options.store.getState();
     const pendingDocument = state.pending_document;
     const pendingRevision = state.pending_revision;
@@ -573,7 +574,7 @@ export function createWorkbenchSaveQueue(
         requestId,
         "invalid pending workbench save envelope",
       );
-      return;
+      return false;
     }
     const envelope: WorkbenchPendingSaveEnvelope = {
       request_id: requestId,
@@ -595,6 +596,7 @@ export function createWorkbenchSaveQueue(
     };
     options.on_save_pending?.(envelope);
     await sendActive(active);
+    return true;
   };
 
   const unsubscribe = options.store.subscribe(() => {
