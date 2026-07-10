@@ -1,0 +1,34 @@
+import { useLayoutEffect, useRef } from "react";
+
+import type { DeepReadonly } from "../../features/workbench/useWorkbenchStore";
+import type { WorkbenchSurfaceV1 } from "../../types";
+
+export type WorkbenchTabProps = {
+  surface: DeepReadonly<WorkbenchSurfaceV1>;
+  title: string;
+};
+
+/** Decorates Dockview's owned ARIA tab without introducing a nested tab role. */
+export function WorkbenchTab({ surface, title }: WorkbenchTabProps) {
+  const descriptorRef = useRef<HTMLSpanElement>(null);
+
+  useLayoutEffect(() => {
+    const tab = descriptorRef.current?.closest<HTMLElement>('[role="tab"]');
+    if (!tab) return;
+    tab.id = `workbench-tab-${surface.surface_id}`;
+    tab.setAttribute("aria-controls", `workbench-panel-${surface.surface_id}`);
+    tab.dataset.surfaceId = surface.surface_id;
+    tab.dataset.surfaceType = surface.surface_type;
+    if (surface.resource_key === undefined) delete tab.dataset.resourceKey;
+    else tab.dataset.resourceKey = surface.resource_key;
+  }, [surface.resource_key, surface.surface_id, surface.surface_type]);
+
+  return (
+    <span
+      ref={descriptorRef}
+      className="wardian-workbench-tab-label"
+    >
+      {title}
+    </span>
+  );
+}

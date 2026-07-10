@@ -11,6 +11,7 @@ import type {
 import {
   applyWorkbenchCommand,
   createDefaultWorkbenchDocument,
+  groupsAreWorkbenchAdjacent,
   validateWorkbenchDocument,
   type WorkbenchCommand,
 } from "./workbenchModel";
@@ -760,6 +761,9 @@ describe("workbench model", () => {
       source_group_id: "group-1",
       target_group_id: "group-2",
     }).accepted).toBe(true);
+
+    expect(groupsAreWorkbenchAdjacent(document.root, "group-1", "group-2")).toBe(true);
+    expect(groupsAreWorkbenchAdjacent(document.root, "group-1", "group-3")).toBe(false);
   });
 
   it("updates opaque surface state and applies only the six shell fields", () => {

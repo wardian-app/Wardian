@@ -51,6 +51,7 @@ import { WORKBENCH_FLAGS } from "../config/workbenchFlags";
 import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflictDialog";
 import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
 import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
+import { WorkbenchHost } from "../layout/workbench/WorkbenchHost";
 
 declare global {
   interface Window {
@@ -1073,6 +1074,9 @@ function AppBody() {
   const selectedUserTerminalWorkspace = selectedAgentIds.size === 1
     ? agents.find((agent) => agent.session_id === Array.from(selectedAgentIds)[0])?.folder?.trim() || null
     : null;
+  const selectedWorkbenchResourceKey = selectedAgentIds.size === 1
+    ? Array.from(selectedAgentIds)[0]
+    : undefined;
 
   const openWorkflowsView = useCallback(() => {
     setActiveTab("workflows");
@@ -1192,7 +1196,14 @@ function AppBody() {
         />
 
         <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
-          <div 
+          {WORKBENCH_FLAGS.workbench_enabled ? (
+            <WorkbenchHost
+              store={workbenchPersistence.store}
+              safe_mode={workbenchPersistence.safe_mode}
+              resource_key={selectedWorkbenchResourceKey}
+            />
+          ) : (
+          <div
             className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2 flex flex-col"
             onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
           >
@@ -1350,6 +1361,7 @@ function AppBody() {
               />
             )}
           </div>
+          )}
           <CustomCloneModal
             sourceSessionId={customCloneSourceId ?? ""}
             agentClasses={agentClasses}

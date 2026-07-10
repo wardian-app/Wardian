@@ -436,6 +436,7 @@ describe("Workbench persistence boot integration", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("load_workbench_state");
     expect(localStorage.getItem("wardian-layout")).toBe("legacy-layout-bytes");
     expect(screen.queryByTestId("workbench-persistence-notice")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workbench-host")).not.toBeInTheDocument();
     expect(screen.getByText("Grid")).toBeInTheDocument();
     expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
   });
@@ -465,6 +466,9 @@ describe("Workbench persistence boot integration", () => {
     expect(notice).toHaveTextContent("Workbench safe mode is active");
     expect(notice).toHaveAttribute("role", "status");
     expect(screen.getByTestId("app-shell")).toBeInTheDocument();
+    expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
+    expect(document.querySelector('[data-safe-mode="true"]')).not.toBeNull();
+    expect(screen.getAllByTestId("workbench-group")).toHaveLength(1);
     expect(screen.getByText("Grid")).toBeInTheDocument();
   });
 });

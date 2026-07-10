@@ -785,7 +785,12 @@ function intervalsOverlapPositively(
   return compareExact(earlierEnd, laterStart) > 0;
 }
 
-function groupsAreAdjacent(root: WorkbenchNodeV1, firstId: string, secondId: string): boolean {
+/** Returns whether two group leaves share a positive-length canonical edge. */
+export function groupsAreWorkbenchAdjacent(
+  root: WorkbenchNodeV1,
+  firstId: string,
+  secondId: string,
+): boolean {
   const rectangles = new Map<string, ExactWorkbenchRectangle>();
   collectExactGroupRectangles(root, {
     left: EXACT_ZERO,
@@ -1121,7 +1126,7 @@ export function applyWorkbenchCommand(
       const target = document.groups[command.target_group_id];
       if (!source) return commandRejected(document, "source group does not exist", "$.command.source_group_id");
       if (!target) return commandRejected(document, "target group does not exist", "$.command.target_group_id");
-      if (!groupsAreAdjacent(document.root, command.source_group_id, command.target_group_id)) {
+      if (!groupsAreWorkbenchAdjacent(document.root, command.source_group_id, command.target_group_id)) {
         return commandRejected(document, "source and target groups must be adjacent");
       }
       const removed = removeGroupLeaf(document.root, command.source_group_id);
