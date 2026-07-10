@@ -14,6 +14,16 @@ import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 import { ConfirmProvider } from "../components/ConfirmDialog";
+import { makeSingleGroupDocument } from "../features/workbench/workbenchTestUtils";
+
+const workbenchFlagState = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../config/workbenchFlags", () => ({
+  WORKBENCH_FLAGS: {
+    get workbench_enabled() {
+      return workbenchFlagState.enabled;
+    },
+  },
+}));
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -389,8 +399,11 @@ const opencodeAgents: AgentConfig[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  workbenchFlagState.enabled = false;
+  localStorage.clear();
   useLayoutStore.getState().resetLayout();
   useSettingsStore.setState({
+    settingsOpen: false,
     theme: "system",
     autoPatchGemini: false,
     terminalFontSize: 14,
@@ -409,6 +422,51 @@ beforeEach(() => {
   document.documentElement.style.removeProperty("--wardian-native-window-height");
   // Mock window.confirm
   window.confirm = vi.fn(() => true);
+});
+
+describe("Workbench persistence boot integration", () => {
+  it("keeps flag-off navigation unchanged without reading or deleting legacy layout", async () => {
+    setupDefaultMocks([], defaultClasses);
+    localStorage.setItem("wardian-layout", "legacy-layout-bytes");
+
+    render(<App />);
+    await screen.findByText("No Active Instances");
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_workbench_boot_config");
+    expect(mockInvoke).not.toHaveBeenCalledWith("load_workbench_state");
+    expect(localStorage.getItem("wardian-layout")).toBe("legacy-layout-bytes");
+    expect(screen.queryByTestId("workbench-persistence-notice")).not.toBeInTheDocument();
+    expect(screen.getByText("Grid")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
+  });
+
+  it("shows nonblocking recovery and backend safe-mode state behind the flag", async () => {
+    workbenchFlagState.enabled = true;
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "get_workbench_boot_config") return Promise.resolve({ safe_mode: true });
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "backup",
+          document: makeSingleGroupDocument(),
+          notice: "Recovered the workbench from backup.",
+          durable_revision: 0,
+          durable_token: "opaque-zero",
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    const notice = await screen.findByTestId("workbench-persistence-notice");
+    expect(notice).toHaveTextContent("Recovered the workbench from backup.");
+    expect(notice).toHaveTextContent("Workbench safe mode is active");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(screen.getByTestId("app-shell")).toBeInTheDocument();
+    expect(screen.getByText("Grid")).toBeInTheDocument();
+  });
 });
 
 afterEach(() => {

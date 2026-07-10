@@ -1,5 +1,6 @@
 use crate::state::AppState;
-use std::path::Path;
+use serde::Serialize;
+use std::{ffi::OsStr, path::Path};
 use tauri::State;
 use wardian_core::{
     models::workbench::WorkbenchDocumentV1,
@@ -9,6 +10,24 @@ use wardian_core::{
         WorkbenchSaveResult,
     },
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WorkbenchBootConfig {
+    pub safe_mode: bool,
+}
+
+fn workbench_safe_mode_from_value(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+#[tauri::command]
+pub fn get_workbench_boot_config() -> WorkbenchBootConfig {
+    WorkbenchBootConfig {
+        safe_mode: workbench_safe_mode_from_value(
+            std::env::var_os("WARDIAN_WORKBENCH_SAFE_MODE").as_deref(),
+        ),
+    }
+}
 
 #[tauri::command]
 pub async fn load_workbench_state(
@@ -96,6 +115,15 @@ mod tests {
         models::workbench::MAX_SAFE_INTEGER,
         workbench::{WorkbenchLoadSource, WorkbenchPersistenceOutcome},
     };
+
+    #[test]
+    fn workbench_safe_mode_requires_the_exact_value_one() {
+        assert!(workbench_safe_mode_from_value(Some(OsStr::new("1"))));
+        assert!(!workbench_safe_mode_from_value(None));
+        assert!(!workbench_safe_mode_from_value(Some(OsStr::new("true"))));
+        assert!(!workbench_safe_mode_from_value(Some(OsStr::new("01"))));
+        assert!(!workbench_safe_mode_from_value(Some(OsStr::new("1 "))));
+    }
 
     #[tokio::test]
     async fn workbench_command_helpers_return_structured_save_conflict_and_reset_results() {

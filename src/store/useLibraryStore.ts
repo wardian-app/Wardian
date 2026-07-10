@@ -15,6 +15,17 @@ import {
 // param is kept on the wire for interface stability, but only `"library"` is
 // ever sent or expected here.
 const LIBRARY_WATCH_TYPE = 'library';
+const DEFAULT_LIBRARY_DETAIL_WIDTH = 480;
+const MIN_LIBRARY_DETAIL_WIDTH = 360;
+const MAX_LIBRARY_DETAIL_FRACTION = 0.7;
+
+function clampLibraryDetailWidth(px: number): number {
+  const maximum = Math.max(
+    MIN_LIBRARY_DETAIL_WIDTH,
+    Math.floor(window.innerWidth * MAX_LIBRARY_DETAIL_FRACTION),
+  );
+  return Math.max(MIN_LIBRARY_DETAIL_WIDTH, Math.min(maximum, Math.round(px)));
+}
 
 interface LibraryChangedEvent {
   library_type: string;
@@ -63,6 +74,7 @@ function errorMessage(e: unknown): string {
 }
 
 interface LibraryState {
+  libraryDetailWidth: number;
   index: LibraryIndex | null;
   isLoading: boolean;
   error: string | null;
@@ -78,6 +90,8 @@ interface LibraryState {
    * `selectedContent` or whether it must instead flag `contentStale` and
    * let the editor decide when to reload. Internal to this store. */
   _editorDirty: boolean;
+  setLibraryDetailWidth: (width: number) => void;
+  resetLibraryDetailWidth: () => void;
   setActiveSection: (s: LibrarySectionId) => void;
   select: (entryRef: string | null, opts?: { editorDirty?: boolean }) => Promise<void>;
   /** Cheap way for a future editor to flag dirty state without forcing a
@@ -120,6 +134,7 @@ interface LibraryState {
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
+  libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
   index: null,
   isLoading: false,
   error: null,
@@ -131,6 +146,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   selectedContent: null,
   contentStale: false,
   _editorDirty: false,
+
+  setLibraryDetailWidth: (libraryDetailWidth) => set({
+    libraryDetailWidth: clampLibraryDetailWidth(libraryDetailWidth),
+  }),
+  resetLibraryDetailWidth: () => set({
+    libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
+  }),
 
   setActiveSection: (s) => set({ activeSection: s }),
 

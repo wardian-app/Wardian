@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act } from '@testing-library/react';
 import { useLayoutStore } from './useLayoutStore';
 
@@ -47,5 +47,17 @@ describe('useLayoutStore — sidebar widths', () => {
     act(() => useLayoutStore.getState().resetLayout());
     expect(useLayoutStore.getState().leftSidebarWidth).toBe(240);
     expect(useLayoutStore.getState().rightSidebarWidth).toBe(240);
+  });
+
+  it('keeps layout state runtime-only with no wardian-layout shadow writer', () => {
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem');
+    useLayoutStore.getState().setLeftSidebarWidth(300);
+    useLayoutStore.getState().setUserTerminalOpen(true);
+
+    expect(storageWrite).not.toHaveBeenCalled();
+    expect(localStorage.getItem('wardian-layout')).toBeNull();
+    expect('settingsOpen' in useLayoutStore.getState()).toBe(false);
+    expect('libraryDetailWidth' in useLayoutStore.getState()).toBe(false);
+    storageWrite.mockRestore();
   });
 });

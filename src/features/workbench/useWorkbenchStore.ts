@@ -12,8 +12,15 @@ export type WorkbenchStoreOptions = {
   initial_document?: WorkbenchDocumentV1;
   durable_revision?: number;
   durable_token?: string | null;
+  loading?: boolean;
   now?: () => string;
   create_default_document?: () => WorkbenchDocumentV1;
+};
+
+export type WorkbenchDurableState = {
+  document: WorkbenchDocumentV1;
+  durable_revision: number;
+  durable_token: string;
 };
 
 export type DeepReadonly<T> =
@@ -73,6 +80,8 @@ type MutableWorkbenchStoreState = {
   set_zoomed_group_id: (groupId: string | null) => void;
   set_launcher_open: (open: boolean) => void;
   touch_surface: (surfaceId: string) => boolean;
+  adopt_durable_state: (durableState: WorkbenchDurableState) => boolean;
+  rebase_working_onto_durable: (durableState: WorkbenchDurableState) => boolean;
   begin_pending_save: (requestId: string) => boolean;
   acknowledge_pending_save: (
     requestId: string,
@@ -80,6 +89,18 @@ type MutableWorkbenchStoreState = {
     pendingTransactionVersion: number | null,
     expectedToken: string | null,
     durableToken: string,
+  ) => boolean;
+  acknowledge_pending_reset: (
+    requestId: string,
+    revision: number,
+    pendingTransactionVersion: number | null,
+    expectedToken: string | null,
+    durableToken: string,
+    document: WorkbenchDocumentV1,
+  ) => boolean;
+  reject_pending_save: (
+    requestId: string,
+    conflict: "revision_conflict" | "future_schema",
   ) => boolean;
   fail_pending_save: (requestId: string, error: string) => boolean;
   set_conflict: (conflict: string | null) => void;
@@ -398,7 +419,7 @@ export function createWorkbenchStore(
       pending_transaction_version: null,
       used_pending_request_ids: Object.freeze([]),
       conflict: null,
-      loading: false,
+      loading: options.loading ?? false,
       read_only: false,
       save_error: null,
 
@@ -444,6 +465,95 @@ export function createWorkbenchStore(
           };
         });
         return touched;
+      },
+
+      adopt_durable_state: ({ document, durable_revision: revision, durable_token: token }) => {
+        if (
+          token.length === 0
+          || !Number.isSafeInteger(revision)
+          || revision < 0
+          || document.revision !== revision
+        ) return false;
+        const validation = validateWorkbenchDocument(document);
+        if (!validation.valid) return false;
+        const durableDocument = cloneAndFreezeDocument(document);
+        set((current) => ({
+          ...current,
+          document: durableDocument,
+          durable_document: durableDocument,
+          zoomed_group_id: current.zoomed_group_id !== null
+            && current.zoomed_group_id in durableDocument.groups
+            ? current.zoomed_group_id
+            : null,
+          launcher_open: false,
+          surface_mru: initialSurfaceMru(durableDocument),
+          durable_revision: revision,
+          durable_token: token,
+          is_dirty: false,
+          save_pending: false,
+          pending_request_id: null,
+          pending_revision: null,
+          pending_document: null,
+          pending_expected_token: null,
+          pending_transaction_version: null,
+          conflict: null,
+          loading: false,
+          read_only: false,
+          save_error: null,
+          transaction_version: current.transaction_version + 1,
+        }));
+        return true;
+      },
+
+      rebase_working_onto_durable: ({
+        document: durableDocumentInput,
+        durable_revision: revision,
+        durable_token: token,
+      }) => {
+        const current = get();
+        if (
+          token.length === 0
+          || !Number.isSafeInteger(revision)
+          || revision < 0
+          || revision >= Number.MAX_SAFE_INTEGER
+          || durableDocumentInput.revision !== revision
+        ) return false;
+        const durableValidation = validateWorkbenchDocument(durableDocumentInput);
+        if (!durableValidation.valid) return false;
+        const candidate: WorkbenchDocumentV1 = {
+          ...structuredClone(current.document),
+          revision: revision + 1,
+          saved_at: now(),
+        };
+        const workingValidation = validateWorkbenchDocument(candidate);
+        if (!workingValidation.valid) return false;
+        const durableDocument = cloneAndFreezeDocument(durableDocumentInput);
+        const workingDocument = cloneAndFreezeDocument(candidate);
+        set((latest) => ({
+          ...latest,
+          document: workingDocument,
+          durable_document: durableDocument,
+          zoomed_group_id: latest.zoomed_group_id !== null
+            && latest.zoomed_group_id in workingDocument.groups
+            ? latest.zoomed_group_id
+            : null,
+          surface_mru: reconcileSurfaceMru(latest.surface_mru, workingDocument),
+          durable_revision: revision,
+          durable_token: token,
+          is_dirty: true,
+          save_pending: false,
+          pending_request_id: null,
+          pending_revision: null,
+          pending_document: null,
+          pending_expected_token: null,
+          pending_transaction_version: null,
+          conflict: null,
+          loading: false,
+          read_only: false,
+          save_error: null,
+          transaction_version: latest.transaction_version + 1,
+        }));
+        return true;
       },
 
       begin_pending_save: (requestId) => {
@@ -539,6 +649,91 @@ export function createWorkbenchStore(
           };
         });
         return acknowledged;
+      },
+
+      acknowledge_pending_reset: (
+        requestId,
+        revision,
+        pendingTransactionVersion,
+        expectedToken,
+        durableToken,
+        document,
+      ) => {
+        if (
+          durableToken.length === 0
+          || document.revision !== revision
+          || !validateWorkbenchDocument(document).valid
+        ) return false;
+        let acknowledged = false;
+        set((current) => {
+          if (
+            current.pending_request_id !== requestId
+            || current.pending_revision !== revision
+            || current.pending_transaction_version !== pendingTransactionVersion
+            || current.pending_expected_token !== expectedToken
+            || current.pending_document === null
+          ) return current;
+          const durableDocument = cloneAndFreezeDocument(document);
+          const hasNewerWorkingDocument = current.document !== current.pending_document;
+          let workingDocument = durableDocument;
+          if (hasNewerWorkingDocument) {
+            const workingRevision = nextRevision(revision);
+            if (workingRevision === null) return current;
+            const candidate: WorkbenchDocumentV1 = {
+              ...structuredClone(current.document),
+              revision: workingRevision,
+              saved_at: now(),
+            };
+            const validation = validateWorkbenchDocument(candidate);
+            if (!validation.valid) return current;
+            workingDocument = cloneAndFreezeDocument(candidate);
+          }
+          acknowledged = true;
+          return {
+            ...current,
+            document: workingDocument,
+            durable_document: durableDocument,
+            surface_mru: reconcileSurfaceMru(current.surface_mru, workingDocument),
+            zoomed_group_id: current.zoomed_group_id !== null
+              && current.zoomed_group_id in workingDocument.groups
+              ? current.zoomed_group_id
+              : null,
+            durable_revision: revision,
+            durable_token: durableToken,
+            is_dirty: hasNewerWorkingDocument,
+            save_pending: false,
+            pending_request_id: null,
+            pending_revision: null,
+            pending_document: null,
+            pending_expected_token: null,
+            pending_transaction_version: null,
+            save_error: null,
+            transaction_version: current.transaction_version + 1,
+          };
+        });
+        return acknowledged;
+      },
+
+      reject_pending_save: (requestId, conflict) => {
+        let rejectedPending = false;
+        set((current) => {
+          if (current.pending_request_id !== requestId) return current;
+          rejectedPending = true;
+          return {
+            ...current,
+            save_pending: false,
+            pending_request_id: null,
+            pending_revision: null,
+            pending_document: null,
+            pending_expected_token: null,
+            pending_transaction_version: null,
+            conflict,
+            read_only: conflict === "future_schema",
+            save_error: conflict,
+            transaction_version: current.transaction_version + 1,
+          };
+        });
+        return rejectedPending;
       },
 
       fail_pending_save: (requestId, error) => {

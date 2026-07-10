@@ -571,4 +571,17 @@ describe('app settings persistence', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  it('owns transient Settings modal state without serializing it', () => {
+    useSettingsStore.getState().setSettingsOpen(false);
+    useSettingsStore.getState().toggleSettings();
+    expect(useSettingsStore.getState().settingsOpen).toBe(true);
+    useSettingsStore.getState().setSettingsOpen(false);
+    expect(useSettingsStore.getState().settingsOpen).toBe(false);
+
+    const persisted = JSON.parse(localStorage.getItem('wardian-settings') ?? '{}') as {
+      state?: Record<string, unknown>;
+    };
+    expect(persisted.state).not.toHaveProperty('settingsOpen');
+  });
 });

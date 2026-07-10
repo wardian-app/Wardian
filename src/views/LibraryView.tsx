@@ -1,6 +1,5 @@
 import React, { useEffect } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { useLayoutStore } from '../store/useLayoutStore';
 import { SectionRail } from '../features/library/SectionRail';
 import { LibraryList } from '../features/library/LibraryList';
 import { DetailPane } from '../features/library/DetailPane';
@@ -28,8 +27,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
     const setActiveSection = useLibraryStore((s) => s.setActiveSection);
     const subscribeToLibraryChanges = useLibraryStore((s) => s.subscribeToLibraryChanges);
     const fetchIndex = useLibraryStore((s) => s.fetchIndex);
-    const libraryDetailWidth = useLayoutStore((s) => s.libraryDetailWidth);
-    const setLibraryDetailWidth = useLayoutStore((s) => s.setLibraryDetailWidth);
+    const libraryDetailWidth = useLibraryStore((s) => s.libraryDetailWidth);
+    const setLibraryDetailWidth = useLibraryStore((s) => s.setLibraryDetailWidth);
 
     useEffect(() => subscribeToLibraryChanges(), []);
 

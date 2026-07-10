@@ -510,6 +510,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::workbench::get_workbench_boot_config,
             commands::workbench::load_workbench_state,
             commands::workbench::save_workbench_state,
             commands::workbench::reset_workbench_state,

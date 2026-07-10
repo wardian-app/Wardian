@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
-import type { CloneMode } from "../types";
+import type { CloneMode, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -47,6 +47,10 @@ import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 import { CustomCloneModal } from "../features/agents/CustomCloneModal";
+import { WORKBENCH_FLAGS } from "../config/workbenchFlags";
+import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflictDialog";
+import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
+import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
 
 declare global {
   interface Window {
@@ -69,6 +73,42 @@ const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
 const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
 const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
 const CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
+const WORKBENCH_PERSISTENCE_ADAPTER = createWorkbenchInvokeAdapter(
+  (command, args) => invoke(command, args),
+);
+const WORKBENCH_SHELL_PROJECTION = {
+  read: () => {
+    const layout = useLayoutStore.getState();
+    return {
+      left_sidebar_collapsed: layout.leftSidebarCollapsed,
+      left_sidebar_width: layout.leftSidebarWidth,
+      right_sidebar_collapsed: layout.rightSidebarCollapsed,
+      right_sidebar_width: layout.rightSidebarWidth,
+      bottom_terminal_open: layout.userTerminalOpen,
+      bottom_terminal_height: layout.userTerminalHeight,
+    };
+  },
+  write: (shell: WorkbenchShellV1) => {
+    useLayoutStore.setState({
+      leftSidebarCollapsed: shell.left_sidebar_collapsed,
+      leftSidebarWidth: shell.left_sidebar_width,
+      rightSidebarCollapsed: shell.right_sidebar_collapsed,
+      rightSidebarWidth: shell.right_sidebar_width,
+      userTerminalOpen: shell.bottom_terminal_open,
+      userTerminalHeight: shell.bottom_terminal_height,
+    });
+  },
+  subscribe: (listener: () => void) => useLayoutStore.subscribe((state, previous) => {
+    if (
+      state.leftSidebarCollapsed !== previous.leftSidebarCollapsed
+      || state.leftSidebarWidth !== previous.leftSidebarWidth
+      || state.rightSidebarCollapsed !== previous.rightSidebarCollapsed
+      || state.rightSidebarWidth !== previous.rightSidebarWidth
+      || state.userTerminalOpen !== previous.userTerminalOpen
+      || state.userTerminalHeight !== previous.userTerminalHeight
+    ) listener();
+  }),
+};
 
 type NativeWindowResizePayload = {
   width?: number;
@@ -167,6 +207,14 @@ function AppBody() {
   const fetchAgentsRequestRef = React.useRef(0);
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const workbenchPersistence = useWorkbenchPersistence({
+    enabled: WORKBENCH_FLAGS.workbench_enabled,
+    adapter: WORKBENCH_PERSISTENCE_ADAPTER,
+    legacy_storage: window.localStorage,
+    viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
+    initial_view_mode: viewMode,
+    shell_projection: WORKBENCH_SHELL_PROJECTION,
+  });
   const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
@@ -297,15 +345,26 @@ function AppBody() {
   const [broadcastMessage, setBroadcastMessage] = useState("");
 
   const [activeTab, setActiveTab] = useState<SidebarTab>("agent-config");
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const leftCollapsed = useLayoutStore((state) => state.leftSidebarCollapsed);
+  const setLeftCollapsed = useLayoutStore((state) => state.setLeftSidebarCollapsed);
+  const rightCollapsed = useLayoutStore((state) => state.rightSidebarCollapsed);
+  const setRightCollapsed = useLayoutStore((state) => state.setRightSidebarCollapsed);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
   const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const { theme, autoPatchGemini, titlebarTelemetryVisible, app_settings_loaded, loadAppSettings } = useSettingsStore();
+  const {
+    theme,
+    autoPatchGemini,
+    titlebarTelemetryVisible,
+    app_settings_loaded,
+    loadAppSettings,
+    settingsOpen,
+    setSettingsOpen,
+    toggleSettings,
+  } = useSettingsStore();
   const resolvedTitlebarTelemetryVisible = app_settings_loaded && titlebarTelemetryVisible;
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
@@ -506,13 +565,10 @@ function AppBody() {
   const leftSidebarWidth = useLayoutStore((s) => s.leftSidebarWidth);
   const rightSidebarWidth = useLayoutStore((s) => s.rightSidebarWidth);
   const userTerminalOpen = useLayoutStore((s) => s.userTerminalOpen);
-  const settingsOpen = useLayoutStore((s) => s.settingsOpen);
   const userTerminalHeight = useLayoutStore((s) => s.userTerminalHeight);
   const setUserTerminalOpen = useLayoutStore((s) => s.setUserTerminalOpen);
-  const setSettingsOpen = useLayoutStore((s) => s.setSettingsOpen);
   const setUserTerminalHeight = useLayoutStore((s) => s.setUserTerminalHeight);
   const toggleUserTerminal = useLayoutStore((s) => s.toggleUserTerminal);
-  const toggleSettings = useLayoutStore((s) => s.toggleSettings);
 
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -1031,6 +1087,28 @@ function AppBody() {
   }, [scrollToAgent]);
   const shouldRenderGraph = viewMode === "graph" || cachedCanvasViews.has("graph");
   const shouldRenderGarden = viewMode === "garden" || cachedCanvasViews.has("garden");
+  const workbenchNotice = WORKBENCH_FLAGS.workbench_enabled
+    ? [
+        workbenchPersistence.notice,
+        workbenchPersistence.safe_mode
+          ? "Workbench safe mode is active; the durable document is preserved."
+          : null,
+        workbenchPersistence.save_error,
+        workbenchPersistence.save_pending || workbenchPersistence.is_dirty
+          ? "Saving workbench changes…"
+          : null,
+      ].filter((message): message is string => Boolean(message)).join(" ") || null
+    : null;
+
+  const exportLocalWorkbench = useCallback(() => {
+    const exported = workbenchPersistence.export_local_json();
+    const objectUrl = URL.createObjectURL(new Blob([exported.json], { type: exported.mime_type }));
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = exported.filename;
+    anchor.click();
+    URL.revokeObjectURL(objectUrl);
+  }, [workbenchPersistence]);
 
   return (
     <div
@@ -1056,6 +1134,34 @@ function AppBody() {
         offAgentIds={offAgentIds}
         titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
       />
+
+      {workbenchNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="workbench-persistence-notice"
+          className="pointer-events-none fixed right-4 top-12 z-40 max-w-md rounded border px-3 py-2 text-xs shadow-lg"
+          style={{
+            background: "var(--color-wardian-card)",
+            borderColor: "var(--color-wardian-border)",
+            color: "var(--color-wardian-text-muted)",
+          }}
+        >
+          {workbenchNotice}
+        </div>
+      )}
+
+      {WORKBENCH_FLAGS.workbench_enabled
+        && (workbenchPersistence.conflict === "revision_conflict"
+          || workbenchPersistence.conflict === "future_schema") && (
+        <WorkbenchConflictDialog
+          mode={workbenchPersistence.conflict}
+          resolving={workbenchPersistence.resolving_conflict}
+          on_use_disk={() => { void workbenchPersistence.use_disk(); }}
+          on_replace_disk={() => { void workbenchPersistence.replace_disk(); }}
+          on_export_local={exportLocalWorkbench}
+        />
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         <SidebarIconRail

@@ -158,6 +158,7 @@ export function normalizeExplorerFileClickAction(
 }
 
 interface SettingsState {
+  settingsOpen: boolean;
   theme: AppThemeSetting;
   autoPatchGemini: boolean;
   terminalFontSize: number;
@@ -181,6 +182,8 @@ interface SettingsState {
   app_settings_loaded: boolean;
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
+  setSettingsOpen: (open: boolean) => void;
+  toggleSettings: () => void;
   setTheme: (theme: AppThemeSetting) => void;
   setAutoPatchGemini: (enabled: boolean) => void;
   setTerminalFontSize: (value: number) => void;
@@ -454,6 +457,7 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
+      settingsOpen: false,
       theme: 'system',
       autoPatchGemini: false,
       terminalFontSize: defaultTerminalFontSize(),
@@ -477,6 +481,8 @@ export const useSettingsStore = create<SettingsState>()(
       app_settings_loaded: false,
       shell_settings_loaded: false,
       shells_loaded: false,
+      setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
       setTheme: (theme) => set((state) => ({
         theme,
         app_settings_overrides: { ...state.app_settings_overrides, theme },

@@ -40,7 +40,18 @@ describe('useLibraryStore', () => {
       isLoading: false,
       error: null,
       _editorDirty: false,
+      libraryDetailWidth: 480,
     });
+  });
+
+  it('owns and clamps its transient detail-pane width', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1_000, configurable: true });
+    useLibraryStore.getState().setLibraryDetailWidth(100);
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(360);
+    useLibraryStore.getState().setLibraryDetailWidth(900);
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(700);
+    useLibraryStore.getState().resetLibraryDetailWidth();
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(480);
   });
 
   it('fetchIndex loads the unified index', async () => {
