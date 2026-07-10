@@ -5,9 +5,9 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Notify, RwLock};
 use wardian_core::models::*;
 
 pub const TERMINAL_SESSION_ACTOR_CAPACITY: usize = 256;
@@ -137,9 +137,248 @@ impl TerminalTimer for TokioTerminalTimer {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivationKey {
+    presentation_id: String,
+    runtime_generation: u64,
+    lease_epoch: u64,
+    activation_id: String,
+}
+
+impl ActivationKey {
+    fn from_ack(request: &TerminalActivationAckRequest) -> Self {
+        Self {
+            presentation_id: request.presentation_id.clone(),
+            runtime_generation: request.runtime_generation,
+            lease_epoch: request.lease_epoch,
+            activation_id: request.activation_id.clone(),
+        }
+    }
+
+    fn from_pending(pending: &PendingActivation) -> Self {
+        Self {
+            presentation_id: pending.state.presentation_id.clone(),
+            runtime_generation: pending.state.runtime_generation,
+            lease_epoch: pending.state.lease_epoch,
+            activation_id: pending.state.activation_id.clone(),
+        }
+    }
+}
+
+struct ActivationControlState {
+    key: ActivationKey,
+    ack_reserved: bool,
+    deadline_elapsed: bool,
+    timeout_due: bool,
+}
+
+#[derive(Default)]
+struct TerminalControlState {
+    activation: Option<ActivationControlState>,
+    wake_due: bool,
+}
+
+/// Constant-space priority state shared by broker callers, timer tasks, and the actor.
+///
+/// The synchronous mutex is held only for state transitions, never across an await. It
+/// linearizes activation acknowledgements with deadline expiry while `Notify` lets the
+/// actor cut ahead of a saturated external command queue without accumulating messages.
+#[derive(Default)]
+struct TerminalControlPlane {
+    state: Mutex<TerminalControlState>,
+    notify: Notify,
+}
+
+struct DueControlSignals {
+    activation_timeout: Option<ActivationKey>,
+    flush_wake: bool,
+}
+
+impl TerminalControlPlane {
+    fn start_activation(&self, key: ActivationKey) {
+        self.state.lock().expect("terminal control lock").activation =
+            Some(ActivationControlState {
+                key,
+                ack_reserved: false,
+                deadline_elapsed: false,
+                timeout_due: false,
+            });
+    }
+
+    fn clear_activation(&self, key: &ActivationKey) {
+        let mut state = self.state.lock().expect("terminal control lock");
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|activation| activation.key == *key)
+        {
+            state.activation = None;
+        }
+    }
+
+    fn reserve_activation_ack(
+        self: &Arc<Self>,
+        request: &TerminalActivationAckRequest,
+    ) -> Option<ActivationAckReservation> {
+        let key = ActivationKey::from_ack(request);
+        let mut state = self.state.lock().expect("terminal control lock");
+        let activation = state
+            .activation
+            .as_mut()
+            .filter(|activation| activation.key == key)?;
+        if activation.deadline_elapsed || activation.ack_reserved {
+            return None;
+        }
+        // This reservation is the acknowledgement's arrival point. It remains claimed
+        // while the bounded external channel is full, so later deadline expiry cannot
+        // roll back an acknowledgement that was already submitted.
+        activation.ack_reserved = true;
+        Some(ActivationAckReservation {
+            control: self.clone(),
+            key,
+            committed: false,
+        })
+    }
+
+    fn release_activation_ack(&self, key: &ActivationKey) {
+        let should_notify = {
+            let mut state = self.state.lock().expect("terminal control lock");
+            let Some(activation) = state
+                .activation
+                .as_mut()
+                .filter(|activation| activation.key == *key)
+            else {
+                return;
+            };
+            activation.ack_reserved = false;
+            if activation.deadline_elapsed && !activation.timeout_due {
+                activation.timeout_due = true;
+                true
+            } else {
+                false
+            }
+        };
+        if should_notify {
+            self.notify.notify_one();
+        }
+    }
+
+    fn activation_deadline_elapsed(&self, key: &ActivationKey) {
+        let should_notify = {
+            let mut state = self.state.lock().expect("terminal control lock");
+            let Some(activation) = state
+                .activation
+                .as_mut()
+                .filter(|activation| activation.key == *key)
+            else {
+                return;
+            };
+            activation.deadline_elapsed = true;
+            if !activation.ack_reserved && !activation.timeout_due {
+                activation.timeout_due = true;
+                true
+            } else {
+                false
+            }
+        };
+        if should_notify {
+            self.notify.notify_one();
+        }
+    }
+
+    fn mark_wake_due(&self) {
+        let should_notify = {
+            let mut state = self.state.lock().expect("terminal control lock");
+            if state.wake_due {
+                false
+            } else {
+                state.wake_due = true;
+                true
+            }
+        };
+        if should_notify {
+            self.notify.notify_one();
+        }
+    }
+
+    fn take_due(&self) -> DueControlSignals {
+        let mut state = self.state.lock().expect("terminal control lock");
+        let activation_timeout = state.activation.as_mut().and_then(|activation| {
+            if activation.timeout_due {
+                activation.timeout_due = false;
+                Some(activation.key.clone())
+            } else {
+                None
+            }
+        });
+        DueControlSignals {
+            activation_timeout,
+            flush_wake: std::mem::take(&mut state.wake_due),
+        }
+    }
+
+    fn clear(&self) {
+        *self.state.lock().expect("terminal control lock") = TerminalControlState::default();
+    }
+
+    #[cfg(test)]
+    fn activation_ack_reserved(&self, activation_id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("terminal control lock")
+            .activation
+            .as_ref()
+            .is_some_and(|activation| {
+                activation.key.activation_id == activation_id && activation.ack_reserved
+            })
+    }
+
+    #[cfg(test)]
+    fn activation_slots(&self) -> usize {
+        usize::from(
+            self.state
+                .lock()
+                .expect("terminal control lock")
+                .activation
+                .is_some(),
+        )
+    }
+}
+
+struct ActivationAckReservation {
+    control: Arc<TerminalControlPlane>,
+    key: ActivationKey,
+    committed: bool,
+}
+
+impl ActivationAckReservation {
+    fn commit(mut self) {
+        // Once enqueued, the actor owns the request. Keep the reservation claimed until
+        // that actor either commits or supersedes the activation.
+        self.committed = true;
+    }
+}
+
+impl Drop for ActivationAckReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.control.release_activation_ack(&self.key);
+        }
+    }
+}
+
+struct AbortOnDropTask(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Clone)]
 pub struct TerminalSessionHandle {
     tx: mpsc::Sender<TerminalSessionMessage>,
+    control: Arc<TerminalControlPlane>,
     runtime_generation: u64,
     lease_epoch: Arc<AtomicU64>,
     latest_sequence: Arc<AtomicU64>,
@@ -336,10 +575,26 @@ impl TerminalSessionBroker {
         request: TerminalActivationAckRequest,
     ) -> Result<TerminalActivationAckResult, TerminalBrokerError> {
         let session_id = request.session_id.clone();
-        self.request(&session_id, move |reply| {
-            TerminalSessionMessage::AckActivation { request, reply }
-        })
-        .await
+        let handle = self.session_handle(&session_id).await?;
+        if handle.terminated.load(Ordering::SeqCst) {
+            return Err(TerminalBrokerError::RuntimeTerminated);
+        }
+        let reservation = handle.control.reserve_activation_ack(&request);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .tx
+            .send(TerminalSessionMessage::AckActivation {
+                request,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
+        if let Some(reservation) = reservation {
+            reservation.commit();
+        }
+        reply_rx
+            .await
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?
     }
 
     pub async fn begin_owner_resync(
@@ -510,6 +765,31 @@ impl TerminalSessionBroker {
     }
 
     #[cfg(test)]
+    pub(super) async fn activation_ack_reserved_for_test(
+        &self,
+        session_id: &str,
+        activation_id: &str,
+    ) -> Result<bool, TerminalBrokerError> {
+        Ok(self
+            .session_handle(session_id)
+            .await?
+            .control
+            .activation_ack_reserved(activation_id))
+    }
+
+    #[cfg(test)]
+    pub(super) async fn activation_control_slots_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<usize, TerminalBrokerError> {
+        Ok(self
+            .session_handle(session_id)
+            .await?
+            .control
+            .activation_slots())
+    }
+
+    #[cfg(test)]
     pub(super) async fn block_actor_for_test(
         &self,
         session_id: &str,
@@ -540,7 +820,7 @@ impl TerminalSessionBroker {
         geometry: TerminalGeometry,
     ) -> TerminalSessionHandle {
         let (tx, rx) = mpsc::channel(TERMINAL_SESSION_ACTOR_CAPACITY);
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let control = Arc::new(TerminalControlPlane::default());
         let lease_epoch = Arc::new(AtomicU64::new(lease_epoch_value));
         let latest_sequence = Arc::new(AtomicU64::new(0));
         let terminated = Arc::new(AtomicBool::new(false));
@@ -552,16 +832,17 @@ impl TerminalSessionBroker {
             terminated.clone(),
             runtime,
             geometry,
-            control_tx,
+            control.clone(),
             self.wake_tx.clone(),
             self.lifecycle_tx.clone(),
             self.timer.clone(),
         );
-        let task = tokio::spawn(actor.run(rx, control_rx));
+        let task = tokio::spawn(actor.run(rx));
         let abort_handle = task.abort_handle();
         drop(task);
         TerminalSessionHandle {
             tx,
+            control,
             runtime_generation,
             lease_epoch,
             latest_sequence,
@@ -770,17 +1051,6 @@ enum TerminalSessionMessage {
     },
 }
 
-enum TerminalSessionControlMessage {
-    ActivationTimeout {
-        runtime_generation: u64,
-        lease_epoch: u64,
-        activation_id: String,
-    },
-    FlushWake {
-        runtime_generation: u64,
-    },
-}
-
 struct PresentationRecord {
     state: TerminalPresentationState,
     last_geometry_sequence: u64,
@@ -834,7 +1104,9 @@ struct TerminalSessionActor {
     snapshot_sequence: u64,
     geometry: TerminalGeometry,
     wake_pending: bool,
-    control_tx: mpsc::UnboundedSender<TerminalSessionControlMessage>,
+    activation_timer: Option<AbortOnDropTask>,
+    wake_timer: Option<AbortOnDropTask>,
+    control: Arc<TerminalControlPlane>,
     wake_tx: broadcast::Sender<TerminalEventsReady>,
     lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
     timer: Arc<dyn TerminalTimer>,
@@ -850,7 +1122,7 @@ impl TerminalSessionActor {
         terminated: Arc<AtomicBool>,
         runtime: TerminalRuntimeHandles,
         geometry: TerminalGeometry,
-        control_tx: mpsc::UnboundedSender<TerminalSessionControlMessage>,
+        control: Arc<TerminalControlPlane>,
         wake_tx: broadcast::Sender<TerminalEventsReady>,
         lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
         timer: Arc<dyn TerminalTimer>,
@@ -880,26 +1152,23 @@ impl TerminalSessionActor {
             snapshot_sequence: 0,
             geometry,
             wake_pending: false,
-            control_tx,
+            activation_timer: None,
+            wake_timer: None,
+            control,
             wake_tx,
             lifecycle_tx,
             timer,
         }
     }
 
-    async fn run(
-        mut self,
-        mut rx: mpsc::Receiver<TerminalSessionMessage>,
-        mut control_rx: mpsc::UnboundedReceiver<TerminalSessionControlMessage>,
-    ) {
+    async fn run(mut self, mut rx: mpsc::Receiver<TerminalSessionMessage>) {
+        let control = self.control.clone();
         let mut shutdown = None;
         loop {
             tokio::select! {
                 biased;
-                control = control_rx.recv() => {
-                    if let Some(control) = control {
-                        self.handle_control(control).await;
-                    }
+                _ = control.notify.notified() => {
+                    self.handle_control().await;
                 }
                 message = rx.recv() => {
                     let Some(message) = message else {
@@ -920,6 +1189,9 @@ impl TerminalSessionActor {
                 value.0
             });
         self.runtime_state = TerminalRuntimeState::Terminated;
+        self.activation_timer = None;
+        self.wake_timer = None;
+        self.control.clear();
         self.pending_activation = None;
         self.pending_owner_resync = None;
         self.consumers.clear();
@@ -1053,26 +1325,19 @@ impl TerminalSessionActor {
         }
     }
 
-    async fn handle_control(&mut self, control: TerminalSessionControlMessage) {
-        match control {
-            TerminalSessionControlMessage::ActivationTimeout {
-                runtime_generation,
-                lease_epoch,
-                activation_id,
-            } => {
-                self.activation_timeout(runtime_generation, lease_epoch, &activation_id)
-                    .await;
-            }
-            TerminalSessionControlMessage::FlushWake { runtime_generation } => {
-                if runtime_generation == self.runtime_generation {
-                    self.wake_pending = false;
-                    let _ = self.wake_tx.send(TerminalEventsReady {
-                        session_id: self.session_id.clone(),
-                        runtime_generation: self.runtime_generation,
-                        latest_sequence: self.stream_sequence,
-                    });
-                }
-            }
+    async fn handle_control(&mut self) {
+        let due = self.control.take_due();
+        if let Some(key) = due.activation_timeout {
+            self.activation_timeout(&key).await;
+        }
+        if due.flush_wake {
+            self.wake_pending = false;
+            self.wake_timer = None;
+            let _ = self.wake_tx.send(TerminalEventsReady {
+                session_id: self.session_id.clone(),
+                runtime_generation: self.runtime_generation,
+                latest_sequence: self.stream_sequence,
+            });
         }
     }
 
@@ -1317,9 +1582,11 @@ impl TerminalSessionActor {
             return Ok(self.rejected_begin(TerminalLeaseRejectionReason::LeaseEpochChanged));
         }
 
-        let previous_owner_presentation_id = self
-            .pending_activation
-            .take()
+        let previous_pending = self.pending_activation.take();
+        if let Some(pending) = previous_pending.as_ref() {
+            self.cancel_activation_timeout(&ActivationKey::from_pending(pending));
+        }
+        let previous_owner_presentation_id = previous_pending
             .and_then(|pending| pending.state.previous_owner_presentation_id)
             .or_else(|| self.owner_presentation_id.take());
         self.advance_lease_epoch();
@@ -1333,7 +1600,7 @@ impl TerminalSessionActor {
             self.runtime_generation, self.lease_epoch, self.activation_sequence
         );
         let pending_state = TerminalPendingActivationState {
-            presentation_id: request.presentation_id,
+            presentation_id: request.presentation_id.clone(),
             previous_owner_presentation_id,
             runtime_generation: self.runtime_generation,
             lease_epoch: self.lease_epoch,
@@ -1356,7 +1623,12 @@ impl TerminalSessionActor {
             observed_lease_epoch: request.observed_lease_epoch,
             begin_result: begin_result.clone(),
         });
-        self.schedule_activation_timeout(self.lease_epoch, activation_id);
+        self.schedule_activation_timeout(ActivationKey {
+            presentation_id: request.presentation_id,
+            runtime_generation: self.runtime_generation,
+            lease_epoch: self.lease_epoch,
+            activation_id,
+        });
         Ok(begin_result)
     }
 
@@ -1394,11 +1666,17 @@ impl TerminalSessionActor {
             .get(&request.presentation_id)
             .and_then(|record| record.state.desired_geometry);
         if let Some(geometry) = desired {
-            self.commit_geometry(geometry, 0).await?;
+            if let Err(error) = self.commit_geometry(geometry, 0).await {
+                if let Some(pending) = self.pending_activation.take() {
+                    let _ = self.rollback_pending(pending).await;
+                }
+                return Err(error);
+            }
         }
         if let Some(record) = self.presentations.get_mut(&request.presentation_id) {
             record.state.requires_resync = false;
         }
+        self.cancel_activation_timeout(&ActivationKey::from_ack(&request));
         self.pending_activation = None;
         self.owner_presentation_id = Some(request.presentation_id.clone());
         self.emit_event(TerminalBrokerEventKind::Ownership {
@@ -1740,16 +2018,12 @@ impl TerminalSessionActor {
         Ok(self.broker_state())
     }
 
-    async fn activation_timeout(
-        &mut self,
-        runtime_generation: u64,
-        lease_epoch: u64,
-        activation_id: &str,
-    ) {
+    async fn activation_timeout(&mut self, key: &ActivationKey) {
         let matches = self.pending_activation.as_ref().is_some_and(|pending| {
-            pending.state.runtime_generation == runtime_generation
-                && pending.state.lease_epoch == lease_epoch
-                && pending.state.activation_id == activation_id
+            pending.state.presentation_id == key.presentation_id
+                && pending.state.runtime_generation == key.runtime_generation
+                && pending.state.lease_epoch == key.lease_epoch
+                && pending.state.activation_id == key.activation_id
         });
         if matches {
             if let Some(pending) = self.pending_activation.take() {
@@ -1762,6 +2036,7 @@ impl TerminalSessionActor {
         &mut self,
         pending: PendingActivation,
     ) -> Result<(), TerminalBrokerError> {
+        self.cancel_activation_timeout(&ActivationKey::from_pending(&pending));
         self.owner_presentation_id = None;
         if let Some(previous_owner) = pending.state.previous_owner_presentation_id {
             if self.presentation_has_active_renderer(&previous_owner) {
@@ -1896,29 +2171,29 @@ impl TerminalSessionActor {
         }
         self.wake_pending = true;
         let timer = self.timer.clone();
-        let control_tx = self.control_tx.clone();
-        let runtime_generation = self.runtime_generation;
+        let control = self.control.clone();
         let delay = timer.sleep(EVENT_WAKE_COALESCE);
-        tokio::spawn(async move {
+        self.wake_timer = Some(AbortOnDropTask(tokio::spawn(async move {
             delay.await;
-            let _ =
-                control_tx.send(TerminalSessionControlMessage::FlushWake { runtime_generation });
-        });
+            control.mark_wake_due();
+        })));
     }
 
-    fn schedule_activation_timeout(&self, lease_epoch: u64, activation_id: String) {
+    fn schedule_activation_timeout(&mut self, key: ActivationKey) {
+        self.activation_timer = None;
+        self.control.start_activation(key.clone());
         let timer = self.timer.clone();
-        let control_tx = self.control_tx.clone();
-        let runtime_generation = self.runtime_generation;
+        let control = self.control.clone();
         let delay = timer.sleep(ACTIVATION_TIMEOUT);
-        tokio::spawn(async move {
+        self.activation_timer = Some(AbortOnDropTask(tokio::spawn(async move {
             delay.await;
-            let _ = control_tx.send(TerminalSessionControlMessage::ActivationTimeout {
-                runtime_generation,
-                lease_epoch,
-                activation_id,
-            });
-        });
+            control.activation_deadline_elapsed(&key);
+        })));
+    }
+
+    fn cancel_activation_timeout(&mut self, key: &ActivationKey) {
+        self.activation_timer = None;
+        self.control.clear_activation(key);
     }
 
     fn snapshot(&mut self) -> TerminalSnapshot {

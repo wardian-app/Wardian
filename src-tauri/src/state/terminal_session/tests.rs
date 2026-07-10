@@ -16,6 +16,7 @@ impl ManualTimer {
         for _ in 0..100 {
             let sender = {
                 let mut sleepers = self.sleepers.lock().expect("manual timer lock");
+                sleepers.retain(|(_, sender)| !sender.is_closed());
                 sleepers
                     .iter()
                     .rposition(|(delay, _)| *delay == duration)
@@ -37,6 +38,15 @@ impl ManualTimer {
             .expect("manual timer lock")
             .iter()
             .any(|(delay, _)| *delay == duration)
+    }
+
+    fn live_sleep_count(&self, duration: Duration) -> usize {
+        let mut sleepers = self.sleepers.lock().expect("manual timer lock");
+        sleepers.retain(|(_, sender)| !sender.is_closed());
+        sleepers
+            .iter()
+            .filter(|(delay, _)| *delay == duration)
+            .count()
     }
 
     async fn wait_for_sleep(&self, duration: Duration) {
@@ -183,6 +193,41 @@ async fn wait_for_external_capacity(broker: &TerminalSessionBroker, expected: us
     })
     .await
     .unwrap_or_else(|_| panic!("external command capacity never reached {expected}"));
+}
+
+async fn wait_for_ack_reservation(broker: &TerminalSessionBroker, activation_id: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if broker
+                .activation_ack_reserved_for_test("session-1", activation_id)
+                .await
+                .expect("ack reservation diagnostic")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("ack was never reserved before deadline");
+}
+
+async fn wait_for_live_sleep_count(timer: &ManualTimer, duration: Duration, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if timer.live_sleep_count(duration) == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("live sleeper count never reached {expected}"));
+}
+
+#[test]
+fn actor_control_path_does_not_use_an_unbounded_channel() {
+    assert!(!include_str!("actor.rs").contains("unbounded_channel"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1628,6 +1673,7 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
         })
         .await
         .expect("begin pending takeover");
+    let mut wakeups = broker.subscribe_wakeups();
 
     let release = broker
         .block_actor_for_test("session-1")
@@ -1649,9 +1695,15 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
         }));
     }
     wait_for_external_capacity(&broker, 0).await;
+    timer.fire(Duration::from_millis(16)).await;
     timer.fire(Duration::from_secs(5)).await;
     release.send(()).expect("release actor");
 
+    let wake = tokio::time::timeout(Duration::from_secs(5), wakeups.recv())
+        .await
+        .expect("wake was starved by saturated external queue")
+        .expect("wake broadcast");
+    assert_eq!(wake.runtime_generation, generation);
     let state = first_queued_state
         .await
         .expect("state task")
@@ -1664,4 +1716,187 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
             .expect("output thread")
             .expect("output retained");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_submitted_before_deadline_wins_while_external_queue_is_full() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let pending = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+    let activation_id = pending.activation_id.expect("activation id");
+
+    let release = broker
+        .block_actor_for_test("session-1")
+        .await
+        .expect("block actor");
+    let mut output_threads = Vec::new();
+    for index in 0..TERMINAL_SESSION_ACTOR_CAPACITY {
+        let output_broker = broker.clone();
+        output_threads.push(std::thread::spawn(move || {
+            output_broker.process_output_blocking(
+                "session-1",
+                generation,
+                vec![(index % 251) as u8],
+            )
+        }));
+    }
+    wait_for_external_capacity(&broker, 0).await;
+
+    let ack_broker = broker.clone();
+    let ack_activation_id = activation_id.clone();
+    let ack = tokio::spawn(async move {
+        ack_broker
+            .ack_activation(TerminalActivationAckRequest {
+                session_id: "session-1".to_string(),
+                presentation_id: "takeover".to_string(),
+                runtime_generation: generation,
+                lease_epoch: pending.decision.lease_epoch,
+                activation_id: ack_activation_id,
+            })
+            .await
+    });
+    wait_for_ack_reservation(&broker, &activation_id).await;
+    timer.fire(Duration::from_secs(5)).await;
+    release.send(()).expect("release actor");
+
+    let committed = ack
+        .await
+        .expect("ack task")
+        .expect("ack after queue drains");
+    assert_eq!(
+        committed.decision.status,
+        TerminalLeaseDecisionStatus::Accepted
+    );
+    assert_eq!(
+        committed.broker_state.owner_presentation_id.as_deref(),
+        Some("takeover")
+    );
+    assert!(committed.broker_state.pending_activation.is_none());
+    for thread in output_threads {
+        thread
+            .join()
+            .expect("output thread")
+            .expect("output retained");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_submitted_after_deadline_is_rejected_as_stale() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "takeover").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let pending = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "takeover".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: active.broker_state.lease_epoch,
+        })
+        .await
+        .expect("begin pending takeover");
+
+    let release = broker
+        .block_actor_for_test("session-1")
+        .await
+        .expect("block actor");
+    timer.fire(Duration::from_secs(5)).await;
+    let ack_broker = broker.clone();
+    let ack = tokio::spawn(async move {
+        ack_broker
+            .ack_activation(TerminalActivationAckRequest {
+                session_id: "session-1".to_string(),
+                presentation_id: "takeover".to_string(),
+                runtime_generation: generation,
+                lease_epoch: pending.decision.lease_epoch,
+                activation_id: pending.activation_id.expect("activation id"),
+            })
+            .await
+    });
+    release.send(()).expect("release actor");
+
+    let rejected = ack.await.expect("ack task").expect("structured stale ack");
+    assert_eq!(
+        rejected.decision.status,
+        TerminalLeaseDecisionStatus::Rejected
+    );
+    assert_eq!(
+        rejected.decision.reason,
+        Some(TerminalLeaseRejectionReason::StaleActivation)
+    );
+    assert_eq!(
+        rejected.broker_state.owner_presentation_id.as_deref(),
+        Some("owner")
+    );
+    assert!(rejected.broker_state.pending_activation.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn superseding_activations_keep_only_the_current_timeout_signal() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer.clone()).await;
+    register_desktop(&broker, "owner").await;
+    register_desktop(&broker, "one").await;
+    register_desktop(&broker, "two").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let mut observed_lease_epoch = active.broker_state.lease_epoch;
+    let mut current_activation_id = None;
+
+    for index in 0..64 {
+        let pending = broker
+            .begin_activation(TerminalActivationBeginRequest {
+                session_id: "session-1".to_string(),
+                presentation_id: if index % 2 == 0 { "one" } else { "two" }.to_string(),
+                runtime_generation: generation,
+                observed_lease_epoch,
+            })
+            .await
+            .expect("superseding begin");
+        assert_eq!(
+            pending.decision.status,
+            TerminalLeaseDecisionStatus::Accepted
+        );
+        observed_lease_epoch = pending.decision.lease_epoch;
+        current_activation_id = pending.activation_id;
+    }
+
+    wait_for_live_sleep_count(&timer, Duration::from_secs(5), 1).await;
+    assert_eq!(
+        broker
+            .activation_control_slots_for_test("session-1")
+            .await
+            .expect("control diagnostic"),
+        1
+    );
+    let state = broker
+        .broker_state("session-1")
+        .await
+        .expect("actor remains responsive");
+    assert_eq!(
+        state
+            .pending_activation
+            .as_ref()
+            .map(|pending| pending.activation_id.as_str()),
+        current_activation_id.as_deref()
+    );
+
+    timer.fire(Duration::from_secs(5)).await;
+    let rolled_back = broker
+        .broker_state("session-1")
+        .await
+        .expect("current timeout was not starved");
+    assert!(rolled_back.pending_activation.is_none());
+    assert_eq!(rolled_back.owner_presentation_id.as_deref(), Some("owner"));
 }
