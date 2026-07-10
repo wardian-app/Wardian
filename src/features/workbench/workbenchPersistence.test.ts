@@ -36,7 +36,7 @@ describe("createWorkbenchInvokeAdapter", () => {
   it("loads the backend document and keeps its opaque durable token", async () => {
     const invoke = vi.fn().mockResolvedValue({
       source: "default",
-      document: null,
+      document: makeSingleGroupDocument(),
       notice: null,
       durable_revision: 0,
       durable_token: "opaque-token-from-rust",
@@ -92,6 +92,239 @@ describe("createWorkbenchInvokeAdapter", () => {
       expected_token: "opaque-next",
       request_id: "request-2",
     });
+  });
+
+  it.each([
+    ["non-object", null],
+    ["missing field", {}],
+    ["extra field", { safe_mode: false, extra: true }],
+    ["wrong type", { safe_mode: "yes" }],
+    ["non-plain object", Object.assign(new Date(0), { safe_mode: false })],
+  ])("rejects a malformed boot response: %s", async (_label, response) => {
+    const adapter = createWorkbenchInvokeAdapter(vi.fn().mockResolvedValue(response));
+
+    await expect(adapter.boot()).rejects.toThrow(/boot.*response/i);
+  });
+
+  it.each([
+    ["missing field", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: 0,
+    }],
+    ["extra field", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+      extra: true,
+    }],
+    ["unknown source", {
+      source: "mystery",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+    }],
+    ["invalid document", {
+      source: "primary",
+      document: { ...makeSingleGroupDocument(), revision: -1 },
+      notice: null,
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+    }],
+    ["normal source without document", {
+      source: "primary",
+      document: null,
+      notice: null,
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+    }],
+    ["wrong notice type", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: false,
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+    }],
+    ["unsafe revision", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: Number.MAX_SAFE_INTEGER + 1,
+      durable_token: "opaque-zero",
+    }],
+    ["empty token", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: 0,
+      durable_token: "",
+    }],
+    ["mismatched revision", {
+      source: "primary",
+      document: makeSingleGroupDocument(),
+      notice: null,
+      durable_revision: 1,
+      durable_token: "opaque-one",
+    }],
+    ["future schema with V1 identity", {
+      source: "future_schema",
+      document: makeSingleGroupDocument(),
+      notice: "Upgrade Wardian.",
+      durable_revision: 0,
+      durable_token: "opaque-zero",
+    }],
+  ])("rejects a malformed load response: %s", async (_label, response) => {
+    const adapter = createWorkbenchInvokeAdapter(vi.fn().mockResolvedValue(response));
+
+    await expect(adapter.load()).rejects.toThrow(/load.*response/i);
+  });
+
+  it.each([
+    ["missing field", {
+      outcome: "saved",
+      durable_revision: 1,
+      request_id: "request-1",
+    }],
+    ["extra field", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "request-1",
+      extra: true,
+    }],
+    ["unknown outcome", {
+      outcome: "mystery_outcome",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "request-1",
+    }],
+    ["wrong revision type", {
+      outcome: "saved",
+      durable_revision: "1",
+      durable_token: "opaque-one",
+      request_id: "request-1",
+    }],
+    ["empty token", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "",
+      request_id: "request-1",
+    }],
+    ["wrong request id", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "other-request",
+    }],
+    ["wrong saved revision", {
+      outcome: "saved",
+      durable_revision: 2,
+      durable_token: "opaque-two",
+      request_id: "request-1",
+    }],
+    ["future schema with V1 identity", {
+      outcome: "future_schema",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "request-1",
+    }],
+    ["conflict without identity", {
+      outcome: "revision_conflict",
+      durable_revision: null,
+      durable_token: null,
+      request_id: "request-1",
+    }],
+  ])("rejects a malformed save response: %s", async (_label, response) => {
+    const adapter = createWorkbenchInvokeAdapter(vi.fn().mockResolvedValue(response));
+
+    await expect(adapter.save({
+      document: { ...makeSingleGroupDocument(), revision: 1 },
+      expected_revision: 0,
+      expected_token: "opaque-zero",
+      request_id: "request-1",
+    })).rejects.toThrow(/save.*response/i);
+  });
+
+  it.each([
+    ["missing field", {
+      outcome: "saved",
+      durable_revision: 1,
+      request_id: "reset-1",
+      document: { ...makeSingleGroupDocument(), revision: 1 },
+    }],
+    ["extra field", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+      document: { ...makeSingleGroupDocument(), revision: 1 },
+      extra: true,
+    }],
+    ["unknown outcome", {
+      outcome: "mystery_outcome",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+    }],
+    ["wrong request id", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "other-reset",
+      document: { ...makeSingleGroupDocument(), revision: 1 },
+    }],
+    ["saved without document", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+    }],
+    ["saved with null document", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+      document: null,
+    }],
+    ["saved with invalid document", {
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+      document: { ...makeSingleGroupDocument(), revision: -1 },
+    }],
+    ["saved with wrong successor revision", {
+      outcome: "saved",
+      durable_revision: 2,
+      durable_token: "opaque-reset",
+      request_id: "reset-1",
+      document: { ...makeSingleGroupDocument(), revision: 2 },
+    }],
+    ["conflict with document", {
+      outcome: "revision_conflict",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "reset-1",
+      document: { ...makeSingleGroupDocument(), revision: 1 },
+    }],
+    ["future schema with V1 identity", {
+      outcome: "future_schema",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "reset-1",
+    }],
+  ])("rejects a malformed reset response: %s", async (_label, response) => {
+    const adapter = createWorkbenchInvokeAdapter(vi.fn().mockResolvedValue(response));
+
+    await expect(adapter.reset({
+      expected_revision: 0,
+      expected_token: "opaque-zero",
+      request_id: "reset-1",
+    })).rejects.toThrow(/reset.*response/i);
   });
 });
 
@@ -368,6 +601,61 @@ describe("createWorkbenchSaveQueue", () => {
     expect(store.getState().pending_request_id).toBeNull();
     expect(store.getState().durable_revision).toBe(1);
     expect(store.getState().durable_token).toBe("reset-token");
+  });
+
+  it("drains one newest snapshot after shutdown waits for an active save", async () => {
+    const first = deferred<WorkbenchSaveResult>();
+    const save = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({
+        outcome: "saved",
+        durable_revision: 2,
+        durable_token: "opaque-two",
+        request_id: "request-2",
+      } satisfies WorkbenchSaveResult);
+    const requestIds = ["request-1", "request-2"];
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument(),
+      durable_token: "opaque-zero",
+    });
+    const queue = createWorkbenchSaveQueue({
+      store,
+      adapter: adapterWithSave(save),
+      request_id: () => requestIds.shift() ?? "unexpected-request",
+    });
+
+    store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-a") },
+    ]);
+    void queue.flush();
+    expect(save).toHaveBeenCalledTimes(1);
+    store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-b") },
+    ]);
+    const shutdown = queue.shutdown();
+    expect(save).toHaveBeenCalledTimes(1);
+
+    first.resolve({
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "request-1",
+    });
+    await shutdown;
+
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]?.[0]).toMatchObject({
+      document: {
+        revision: 2,
+        surfaces: {
+          "surface-a": expect.any(Object),
+          "surface-b": expect.any(Object),
+        },
+      },
+      expected_revision: 1,
+      expected_token: "opaque-one",
+      request_id: "request-2",
+    });
   });
 });
 

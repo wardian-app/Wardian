@@ -11,6 +11,7 @@ import {
   type WorkbenchLoadSource,
   type WorkbenchLoadResult,
   type WorkbenchPersistenceAdapter,
+  type WorkbenchPendingSaveEnvelope,
   type WorkbenchSaveQueue,
 } from "./workbenchPersistence";
 
@@ -120,7 +121,7 @@ export function useWorkbenchPersistence(
     let unsubscribeStore: (() => void) | null = null;
     let unsubscribeShell: (() => void) | null = null;
     let projectingShell = false;
-    queueRef.current?.shutdown();
+    if (queueRef.current !== null) void queueRef.current.shutdown();
     queueRef.current = null;
 
     if (!options.enabled) {
@@ -152,7 +153,8 @@ export function useWorkbenchPersistence(
           ) {
             throw new Error("backend returned an invalid workbench load result");
           }
-          let migrationPending = false;
+          let captureMigrationEnvelope = false;
+          let migrationEnvelope: WorkbenchPendingSaveEnvelope | null = null;
           if (loaded.source === "default") {
             let rawLegacyLayout: string | null = null;
             try {
@@ -176,15 +178,20 @@ export function useWorkbenchPersistence(
             if (!migrated.accepted) {
               throw new Error("could not create the first migrated workbench document");
             }
-            migrationPending = true;
+            captureMigrationEnvelope = true;
           }
-          queueRef.current = createWorkbenchSaveQueue({
+          const queue = createWorkbenchSaveQueue({
             store,
             adapter: options.adapter,
             request_id: () => requestIdRef.current(),
-            on_durable: () => {
-              if (!migrationPending) return;
-              migrationPending = false;
+            on_save_pending: (envelope) => {
+              if (!captureMigrationEnvelope || migrationEnvelope !== null) return;
+              migrationEnvelope = envelope;
+              captureMigrationEnvelope = false;
+            },
+            on_save_durable: (envelope) => {
+              if (migrationEnvelope === null || envelope !== migrationEnvelope) return;
+              migrationEnvelope = null;
               try {
                 legacyStorageRef.current?.removeItem("wardian-layout");
               } catch {
@@ -192,6 +199,8 @@ export function useWorkbenchPersistence(
               }
             },
           });
+          queueRef.current = queue;
+          if (captureMigrationEnvelope) void queue.flush();
           const shellProjection = shellProjectionRef.current;
           if (shellProjection) {
             projectingShell = true;
@@ -273,7 +282,7 @@ export function useWorkbenchPersistence(
       cancelled = true;
       unsubscribeStore?.();
       unsubscribeShell?.();
-      queueRef.current?.shutdown();
+      if (queueRef.current !== null) void queueRef.current.shutdown();
       queueRef.current = null;
     };
   }, [options.adapter, options.enabled, store]);

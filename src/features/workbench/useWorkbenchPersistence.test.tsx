@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorkbenchStore } from "./useWorkbenchStore";
 import { useWorkbenchPersistence } from "./useWorkbenchPersistence";
 import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
+import { WorkbenchPersistenceAdapterError } from "./workbenchPersistence";
 import type {
   WorkbenchLoadResult,
   WorkbenchPersistenceAdapter,
@@ -482,5 +483,106 @@ describe("useWorkbenchPersistence", () => {
         shell: expect.objectContaining({ right_sidebar_width: 350 }),
       }),
     }));
+  });
+
+  it("does not delete wardian-layout when reset becomes durable before the migration snapshot", async () => {
+    const requestIds = ["migration-request", "reset-before-migration"];
+    const legacyStorage = {
+      getItem: vi.fn().mockReturnValue(JSON.stringify({
+        state: { leftSidebarWidth: 300 },
+        version: 0,
+      })),
+      removeItem: vi.fn(),
+    };
+    const adapter = createAdapter({
+      load: vi.fn().mockResolvedValue({
+        source: "default",
+        document: makeSingleGroupDocument(),
+        notice: null,
+        durable_revision: 0,
+        durable_token: "opaque-zero",
+      } satisfies WorkbenchLoadResult),
+      save: vi.fn().mockRejectedValue(new WorkbenchPersistenceAdapterError(
+        "save",
+        "malformed migration acknowledgement",
+      )),
+      reset: vi.fn().mockResolvedValue({
+        outcome: "saved",
+        durable_revision: 1,
+        durable_token: "reset-token",
+        request_id: "reset-before-migration",
+        document: { ...makeSingleGroupDocument(), revision: 1 },
+      } satisfies WorkbenchResetResult),
+    });
+    const { result } = renderHook(() => useWorkbenchPersistence({
+      enabled: true,
+      adapter,
+      legacy_storage: legacyStorage,
+      request_id: () => requestIds.shift() ?? "unexpected-request",
+    }));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    await act(async () => {
+      await expect(result.current.reset()).resolves.toBe(true);
+    });
+
+    expect(legacyStorage.removeItem).not.toHaveBeenCalled();
+  });
+
+  it("does not delete wardian-layout for a later replacement acknowledgement", async () => {
+    const requestIds = ["migration-request", "replacement-request"];
+    const legacyStorage = {
+      getItem: vi.fn().mockReturnValue(JSON.stringify({
+        state: { rightSidebarWidth: 320 },
+        version: 0,
+      })),
+      removeItem: vi.fn(),
+    };
+    const load = vi.fn()
+      .mockResolvedValueOnce({
+        source: "default",
+        document: makeSingleGroupDocument(),
+        notice: null,
+        durable_revision: 0,
+        durable_token: "opaque-zero",
+      } satisfies WorkbenchLoadResult)
+      .mockResolvedValueOnce({
+        source: "primary",
+        document: { ...makeSingleGroupDocument(), revision: 2 },
+        notice: null,
+        durable_revision: 2,
+        durable_token: "disk-token",
+      } satisfies WorkbenchLoadResult);
+    const save = vi.fn()
+      .mockResolvedValueOnce({
+        outcome: "revision_conflict",
+        durable_revision: 2,
+        durable_token: "disk-token",
+        request_id: "migration-request",
+      } satisfies WorkbenchSaveResult)
+      .mockResolvedValueOnce({
+        outcome: "saved",
+        durable_revision: 3,
+        durable_token: "replacement-token",
+        request_id: "replacement-request",
+      } satisfies WorkbenchSaveResult);
+    const adapter = createAdapter({ load, save });
+    const { result } = renderHook(() => useWorkbenchPersistence({
+      enabled: true,
+      adapter,
+      legacy_storage: legacyStorage,
+      request_id: () => requestIds.shift() ?? "unexpected-request",
+    }));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    await act(async () => {
+      await result.current.flush();
+    });
+    await waitFor(() => expect(result.current.conflict).toBe("revision_conflict"));
+
+    await act(async () => {
+      await expect(result.current.replace_disk()).resolves.toBe(true);
+    });
+
+    expect(legacyStorage.removeItem).not.toHaveBeenCalled();
   });
 });

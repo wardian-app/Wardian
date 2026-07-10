@@ -3,7 +3,11 @@ import type {
   WorkbenchShellV1,
   WorkbenchSurfaceV1,
 } from "../../types";
-import type { WorkbenchStore } from "./useWorkbenchStore";
+import type {
+  ReadonlyWorkbenchDocumentV1,
+  WorkbenchStore,
+} from "./useWorkbenchStore";
+import { validateWorkbenchDocument } from "./workbenchModel";
 
 export type WorkbenchLoadSource = "primary" | "backup" | "default" | "future_schema";
 
@@ -60,8 +64,242 @@ export type WorkbenchPersistenceAdapter = {
   reset: (request: WorkbenchResetRequest) => Promise<WorkbenchResetResult>;
 };
 
-function invokeResult<TResult>(result: Promise<unknown>): Promise<TResult> {
-  return result as Promise<TResult>;
+export class WorkbenchPersistenceAdapterError extends Error {
+  constructor(command: "boot" | "load" | "save" | "reset", detail: string) {
+    super(`Invalid workbench ${command} response: ${detail}`);
+    this.name = "WorkbenchPersistenceAdapterError";
+  }
+}
+
+type DecodeCommand = "boot" | "load" | "save" | "reset";
+
+function decodeRecord(
+  value: unknown,
+  command: DecodeCommand,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new WorkbenchPersistenceAdapterError(command, "expected a plain object");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new WorkbenchPersistenceAdapterError(command, "expected a plain object prototype");
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  const ownKeys = Reflect.ownKeys(record);
+  if (ownKeys.some((key) => typeof key !== "string")) {
+    throw new WorkbenchPersistenceAdapterError(command, "contained a symbol field");
+  }
+  const keys = ownKeys as string[];
+  if (keys.some((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor === undefined
+      || descriptor.enumerable !== true
+      || !("value" in descriptor);
+  })) {
+    throw new WorkbenchPersistenceAdapterError(
+      command,
+      "fields must be enumerable data properties",
+    );
+  }
+  if (!requiredKeys.every((key) => Object.prototype.hasOwnProperty.call(record, key))) {
+    throw new WorkbenchPersistenceAdapterError(command, "missing a required field");
+  }
+  if (keys.some((key) => !allowed.has(key))) {
+    throw new WorkbenchPersistenceAdapterError(command, "contained an unexpected field");
+  }
+  return record;
+}
+
+function decodeRevision(value: unknown, command: DecodeCommand): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || Object.is(value, -0)) {
+    throw new WorkbenchPersistenceAdapterError(
+      command,
+      "durable_revision must be a nonnegative safe integer",
+    );
+  }
+  return value as number;
+}
+
+function decodeToken(value: unknown, command: DecodeCommand): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new WorkbenchPersistenceAdapterError(command, "durable_token must be nonempty");
+  }
+  return value;
+}
+
+function decodeRequestId(value: unknown, command: DecodeCommand): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new WorkbenchPersistenceAdapterError(command, "request_id must be nonempty");
+  }
+  return value;
+}
+
+function decodeDocument(value: unknown, command: DecodeCommand): WorkbenchDocumentV1 {
+  const validation = validateWorkbenchDocument(value as WorkbenchDocumentV1);
+  if (!validation.valid) {
+    throw new WorkbenchPersistenceAdapterError(command, "document failed V1 validation");
+  }
+  return validation.document;
+}
+
+function decodeBootResult(value: unknown): WorkbenchBootConfig {
+  const record = decodeRecord(value, "boot", ["safe_mode"]);
+  if (typeof record.safe_mode !== "boolean") {
+    throw new WorkbenchPersistenceAdapterError("boot", "safe_mode must be boolean");
+  }
+  return { safe_mode: record.safe_mode };
+}
+
+function decodeLoadResult(value: unknown): WorkbenchLoadResult {
+  const record = decodeRecord(value, "load", [
+    "source",
+    "document",
+    "notice",
+    "durable_revision",
+    "durable_token",
+  ]);
+  const source = record.source;
+  if (
+    source !== "primary"
+    && source !== "backup"
+    && source !== "default"
+    && source !== "future_schema"
+  ) {
+    throw new WorkbenchPersistenceAdapterError("load", "source was unknown");
+  }
+  if (record.notice !== null && typeof record.notice !== "string") {
+    throw new WorkbenchPersistenceAdapterError("load", "notice must be string or null");
+  }
+  if (source === "future_schema") {
+    if (
+      record.document !== null
+      || record.durable_revision !== null
+      || record.durable_token !== null
+    ) {
+      throw new WorkbenchPersistenceAdapterError(
+        "load",
+        "future_schema must not expose a V1 document or durable identity",
+      );
+    }
+    return {
+      source,
+      document: null,
+      notice: record.notice,
+      durable_revision: null,
+      durable_token: null,
+    };
+  }
+  const document = decodeDocument(record.document, "load");
+  const durableRevision = decodeRevision(record.durable_revision, "load");
+  if (document.revision !== durableRevision) {
+    throw new WorkbenchPersistenceAdapterError(
+      "load",
+      "document revision did not match durable_revision",
+    );
+  }
+  return {
+    source,
+    document,
+    notice: record.notice,
+    durable_revision: durableRevision,
+    durable_token: decodeToken(record.durable_token, "load"),
+  };
+}
+
+function decodeOutcome(value: unknown, command: "save" | "reset"): WorkbenchPersistenceOutcome {
+  if (value !== "saved" && value !== "revision_conflict" && value !== "future_schema") {
+    throw new WorkbenchPersistenceAdapterError(command, "outcome was unknown");
+  }
+  return value;
+}
+
+function decodePersistenceIdentity(
+  record: Record<string, unknown>,
+  command: "save" | "reset",
+  outcome: WorkbenchPersistenceOutcome,
+): { durable_revision: number | null; durable_token: string | null } {
+  if (outcome === "future_schema") {
+    if (record.durable_revision !== null || record.durable_token !== null) {
+      throw new WorkbenchPersistenceAdapterError(
+        command,
+        "future_schema must not expose a durable V1 identity",
+      );
+    }
+    return { durable_revision: null, durable_token: null };
+  }
+  return {
+    durable_revision: decodeRevision(record.durable_revision, command),
+    durable_token: decodeToken(record.durable_token, command),
+  };
+}
+
+function decodeSaveResult(
+  value: unknown,
+  request: WorkbenchSaveRequest,
+): WorkbenchSaveResult {
+  const record = decodeRecord(value, "save", [
+    "outcome",
+    "durable_revision",
+    "durable_token",
+    "request_id",
+  ]);
+  const outcome = decodeOutcome(record.outcome, "save");
+  const requestId = decodeRequestId(record.request_id, "save");
+  if (requestId !== request.request_id) {
+    throw new WorkbenchPersistenceAdapterError("save", "request_id did not echo the request");
+  }
+  const identity = decodePersistenceIdentity(record, "save", outcome);
+  if (outcome === "saved" && identity.durable_revision !== request.document.revision) {
+    throw new WorkbenchPersistenceAdapterError(
+      "save",
+      "saved revision did not match the proposed document",
+    );
+  }
+  return { outcome, ...identity, request_id: requestId };
+}
+
+function decodeResetResult(
+  value: unknown,
+  request: WorkbenchResetRequest,
+): WorkbenchResetResult {
+  const record = decodeRecord(value, "reset", [
+    "outcome",
+    "durable_revision",
+    "durable_token",
+    "request_id",
+  ], ["document"]);
+  const outcome = decodeOutcome(record.outcome, "reset");
+  const requestId = decodeRequestId(record.request_id, "reset");
+  if (requestId !== request.request_id) {
+    throw new WorkbenchPersistenceAdapterError("reset", "request_id did not echo the request");
+  }
+  const identity = decodePersistenceIdentity(record, "reset", outcome);
+  if (outcome !== "saved") {
+    if (Object.prototype.hasOwnProperty.call(record, "document")) {
+      throw new WorkbenchPersistenceAdapterError(
+        "reset",
+        "non-saved reset must not include a document",
+      );
+    }
+    return { outcome, ...identity, request_id: requestId };
+  }
+  if (!Object.prototype.hasOwnProperty.call(record, "document")) {
+    throw new WorkbenchPersistenceAdapterError("reset", "saved reset omitted its document");
+  }
+  const document = decodeDocument(record.document, "reset");
+  if (
+    identity.durable_revision !== request.expected_revision + 1
+    || document.revision !== identity.durable_revision
+  ) {
+    throw new WorkbenchPersistenceAdapterError(
+      "reset",
+      "saved reset document did not match the successor revision",
+    );
+  }
+  return { outcome, ...identity, request_id: requestId, document };
 }
 
 /** Thin, snake_case-preserving bridge to the Rust-owned persistence commands. */
@@ -69,13 +307,15 @@ export function createWorkbenchInvokeAdapter(
   invoke: WorkbenchInvoke,
 ): WorkbenchPersistenceAdapter {
   return {
-    boot: () => invokeResult<WorkbenchBootConfig>(invoke("get_workbench_boot_config")),
-    load: () => invokeResult<WorkbenchLoadResult>(invoke("load_workbench_state")),
-    save: (request) => invokeResult<WorkbenchSaveResult>(
-      invoke("save_workbench_state", { ...request }),
+    boot: async () => decodeBootResult(await invoke("get_workbench_boot_config")),
+    load: async () => decodeLoadResult(await invoke("load_workbench_state")),
+    save: async (request) => decodeSaveResult(
+      await invoke("save_workbench_state", { ...request }),
+      request,
     ),
-    reset: (request) => invokeResult<WorkbenchResetResult>(
-      invoke("reset_workbench_state", { ...request }),
+    reset: async (request) => decodeResetResult(
+      await invoke("reset_workbench_state", { ...request }),
+      request,
     ),
   };
 }
@@ -111,6 +351,7 @@ export function decideWorkbenchSaveResponse(
   if (result.outcome === "future_schema") {
     return { type: "future_schema", request_id: pending.request_id };
   }
+  if (result.outcome !== "saved") return { type: "ignore" };
   if (
     result.durable_revision !== pending.revision
     || typeof result.durable_token !== "string"
@@ -134,21 +375,33 @@ export type WorkbenchSaveQueueOptions = {
   retry_delay_ms?: number;
   set_timeout?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>;
   clear_timeout?: (timer: ReturnType<typeof setTimeout>) => void;
-  on_durable?: (result: {
+  on_save_pending?: (envelope: WorkbenchPendingSaveEnvelope) => void;
+  on_save_durable?: (
+    envelope: WorkbenchPendingSaveEnvelope,
+    result: {
     request_id: string;
     durable_revision: number;
     durable_token: string;
-  }) => void;
+    },
+  ) => void;
+};
+
+export type WorkbenchPendingSaveEnvelope = {
+  request_id: string;
+  revision: number;
+  pending_transaction_version: number | null;
+  pending_document: ReadonlyWorkbenchDocumentV1;
 };
 
 export type WorkbenchSaveQueue = {
   flush: () => Promise<void>;
   reset: () => Promise<boolean>;
-  shutdown: () => void;
+  shutdown: () => Promise<void>;
 };
 
 type ActiveSave = {
   request: WorkbenchSaveRequest;
+  envelope: WorkbenchPendingSaveEnvelope;
   pending_transaction_version: number | null;
   pending_expected_token: string;
   promise: Promise<void> | null;
@@ -173,7 +426,9 @@ export function createWorkbenchSaveQueue(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let active: ActiveSave | null = null;
   let resetInFlight = false;
+  let shuttingDown = false;
   let disposed = false;
+  let shutdownPromise: Promise<void> | null = null;
 
   const cancelTimer = (): void => {
     if (timer === null) return;
@@ -193,7 +448,14 @@ export function createWorkbenchSaveQueue(
   let sendActive: (pending: ActiveSave) => Promise<void>;
 
   const arm = (delay: number): void => {
-    if (disposed || timer !== null || active !== null || resetInFlight || !eligible()) return;
+    if (
+      disposed
+      || shuttingDown
+      || timer !== null
+      || active !== null
+      || resetInFlight
+      || !eligible()
+    ) return;
     timer = setTimer(() => {
       timer = null;
       void flush();
@@ -201,7 +463,7 @@ export function createWorkbenchSaveQueue(
   };
 
   const armRetry = (pending: ActiveSave): void => {
-    if (disposed || timer !== null || active !== pending) return;
+    if (disposed || shuttingDown || timer !== null || active !== pending) return;
     timer = setTimer(() => {
       timer = null;
       void sendActive(pending);
@@ -249,13 +511,16 @@ export function createWorkbenchSaveQueue(
       armRetry(pending);
       return;
     }
-    options.on_durable?.({
-      request_id: decision.request_id,
-      durable_revision: decision.durable_revision,
-      durable_token: decision.durable_token,
-    });
+    options.on_save_durable?.(
+      pending.envelope,
+      {
+        request_id: decision.request_id,
+        durable_revision: decision.durable_revision,
+        durable_token: decision.durable_token,
+      },
+    );
     finishActive(pending);
-    if (eligible()) void flush();
+    if (!shuttingDown && eligible()) void flush();
   };
 
   sendActive = (pending): Promise<void> => {
@@ -266,6 +531,14 @@ export function createWorkbenchSaveQueue(
       })
       .catch((error: unknown) => {
         if (active !== pending) return;
+        if (error instanceof WorkbenchPersistenceAdapterError) {
+          options.store.getState().fail_pending_save(
+            pending.request.request_id,
+            error.message,
+          );
+          finishActive(pending);
+          return;
+        }
         options.store.getState().set_save_error(errorMessage(error));
         armRetry(pending);
       })
@@ -275,9 +548,9 @@ export function createWorkbenchSaveQueue(
     return pending.promise;
   };
 
-  const flush = async (): Promise<void> => {
+  const flush = async (allowDuringShutdown = false): Promise<void> => {
     cancelTimer();
-    if (resetInFlight) return;
+    if (resetInFlight || (shuttingDown && !allowDuringShutdown)) return;
     if (active !== null) {
       await sendActive(active);
       return;
@@ -302,6 +575,12 @@ export function createWorkbenchSaveQueue(
       );
       return;
     }
+    const envelope: WorkbenchPendingSaveEnvelope = {
+      request_id: requestId,
+      revision: pendingRevision,
+      pending_transaction_version: state.pending_transaction_version,
+      pending_document: pendingDocument,
+    };
     active = {
       request: {
         document: structuredClone(pendingDocument) as WorkbenchDocumentV1,
@@ -309,10 +588,12 @@ export function createWorkbenchSaveQueue(
         expected_token: expectedToken,
         request_id: requestId,
       },
+      envelope,
       pending_transaction_version: state.pending_transaction_version,
       pending_expected_token: expectedToken,
       promise: null,
     };
+    options.on_save_pending?.(envelope);
     await sendActive(active);
   };
 
@@ -325,7 +606,7 @@ export function createWorkbenchSaveQueue(
     flush,
     reset: async () => {
       cancelTimer();
-      if (resetInFlight || disposed) return false;
+      if (resetInFlight || shuttingDown || disposed) return false;
       if (active !== null) {
         await sendActive(active);
         if (active !== null) return false;
@@ -377,6 +658,7 @@ export function createWorkbenchSaveQueue(
           } catch (error) {
             failure = errorMessage(error);
             options.store.getState().set_save_error(failure);
+            if (error instanceof WorkbenchPersistenceAdapterError) break;
             continue;
           }
           const decision = decideWorkbenchSaveResponse(
@@ -397,30 +679,68 @@ export function createWorkbenchSaveQueue(
             result.document,
           );
           if (!acknowledged) continue;
-          options.on_durable?.({
-            request_id: decision.request_id,
-            durable_revision: decision.durable_revision,
-            durable_token: decision.durable_token,
-          });
           return true;
         }
         options.store.getState().fail_pending_save(requestId, failure);
         return false;
       } finally {
         resetInFlight = false;
-        if (!disposed && eligible()) void flush();
+        if (!disposed && !shuttingDown && eligible()) void flush();
       }
     },
     shutdown: () => {
-      if (disposed) return;
+      if (shutdownPromise !== null) return shutdownPromise;
+      if (disposed) return Promise.resolve();
+      shuttingDown = true;
       cancelTimer();
-      if (active !== null) {
-        void sendActive(active);
-      } else if (eligible()) {
-        void flush();
-      }
-      disposed = true;
-      unsubscribe();
+      shutdownPromise = (async () => {
+        try {
+          const activeAtShutdown = active;
+          if (activeAtShutdown !== null) {
+            await sendActive(activeAtShutdown);
+            if (active === activeAtShutdown) {
+              options.store.getState().fail_pending_save(
+                activeAtShutdown.request.request_id,
+                options.store.getState().save_error
+                  ?? "workbench shutdown save was not acknowledged",
+              );
+              finishActive(activeAtShutdown);
+              return;
+            }
+            const afterActive = options.store.getState();
+            if (
+              afterActive.conflict !== null
+              || afterActive.read_only
+              || afterActive.save_error !== null
+            ) return;
+          } else {
+            const current = options.store.getState();
+            if (
+              current.conflict !== null
+              || current.read_only
+              || current.save_error !== null
+            ) return;
+          }
+
+          if (!eligible()) return;
+          await flush(true);
+          if (active !== null) {
+            const unacknowledged = active;
+            options.store.getState().fail_pending_save(
+              unacknowledged.request.request_id,
+              options.store.getState().save_error
+                ?? "workbench shutdown drain was not acknowledged",
+            );
+            finishActive(unacknowledged);
+          }
+        } finally {
+          cancelTimer();
+          unsubscribe();
+          disposed = true;
+          shuttingDown = false;
+        }
+      })();
+      return shutdownPromise;
     },
   };
 }
