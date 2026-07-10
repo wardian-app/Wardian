@@ -25,6 +25,11 @@ Before requesting a commit or finalizing a task, ensure the following steps are 
    - [ ] **Git Status**: Run `git status` to ensure only intended files are staged.
    - [ ] **Commit Message**: Use a clear, semantic commit message (e.g., `feat(workflows): implement parallel execution`).
 
+### PowerShell Home Safety
+- PowerShell variable names are case-insensitive: `$home` is the built-in `$HOME` variable and points to the OS user profile. Never assign to or reuse `$home` as a scratch, test, temporary, or Wardian-home variable. Use a descriptive name such as `$testHome`, `$wardianHome`, or `$tempRoot`.
+- Never pass `$HOME`, `$home`, `$env:USERPROFILE`, `~`, or a path derived only from one of them to a recursive delete or move. Commands such as `Remove-Item $home -Recurse -Force` are forbidden under all circumstances.
+- Before any recursive delete or move, resolve the intended target to an absolute path, verify that it is inside the workspace or an explicitly created temporary directory, and abort if assignment or path resolution failed. Filesystem mutation scripts must fail closed instead of continuing after a setup error.
+
 ### Cross-Platform Documentation
 - User-facing docs, bundled skills, examples, and agent instructions must be cross-OS and cross-computer by default.
 - Use placeholders such as `<absolute-workspace-path>` instead of local machine paths, drive-letter paths, or user-home paths.
