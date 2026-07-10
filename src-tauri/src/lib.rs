@@ -510,6 +510,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::workbench::load_workbench_state,
+            commands::workbench::save_workbench_state,
+            commands::workbench::reset_workbench_state,
             commands::agent::spawn_agent,
             commands::agent::list_provider_readiness,
             commands::agent::clone_agent,

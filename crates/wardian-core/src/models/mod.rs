@@ -7,6 +7,7 @@ pub mod git;
 pub mod library;
 pub mod provider;
 pub mod session_policy;
+pub mod workbench;
 pub mod workflow;
 
 pub use agent_config::{
@@ -24,4 +25,5 @@ pub use session_policy::{
     AgentExecutionPolicy, AgentSessionPersistence, AgentSessionPersistenceOverride,
     WorkflowAgentMode,
 };
+pub use workbench::*;
 pub use workflow::*;

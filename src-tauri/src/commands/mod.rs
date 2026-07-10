@@ -12,6 +12,7 @@ pub mod settings;
 pub mod terminal;
 pub mod topology;
 pub mod watchlist;
+pub mod workbench;
 pub mod workflow;
 
 pub use agent::*;
@@ -26,4 +27,5 @@ pub use settings::*;
 pub use terminal::*;
 pub use topology::*;
 pub use watchlist::*;
+pub use workbench::*;
 pub use workflow::*;

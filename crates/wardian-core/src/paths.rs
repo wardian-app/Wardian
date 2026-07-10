@@ -173,6 +173,16 @@ pub fn topology_path_for_home(home: &Path) -> PathBuf {
     home.join("topology.json")
 }
 
+/// `<wardian-home>/settings/workbench.json`.
+pub fn workbench_path_for_home(home: &Path) -> PathBuf {
+    home.join("settings").join("workbench.json")
+}
+
+/// `<wardian-home>/settings/workbench.backup.json`.
+pub fn workbench_backup_path_for_home(home: &Path) -> PathBuf {
+    home.join("settings").join("workbench.backup.json")
+}
+
 /// `<wardian-home>/library`.
 pub fn library_dir_for_home(home: &Path) -> PathBuf {
     home.join("library")

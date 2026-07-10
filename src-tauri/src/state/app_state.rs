@@ -22,6 +22,10 @@ pub struct ExplorerWatchRegistration {
 }
 
 pub struct AppState {
+    // Serializes workbench load/save/reset commands before the core's per-home
+    // disk CAS lock, keeping the async command boundary ordered without a
+    // synchronous mutex held across an await.
+    pub workbench_io_lock: Mutex<()>,
     // Map of session_id to ActiveAgent
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: Arc<Mutex<sysinfo::System>>,
@@ -176,6 +180,7 @@ impl Default for AppState {
         let mut sys = sysinfo::System::new_all();
         sys.refresh_all();
         Self {
+            workbench_io_lock: Mutex::new(()),
             agents: Mutex::new(HashMap::new()),
             system_metrics: Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
@@ -218,6 +223,7 @@ mod tests {
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
+        assert!(state.workbench_io_lock.try_lock().is_ok());
         assert!(state.terminal_attach.snapshot("missing-agent").is_none());
         assert_eq!(state.terminal_theme(), "dark");
         assert!(!state
