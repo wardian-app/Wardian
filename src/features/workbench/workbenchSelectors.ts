@@ -1,23 +1,29 @@
 import type {
-  WorkbenchDocumentV1,
   WorkbenchGroupV1,
   WorkbenchNodeV1,
   WorkbenchSurfaceV1,
 } from "../../types";
-import type { WorkbenchStoreState } from "./useWorkbenchStore";
+import type {
+  DeepReadonly,
+  ReadonlyWorkbenchDocumentV1,
+  WorkbenchStoreState,
+} from "./useWorkbenchStore";
 
 type WorkbenchDocumentState = Pick<WorkbenchStoreState, "document">;
+type ReadonlyWorkbenchGroupV1 = DeepReadonly<WorkbenchGroupV1>;
+type ReadonlyWorkbenchNodeV1 = DeepReadonly<WorkbenchNodeV1>;
+type ReadonlyWorkbenchSurfaceV1 = DeepReadonly<WorkbenchSurfaceV1>;
 
 const groupsInTreeOrderCache = new WeakMap<
-  WorkbenchDocumentV1,
-  readonly WorkbenchGroupV1[]
+  object,
+  readonly ReadonlyWorkbenchGroupV1[]
 >();
 const surfacesInTreeOrderCache = new WeakMap<
-  WorkbenchDocumentV1,
-  readonly WorkbenchSurfaceV1[]
+  object,
+  readonly ReadonlyWorkbenchSurfaceV1[]
 >();
 
-function groupIdsInTreeOrder(node: WorkbenchNodeV1): string[] {
+function groupIdsInTreeOrder(node: ReadonlyWorkbenchNodeV1): string[] {
   return node.kind === "group"
     ? [node.group_id]
     : [...groupIdsInTreeOrder(node.first), ...groupIdsInTreeOrder(node.second)];
@@ -25,13 +31,13 @@ function groupIdsInTreeOrder(node: WorkbenchNodeV1): string[] {
 
 export function selectActiveWorkbenchGroup(
   state: WorkbenchDocumentState,
-): WorkbenchGroupV1 | undefined {
+): ReadonlyWorkbenchGroupV1 | undefined {
   return state.document.groups[state.document.active_group_id];
 }
 
 export function selectActiveWorkbenchSurface(
   state: WorkbenchDocumentState,
-): WorkbenchSurfaceV1 | undefined {
+): ReadonlyWorkbenchSurfaceV1 | undefined {
   const group = selectActiveWorkbenchGroup(state);
   return group?.active_surface_id
     ? state.document.surfaces[group.active_surface_id]
@@ -40,7 +46,7 @@ export function selectActiveWorkbenchSurface(
 
 export function selectWorkbenchGroupsInTreeOrder(
   state: WorkbenchDocumentState,
-): readonly WorkbenchGroupV1[] {
+): readonly ReadonlyWorkbenchGroupV1[] {
   const cached = groupsInTreeOrderCache.get(state.document);
   if (cached) return cached;
   const groups = Object.freeze(
@@ -54,7 +60,7 @@ export function selectWorkbenchGroupsInTreeOrder(
 
 export function selectWorkbenchSurfacesInTreeOrder(
   state: WorkbenchDocumentState,
-): readonly WorkbenchSurfaceV1[] {
+): readonly ReadonlyWorkbenchSurfaceV1[] {
   const cached = surfacesInTreeOrderCache.get(state.document);
   if (cached) return cached;
   const surfaces = Object.freeze(
@@ -66,17 +72,17 @@ export function selectWorkbenchSurfacesInTreeOrder(
 }
 
 export function selectWorkbenchGroup(groupId: string) {
-  return (state: WorkbenchDocumentState): WorkbenchGroupV1 | undefined =>
+  return (state: WorkbenchDocumentState): ReadonlyWorkbenchGroupV1 | undefined =>
     state.document.groups[groupId];
 }
 
 export function selectWorkbenchSurface(surfaceId: string) {
-  return (state: WorkbenchDocumentState): WorkbenchSurfaceV1 | undefined =>
+  return (state: WorkbenchDocumentState): ReadonlyWorkbenchSurfaceV1 | undefined =>
     state.document.surfaces[surfaceId];
 }
 
 export function selectWorkbenchGroupForSurface(surfaceId: string) {
-  return (state: WorkbenchDocumentState): WorkbenchGroupV1 | undefined =>
+  return (state: WorkbenchDocumentState): ReadonlyWorkbenchGroupV1 | undefined =>
     selectWorkbenchGroupsInTreeOrder(state).find(
       (group) => group.surface_ids.includes(surfaceId),
     );
@@ -99,6 +105,12 @@ export function selectWorkbenchLauncherOpen(
   return state.launcher_open;
 }
 
+export function selectWorkbenchSurfaceMru(
+  state: Pick<WorkbenchStoreState, "surface_mru">,
+): readonly string[] {
+  return state.surface_mru;
+}
+
 export function selectWorkbenchTransactionVersion(
   state: Pick<WorkbenchStoreState, "transaction_version">,
 ): number {
@@ -107,7 +119,7 @@ export function selectWorkbenchTransactionVersion(
 
 export function selectWorkbenchDurableDocument(
   state: Pick<WorkbenchStoreState, "durable_document">,
-): WorkbenchDocumentV1 {
+): ReadonlyWorkbenchDocumentV1 {
   return state.durable_document;
 }
 

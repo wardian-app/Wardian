@@ -532,59 +532,59 @@ export type SurfaceClosePolicy = "close_view" | "confirm_if_dirty";
 export type CloseDecision = "allow" | "cancel";
 
 export type OpenSurfaceRequest = {
-    surface_type: SurfaceType;
-    resource_key?: string;
-    state?: SurfaceState;
-    group_id?: string;
-    duplicate?: boolean;
+    readonly surface_type: SurfaceType;
+    readonly resource_key?: string;
+    readonly state?: SurfaceState;
+    readonly group_id?: string;
+    readonly duplicate?: boolean;
 };
 
 export type SurfaceRestoreResult<TState extends SurfaceState = SurfaceState> =
-    | { ok: true; state: TState }
-    | { ok: false; error: string };
+    | { readonly ok: true; readonly state: TState }
+    | { readonly ok: false; readonly error: string };
 
 export type SerializedSurfaceState = {
-    state_schema_version: number;
-    state: unknown;
+    readonly state_schema_version: number;
+    readonly state: unknown;
 };
 
 export type SurfaceCommandDefinition = {
-    command_id: string;
-    title: string;
-    accessibility_label?: string;
+    readonly command_id: string;
+    readonly title: string;
+    readonly accessibility_label?: string;
 };
 
 export type SurfaceBadge = {
-    badge_id: string;
-    label: string;
+    readonly badge_id: string;
+    readonly label: string;
 };
 
 export type SurfacePresentationMetadata = {
-    title: string;
-    icon: SurfaceIcon;
-    commands: readonly SurfaceCommandDefinition[];
-    badges: readonly SurfaceBadge[];
+    readonly title: string;
+    readonly icon: SurfaceIcon;
+    readonly commands: readonly SurfaceCommandDefinition[];
+    readonly badges: readonly SurfaceBadge[];
 };
 
 export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
-    type: SurfaceType;
-    title: (surface: WorkbenchSurfaceV1) => string;
-    icon: SurfaceIcon;
-    render_policy: SurfaceRenderPolicy;
-    open_policy: SurfaceOpenPolicy;
-    runtime_policy: SurfaceRuntimePolicy;
-    close_policy: SurfaceClosePolicy;
-    state_schema_version: number;
-    max_state_bytes: number;
-    resource_key?: (request: OpenSurfaceRequest) => string | undefined;
-    resolve_existing?: (
+    readonly type: SurfaceType;
+    readonly title: (surface: WorkbenchSurfaceV1) => string;
+    readonly icon: SurfaceIcon;
+    readonly render_policy: SurfaceRenderPolicy;
+    readonly open_policy: SurfaceOpenPolicy;
+    readonly runtime_policy: SurfaceRuntimePolicy;
+    readonly close_policy: SurfaceClosePolicy;
+    readonly state_schema_version: number;
+    readonly max_state_bytes: number;
+    readonly resource_key?: (request: OpenSurfaceRequest) => string | undefined;
+    readonly resolve_existing?: (
         request: OpenSurfaceRequest,
-        candidates: WorkbenchSurfaceV1[],
+        candidates: readonly WorkbenchSurfaceV1[],
     ) => string | undefined;
-    default_state: () => TState;
-    serialize_state: (state: TState) => unknown;
-    restore_state: (value: unknown, version: number) => SurfaceRestoreResult<TState>;
-    can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
-    commands: SurfaceCommandDefinition[];
-    badges?: (surface: WorkbenchSurfaceV1) => SurfaceBadge[];
+    readonly default_state: () => TState;
+    readonly serialize_state: (state: TState) => unknown;
+    readonly restore_state: (value: unknown, version: number) => SurfaceRestoreResult<TState>;
+    readonly can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
+    readonly commands: readonly SurfaceCommandDefinition[];
+    readonly badges?: (surface: WorkbenchSurfaceV1) => readonly SurfaceBadge[];
 };

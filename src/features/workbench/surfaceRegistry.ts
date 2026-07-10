@@ -37,7 +37,7 @@ export interface WorkbenchSurfaceRegistry {
   resolve_surface(surface: WorkbenchSurfaceV1): ResolvedSurface;
   resolve_existing(
     request: OpenSurfaceRequest,
-    candidates: WorkbenchSurfaceV1[],
+    candidates: readonly WorkbenchSurfaceV1[],
   ): string | undefined;
   presentation(surface: WorkbenchSurfaceV1): SurfacePresentationMetadata;
   can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision>;
@@ -51,10 +51,6 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
     if (descriptor && "value" in descriptor) deepFreeze(descriptor.value, seen);
   }
   return Object.freeze(value);
-}
-
-function cloneAndFreeze<T>(value: T): T {
-  return deepFreeze(structuredClone(value));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -120,6 +116,11 @@ function validateDefinition(definition: SurfaceDefinition): void {
   if (definition.type === MISSING_SURFACE_TYPE) {
     throw new Error(`${MISSING_SURFACE_TYPE} is reserved for inert placeholders`);
   }
+  if (typeof definition.icon !== "string") throw new Error("icon must be a string");
+  if (typeof definition.title !== "function") throw new Error("title must be a function");
+  if (!Array.isArray(definition.commands) || definition.commands.some(
+    (command) => typeof command.command_id !== "string" || typeof command.title !== "string",
+  )) throw new Error("commands must contain string command_id and title fields");
   if (!Number.isSafeInteger(definition.state_schema_version) || definition.state_schema_version < 0) {
     throw new Error("state_schema_version must be a non-negative safe integer");
   }
@@ -132,10 +133,50 @@ function validateDefinition(definition: SurfaceDefinition): void {
       `max_state_bytes must be within 1..${MAX_WORKBENCH_SURFACE_STATE_BYTES}`,
     );
   }
+  if (!["keep_alive", "suspend_when_hidden", "recreate_from_state"].includes(
+    definition.render_policy,
+  )) throw new Error("render_policy is invalid");
+  if (!["singleton", "focus_resource", "allow_multiple"].includes(
+    definition.open_policy,
+  )) throw new Error("open_policy is invalid");
+  if (!["view_only", "runtime_backed"].includes(definition.runtime_policy)) {
+    throw new Error("runtime_policy is invalid");
+  }
+  if (!["close_view", "confirm_if_dirty"].includes(definition.close_policy)) {
+    throw new Error("close_policy is invalid");
+  }
+}
+
+function canonicalRequest(
+  request: OpenSurfaceRequest,
+  maxStateBytes = MAX_WORKBENCH_SURFACE_STATE_BYTES,
+): OpenSurfaceRequest {
+  return deepFreeze({
+    surface_type: request.surface_type,
+    ...(request.resource_key === undefined ? {} : { resource_key: request.resource_key }),
+    ...(request.state === undefined
+      ? {}
+      : { state: canonicalizeState(request.state, maxStateBytes) }),
+    ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
+    ...(request.duplicate === undefined ? {} : { duplicate: request.duplicate }),
+  });
+}
+
+function canonicalSurface(
+  surface: WorkbenchSurfaceV1,
+  maxStateBytes: number,
+): WorkbenchSurfaceV1 {
+  return deepFreeze({
+    surface_id: surface.surface_id,
+    surface_type: surface.surface_type,
+    ...(surface.resource_key === undefined ? {} : { resource_key: surface.resource_key }),
+    state_schema_version: surface.state_schema_version,
+    state: canonicalizeState(surface.state, maxStateBytes),
+  });
 }
 
 function missingDefinition(surface: WorkbenchSurfaceV1): SurfaceDefinition {
-  const snapshot = cloneAndFreeze(surface);
+  const snapshot = canonicalSurface(surface, MAX_WORKBENCH_SURFACE_STATE_BYTES);
   return deepFreeze({
     type: MISSING_SURFACE_TYPE,
     title: () => `Missing surface: ${snapshot.surface_type}`,
@@ -147,8 +188,20 @@ function missingDefinition(surface: WorkbenchSurfaceV1): SurfaceDefinition {
     state_schema_version: snapshot.state_schema_version,
     max_state_bytes: MAX_WORKBENCH_SURFACE_STATE_BYTES,
     default_state: () => snapshot.state,
-    serialize_state: (state) => state,
-    restore_state: (value) => ({ ok: true, state: value }),
+    serialize_state: (state) => deepFreeze(canonicalizeState(
+      state,
+      MAX_WORKBENCH_SURFACE_STATE_BYTES,
+    )),
+    restore_state: (value) => {
+      try {
+        return deepFreeze({
+          ok: true as const,
+          state: deepFreeze(canonicalizeState(value, MAX_WORKBENCH_SURFACE_STATE_BYTES)),
+        });
+      } catch (error) {
+        return invalidRestore(error instanceof Error ? error.message : String(error));
+      }
+    },
     commands: [
       { command_id: "workbench.close_surface", title: "Close Surface" },
       { command_id: "workbench.reset_surface", title: "Reset Surface" },
@@ -158,17 +211,20 @@ function missingDefinition(surface: WorkbenchSurfaceV1): SurfaceDefinition {
 }
 
 class SurfaceRegistry implements WorkbenchSurfaceRegistry {
-  private readonly definitionsByType = new Map<string, SurfaceDefinition>();
+  private readonly rawDefinitionsByType = new Map<string, SurfaceDefinition>();
+  private readonly publicDefinitionsByType = new Map<string, SurfaceDefinition>();
   private readonly registrationOrder: SurfaceDefinition[] = [];
 
   register<TState extends SurfaceState>(definition: SurfaceDefinition<TState>): void {
     validateDefinition(definition as SurfaceDefinition);
-    if (this.definitionsByType.has(definition.type)) {
+    if (this.rawDefinitionsByType.has(definition.type)) {
       throw new Error(`surface type ${definition.type} is already registered`);
     }
-    const storedDefinition = copyDefinition(definition);
-    this.definitionsByType.set(storedDefinition.type, storedDefinition);
-    this.registrationOrder.push(storedDefinition);
+    const rawDefinition = copyDefinition(definition);
+    this.rawDefinitionsByType.set(rawDefinition.type, rawDefinition);
+    const publicDefinition = this.safeDefinition(rawDefinition);
+    this.publicDefinitionsByType.set(rawDefinition.type, publicDefinition);
+    this.registrationOrder.push(publicDefinition);
   }
 
   list(): readonly SurfaceDefinition[] {
@@ -176,7 +232,7 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
   }
 
   get(type: string): SurfaceDefinition | undefined {
-    return this.definitionsByType.get(type);
+    return this.publicDefinitionsByType.get(type);
   }
 
   require(type: string): SurfaceDefinition {
@@ -186,21 +242,35 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
   }
 
   default_state(type: string): SurfaceState {
-    return cloneAndFreeze(this.require(type).default_state());
+    const definition = this.requireRaw(type);
+    const state = deepFreeze(canonicalizeState(
+      definition.default_state(),
+      MAX_WORKBENCH_SURFACE_STATE_BYTES,
+    ));
+    canonicalizeState(definition.serialize_state(state), definition.max_state_bytes);
+    return state;
   }
 
   resource_key(request: OpenSurfaceRequest): string | undefined {
-    const definition = this.require(request.surface_type);
-    const snapshot = cloneAndFreeze(request);
-    return definition.resource_key?.(snapshot) ?? snapshot.resource_key;
+    const definition = this.requireRaw(request.surface_type);
+    const snapshot = canonicalRequest(request, definition.max_state_bytes);
+    const resourceKey = definition.resource_key?.(snapshot) ?? snapshot.resource_key;
+    if (resourceKey !== undefined && typeof resourceKey !== "string") {
+      throw new Error("resource_key callback must return a string or undefined");
+    }
+    return resourceKey;
   }
 
   serialize_state<TState extends SurfaceState>(
     type: string,
     state: TState,
   ): SerializedSurfaceState {
-    const definition = this.require(type);
-    const serialized = definition.serialize_state(cloneAndFreeze(state));
+    const definition = this.requireRaw(type);
+    const callbackState = deepFreeze(canonicalizeState(
+      state,
+      MAX_WORKBENCH_SURFACE_STATE_BYTES,
+    ));
+    const serialized = definition.serialize_state(callbackState);
     return deepFreeze({
       state_schema_version: definition.state_schema_version,
       state: canonicalizeState(serialized, definition.max_state_bytes),
@@ -208,110 +278,178 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
   }
 
   resolve_surface(surface: WorkbenchSurfaceV1): ResolvedSurface {
-    const definition = this.get(surface.surface_type);
-    if (!definition) {
-      const opaqueState = cloneAndFreeze(surface.state);
-      return {
-        definition: missingDefinition(surface),
-        missing_surface_type: surface.surface_type,
-        restore_result: deepFreeze({ ok: true, state: opaqueState }),
-      };
-    }
-
-    try {
-      const restoreResult: unknown = definition.restore_state(
-        cloneAndFreeze(surface.state),
-        surface.state_schema_version,
-      );
-      if (!isRecord(restoreResult) || typeof restoreResult.ok !== "boolean") {
-        return { definition, restore_result: invalidRestore("restore_state returned an invalid result") };
-      }
-      if (restoreResult.ok === true) {
-        if (!Object.prototype.hasOwnProperty.call(restoreResult, "state")) {
-          return { definition, restore_result: invalidRestore("restore_state success omitted state") };
-        }
-        const state = cloneAndFreeze(restoreResult.state);
-        this.serialize_state(definition.type, state);
+    const rawDefinition = this.rawDefinitionsByType.get(surface.surface_type);
+    if (!rawDefinition) {
+      try {
+        const snapshot = canonicalSurface(surface, MAX_WORKBENCH_SURFACE_STATE_BYTES);
         return {
-          definition,
-          restore_result: deepFreeze({ ok: true, state }),
+          definition: missingDefinition(snapshot),
+          missing_surface_type: surface.surface_type,
+          restore_result: deepFreeze({ ok: true, state: snapshot.state }),
+        };
+      } catch (error) {
+        const sanitized = { ...surface, state: null };
+        return {
+          definition: missingDefinition(sanitized),
+          missing_surface_type: surface.surface_type,
+          restore_result: invalidRestore(
+            `restore failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
         };
       }
-      if (typeof restoreResult.error !== "string") {
-        return { definition, restore_result: invalidRestore("restore_state failure omitted a string error") };
-      }
-      return {
-        definition,
-        restore_result: invalidRestore(restoreResult.error),
-      };
-    } catch (error) {
-      return {
-        definition,
-        restore_result: invalidRestore(
-          `restore failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      };
     }
+    return {
+      definition: this.require(surface.surface_type),
+      restore_result: this.restoreKnown(
+        rawDefinition,
+        surface.state,
+        surface.state_schema_version,
+      ),
+    };
   }
 
   resolve_existing(
     request: OpenSurfaceRequest,
-    candidates: WorkbenchSurfaceV1[],
+    candidates: readonly WorkbenchSurfaceV1[],
   ): string | undefined {
-    if (request.duplicate === true) return undefined;
-    const requestSnapshot = cloneAndFreeze(request);
-    const definition = this.require(requestSnapshot.surface_type);
-    const typedCandidates = cloneAndFreeze(candidates.filter(
-      (candidate) => candidate.surface_type === definition.type,
-    ));
+    const definition = this.requireRaw(request.surface_type);
+    const requestSnapshot = canonicalRequest(request, definition.max_state_bytes);
+    if (requestSnapshot.duplicate === true) return undefined;
+    const typedCandidates = Object.freeze(candidates
+      .filter((candidate) => candidate.surface_type === definition.type)
+      .map((candidate) => canonicalSurface(candidate, definition.max_state_bytes)));
     if (typedCandidates.length === 0 || definition.open_policy === "allow_multiple") {
       return undefined;
     }
 
     if (definition.resolve_existing) {
       const resolvedId = definition.resolve_existing(requestSnapshot, typedCandidates);
+      if (resolvedId !== undefined && typeof resolvedId !== "string") {
+        throw new Error("resolve_existing must return a surface ID or undefined");
+      }
       if (resolvedId && typedCandidates.some((candidate) => candidate.surface_id === resolvedId)) {
         return resolvedId;
       }
     }
-
-    if (definition.open_policy === "singleton") {
-      return typedCandidates[typedCandidates.length - 1]?.surface_id;
-    }
+    if (definition.open_policy === "singleton") return typedCandidates[0]?.surface_id;
 
     const resourceKey = definition.resource_key?.(requestSnapshot) ?? requestSnapshot.resource_key;
     if (resourceKey === undefined) return undefined;
-    return [...typedCandidates]
-      .reverse()
-      .find((candidate) => candidate.resource_key === resourceKey)
-      ?.surface_id;
+    if (typeof resourceKey !== "string") {
+      throw new Error("resource_key callback must return a string or undefined");
+    }
+    return typedCandidates.find((candidate) => candidate.resource_key === resourceKey)?.surface_id;
   }
 
   presentation(surface: WorkbenchSurfaceV1): SurfacePresentationMetadata {
-    const snapshot = cloneAndFreeze(surface);
-    const definition = this.get(snapshot.surface_type) ?? missingDefinition(snapshot);
-    const title = definition.title(snapshot);
-    const badges = definition.badges?.(snapshot) ?? [];
+    const rawDefinition = this.rawDefinitionsByType.get(surface.surface_type);
+    if (!rawDefinition) {
+      const snapshot = canonicalSurface(surface, MAX_WORKBENCH_SURFACE_STATE_BYTES);
+      const definition = missingDefinition(snapshot);
+      return deepFreeze({
+        title: definition.title(snapshot),
+        icon: definition.icon,
+        commands: definition.commands.map((command) => ({ ...command })),
+        badges: definition.badges?.(snapshot) ?? [],
+      });
+    }
+    const snapshot = canonicalSurface(surface, rawDefinition.max_state_bytes);
+    const title = rawDefinition.title(snapshot);
+    if (typeof title !== "string") throw new Error("title callback must return a string");
+    const badges = canonicalizeState(
+      rawDefinition.badges?.(snapshot) ?? [],
+      MAX_WORKBENCH_SURFACE_STATE_BYTES,
+    );
+    if (
+      !Array.isArray(badges)
+      || badges.some((badge) => !isRecord(badge)
+        || typeof badge.badge_id !== "string"
+        || typeof badge.label !== "string")
+    ) throw new Error("badges callback must return badge_id/label string records");
     return deepFreeze({
       title,
-      icon: definition.icon,
-      commands: definition.commands.map((command) => ({ ...command })),
-      badges: badges.map((badge) => ({ ...badge })),
-    });
+      icon: rawDefinition.icon,
+      commands: rawDefinition.commands.map((command) => ({ ...command })),
+      badges,
+    }) as SurfacePresentationMetadata;
   }
 
   async can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision> {
-    const definition = this.get(surface.surface_type);
+    const definition = this.rawDefinitionsByType.get(surface.surface_type);
     if (!definition) return "allow";
     if (definition.close_policy === "close_view") return "allow";
     if (!definition.can_close) return "cancel";
     try {
-      return await definition.can_close(cloneAndFreeze(surface)) === "allow"
-        ? "allow"
-        : "cancel";
+      const snapshot = canonicalSurface(surface, definition.max_state_bytes);
+      return await definition.can_close(snapshot) === "allow" ? "allow" : "cancel";
     } catch {
       return "cancel";
     }
+  }
+
+  private requireRaw(type: string): SurfaceDefinition {
+    const definition = this.rawDefinitionsByType.get(type);
+    if (!definition) throw new Error(`surface type ${type} is not registered`);
+    return definition;
+  }
+
+  private restoreKnown(
+    definition: SurfaceDefinition,
+    persistedState: unknown,
+    version: number,
+  ): SurfaceRestoreResult {
+    try {
+      const callbackState = deepFreeze(canonicalizeState(
+        persistedState,
+        definition.max_state_bytes,
+      ));
+      const restoreResult: unknown = definition.restore_state(callbackState, version);
+      if (!isRecord(restoreResult) || typeof restoreResult.ok !== "boolean") {
+        return invalidRestore("restore_state returned an invalid result");
+      }
+      if (restoreResult.ok === true) {
+        if (!Object.prototype.hasOwnProperty.call(restoreResult, "state")) {
+          return invalidRestore("restore_state success omitted state");
+        }
+        const state = deepFreeze(canonicalizeState(
+          restoreResult.state,
+          MAX_WORKBENCH_SURFACE_STATE_BYTES,
+        ));
+        this.serialize_state(definition.type, state);
+        return deepFreeze({ ok: true, state });
+      }
+      return typeof restoreResult.error === "string"
+        ? invalidRestore(restoreResult.error)
+        : invalidRestore("restore_state failure omitted a string error");
+    } catch (error) {
+      return invalidRestore(
+        `restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private safeDefinition(definition: SurfaceDefinition): SurfaceDefinition {
+    const type = definition.type;
+    return deepFreeze({
+      ...definition,
+      title: (surface: WorkbenchSurfaceV1) => this.presentation(surface).title,
+      default_state: () => this.default_state(type),
+      serialize_state: (state: SurfaceState) => this.serialize_state(type, state).state,
+      restore_state: (value: unknown, version: number) =>
+        this.restoreKnown(definition, value, version),
+      resource_key: definition.resource_key
+        ? (request: OpenSurfaceRequest) => this.resource_key({ ...request, surface_type: type })
+        : undefined,
+      resolve_existing: definition.resolve_existing
+        ? (request: OpenSurfaceRequest, candidates: readonly WorkbenchSurfaceV1[]) =>
+            this.resolve_existing({ ...request, surface_type: type }, candidates)
+        : undefined,
+      can_close: (surface: WorkbenchSurfaceV1) => this.can_close(surface),
+      badges: definition.badges
+        ? (surface: WorkbenchSurfaceV1) => this.presentation(surface).badges
+        : undefined,
+      commands: definition.commands.map((command) => ({ ...command })),
+    }) as SurfaceDefinition;
   }
 }
 

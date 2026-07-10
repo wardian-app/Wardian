@@ -101,10 +101,19 @@ export function createWorkbenchNavigationService(
   return {
     open: (request) => {
       registry.require(request.surface_type);
-      const document = store.getState().document;
+      const state = store.getState();
+      const document = state.document;
+      const candidates = state.surface_mru
+        .map((surfaceId) => document.surfaces[surfaceId])
+        .filter((surface): surface is WorkbenchSurfaceV1 => surface !== undefined);
+      for (const surface of Object.values(document.surfaces)) {
+        if (!candidates.some((candidate) => candidate.surface_id === surface.surface_id)) {
+          candidates.push(surface);
+        }
+      }
       const existingId = registry.resolve_existing(
         request,
-        Object.values(document.surfaces),
+        candidates,
       );
       if (existingId) {
         apply([{ type: "focus_surface", surface_id: existingId }]);

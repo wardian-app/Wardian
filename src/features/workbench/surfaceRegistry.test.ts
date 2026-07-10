@@ -128,8 +128,8 @@ describe("surface registry", () => {
     registry.register(definition("multiple"));
     const candidates = [
       surface("singleton-1", "singleton"),
-      surface("resource-old", "resource", "agent-1"),
       surface("resource-new", "resource", "agent-1"),
+      surface("resource-old", "resource", "agent-1"),
       surface("resource-other", "resource", "agent-2"),
       surface("custom-1", "custom"),
       surface("custom-2", "custom"),
@@ -200,9 +200,10 @@ describe("surface registry", () => {
     const original = definition("stable", { commands: [command] });
     const registry = createSurfaceRegistry([original]);
 
-    original.type = "caller-mutated";
+    (original as unknown as { type: string }).type = "caller-mutated";
     command.title = "Caller Mutated";
-    original.commands.push({ command_id: "caller.extra", title: "Extra" });
+    (original.commands as unknown as { command_id: string; title: string }[])
+      .push({ command_id: "caller.extra", title: "Extra" });
 
     const registered = registry.require("stable");
     expect(registered.type).toBe("stable");
@@ -226,6 +227,8 @@ describe("surface registry", () => {
         title: "Injected",
       });
     }).toThrow(TypeError);
+    const directBadges = registered.badges?.(surface("surface-1", "stable"));
+    expect(Object.isFrozen(directBadges)).toBe(true);
   });
 
   it("passes immutable detached request, state, candidate, and surface snapshots to callbacks", async () => {
@@ -310,6 +313,7 @@ describe("surface registry", () => {
     expect(state.label).toBe("original");
     expect(mutationBlocked).toEqual([
       "request",
+      "serialize",
       "candidate",
       "serialize",
       "restore",
@@ -372,5 +376,91 @@ describe("surface registry", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toMatch(/restore|invalid|bytes/i);
     }
+  });
+
+  it("exposes only validated safe callback wrappers from list/get/require", async () => {
+    const serialize = vi.fn((state: TestState) => state);
+    const restore = vi.fn((value: unknown) => ({ ok: true as const, state: value as TestState }));
+    const resource = vi.fn((request: { resource_key?: string }) => request.resource_key);
+    const registry = createSurfaceRegistry([
+      definition("wrapped", {
+        max_state_bytes: 16,
+        close_policy: "confirm_if_dirty",
+        serialize_state: serialize,
+        restore_state: restore,
+        resource_key: resource,
+        can_close: async (): Promise<"allow"> => "allow",
+      }),
+    ]);
+    const exposed = registry.require("wrapped");
+    expect(registry.get("wrapped")).toBe(exposed);
+    expect(registry.list()[0]).toBe(exposed);
+
+    expect(() => exposed.default_state()).toThrow(/16 bytes/i);
+    expect(() => exposed.serialize_state({ label: "😀😀" })).toThrow(/16 bytes/i);
+    const restored = exposed.restore_state({ label: "ok" }, 1);
+    expect(restored).toEqual({ ok: true, state: { label: "ok" } });
+    expect(Object.isFrozen(restored)).toBe(true);
+    expect(exposed.resource_key?.({
+      surface_type: "wrapped",
+      resource_key: "resource-1",
+    })).toBe("resource-1");
+    await expect(exposed.can_close?.({
+      ...surface("surface-1", "wrapped"),
+      state: { label: "ok" },
+    })).resolves.toBe("allow");
+  });
+
+  it("rejects noncanonical/oversize persisted state before restore and validates policy enums", () => {
+    const restore = vi.fn(() => ({ ok: true as const, state: { label: "restored" } }));
+    const registry = createSurfaceRegistry([
+      definition("prevalidated", { max_state_bytes: 16, restore_state: restore }),
+    ]);
+
+    const builtIn = surface("surface-1", "prevalidated");
+    builtIn.state = new Map([["label", "mutable"]]);
+    const builtInResult = registry.resolve_surface(builtIn).restore_result;
+    expect(builtInResult.ok).toBe(false);
+    expect(restore).not.toHaveBeenCalled();
+
+    const oversized = surface("surface-2", "prevalidated");
+    oversized.state = { label: "😀😀" };
+    expect(registry.resolve_surface(oversized).restore_result.ok).toBe(false);
+    expect(restore).not.toHaveBeenCalled();
+
+    const unknown = surface("surface-3", "unknown");
+    unknown.state = new Uint8Array([1, 2, 3]);
+    expect(registry.resolve_surface(unknown).restore_result.ok).toBe(false);
+
+    for (const [field, value] of [
+      ["render_policy", "invalid-render"],
+      ["open_policy", "invalid-open"],
+      ["runtime_policy", "invalid-runtime"],
+      ["close_policy", "invalid-close"],
+    ] as const) {
+      const invalid = { ...definition(`invalid-${field}`), [field]: value };
+      expect(() => createSurfaceRegistry([
+        invalid as unknown as SurfaceDefinition<TestState>,
+      ])).toThrow(new RegExp(field));
+    }
+  });
+
+  it("rejects mutable built-in state/request data before invoking callbacks", () => {
+    const serialize = vi.fn((state: TestState) => state);
+    const resource = vi.fn(() => "resource");
+    const registry = createSurfaceRegistry([
+      definition("canonical-only", { serialize_state: serialize, resource_key: resource }),
+    ]);
+
+    expect(() => registry.serialize_state(
+      "canonical-only",
+      new Date() as unknown as TestState,
+    )).toThrow(/canonical json/i);
+    expect(serialize).not.toHaveBeenCalled();
+    expect(() => registry.resource_key({
+      surface_type: "canonical-only",
+      state: new Set(["mutable"]),
+    })).toThrow(/canonical json/i);
+    expect(resource).not.toHaveBeenCalled();
   });
 });

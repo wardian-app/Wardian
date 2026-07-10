@@ -15,12 +15,87 @@ import {
   selectWorkbenchPendingRequestId,
   selectWorkbenchReadOnly,
   selectWorkbenchSurfacesInTreeOrder,
+  selectWorkbenchSurfaceMru,
   selectWorkbenchTransactionVersion,
   selectWorkbenchZoomedGroupId,
 } from "./workbenchSelectors";
 import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
 
 describe("createWorkbenchStore", () => {
+  it("does not expose replaceable outer state or actions through getState", () => {
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+    const snapshot = store.getState();
+    const document = snapshot.document;
+    const applyCommands = snapshot.apply_commands;
+
+    expect(() => {
+      (snapshot as unknown as { document: typeof document }).document =
+        makeSingleGroupDocument([makeSurface("injected")]);
+    }).toThrow(TypeError);
+    expect(() => {
+      (snapshot as unknown as { launcher_open: boolean }).launcher_open = true;
+    }).toThrow(TypeError);
+    expect(() => {
+      (snapshot as unknown as { apply_commands: () => unknown }).apply_commands = () => null;
+    }).toThrow(TypeError);
+
+    expect(store.getState()).toBe(snapshot);
+    expect(store.getState().document).toBe(document);
+    expect(store.getState().launcher_open).toBe(false);
+    expect(store.getState().apply_commands).toBe(applyCommands);
+  });
+
+  it("does not expose replaceable outer state or actions through getInitialState", () => {
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+    const snapshot = store.getInitialState();
+    const resetDocument = snapshot.reset_document;
+
+    expect(() => {
+      (snapshot as unknown as { durable_revision: number }).durable_revision = 99;
+    }).toThrow(TypeError);
+    expect(() => {
+      (snapshot as unknown as { reset_document: () => unknown }).reset_document = () => null;
+    }).toThrow(TypeError);
+
+    expect(store.getInitialState()).toBe(snapshot);
+    expect(store.getInitialState().durable_revision).toBe(0);
+    expect(store.getInitialState().reset_document).toBe(resetDocument);
+  });
+
+  it("delivers frozen cached current/previous subscription snapshots", () => {
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+    const initial = store.getState();
+    let currentSnapshot: ReturnType<typeof store.getState> | undefined;
+    let previousSnapshot: ReturnType<typeof store.getState> | undefined;
+    let currentMutationBlocked = false;
+    let previousMutationBlocked = false;
+    const unsubscribe = store.subscribe((current, previous) => {
+      currentSnapshot = current;
+      previousSnapshot = previous;
+      try {
+        (current as unknown as { launcher_open: boolean }).launcher_open = false;
+      } catch {
+        currentMutationBlocked = true;
+      }
+      try {
+        (previous as unknown as { set_launcher_open: () => void }).set_launcher_open = () => undefined;
+      } catch {
+        previousMutationBlocked = true;
+      }
+    });
+
+    initial.set_launcher_open(true);
+    unsubscribe();
+
+    expect(currentMutationBlocked).toBe(true);
+    expect(previousMutationBlocked).toBe(true);
+    expect(previousSnapshot).toBe(initial);
+    expect(currentSnapshot).toBe(store.getState());
+    expect(currentSnapshot).not.toBe(previousSnapshot);
+    expect(store.getState().launcher_open).toBe(true);
+    expect(store.getState().set_launcher_open).toBe(initial.set_launcher_open);
+  });
+
   it("does not retain caller-owned initial_document references", () => {
     const initial = makeSingleGroupDocument();
     const store = createWorkbenchStore({ initial_document: initial });
@@ -41,10 +116,12 @@ describe("createWorkbenchStore", () => {
     });
 
     expect(() => {
-      exposed.groups["group-1"].surface_ids.push("consumer-mutation");
+      (exposed.groups["group-1"].surface_ids as unknown as string[])
+        .push("consumer-mutation");
     }).toThrow(TypeError);
     expect(() => {
-      initialExposed.shell.left_sidebar_width = 999;
+      (initialExposed.shell as unknown as { left_sidebar_width: number })
+        .left_sidebar_width = 999;
     }).toThrow(TypeError);
 
     unsubscribe();
@@ -263,6 +340,8 @@ describe("createWorkbenchStore", () => {
     expect(store.getState().pending_revision).toBe(1);
     expect(store.getState().save_pending).toBe(true);
     const pendingDocument = store.getState().pending_document;
+    const pendingGeneration = store.getState().pending_transaction_version;
+    const pendingExpectedToken = store.getState().pending_expected_token;
 
     store.getState().apply_commands([
       { type: "open_surface", surface: makeSurface("surface-2") },
@@ -274,12 +353,16 @@ describe("createWorkbenchStore", () => {
     expect(store.getState().acknowledge_pending_save(
       "wrong-request",
       1,
+      pendingGeneration,
+      pendingExpectedToken,
       "wrong-token",
     )).toBe(false);
     expect(store.getState()).toBe(beforeWrongAck);
     expect(store.getState().acknowledge_pending_save(
       "request-1",
       2,
+      pendingGeneration,
+      pendingExpectedToken,
       "wrong-revision-token",
     )).toBe(false);
     expect(store.getState()).toBe(beforeWrongAck);
@@ -287,6 +370,8 @@ describe("createWorkbenchStore", () => {
     expect(store.getState().acknowledge_pending_save(
       "request-1",
       1,
+      pendingGeneration,
+      pendingExpectedToken,
       "opaque-token-1",
     )).toBe(true);
 
@@ -302,9 +387,13 @@ describe("createWorkbenchStore", () => {
     expect(store.getState().save_pending).toBe(false);
 
     expect(store.getState().begin_pending_save("request-2")).toBe(true);
+    const secondGeneration = store.getState().pending_transaction_version;
+    const secondExpectedToken = store.getState().pending_expected_token;
     expect(store.getState().acknowledge_pending_save(
       "request-2",
       2,
+      secondGeneration,
+      secondExpectedToken,
       "opaque-token-2",
     )).toBe(true);
     expect(store.getState().document).toBe(store.getState().durable_document);
@@ -407,5 +496,130 @@ describe("createWorkbenchStore", () => {
 
     store.getState().set_conflict("CAS conflict");
     expect(store.getState().begin_pending_save("request-2")).toBe(false);
+  });
+
+  it("maintains explicit stable surface MRU order and prunes closed surfaces", () => {
+    const first = makeSurface("surface-1");
+    const second = makeSurface("surface-2");
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([first, second]),
+    });
+
+    expect(selectWorkbenchSurfaceMru(store.getState())).toEqual(["surface-2", "surface-1"]);
+    const initialMru = selectWorkbenchSurfaceMru(store.getState());
+    expect(store.getState().touch_surface("surface-1")).toBe(true);
+    expect(selectWorkbenchSurfaceMru(store.getState())).toEqual(["surface-1", "surface-2"]);
+    expect(selectWorkbenchSurfaceMru(store.getState())).not.toBe(initialMru);
+
+    store.getState().apply_commands([{ type: "close_surface", surface_id: "surface-1" }]);
+    expect(selectWorkbenchSurfaceMru(store.getState())).toEqual(["surface-2"]);
+    expect(selectWorkbenchSurfaceMru(store.getState())).toBe(
+      selectWorkbenchSurfaceMru(store.getState()),
+    );
+  });
+
+  it("rejects edits beyond a MAX_SAFE_INTEGER pending snapshot but permits its exact ack", () => {
+    const initial = {
+      ...makeSingleGroupDocument(),
+      revision: Number.MAX_SAFE_INTEGER - 1,
+    };
+    const store = createWorkbenchStore({ initial_document: initial });
+    expect(store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-1") },
+    ]).accepted).toBe(true);
+    expect(store.getState().document.revision).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getState().begin_pending_save("max-request")).toBe(true);
+    const pendingGeneration = store.getState().pending_transaction_version;
+    const expectedToken = store.getState().pending_expected_token;
+    const before = store.getState().document;
+
+    expect(store.getState().apply_commands([
+      { type: "focus_surface", surface_id: "surface-1" },
+    ]).accepted).toBe(false);
+    expect(store.getState().document).toBe(before);
+    expect(store.getState().acknowledge_pending_save(
+      "max-request",
+      Number.MAX_SAFE_INTEGER,
+      pendingGeneration,
+      expectedToken,
+      "max-durable-token",
+    )).toBe(true);
+    expect(store.getState().durable_revision).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getState().is_dirty).toBe(false);
+  });
+
+  it("reconciles zoom atomically when a document mutation removes its group", () => {
+    const document = {
+      ...makeSingleGroupDocument(),
+      root: {
+        kind: "split" as const,
+        node_id: "split-1",
+        direction: "horizontal" as const,
+        ratio: 0.5,
+        first: { kind: "group" as const, group_id: "left" },
+        second: { kind: "group" as const, group_id: "right" },
+      },
+      groups: {
+        left: { group_id: "left", surface_ids: [], active_surface_id: null },
+        right: { group_id: "right", surface_ids: [], active_surface_id: null },
+      },
+      active_group_id: "left",
+    };
+    const store = createWorkbenchStore({ initial_document: document });
+    store.getState().set_zoomed_group_id("right");
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => { notifications += 1; });
+
+    expect(store.getState().apply_commands([
+      { type: "close_group", group_id: "right" },
+    ]).accepted).toBe(true);
+    unsubscribe();
+    expect(store.getState().zoomed_group_id).toBeNull();
+    expect(notifications).toBe(1);
+  });
+
+  it("requires an exact non-reusable pending lifecycle and preserves unrelated conflict", () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument(),
+      durable_token: "base-token",
+    });
+    store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-1") },
+    ]);
+    expect(store.getState().begin_pending_save("request-1")).toBe(true);
+    const generation = store.getState().pending_transaction_version;
+    const expectedToken = store.getState().pending_expected_token;
+    store.getState().set_conflict("newer unrelated conflict");
+    const before = store.getState();
+
+    expect(store.getState().acknowledge_pending_save(
+      "request-1", 1, generation === null ? null : generation + 1, expectedToken, "token-1",
+    )).toBe(false);
+    expect(store.getState()).toBe(before);
+    expect(store.getState().acknowledge_pending_save(
+      "request-1", 1, generation, "wrong-base", "token-1",
+    )).toBe(false);
+    expect(store.getState()).toBe(before);
+    expect(store.getState().acknowledge_pending_save(
+      "request-1", 1, generation, expectedToken, "",
+    )).toBe(false);
+    expect(store.getState()).toBe(before);
+
+    expect(store.getState().acknowledge_pending_save(
+      "request-1", 1, generation, expectedToken, "token-1",
+    )).toBe(true);
+    expect(store.getState().conflict).toBe("newer unrelated conflict");
+    store.getState().set_conflict(null);
+    expect(store.getState().apply_commands([
+      { type: "focus_surface", surface_id: "surface-1" },
+    ]).accepted).toBe(true);
+    expect(store.getState().begin_pending_save("request-1")).toBe(false);
+    expect(store.getState().begin_pending_save("request-2")).toBe(true);
+    const secondPending = store.getState();
+    expect(store.getState().acknowledge_pending_save(
+      "request-1", 1, generation, expectedToken, "delayed-token",
+    )).toBe(false);
+    expect(store.getState()).toBe(secondPending);
+    expect(store.getState().pending_request_id).toBe("request-2");
   });
 });

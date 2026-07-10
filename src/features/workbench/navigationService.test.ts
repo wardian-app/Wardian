@@ -52,7 +52,10 @@ describe("workbench navigation service", () => {
       initial_document: original,
       now: () => "2026-07-10T12:00:00.000Z",
     });
-    const applyCommands = vi.spyOn(store.getState(), "apply_commands");
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => {
+      notifications += 1;
+    });
     const navigation = createWorkbenchNavigationService({
       registry,
       store,
@@ -61,8 +64,9 @@ describe("workbench navigation service", () => {
 
     expect(navigation.open({ surface_type: "notes", state: { label: "hello" } }))
       .toBe("surface-fixed");
+    unsubscribe();
 
-    expect(applyCommands).toHaveBeenCalledOnce();
+    expect(notifications).toBe(1);
     expect(original.groups["group-1"].surface_ids).toEqual([]);
     expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["surface-fixed"]);
     expect(store.getState().document.surfaces["surface-fixed"].state).toEqual({ label: "hello" });
@@ -228,7 +232,7 @@ describe("workbench navigation service", () => {
       initial_document: document,
       now: () => "2026-07-10T12:00:00.000Z",
     });
-    const resetDocument = vi.spyOn(store.getState(), "compare_and_reset_document");
+    const transactionVersion = store.getState().transaction_version;
     const navigation = createWorkbenchNavigationService({
       registry,
       store,
@@ -238,7 +242,7 @@ describe("workbench navigation service", () => {
     await expect(navigation.reset_workbench()).resolves.toBe("allow");
 
     expect(order).toEqual(["left-a", "left-b", "right-a"]);
-    expect(resetDocument).toHaveBeenCalledOnce();
+    expect(store.getState().transaction_version).toBe(transactionVersion + 1);
     expect(store.getState().document.groups["group-1"].surface_ids).toEqual([]);
   });
 
@@ -359,5 +363,34 @@ describe("workbench navigation service", () => {
     await expect(close).resolves.toBe("cancel");
     expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
     expect(store.getState().launcher_open).toBe(true);
+  });
+
+  it("uses explicit runtime MRU rather than persisted object order for resource focus", () => {
+    const registry = createSurfaceRegistry([
+      definition("agent-session", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const old = makeSurface("old", { surface_type: "agent-session", resource_key: "agent-1" });
+    const recent = makeSurface("recent", {
+      surface_type: "agent-session",
+      resource_key: "agent-1",
+    });
+    const document = makeSingleGroupDocument([old, recent]);
+    document.surfaces = { recent, old };
+    const store = createWorkbenchStore({ initial_document: document });
+    store.getState().touch_surface("old");
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    expect(navigation.open({
+      surface_type: "agent-session",
+      resource_key: "agent-1",
+    })).toBe("old");
+    expect(store.getState().document.groups["group-1"].active_surface_id).toBe("old");
   });
 });

@@ -1,4 +1,4 @@
-import { createStore, type StoreApi } from "zustand/vanilla";
+import { createStore } from "zustand/vanilla";
 
 import type { WorkbenchDocumentV1, WorkbenchValidationError } from "../../types";
 import {
@@ -16,24 +16,36 @@ export type WorkbenchStoreOptions = {
   create_default_document?: () => WorkbenchDocumentV1;
 };
 
+export type DeepReadonly<T> =
+  T extends (...args: infer TArgs) => infer TResult
+    ? (...args: TArgs) => TResult
+    : T extends readonly (infer TItem)[]
+      ? readonly DeepReadonly<TItem>[]
+      : T extends object
+        ? { readonly [TKey in keyof T]: DeepReadonly<T[TKey]> }
+        : T;
+
+export type ReadonlyWorkbenchDocumentV1 = DeepReadonly<WorkbenchDocumentV1>;
+
 export type WorkbenchMutationResult =
   | {
       accepted: true;
-      document: WorkbenchDocumentV1;
+      document: ReadonlyWorkbenchDocumentV1;
       stale: false;
     }
   | {
       accepted: false;
-      document: WorkbenchDocumentV1;
+      document: ReadonlyWorkbenchDocumentV1;
       errors: WorkbenchValidationError[];
       stale: boolean;
     };
 
-export type WorkbenchStoreState = {
+type MutableWorkbenchStoreState = {
   document: WorkbenchDocumentV1;
   durable_document: WorkbenchDocumentV1;
   zoomed_group_id: string | null;
   launcher_open: boolean;
+  surface_mru: readonly string[];
   transaction_version: number;
   durable_revision: number;
   durable_token: string | null;
@@ -44,6 +56,7 @@ export type WorkbenchStoreState = {
   pending_document: WorkbenchDocumentV1 | null;
   pending_expected_token: string | null;
   pending_transaction_version: number | null;
+  used_pending_request_ids: readonly string[];
   conflict: string | null;
   loading: boolean;
   read_only: boolean;
@@ -59,10 +72,13 @@ export type WorkbenchStoreState = {
   ) => WorkbenchMutationResult;
   set_zoomed_group_id: (groupId: string | null) => void;
   set_launcher_open: (open: boolean) => void;
+  touch_surface: (surfaceId: string) => boolean;
   begin_pending_save: (requestId: string) => boolean;
   acknowledge_pending_save: (
     requestId: string,
     revision: number,
+    pendingTransactionVersion: number | null,
+    expectedToken: string | null,
     durableToken: string,
   ) => boolean;
   fail_pending_save: (requestId: string, error: string) => boolean;
@@ -72,20 +88,34 @@ export type WorkbenchStoreState = {
   set_save_error: (error: string | null) => void;
 };
 
-export type WorkbenchStore = Pick<
-  StoreApi<WorkbenchStoreState>,
-  "getState" | "getInitialState" | "subscribe"
->;
+export type WorkbenchStoreState = Readonly<
+  Omit<
+    MutableWorkbenchStoreState,
+    "document" | "durable_document" | "pending_document"
+  >
+> & {
+  readonly document: ReadonlyWorkbenchDocumentV1;
+  readonly durable_document: ReadonlyWorkbenchDocumentV1;
+  readonly pending_document: ReadonlyWorkbenchDocumentV1 | null;
+};
+
+export type WorkbenchStore = {
+  getState: () => WorkbenchStoreState;
+  getInitialState: () => WorkbenchStoreState;
+  subscribe: (
+    listener: (state: WorkbenchStoreState, previousState: WorkbenchStoreState) => void,
+  ) => () => void;
+};
 
 function rejected(
-  document: WorkbenchDocumentV1,
+  document: ReadonlyWorkbenchDocumentV1,
   errors: WorkbenchValidationError[],
   stale = false,
 ): WorkbenchMutationResult {
   return { accepted: false, document, errors, stale };
 }
 
-function accepted(document: WorkbenchDocumentV1): WorkbenchMutationResult {
+function accepted(document: ReadonlyWorkbenchDocumentV1): WorkbenchMutationResult {
   return { accepted: true, document, stale: false };
 }
 
@@ -93,6 +123,61 @@ function nextRevision(durableRevision: number): number | null {
   return Number.isSafeInteger(durableRevision) && durableRevision < Number.MAX_SAFE_INTEGER
     ? durableRevision + 1
     : null;
+}
+
+function surfaceIdsInTreeOrder(document: ReadonlyWorkbenchDocumentV1): string[] {
+  const groupIds: string[] = [];
+  const visit = (node: ReadonlyWorkbenchDocumentV1["root"]): void => {
+    if (node.kind === "group") {
+      groupIds.push(node.group_id);
+      return;
+    }
+    visit(node.first);
+    visit(node.second);
+  };
+  visit(document.root);
+  return groupIds.flatMap((groupId) => [...document.groups[groupId].surface_ids]);
+}
+
+function reconcileSurfaceMru(
+  currentMru: readonly string[],
+  document: ReadonlyWorkbenchDocumentV1,
+  commands: readonly WorkbenchCommand[] = [],
+): readonly string[] {
+  const present = new Set(Object.keys(document.surfaces));
+  let next = currentMru.filter((surfaceId) => present.has(surfaceId));
+  const touch = (surfaceId: string | null | undefined): void => {
+    if (!surfaceId || !present.has(surfaceId)) return;
+    next = [surfaceId, ...next.filter((candidate) => candidate !== surfaceId)];
+  };
+  for (const command of commands) {
+    switch (command.type) {
+      case "open_surface":
+        touch(command.surface.surface_id);
+        break;
+      case "focus_surface":
+      case "move_surface":
+        touch(command.surface_id);
+        break;
+      case "set_active_surface":
+        touch(command.surface_id);
+        break;
+      case "reopen_closed_surface":
+        touch(document.groups[document.active_group_id]?.active_surface_id);
+        break;
+      default:
+        break;
+    }
+  }
+  for (const surfaceId of surfaceIdsInTreeOrder(document)) {
+    if (!next.includes(surfaceId)) next.push(surfaceId);
+  }
+  return Object.freeze(next);
+}
+
+function initialSurfaceMru(document: ReadonlyWorkbenchDocumentV1): readonly string[] {
+  const activeSurfaceId = document.groups[document.active_group_id]?.active_surface_id;
+  return reconcileSurfaceMru(activeSurfaceId ? [activeSurfaceId] : [], document);
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
@@ -134,15 +219,24 @@ export function createWorkbenchStore(
   const now = options.now ?? (() => new Date().toISOString());
   const createDefaultDocument = options.create_default_document ?? createDefaultWorkbenchDocument;
 
-  const zustandStore = createStore<WorkbenchStoreState>((set, get) => {
+  const zustandStore = createStore<MutableWorkbenchStoreState>((set, get) => {
     const reduceCommands = (
-      current: WorkbenchStoreState,
+      current: MutableWorkbenchStoreState,
       commands: readonly WorkbenchCommand[],
     ): WorkbenchMutationResult => {
       if (current.loading || current.read_only) {
         return rejected(current.document, [{
           path: "$.durability",
           message: current.loading ? "workbench is loading" : "workbench is read-only",
+        }]);
+      }
+      if (
+        current.pending_request_id !== null
+        && current.pending_revision === Number.MAX_SAFE_INTEGER
+      ) {
+        return rejected(current.document, [{
+          path: "$.revision",
+          message: "pending MAX_SAFE_INTEGER revision cannot accept newer working edits",
         }]);
       }
       if (commands.length === 0) {
@@ -191,7 +285,12 @@ export function createWorkbenchStore(
         if (!outcome.accepted) return current;
         return {
           ...current,
-          document: outcome.document,
+          document: outcome.document as WorkbenchDocumentV1,
+          surface_mru: reconcileSurfaceMru(current.surface_mru, outcome.document, commands),
+          zoomed_group_id: current.zoomed_group_id !== null
+            && current.zoomed_group_id in outcome.document.groups
+            ? current.zoomed_group_id
+            : null,
           is_dirty: true,
           save_error: null,
           transaction_version: current.transaction_version + 1,
@@ -265,6 +364,7 @@ export function createWorkbenchStore(
           document,
           zoomed_group_id: null,
           launcher_open: false,
+          surface_mru: reconcileSurfaceMru([], document),
           is_dirty: true,
           save_error: null,
           transaction_version: current.transaction_version + 1,
@@ -279,6 +379,7 @@ export function createWorkbenchStore(
       durable_document: initialDocument,
       zoomed_group_id: null,
       launcher_open: false,
+      surface_mru: initialSurfaceMru(initialDocument),
       transaction_version: 0,
       durable_revision: initialDurableRevision,
       durable_token: options.durable_token ?? null,
@@ -289,6 +390,7 @@ export function createWorkbenchStore(
       pending_document: null,
       pending_expected_token: null,
       pending_transaction_version: null,
+      used_pending_request_ids: Object.freeze([]),
       conflict: null,
       loading: false,
       read_only: false,
@@ -320,6 +422,24 @@ export function createWorkbenchStore(
             transaction_version: current.transaction_version + 1,
           }),
 
+      touch_surface: (surfaceId) => {
+        let touched = false;
+        set((current) => {
+          if (!(surfaceId in current.document.surfaces)) return current;
+          touched = true;
+          if (current.surface_mru[0] === surfaceId) return current;
+          return {
+            ...current,
+            surface_mru: Object.freeze([
+              surfaceId,
+              ...current.surface_mru.filter((candidate) => candidate !== surfaceId),
+            ]),
+            transaction_version: current.transaction_version + 1,
+          };
+        });
+        return touched;
+      },
+
       begin_pending_save: (requestId) => {
         let begun = false;
         set((current) => {
@@ -327,6 +447,7 @@ export function createWorkbenchStore(
             requestId.length === 0
             || !current.is_dirty
             || current.pending_request_id !== null
+            || current.used_pending_request_ids.includes(requestId)
             || current.loading
             || current.read_only
             || current.conflict !== null
@@ -340,6 +461,10 @@ export function createWorkbenchStore(
             pending_document: current.document,
             pending_expected_token: current.durable_token,
             pending_transaction_version: current.transaction_version,
+            used_pending_request_ids: Object.freeze([
+              ...current.used_pending_request_ids,
+              requestId,
+            ]),
             save_error: null,
             transaction_version: current.transaction_version + 1,
           };
@@ -347,13 +472,22 @@ export function createWorkbenchStore(
         return begun;
       },
 
-      acknowledge_pending_save: (requestId, revision, durableToken) => {
+      acknowledge_pending_save: (
+        requestId,
+        revision,
+        pendingTransactionVersion,
+        expectedToken,
+        durableToken,
+      ) => {
         let acknowledged = false;
         set((current) => {
           if (
             current.pending_request_id !== requestId
             || current.pending_revision !== revision
+            || current.pending_transaction_version !== pendingTransactionVersion
+            || current.pending_expected_token !== expectedToken
             || current.pending_document === null
+            || durableToken.length === 0
           ) return current;
 
           const durableDocument = current.pending_document;
@@ -380,6 +514,11 @@ export function createWorkbenchStore(
             ...current,
             document: workingDocument,
             durable_document: durableDocument,
+            surface_mru: reconcileSurfaceMru(current.surface_mru, workingDocument),
+            zoomed_group_id: current.zoomed_group_id !== null
+              && current.zoomed_group_id in workingDocument.groups
+              ? current.zoomed_group_id
+              : null,
             durable_revision: revision,
             durable_token: durableToken,
             is_dirty: hasNewerWorkingDocument,
@@ -389,7 +528,6 @@ export function createWorkbenchStore(
             pending_document: null,
             pending_expected_token: null,
             pending_transaction_version: null,
-            conflict: null,
             save_error: null,
             transaction_version: current.transaction_version + 1,
           };
@@ -451,9 +589,20 @@ export function createWorkbenchStore(
     };
   });
 
+  const snapshotCache = new WeakMap<MutableWorkbenchStoreState, WorkbenchStoreState>();
+  const publicSnapshot = (state: MutableWorkbenchStoreState): WorkbenchStoreState => {
+    const cached = snapshotCache.get(state);
+    if (cached) return cached;
+    const snapshot = Object.freeze({ ...state }) as WorkbenchStoreState;
+    snapshotCache.set(state, snapshot);
+    return snapshot;
+  };
+
   return {
-    getState: zustandStore.getState,
-    getInitialState: zustandStore.getInitialState,
-    subscribe: zustandStore.subscribe,
+    getState: () => publicSnapshot(zustandStore.getState()),
+    getInitialState: () => publicSnapshot(zustandStore.getInitialState()),
+    subscribe: (listener) => zustandStore.subscribe((state, previousState) => {
+      listener(publicSnapshot(state), publicSnapshot(previousState));
+    }),
   };
 }
