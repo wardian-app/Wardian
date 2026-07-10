@@ -195,14 +195,14 @@ export interface WorkbenchNavigationService {
 }
 ```
 
-- [ ] **Step 1: Write failing registry tests** for duplicate type rejection, serializer byte bounds, state-version restore, unknown placeholders, open-policy resolution, resource focus, explicit duplicates, commands, badges, and dirty close guards.
-- [ ] **Step 2: Write failing navigation/store tests** for one canonical document writer, transactional close/reset guards, active group/tab selection, runtime-only `zoomed_group_id`, durable revision/pending flags, and deterministic ID injection.
-- [ ] **Step 3: Run** the three focused test files. **Expected:** FAIL on missing modules.
-- [ ] **Step 4: Implement a registry with explicit registration order** and no React/layout-library dependency. Unknown surface records produce a `missing_surface` placeholder definition while retaining inert state.
-- [ ] **Step 5: Implement navigation over `applyWorkbenchCommand`.** A normal resource open focuses the registry-selected candidate; only `open_to_side`/explicit duplicate creates another presentation.
-- [ ] **Step 6: Implement the Zustand store without `persist` middleware.** Persistence is an injected service added in Task 5; group zoom and launcher visibility remain runtime-only.
-- [ ] **Step 7: Run** focused tests and `npm run lint`. **Expected:** PASS.
-- [ ] **Step 8: Commit** `feat(workbench): add surface registry and navigation service`.
+- [x] **Step 1: Write failing registry tests** for duplicate type rejection, serializer byte bounds, state-version restore, unknown placeholders, open-policy resolution, resource focus, explicit duplicates, commands, badges, and dirty close guards.
+- [x] **Step 2: Write failing navigation/store tests** for one canonical document writer, transactional close/reset guards, active group/tab selection, runtime-only `zoomed_group_id`, durable revision/pending flags, and deterministic ID injection.
+- [x] **Step 3: Run** the three focused test files. **Expected:** FAIL on missing modules.
+- [x] **Step 4: Implement a registry with explicit registration order** and no React/layout-library dependency. Unknown surface records produce a `missing_surface` placeholder definition while retaining inert state.
+- [x] **Step 5: Implement navigation over `applyWorkbenchCommand`.** A normal resource open focuses the registry-selected candidate; only `open_to_side`/explicit duplicate creates another presentation.
+- [x] **Step 6: Implement the Zustand store without `persist` middleware.** Persistence is an injected service added in Task 5; group zoom and launcher visibility remain runtime-only.
+- [x] **Step 7: Run** focused tests and `npm run lint`. **Expected:** PASS.
+- [x] **Step 8: Commit** `feat(workbench): add surface registry and navigation service`.
 
 ### Task 4: Add typed Rust workbench validation and atomic persistence
 
