@@ -434,3 +434,83 @@ export interface AgentClonePreview {
     skills: DeployedSkillRef[];
     default_selected_skills: DeployedSkillRef[];
 }
+
+// --- Canonical workbench V1 DTOs ------------------------------------------
+
+export type WorkbenchDocumentV1 = {
+    schema_version: 1;
+    revision: number;
+    saved_at: string;
+    root: WorkbenchNodeV1;
+    groups: Record<string, WorkbenchGroupV1>;
+    surfaces: Record<string, WorkbenchSurfaceV1>;
+    active_group_id: string;
+    recently_closed: ClosedSurfaceV1[];
+    shell: WorkbenchShellV1;
+};
+
+export type WorkbenchNodeV1 =
+    | { kind: "group"; group_id: string }
+    | {
+        kind: "split";
+        node_id: string;
+        direction: "horizontal" | "vertical";
+        ratio: number;
+        first: WorkbenchNodeV1;
+        second: WorkbenchNodeV1;
+    };
+
+export type WorkbenchGroupV1 = {
+    group_id: string;
+    surface_ids: string[];
+    active_surface_id: string | null;
+};
+
+export type WorkbenchSurfaceV1 = {
+    surface_id: string;
+    surface_type: string;
+    resource_key?: string;
+    state_schema_version: number;
+    state: unknown;
+};
+
+export type ClosedSurfaceV1 = {
+    surface: WorkbenchSurfaceV1;
+    previous_group_id: string;
+    previous_index: number;
+};
+
+export type WorkbenchShellV1 = {
+    left_sidebar_collapsed: boolean;
+    left_sidebar_width: number;
+    right_sidebar_collapsed: boolean;
+    right_sidebar_width: number;
+    bottom_terminal_open: boolean;
+    bottom_terminal_height: number;
+};
+
+export type WorkbenchValidationError = {
+    path: string;
+    message: string;
+};
+
+export type WorkbenchValidationResult =
+    | {
+        valid: true;
+        document: WorkbenchDocumentV1;
+    }
+    | {
+        valid: false;
+        errors: WorkbenchValidationError[];
+    };
+
+export type WorkbenchCommandResult =
+    | {
+        accepted: true;
+        document: WorkbenchDocumentV1;
+    }
+    | {
+        accepted: false;
+        document: WorkbenchDocumentV1;
+        errors: WorkbenchValidationError[];
+    };
