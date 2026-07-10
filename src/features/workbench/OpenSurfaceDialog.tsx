@@ -1,4 +1,9 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import type { ClosedSurfaceV1, OpenSurfaceRequest } from "../../types";
 import type { WorkbenchNavigationService } from "./navigationService";
@@ -37,6 +42,27 @@ function choiceDisabled(
 function titleForType(surfaceType: string): string {
   return CORE_SURFACE_CONTRIBUTIONS.find((choice) => choice.surface_type === surfaceType)?.title
     ?? surfaceType;
+}
+
+function handleOptionListKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>): void {
+  const listbox = event.currentTarget.closest<HTMLElement>('[role="listbox"]');
+  const options = [...(listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])];
+  const currentIndex = options.indexOf(event.currentTarget);
+  if (currentIndex < 0 || options.length === 0) return;
+  const targetIndex = event.key === "ArrowDown" || event.key === "ArrowRight"
+    ? (currentIndex + 1) % options.length
+    : event.key === "ArrowUp" || event.key === "ArrowLeft"
+      ? (currentIndex - 1 + options.length) % options.length
+      : event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? options.length - 1
+          : null;
+  if (targetIndex === null) return;
+  event.preventDefault();
+  for (const option of options) option.tabIndex = -1;
+  options[targetIndex].tabIndex = 0;
+  options[targetIndex].focus();
 }
 
 export function OpenSurfaceDialog({
@@ -126,36 +152,62 @@ export function OpenSurfaceDialog({
       {CONTRIBUTION_GROUPS.map((group) => (
         <section key={group} aria-labelledby={`open-surface-${group.replace(" ", "-").toLowerCase()}`}>
           <h3 id={`open-surface-${group.replace(" ", "-").toLowerCase()}`}>{group}</h3>
-          <div role="listbox" aria-label={group}>
-            {CORE_SURFACE_CONTRIBUTIONS.filter((choice) => choice.group === group).map((choice) => {
-              const disabled = choiceDisabled(choice, registry, resource_key);
-              return (
-                <div key={choice.surface_type} className="wardian-open-surface-choice">
+          <div className="wardian-open-surface-choice-layout">
+            <div role="listbox" aria-label={group}>
+              {CORE_SURFACE_CONTRIBUTIONS.filter((choice) => choice.group === group).map((choice, index) => {
+                const disabled = choiceDisabled(choice, registry, resource_key);
+                return (
                   <button
+                    key={choice.surface_type}
                     type="button"
                     role="option"
                     aria-label={choice.title}
                     aria-selected="false"
                     aria-disabled={disabled}
                     data-surface-type={choice.surface_type}
+                    tabIndex={index === 0 ? 0 : -1}
+                    className="wardian-open-surface-option"
+                    onFocus={(event) => {
+                      const options = event.currentTarget.parentElement
+                        ?.querySelectorAll<HTMLButtonElement>('[role="option"]');
+                      options?.forEach((option) => { option.tabIndex = -1; });
+                      event.currentTarget.tabIndex = 0;
+                    }}
+                    onKeyDown={handleOptionListKeyDown}
                     onClick={() => openChoice(choice)}
                   >
                     <span>{choice.title}</span>
                     <small>{choice.description}</small>
                   </button>
-                  {!choice.reserved && (
+                );
+              })}
+            </div>
+            {CORE_SURFACE_CONTRIBUTIONS.some(
+              (choice) => choice.group === group && !choice.reserved,
+            ) && (
+              <div
+                role="group"
+                aria-label={`${group} Open to Side`}
+                className="wardian-open-surface-side-actions"
+              >
+                {CORE_SURFACE_CONTRIBUTIONS.filter(
+                  (choice) => choice.group === group && !choice.reserved,
+                ).map((choice) => {
+                  const disabled = choiceDisabled(choice, registry, resource_key);
+                  return (
                     <button
+                      key={choice.surface_type}
                       type="button"
                       aria-label={`Open ${choice.title} to Side`}
                       disabled={disabled}
                       onClick={() => openChoiceToSide(choice)}
                     >
-                      Open to Side
+                      {choice.title} to Side
                     </button>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            )}
           </div>
         </section>
       ))}

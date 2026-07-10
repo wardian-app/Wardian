@@ -1,11 +1,34 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
+import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
 import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
 import { WorkbenchHost, workbenchEdgeDropCommands } from "./WorkbenchHost";
 
 describe("WorkbenchHost", () => {
+  it("routes tab close keys through the async navigation guard", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([surface]) });
+    const close = vi.fn(async () => "cancel" as const);
+    const navigation = {
+      open: vi.fn(),
+      open_to_side: vi.fn(),
+      focus: vi.fn(),
+      close,
+      close_group: vi.fn(),
+      reset_workbench: vi.fn(),
+    } as unknown as WorkbenchNavigationService;
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    const tab = await screen.findByRole("tab", { name: /agents overview/i });
+    tab.focus();
+    fireEvent.keyDown(tab, { key: "Delete" });
+
+    await waitFor(() => expect(close).toHaveBeenCalledWith("surface-1"));
+    expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
+  });
+
   it("keeps group zoom runtime-only", () => {
     const initialDocument = makeSingleGroupDocument();
     const store = createWorkbenchStore({ initial_document: initialDocument });

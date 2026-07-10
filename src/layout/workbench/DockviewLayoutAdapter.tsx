@@ -48,11 +48,12 @@ export type DockviewLayoutAdapterProps = {
   zoomed_group_id?: string | null;
   render_surface?: WorkbenchSurfaceRenderer;
   renderer_policy?: WorkbenchPanelRendererPolicy;
-  on_command?: (command: WorkbenchCommand) => void;
+  on_command?: (command: WorkbenchCommand) => boolean;
   on_open_surface?: (groupId: string) => void;
   on_toggle_zoom?: (groupId: string) => void;
   on_split_group?: (groupId: string, direction: "horizontal" | "vertical") => void;
   on_close_group?: (groupId: string) => void;
+  on_close_surface?: (surfaceId: string) => void;
   on_join_group?: (sourceGroupId: string, targetGroupId: string) => void;
   on_surface_drop?: (
     surfaceId: string,
@@ -75,6 +76,7 @@ type AdapterRuntime = Pick<
   | "on_toggle_zoom"
   | "on_split_group"
   | "on_close_group"
+  | "on_close_surface"
   | "on_join_group"
   | "render_home"
 >;
@@ -269,6 +271,29 @@ export function routeWorkbenchDockviewDrop(
   onSurfaceDrop?.(surfaceId, event.group.id, event.position);
 }
 
+/** Dispatches a canonical command and requests recovery only on explicit rejection. */
+export function dispatchWorkbenchAdapterCommand(
+  command: WorkbenchCommand,
+  onCommand: DockviewLayoutAdapterProps["on_command"],
+  onRejected: () => void,
+): boolean {
+  const accepted = onCommand?.(command);
+  if (accepted !== true) {
+    onRejected();
+    return false;
+  }
+  return true;
+}
+
+/** Identifies user removals that diverge from the unchanged canonical document. */
+export function shouldRecoverUnexpectedPanelRemoval(
+  document: ReadonlyWorkbenchDocumentV1,
+  surfaceId: string,
+  adapterProjection: boolean,
+): boolean {
+  return !adapterProjection && surfaceId in document.surfaces;
+}
+
 function surfaceTitle(surface: DeepReadonly<WorkbenchSurfaceV1>): string {
   return surface.surface_type
     .split("-")
@@ -338,10 +363,12 @@ function DockviewSurfacePanel({ params }: IDockviewPanelProps<WorkbenchPanelPara
 }
 
 function DockviewSurfaceTab({ params }: IDockviewPanelHeaderProps<WorkbenchPanelParams>) {
+  const runtime = useAdapterRuntime();
   return (
     <WorkbenchTab
       surface={params.surface}
       title={params.title}
+      on_close={() => runtime.on_close_surface?.(params.surface.surface_id)}
     />
   );
 }
@@ -554,6 +581,7 @@ function SafeWorkbenchLayout({
   on_toggle_zoom,
   on_split_group,
   on_close_group,
+  on_close_surface,
   on_join_group,
   render_home,
 }: DockviewLayoutAdapterProps) {
@@ -592,6 +620,13 @@ function SafeWorkbenchLayout({
                   group_id: group.group_id,
                   surface_id: surface.surface_id,
                 })}
+                onKeyDownCapture={(event) => {
+                  if (event.key !== "Delete" && event.key !== "Backspace") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.nativeEvent.stopImmediatePropagation();
+                  on_close_surface?.(surface.surface_id);
+                }}
               >
                 {surfaceTitle(surface)}
               </button>
@@ -611,19 +646,27 @@ function SafeWorkbenchLayout({
           on_join_group={on_join_group}
         />
       </header>
-      {activeSurface ? (
-        <div
-          id={`workbench-panel-${activeSurface.surface_id}`}
-          data-testid="surface-panel"
-          data-surface-id={activeSurface.surface_id}
-          data-surface-type={activeSurface.surface_type}
-          {...(activeSurface.resource_key === undefined
-            ? {}
-            : { "data-resource-key": activeSurface.resource_key })}
-        >
-          {render_surface?.(activeSurface) ?? activeSurface.surface_type}
-        </div>
-      ) : (
+      {activeSurface ? group.surface_ids.map((surfaceId) => {
+        const surface = document.surfaces[surfaceId];
+        const active = surfaceId === activeSurface.surface_id;
+        return (
+          <div
+            key={surfaceId}
+            id={`workbench-panel-${surfaceId}`}
+            role="tabpanel"
+            aria-labelledby={`workbench-tab-${surfaceId}`}
+            hidden={!active}
+            data-testid={active ? "surface-panel" : undefined}
+            data-surface-id={surfaceId}
+            data-surface-type={surface.surface_type}
+            {...(surface.resource_key === undefined
+              ? {}
+              : { "data-resource-key": surface.resource_key })}
+          >
+            {active ? render_surface?.(surface) ?? surface.surface_type : null}
+          </div>
+        );
+      }) : (
         render_home?.(group.group_id)
           ?? <div data-testid="workbench-empty-group" data-group-id={group.group_id} />
       )}
@@ -642,6 +685,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     on_command,
   } = props;
   const [api, setApi] = useState<DockviewApi | null>(null);
+  const [reconcileNonce, setReconcileNonce] = useState(0);
   const expectedMovesRef = useRef(new Map<
     string,
     { group_id: string; index: number; transaction: number }
@@ -650,11 +694,24 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   const projectionGuardRef = useRef(0);
   const topologySignatureRef = useRef<string | null>(null);
   const ratioFeedbackScheduledRef = useRef(false);
+  const reconcileScheduledRef = useRef(false);
   const lastApiSizeRef = useRef<{ width: number; height: number } | null>(null);
   const documentRef = useRef(document);
   const onCommandRef = useRef(on_command);
   documentRef.current = document;
   onCommandRef.current = on_command;
+
+  const requestCanonicalReconcile = useCallback(() => {
+    if (reconcileScheduledRef.current) return;
+    reconcileScheduledRef.current = true;
+    queueMicrotask(() => {
+      reconcileScheduledRef.current = false;
+      setReconcileNonce((nonce) => nonce + 1);
+    });
+  }, []);
+  const emitCommand = useCallback((command: WorkbenchCommand): boolean => (
+    dispatchWorkbenchAdapterCommand(command, onCommandRef.current, requestCanonicalReconcile)
+  ), [requestCanonicalReconcile]);
 
   const normalizedGeometry = useMemo(
     () => normalizedWorkbenchGeometry(document.root),
@@ -667,11 +724,13 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     on_toggle_zoom: props.on_toggle_zoom,
     on_split_group: props.on_split_group,
     on_close_group: props.on_close_group,
+    on_close_surface: props.on_close_surface,
     on_join_group: props.on_join_group,
     render_home: props.render_home,
   }), [
     document,
     props.on_close_group,
+    props.on_close_surface,
     props.on_join_group,
     props.on_open_surface,
     props.on_split_group,
@@ -707,7 +766,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     } finally {
       releaseProjectionGuard();
     }
-  }, [api, document, render_surface, renderer_policy, safe_mode, zoomed_group_id]);
+  }, [api, document, reconcileNonce, render_surface, renderer_policy, safe_mode, zoomed_group_id]);
 
   useLayoutEffect(() => {
     if (!api || safe_mode) return;
@@ -728,7 +787,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         const activation = pendingActivation;
         pendingActivation = null;
         if (!activation || projectionGuardRef.current > 0) return;
-        onCommandRef.current?.({ type: "set_active_surface", ...activation });
+        emitCommand({ type: "set_active_surface", ...activation });
       });
     };
     const moveDisposable = api.onDidMovePanel((event) => {
@@ -739,7 +798,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         return;
       }
       if (projectionGuardRef.current > 0) return;
-      onCommandRef.current?.({
+      emitCommand({
         type: "move_surface",
         surface_id: event.panel.id,
         group_id: event.panel.group.id,
@@ -782,17 +841,26 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
           liveGroupRectangles(api),
         );
         for (const command of commands) {
-          onCommandRef.current?.(command);
+          emitCommand(command);
         }
       });
+    });
+    const removeDisposable = api.onDidRemovePanel((panel) => {
+      if (!shouldRecoverUnexpectedPanelRemoval(
+        documentRef.current,
+        panel.id,
+        projectionGuardRef.current > 0,
+      )) return;
+      requestCanonicalReconcile();
     });
     return () => {
       moveDisposable.dispose();
       activeDisposable.dispose();
       activeGroupDisposable.dispose();
       layoutDisposable.dispose();
+      removeDisposable.dispose();
     };
-  }, [api, safe_mode]);
+  }, [api, emitCommand, requestCanonicalReconcile, safe_mode]);
 
   const handleWillDrop = useCallback((event: DockviewWillDropEvent) => {
     routeWorkbenchDockviewDrop(event, props.on_surface_drop);
@@ -839,7 +907,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
               const ratio = adjustedRatio(split.direction, split.ratio, event.key);
               if (ratio === null) return;
               event.preventDefault();
-              on_command?.({ type: "set_split_ratio", node_id: split.node_id, ratio });
+              emitCommand({ type: "set_split_ratio", node_id: split.node_id, ratio });
             }}
           />
         ))}

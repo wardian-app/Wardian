@@ -196,9 +196,7 @@ export function WorkbenchHost({
             on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
           />
         )}
-        on_command={(command) => {
-          store.getState().apply_commands([command]);
-        }}
+        on_command={(command) => store.getState().apply_commands([command]).accepted}
         on_open_surface={openLauncher}
         on_toggle_zoom={(groupId) => {
           if (!activateGroup(groupId)) return;
@@ -211,6 +209,7 @@ export function WorkbenchHost({
           );
         }}
         on_close_group={(groupId) => { void navigation.close_group(groupId); }}
+        on_close_surface={(surfaceId) => { void navigation.close(surfaceId); }}
         on_join_group={(sourceGroupId, targetGroupId) => {
           store.getState().apply_commands([{
             type: "join_group",

@@ -6,11 +6,13 @@ import { applyWorkbenchCommand, type WorkbenchCommand } from "../../features/wor
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
 import {
   deriveWorkbenchSplitRatios,
+  dispatchWorkbenchAdapterCommand,
   DockviewLayoutAdapter,
   normalizedWorkbenchGeometry,
   planDockviewGroupPlacements,
   projectWorkbenchGroupSizes,
   routeWorkbenchDockviewDrop,
+  shouldRecoverUnexpectedPanelRemoval,
   workbenchSplitRatioCommands,
 } from "./DockviewLayoutAdapter";
 import type { DockviewApi, DockviewWillDropEvent } from "dockview-react";
@@ -88,10 +90,38 @@ describe("DockviewLayoutAdapter", () => {
     expect(document.querySelector('[data-surface-id="surface-2"][data-resource-key="agent-7"]')).not.toBeNull();
     expect(document.querySelector('[data-layout-source="wardian-model"]')).not.toBeNull();
     expect(document.querySelector('[data-layout-source="dockview-json"]')).toBeNull();
-    expect(screen.getByRole("tab", { name: /agents overview/i })).toHaveAttribute(
-      "aria-controls",
-      "workbench-panel-surface-1",
+    const tab = screen.getByRole("tab", { name: /agents overview/i });
+    expect(tab.id).toMatch(/^dv-tab-/);
+    const controlledId = tab.getAttribute("aria-controls");
+    expect(controlledId).toMatch(/^dv-tabpanel-/);
+    const controlledPanel = controlledId ? document.getElementById(controlledId) : null;
+    expect(controlledPanel).toHaveAttribute("role", "tabpanel");
+    expect(controlledPanel).toHaveAttribute("aria-labelledby", tab.id);
+    expect(document.getElementById("workbench-panel-surface-1")).toHaveAttribute(
+      "data-surface-id",
+      "surface-1",
     );
+  });
+
+  it("requests recovery only for canonical panels removed outside projection", () => {
+    const documentModel = makeTwoGroupDocument();
+    expect(shouldRecoverUnexpectedPanelRemoval(documentModel, "surface-1", false)).toBe(true);
+    expect(shouldRecoverUnexpectedPanelRemoval(documentModel, "surface-1", true)).toBe(false);
+    expect(shouldRecoverUnexpectedPanelRemoval(documentModel, "missing", false)).toBe(false);
+  });
+
+  it("requests one self-heal only when the canonical writer explicitly rejects", () => {
+    const rejected = vi.fn(() => false);
+    const accepted = vi.fn(() => true);
+    const recover = vi.fn();
+    const command = { type: "focus_surface", surface_id: "surface-1" } as const;
+
+    expect(dispatchWorkbenchAdapterCommand(command, rejected, recover)).toBe(false);
+    expect(recover).toHaveBeenCalledOnce();
+    recover.mockClear();
+    expect(dispatchWorkbenchAdapterCommand(command, accepted, recover)).toBe(true);
+    expect(dispatchWorkbenchAdapterCommand(command, undefined, recover)).toBe(false);
+    expect(recover).toHaveBeenCalledOnce();
   });
 
   it("seeds both sides before subdividing mixed depth-three canonical trees", () => {
@@ -266,6 +296,12 @@ describe("DockviewLayoutAdapter", () => {
     expect(screen.getAllByTestId("workbench-group")).toHaveLength(1);
     expect(screen.getByTestId("workbench-group")).toHaveAttribute("data-group-id", "group-2");
     expect(screen.getByTestId("workbench-group")).toHaveAttribute("tabindex", "-1");
+    for (const tab of screen.getAllByRole("tab")) {
+      const controlledId = tab.getAttribute("aria-controls");
+      const controlledPanel = controlledId ? document.getElementById(controlledId) : null;
+      expect(controlledPanel).toHaveAttribute("role", "tabpanel");
+      expect(controlledPanel).toHaveAttribute("aria-labelledby", tab.id);
+    }
     expect(documentModel).toEqual(before);
     expect(documentModel.root.kind).toBe("split");
   });
@@ -312,6 +348,53 @@ describe("DockviewLayoutAdapter", () => {
       group_id: "group-1",
       surface_id: "surface-1",
     }));
+  });
+
+  it.each(["Delete", "Backspace"])(
+    "routes %s on a focused tab through the guarded close boundary",
+    async (key) => {
+      const onCloseSurface = vi.fn();
+      render(
+        <DockviewLayoutAdapter
+          document={makeTwoGroupDocument()}
+          on_close_surface={onCloseSurface}
+        />,
+      );
+
+      const tab = await screen.findByRole("tab", { name: /agents overview/i });
+      tab.focus();
+      expect(tab).toHaveFocus();
+      expect(fireEvent.keyDown(tab, { key })).toBe(false);
+
+      expect(onCloseSurface).toHaveBeenCalledWith("surface-1");
+      expect(screen.getByRole("tab", { name: /agents overview/i })).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: /agent session/i })).toBeInTheDocument();
+    },
+  );
+
+  it("reprojects canonical activation after an explicit writer rejection", async () => {
+    const first = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const second = makeSurface("surface-2", { surface_type: "library" });
+    const onCommand = vi.fn(() => false);
+    render(
+      <DockviewLayoutAdapter
+        document={makeSingleGroupDocument([first, second])}
+        on_command={onCommand}
+      />,
+    );
+
+    const firstTab = await screen.findByRole("tab", { name: /agents overview/i });
+    const secondTab = screen.getByRole("tab", { name: /library/i });
+    expect(secondTab).toHaveAttribute("aria-selected", "true");
+    fireEvent.pointerDown(firstTab);
+
+    await waitFor(() => expect(onCommand).toHaveBeenCalledWith({
+      type: "set_active_surface",
+      group_id: "group-1",
+      surface_id: "surface-1",
+    }));
+    await waitFor(() => expect(secondTab).toHaveAttribute("aria-selected", "true"));
+    expect(firstTab).toHaveAttribute("aria-selected", "false");
   });
 
   it("offers only spatially adjacent join targets and one positioned focus target per split", async () => {

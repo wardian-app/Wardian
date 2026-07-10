@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { createWorkbenchNavigationService } from "./navigationService";
@@ -58,6 +58,34 @@ describe("OpenSurfaceDialog", () => {
       .toHaveAttribute("aria-disabled", "true");
     expect(document.querySelector('[role="option"][data-surface-type="browser"]'))
       .toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("uses roving listbox focus and keeps Open to Side actions outside the composite", () => {
+    const fixture = createNavigationFixture();
+    render(
+      <OpenSurfaceDialog
+        open
+        group_id="group-1"
+        navigation={fixture.navigation}
+        registry={fixture.registry}
+        on_close={() => {}}
+      />,
+    );
+
+    const listbox = screen.getByRole("listbox", { name: "Core views" });
+    const options = within(listbox).getAllByRole("option");
+    expect(options[0]).toHaveAttribute("tabindex", "0");
+    expect(options[1]).toHaveAttribute("tabindex", "-1");
+    options[0].focus();
+    fireEvent.keyDown(options[0], { key: "ArrowDown" });
+    expect(options[1]).toHaveFocus();
+    expect(options[0]).toHaveAttribute("tabindex", "-1");
+    expect(options[1]).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(options[1], { key: "End" });
+    expect(options[options.length - 1]).toHaveFocus();
+    expect(within(listbox).queryByRole("button", { name: /to Side/ })).toBeNull();
+    expect(screen.getByRole("group", { name: "Core views Open to Side" }))
+      .toContainElement(screen.getByRole("button", { name: "Open Agents Overview to Side" }));
   });
 
   it("delegates singleton focus and explicit Open to Side to NavigationService", () => {
