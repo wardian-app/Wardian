@@ -197,6 +197,7 @@ describe("workbench navigation service", () => {
     const order: string[] = [];
     const registry = createSurfaceRegistry([
       definition("guarded", {
+        close_policy: "confirm_if_dirty",
         can_close: async (entry): Promise<"allow"> => {
           order.push(entry.surface_id);
           return "allow";
@@ -227,7 +228,7 @@ describe("workbench navigation service", () => {
       initial_document: document,
       now: () => "2026-07-10T12:00:00.000Z",
     });
-    const resetDocument = vi.spyOn(store.getState(), "reset_document");
+    const resetDocument = vi.spyOn(store.getState(), "compare_and_reset_document");
     const navigation = createWorkbenchNavigationService({
       registry,
       store,
@@ -247,7 +248,10 @@ describe("workbench navigation service", () => {
       releaseGuard = resolve;
     });
     const registry = createSurfaceRegistry([
-      definition("guarded", { can_close: () => guardDecision }),
+      definition("guarded", {
+        close_policy: "confirm_if_dirty",
+        can_close: () => guardDecision,
+      }),
     ]);
     const entry = makeSurface("surface-1", { surface_type: "guarded" });
     const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
@@ -268,7 +272,10 @@ describe("workbench navigation service", () => {
   it("commits allowed closes only after the guard resolves", async () => {
     const canClose = vi.fn(async (): Promise<"allow"> => "allow");
     const registry = createSurfaceRegistry([
-      definition("guarded", { can_close: canClose }),
+      definition("guarded", {
+        close_policy: "confirm_if_dirty",
+        can_close: canClose,
+      }),
     ]);
     const entry = makeSurface("surface-1", { surface_type: "guarded" });
     const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
@@ -281,6 +288,76 @@ describe("workbench navigation service", () => {
     await expect(navigation.close("surface-1")).resolves.toBe("allow");
     expect(canClose).toHaveBeenCalledWith(entry);
     expect(store.getState().document.surfaces["surface-1"]).toBeUndefined();
-    expect(store.getState().document.recently_closed[0]?.surface).toBe(entry);
+    expect(store.getState().document.recently_closed[0]?.surface).toEqual(entry);
+    expect(store.getState().document.recently_closed[0]?.surface).not.toBe(entry);
+  });
+
+  it("cancels empty-guard close/reset operations after runtime state changes", async () => {
+    const registry = createSurfaceRegistry();
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+    const beforeClose = store.getState().document;
+
+    const close = navigation.close_group("group-1");
+    store.getState().set_launcher_open(true);
+    await expect(close).resolves.toBe("cancel");
+    expect(store.getState().document).toBe(beforeClose);
+
+    const beforeReset = store.getState().document;
+    const reset = navigation.reset_workbench();
+    store.getState().set_zoomed_group_id("group-1");
+    await expect(reset).resolves.toBe("cancel");
+    expect(store.getState().document).toBe(beforeReset);
+  });
+
+  it("never resets a surface opened after an empty-workbench reset begins", async () => {
+    const registry = createSurfaceRegistry([definition("notes")]);
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["surface-new"]),
+    });
+
+    const reset = navigation.reset_workbench();
+    navigation.open({ surface_type: "notes" });
+
+    await expect(reset).resolves.toBe("cancel");
+    expect(store.getState().document.surfaces["surface-new"]).toBeDefined();
+  });
+
+  it("atomically rejects a final-microtask runtime race after an allowed guard", async () => {
+    let releaseGuard: ((decision: "allow") => void) | undefined;
+    const guard = new Promise<"allow">((resolve) => {
+      releaseGuard = resolve;
+    });
+    const registry = createSurfaceRegistry([
+      definition("guarded", {
+        close_policy: "confirm_if_dirty",
+        can_close: () => guard,
+      }),
+    ]);
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "guarded" }),
+      ]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    const close = navigation.close("surface-1");
+    queueMicrotask(() => store.getState().set_launcher_open(true));
+    releaseGuard?.("allow");
+
+    await expect(close).resolves.toBe("cancel");
+    expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
+    expect(store.getState().launcher_open).toBe(true);
   });
 });

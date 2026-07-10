@@ -109,7 +109,8 @@ describe("surface registry", () => {
     expect(resolved.definition.type).toBe("missing_surface");
     expect(resolved.missing_surface_type).toBe("extension.future");
     expect(resolved.restore_result).toEqual({ ok: true, state: opaque });
-    expect((resolved.restore_result as { ok: true; state: unknown }).state).toBe(opaque);
+    expect((resolved.restore_result as { ok: true; state: unknown }).state).not.toBe(opaque);
+    expect(Object.isFrozen((resolved.restore_result as { ok: true; state: unknown }).state)).toBe(true);
     expect(missing.state_schema_version).toBe(41);
   });
 
@@ -181,6 +182,7 @@ describe("surface registry", () => {
         can_close,
       }),
       definition("broken", {
+        close_policy: "confirm_if_dirty",
         can_close: async () => {
           throw new Error("save failed");
         },
@@ -191,5 +193,184 @@ describe("surface registry", () => {
     expect(can_close).toHaveBeenCalledOnce();
     await expect(registry.can_close(surface("broken-1", "broken"))).resolves.toBe("cancel");
     await expect(registry.can_close(surface("unknown-1", "unknown"))).resolves.toBe("allow");
+  });
+
+  it("copies and freezes definitions, commands, and returned registration order", () => {
+    const command = { command_id: "stable.command", title: "Stable" };
+    const original = definition("stable", { commands: [command] });
+    const registry = createSurfaceRegistry([original]);
+
+    original.type = "caller-mutated";
+    command.title = "Caller Mutated";
+    original.commands.push({ command_id: "caller.extra", title: "Extra" });
+
+    const registered = registry.require("stable");
+    expect(registered.type).toBe("stable");
+    expect(registered.commands).toEqual([
+      { command_id: "stable.command", title: "Stable" },
+    ]);
+    expect(Object.isFrozen(registered)).toBe(true);
+    expect(Object.isFrozen(registered.commands)).toBe(true);
+    const order = registry.list();
+    expect(Object.isFrozen(order)).toBe(true);
+    expect(() => {
+      (order as unknown as SurfaceDefinition<TestState>[]).push(definition("injected"));
+    }).toThrow(TypeError);
+    expect(registry.list().map((entry) => entry.type)).toEqual(["stable"]);
+    const metadata = registry.presentation(surface("surface-1", "stable"));
+    expect(Object.isFrozen(metadata)).toBe(true);
+    expect(Object.isFrozen(metadata.commands)).toBe(true);
+    expect(() => {
+      (metadata.commands as { command_id: string; title: string }[]).push({
+        command_id: "injected",
+        title: "Injected",
+      });
+    }).toThrow(TypeError);
+  });
+
+  it("passes immutable detached request, state, candidate, and surface snapshots to callbacks", async () => {
+    const mutationBlocked: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("immutable", {
+        open_policy: "focus_resource",
+        resource_key: (request) => {
+          try {
+            (request as { resource_key?: string }).resource_key = "mutated";
+          } catch {
+            mutationBlocked.push("request");
+          }
+          return request.resource_key;
+        },
+        resolve_existing: (_request, candidates) => {
+          try {
+            (candidates[0] as WorkbenchSurfaceV1).surface_id = "mutated";
+          } catch {
+            mutationBlocked.push("candidate");
+          }
+          return candidates[0]?.surface_id;
+        },
+        serialize_state: (state) => {
+          try {
+            (state as TestState).label = "mutated";
+          } catch {
+            mutationBlocked.push("serialize");
+          }
+          return state;
+        },
+        restore_state: (value) => {
+          try {
+            (value as { label: string }).label = "mutated";
+          } catch {
+            mutationBlocked.push("restore");
+          }
+          return { ok: true, state: value as TestState };
+        },
+        title: (entry) => {
+          try {
+            (entry.state as TestState).label = "mutated";
+          } catch {
+            mutationBlocked.push("title");
+          }
+          return "Immutable";
+        },
+        badges: (entry) => {
+          try {
+            (entry.state as TestState).label = "mutated";
+          } catch {
+            mutationBlocked.push("badges");
+          }
+          return [];
+        },
+        close_policy: "confirm_if_dirty",
+        can_close: (entry) => {
+          try {
+            (entry.state as TestState).label = "mutated";
+          } catch {
+            mutationBlocked.push("close");
+          }
+          return "allow";
+        },
+      }),
+    ]);
+    const request = { surface_type: "immutable", resource_key: "resource-1" };
+    const candidate = surface("surface-1", "immutable", "resource-1");
+    const state = { label: "original" };
+
+    expect(registry.resource_key(request)).toBe("resource-1");
+    expect(Object.isFrozen(registry.default_state("immutable"))).toBe(true);
+    expect(registry.resolve_existing(request, [candidate])).toBe("surface-1");
+    expect(registry.serialize_state("immutable", state).state).toEqual({ label: "original" });
+    const resolved = registry.resolve_surface({ ...candidate, state });
+    expect(resolved.restore_result).toEqual({ ok: true, state: { label: "original" } });
+    registry.presentation({ ...candidate, state });
+    await expect(registry.can_close({ ...candidate, state })).resolves.toBe("allow");
+
+    expect(request.resource_key).toBe("resource-1");
+    expect(candidate.surface_id).toBe("surface-1");
+    expect(state.label).toBe("original");
+    expect(mutationBlocked).toEqual([
+      "request",
+      "candidate",
+      "serialize",
+      "restore",
+      "serialize",
+      "title",
+      "badges",
+      "close",
+    ]);
+  });
+
+  it("enforces close_policy and validates guard results exactly", async () => {
+    const ignored = vi.fn(async (): Promise<"cancel"> => "cancel");
+    const registry = createSurfaceRegistry();
+    registry.register(definition("close-view", { close_policy: "close_view", can_close: ignored }));
+    registry.register(definition("missing-guard", { close_policy: "confirm_if_dirty" }));
+    registry.register(definition("allow", {
+      close_policy: "confirm_if_dirty",
+      can_close: async (): Promise<"allow"> => "allow",
+    }));
+    registry.register(definition("cancel", {
+      close_policy: "confirm_if_dirty",
+      can_close: async (): Promise<"cancel"> => "cancel",
+    }));
+    registry.register(definition("throws", {
+      close_policy: "confirm_if_dirty",
+      can_close: async () => { throw new Error("failed save"); },
+    }));
+    registry.register(definition("malformed", {
+      close_policy: "confirm_if_dirty",
+      can_close: (async () => "malformed") as unknown as NonNullable<
+        SurfaceDefinition<TestState>["can_close"]
+      >,
+    }));
+
+    await expect(registry.can_close(surface("one", "close-view"))).resolves.toBe("allow");
+    expect(ignored).not.toHaveBeenCalled();
+    await expect(registry.can_close(surface("two", "missing-guard"))).resolves.toBe("cancel");
+    await expect(registry.can_close(surface("three", "allow"))).resolves.toBe("allow");
+    await expect(registry.can_close(surface("four", "cancel"))).resolves.toBe("cancel");
+    await expect(registry.can_close(surface("five", "throws"))).resolves.toBe("cancel");
+    await expect(registry.can_close(surface("six", "malformed"))).resolves.toBe("cancel");
+    await expect(registry.can_close(surface("seven", "unknown"))).resolves.toBe("allow");
+  });
+
+  it("turns malformed or unserializable restore results into safe failures", () => {
+    const registry = createSurfaceRegistry();
+    registry.register(definition("missing-state", {
+      restore_state: (() => ({ ok: true })) as unknown as SurfaceDefinition<TestState>["restore_state"],
+    }));
+    registry.register(definition("bad-error", {
+      restore_state: (() => ({ ok: false, error: 42 })) as unknown as SurfaceDefinition<TestState>["restore_state"],
+    }));
+    registry.register(definition("too-large", {
+      max_state_bytes: 16,
+      restore_state: () => ({ ok: true, state: { label: "😀😀" } }),
+    }));
+
+    for (const type of ["missing-state", "bad-error", "too-large"]) {
+      const result = registry.resolve_surface(surface("surface-1", type)).restore_result;
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/restore|invalid|bytes/i);
+    }
   });
 });
