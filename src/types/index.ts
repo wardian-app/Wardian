@@ -588,3 +588,265 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly commands: readonly SurfaceCommandDefinition[];
     readonly badges?: (surface: WorkbenchSurfaceV1) => readonly SurfaceBadge[];
 };
+
+// --- Authoritative terminal session broker DTOs ---------------------------
+
+export type TerminalGeometry = {
+    rows: number;
+    cols: number;
+};
+
+export type TerminalClientKind = "desktop" | "remote";
+export type TerminalVisibility = "visible" | "hidden";
+export type TerminalRenderState = "mounted" | "suspended";
+export type TerminalRequestedInteraction = "interactive" | "read_only";
+export type TerminalInteractionCapability = "interactive" | "read_only";
+export type TerminalRuntimeState = "live" | "paused" | "terminated";
+
+export type TerminalPresentationRegistration = {
+    presentation_id: string;
+    session_id: string;
+    client_kind: TerminalClientKind;
+    desired_geometry: TerminalGeometry | null;
+    visibility: TerminalVisibility;
+    render_state: TerminalRenderState;
+    requested_interaction: TerminalRequestedInteraction;
+    observed_lease_epoch: number;
+};
+
+export type TerminalPresentationUpdateRequest = {
+    presentation_id: string;
+    session_id: string;
+    runtime_generation: number;
+    desired_geometry: TerminalGeometry | null;
+    visibility: TerminalVisibility;
+    render_state: TerminalRenderState;
+    requested_interaction: TerminalRequestedInteraction;
+    observed_lease_epoch: number;
+};
+
+export type TerminalPresentationState = {
+    presentation_id: string;
+    client_kind: TerminalClientKind;
+    desired_geometry: TerminalGeometry | null;
+    visibility: TerminalVisibility;
+    render_state: TerminalRenderState;
+    interaction_capability: TerminalInteractionCapability;
+    interaction_sequence: number;
+    requires_resync: boolean;
+};
+
+export type TerminalPendingActivationState = {
+    presentation_id: string;
+    previous_owner_presentation_id: string | null;
+    runtime_generation: number;
+    lease_epoch: number;
+    activation_id: string;
+};
+
+export type TerminalBrokerState = {
+    session_id: string;
+    runtime_generation: number;
+    lease_epoch: number;
+    stream_sequence: number;
+    interaction_sequence: number;
+    geometry: TerminalGeometry;
+    owner_presentation_id: string | null;
+    pending_activation: TerminalPendingActivationState | null;
+    runtime_state: TerminalRuntimeState;
+};
+
+export type TerminalPresentationRegistrationResult = {
+    presentation: TerminalPresentationState;
+    broker_state: TerminalBrokerState;
+    initial_snapshot: TerminalSnapshot;
+};
+
+export type TerminalPresentationUpdateResult = {
+    presentation: TerminalPresentationState;
+    broker_state: TerminalBrokerState;
+};
+
+export type TerminalPresentationViewportRequest = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    cols: number;
+    rows: number;
+};
+
+export type TerminalLeaseIdentity = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    lease_epoch: number;
+};
+
+export type TerminalActivationBeginRequest = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    observed_lease_epoch: number;
+};
+
+export type TerminalActivationAckRequest = {
+    session_id: string;
+    presentation_id: string;
+    runtime_generation: number;
+    lease_epoch: number;
+    activation_id: string;
+};
+
+export type TerminalLeaseDecisionStatus = "accepted" | "rejected";
+export type TerminalLeaseRejectionReason =
+    | "runtime_unavailable"
+    | "generation_changed"
+    | "lease_epoch_changed"
+    | "presentation_not_found"
+    | "presentation_ineligible"
+    | "pending_activation"
+    | "not_owner"
+    | "stale_activation"
+    | "stale_geometry_sequence";
+
+export type TerminalLeaseDecision = {
+    status: TerminalLeaseDecisionStatus;
+    reason: TerminalLeaseRejectionReason | null;
+    runtime_generation: number;
+    lease_epoch: number;
+    owner_presentation_id: string | null;
+};
+
+export type TerminalActivationBeginResult = {
+    decision: TerminalLeaseDecision;
+    activation_id: string | null;
+    snapshot: TerminalSnapshot | null;
+    sequence_barrier: number;
+};
+
+export type TerminalActivationAckResult = {
+    decision: TerminalLeaseDecision;
+    broker_state: TerminalBrokerState;
+    snapshot: TerminalSnapshot | null;
+};
+
+export type TerminalInputRequest = {
+    lease: TerminalLeaseIdentity;
+    bytes: number[];
+};
+
+export type TerminalGeometryRequest = {
+    lease: TerminalLeaseIdentity;
+    geometry_sequence: number;
+    geometry: TerminalGeometry;
+};
+
+export type TerminalGeometryCommitResult = {
+    decision: TerminalLeaseDecision;
+    geometry_sequence: number;
+    geometry: TerminalGeometry;
+    snapshot: TerminalSnapshot | null;
+};
+
+export type TerminalSnapshot = {
+    snapshot_id: string;
+    session_id: string;
+    runtime_generation: number;
+    sequence_barrier: number;
+    geometry: TerminalGeometry;
+    terminal_state_base64: string;
+    visible_grid: string;
+    scrollback: string[];
+};
+
+export type TerminalBrokerEvent = {
+    sequence: number;
+    runtime_generation: number;
+} & (
+    | { type: "output"; bytes: number[] }
+    | {
+        type: "geometry";
+        geometry: TerminalGeometry;
+        geometry_sequence: number;
+    }
+    | {
+        type: "ownership";
+        owner_presentation_id: string | null;
+        lease_epoch: number;
+        activation_id: string | null;
+    }
+    | { type: "lifecycle"; lifecycle: TerminalSessionLifecycleEvent }
+);
+
+export type TerminalSessionLifecycleEvent =
+    | "runtime_started"
+    | "runtime_paused"
+    | "runtime_resumed"
+    | "runtime_replaced"
+    | "runtime_terminated";
+
+export type TerminalSessionLifecycleNotification = {
+    session_id: string;
+    runtime_generation: number;
+    lifecycle: TerminalSessionLifecycleEvent;
+};
+
+export type TerminalEventSubscriptionRequest = {
+    session_id: string;
+    consumer_id: string;
+    client_kind: TerminalClientKind;
+    runtime_generation: number;
+};
+
+export type TerminalEventSubscriptionResult = {
+    broker_state: TerminalBrokerState;
+    initial_snapshot: TerminalSnapshot;
+};
+
+export type TerminalEventReadRequest = {
+    session_id: string;
+    consumer_id: string;
+    runtime_generation: number;
+    after_sequence: number;
+    max_events: number;
+    max_bytes: number;
+};
+
+export type TerminalEventBatchStatus =
+    | "events"
+    | "gap"
+    | "generation_changed"
+    | "terminated";
+
+export type TerminalEventBatch = {
+    status: TerminalEventBatchStatus;
+    runtime_generation: number;
+    events: TerminalBrokerEvent[];
+    next_sequence: number;
+    available_from_sequence: number;
+    latest_sequence: number;
+    recovery_snapshot: TerminalSnapshot | null;
+};
+
+export type TerminalEventAckRequest = {
+    session_id: string;
+    consumer_id: string;
+    runtime_generation: number;
+    applied_sequence: number;
+};
+
+export type TerminalEventAckResult = {
+    accepted_sequence: number;
+    latest_sequence: number;
+};
+
+export type TerminalEventUnsubscribeRequest = {
+    session_id: string;
+    consumer_id: string;
+};
+
+export type TerminalEventsReady = {
+    session_id: string;
+    runtime_generation: number;
+    latest_sequence: number;
+};

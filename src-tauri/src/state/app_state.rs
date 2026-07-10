@@ -3,6 +3,7 @@ use crate::state::conversation_archive::ConversationArchiveState;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
 use crate::state::terminal_attach::TerminalAttachState;
+use crate::state::terminal_session::TerminalSessionBroker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -76,6 +77,9 @@ pub struct AppState {
     // Lazy remote terminal attach state. This remains idle unless a remote
     // terminal opens an interactive attachment for an agent.
     pub terminal_attach: Arc<TerminalAttachState>,
+    // Authoritative per-runtime terminal actors. Presentations and feed
+    // consumers attach to this broker without owning PTY lifetime or queues.
+    pub terminal_sessions: Arc<TerminalSessionBroker>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +213,7 @@ impl Default for AppState {
             pty_sizes: RwLock::new(HashMap::new()),
             terminal_theme: RwLock::new("dark".to_string()),
             terminal_attach: Arc::new(TerminalAttachState::default()),
+            terminal_sessions: Arc::new(TerminalSessionBroker::default()),
         }
     }
 }
@@ -225,6 +230,11 @@ mod tests {
         assert!(state.agent_order.blocking_lock().is_empty());
         assert!(state.workbench_io_lock.try_lock().is_ok());
         assert!(state.terminal_attach.snapshot("missing-agent").is_none());
+        assert!(state
+            .terminal_sessions
+            .subscribe_wakeups()
+            .try_recv()
+            .is_err());
         assert_eq!(state.terminal_theme(), "dark");
         assert!(!state
             .workflow_schedules_paused
