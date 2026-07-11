@@ -48,16 +48,12 @@ fn enforce_serialized_limit(snapshot: &mut TerminalSnapshot) {
         let remove_count = snapshot.scrollback.len().min(32);
         snapshot.scrollback.drain(..remove_count);
     }
-    while serialized_len(snapshot) > MAX_SNAPSHOT_BYTES
-        && !snapshot.terminal_state_base64.is_empty()
-    {
-        let excess = serialized_len(snapshot).saturating_sub(MAX_SNAPSHOT_BYTES);
-        let target = snapshot
-            .terminal_state_base64
-            .len()
-            .saturating_sub(excess.saturating_add(16));
-        let quartet_boundary = target - (target % 4);
-        snapshot.terminal_state_base64.truncate(quartet_boundary);
+    if serialized_len(snapshot) > MAX_SNAPSHOT_BYTES {
+        // A vt100 formatted state is an atomic restore payload. Truncating its base64
+        // representation can still decode successfully while yielding an incomplete
+        // terminal control stream. Omit it instead so both clients deliberately fall
+        // back to the independently bounded visible grid.
+        snapshot.terminal_state_base64.clear();
     }
     while serialized_len(snapshot) > MAX_SNAPSHOT_BYTES && !snapshot.visible_grid.is_empty() {
         let excess = serialized_len(snapshot).saturating_sub(MAX_SNAPSHOT_BYTES);
@@ -80,4 +76,43 @@ fn serialized_len(snapshot: &TerminalSnapshot) -> usize {
     serde_json::to_vec(snapshot)
         .expect("terminal snapshot DTO must serialize")
         .len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_state(terminal_state_base64: String) -> TerminalSnapshot {
+        TerminalSnapshot {
+            snapshot_id: "snapshot".to_string(),
+            session_id: "session".to_string(),
+            runtime_generation: 1,
+            sequence_barrier: 0,
+            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            terminal_state_base64,
+            visible_grid: "visible fallback".to_string(),
+            scrollback: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn oversized_formatted_state_is_omitted_instead_of_truncated() {
+        let mut snapshot = snapshot_with_state("A".repeat(MAX_SNAPSHOT_BYTES));
+
+        enforce_serialized_limit(&mut snapshot);
+
+        assert!(snapshot.terminal_state_base64.is_empty());
+        assert_eq!(snapshot.visible_grid, "visible fallback");
+        assert!(serialized_len(&snapshot) <= MAX_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn formatted_state_is_retained_when_snapshot_fits() {
+        let state = base64::engine::general_purpose::STANDARD.encode(b"formatted terminal state");
+        let mut snapshot = snapshot_with_state(state.clone());
+
+        enforce_serialized_limit(&mut snapshot);
+
+        assert_eq!(snapshot.terminal_state_base64, state);
+    }
 }

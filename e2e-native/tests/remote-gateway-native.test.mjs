@@ -831,6 +831,85 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   const remoteFallbackAck = await inbox.next((message) => message.type === "activation_ack");
   assert.equal(remoteFallbackAck.result.broker_state.owner_presentation_id, remotePresentationId);
 
+  await invokeTauri(session.driver, "debug_remove_agent_input_sender", {
+    sessionId,
+  });
+  const terminated = await inbox.next(
+    (message) => message.type === "error" && message.code === "terminal_runtime_terminated",
+  );
+  assert.equal(terminated.fatal, false);
+  assert.equal(terminalSocket.readyState, WebSocket.OPEN);
+
+  await invokeTauri(session.driver, "resume_agent", { sessionId });
+  const replacementRegistered = await inbox.next(
+    (message) => message.type === "registered"
+      && message.broker_state?.runtime_generation > terminalSnapshot.runtime_generation,
+    30000,
+  );
+  const replacementGeneration = replacementRegistered.broker_state.runtime_generation;
+  assert.equal(
+    replacementGeneration,
+    terminalSnapshot.runtime_generation + 1,
+    "terminate/remove followed by same-session recreation must advance the generation",
+  );
+  assert.equal(replacementRegistered.presentation.presentation_id, remotePresentationId);
+  assert.equal(replacementRegistered.initial_snapshot.runtime_generation, replacementGeneration);
+  assert.equal(terminalSocket.readyState, WebSocket.OPEN);
+
+  const replacementDesktop = await waitFor(
+    "mounted desktop presentation to rebind to replacement runtime",
+    30000,
+    async () => {
+      const value = await readDesktopBrokerState(
+        session.driver,
+        sessionId,
+        desktopPresentationId,
+        replacementGeneration,
+      );
+      return {
+        ok: value.presentation.presentation_id === desktopPresentationId
+          && value.broker_state.runtime_generation === replacementGeneration,
+        value,
+      };
+    },
+  );
+  assert.equal(replacementDesktop.value.broker_state.owner_presentation_id, null);
+
+  const replacementEvents = await inbox.next(
+    (message) => message.type === "events"
+      && message.batch?.runtime_generation === replacementGeneration
+      && message.batch.events?.some((event) => event.type === "output"),
+    30000,
+  );
+  assert.ok(
+    replacementEvents.batch.events.some((event) => event.runtime_generation === replacementGeneration),
+    "the connected remote consumer must drain replacement-generation output",
+  );
+
+  terminalSocket.send(JSON.stringify({
+    type: "begin_activation",
+    runtime_generation: replacementGeneration,
+    observed_lease_epoch: replacementDesktop.value.broker_state.lease_epoch,
+  }));
+  const replacementRemoteBegin = await inbox.next(
+    (message) => message.type === "activation_begin"
+      && message.result?.decision?.runtime_generation === replacementGeneration,
+  );
+  terminalSocket.send(JSON.stringify({
+    type: "ack_activation",
+    runtime_generation: replacementGeneration,
+    lease_epoch: replacementRemoteBegin.result.decision.lease_epoch,
+    activation_id: replacementRemoteBegin.result.activation_id,
+  }));
+  const replacementRemoteAck = await inbox.next(
+    (message) => message.type === "activation_ack"
+      && message.result?.broker_state?.runtime_generation === replacementGeneration,
+  );
+  assert.equal(
+    replacementRemoteAck.result.broker_state.owner_presentation_id,
+    remotePresentationId,
+  );
+
   terminalSocket.terminate();
   await waitForSocketClose(terminalSocket);
   const fallback = await waitFor("desktop fallback after remote disconnect", 30000, async () => {
@@ -838,7 +917,7 @@ test("remote gateway authenticates broker ownership transitions across desktop a
       session.driver,
       sessionId,
       desktopPresentationId,
-      terminalSnapshot.runtime_generation,
+      replacementGeneration,
     );
     return {
       ok: value.broker_state.owner_presentation_id === desktopPresentationId
@@ -867,7 +946,7 @@ test("remote gateway authenticates broker ownership transitions across desktop a
         session.driver,
         sessionId,
         desktopPresentationId,
-        terminalSnapshot.runtime_generation,
+        replacementGeneration,
       );
       const snapshot = await invokeTauri(session.driver, "request_terminal_snapshot", {
         request: { session_id: sessionId },

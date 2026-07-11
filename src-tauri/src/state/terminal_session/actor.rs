@@ -479,6 +479,12 @@ pub struct TerminalSessionHandle {
 
 pub struct TerminalSessionBroker {
     sessions: RwLock<HashMap<String, TerminalSessionHandle>>,
+    /// Last runtime generation allocated for each session during this broker lifetime.
+    ///
+    /// Entries intentionally outlive runtime removal. Native reader tasks can deliver
+    /// output after a PTY has been killed, and reusing generation 1 would make that
+    /// delayed output indistinguishable from output produced by a recreated runtime.
+    runtime_generation_tombstones: RwLock<HashMap<String, u64>>,
     deferred_geometries: AsyncMutex<DeferredGeometryState>,
     wake_tx: broadcast::Sender<TerminalEventsReady>,
     lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
@@ -512,6 +518,7 @@ impl TerminalSessionBroker {
         let (lifecycle_tx, _) = broadcast::channel(64);
         Self {
             sessions: RwLock::new(HashMap::new()),
+            runtime_generation_tombstones: RwLock::new(HashMap::new()),
             deferred_geometries: AsyncMutex::new(DeferredGeometryState::default()),
             wake_tx,
             lifecycle_tx,
@@ -538,9 +545,18 @@ impl TerminalSessionBroker {
         let (replaced, runtime_generation) = {
             let mut sessions = self.sessions.write().await;
             let previous = sessions.get(session_id).cloned();
-            let runtime_generation = previous
-                .as_ref()
-                .map_or(1, |handle| handle.runtime_generation.saturating_add(1));
+            let mut generations = self.runtime_generation_tombstones.write().await;
+            let runtime_generation = generations
+                .get(session_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    TerminalBrokerError::RuntimeIo(
+                        "terminal runtime generation exhausted".to_string(),
+                    )
+                })?;
+            generations.insert(session_id.to_string(), runtime_generation);
             let initial_lease_epoch = previous.as_ref().map_or(0, |handle| {
                 handle.lease_epoch.load(Ordering::SeqCst).saturating_add(1)
             });
@@ -2404,6 +2420,7 @@ impl TerminalSessionActor {
         request: TerminalEventSubscriptionRequest,
     ) -> Result<TerminalEventSubscriptionResult, TerminalBrokerError> {
         self.ensure_session(&request.session_id)?;
+        self.ensure_generation(request.runtime_generation)?;
         validate_id(&request.consumer_id, "consumer_id")?;
         if request.client_kind == TerminalClientKind::Desktop
             && self.consumers.iter().any(|(id, consumer)| {

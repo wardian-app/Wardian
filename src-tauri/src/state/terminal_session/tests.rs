@@ -2248,6 +2248,100 @@ async fn terminal_session_kill_removes_runtime_while_pause_and_replace_keep_gene
         broker.broker_state("lifecycle").await,
         Err(TerminalBrokerError::SessionNotFound)
     );
+
+    let (third_runtime, _, _) = runtime();
+    let third = broker
+        .start_or_replace_runtime("lifecycle", third_runtime, geometry(120, 40))
+        .await
+        .expect("recreate killed runtime");
+    assert_eq!(
+        third,
+        second + 1,
+        "runtime removal must retain a generation tombstone"
+    );
+
+    broker
+        .register_presentation(
+            TerminalPresentationRegistration {
+                presentation_id: "recreated-presentation".to_string(),
+                session_id: "lifecycle".to_string(),
+                client_kind: TerminalClientKind::Desktop,
+                desired_geometry: Some(geometry(120, 40)),
+                visibility: TerminalVisibility::Visible,
+                render_state: TerminalRenderState::Mounted,
+                requested_interaction: TerminalRequestedInteraction::Interactive,
+                observed_lease_epoch: 0,
+            },
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await
+        .expect("register recreated presentation");
+    broker
+        .subscribe(TerminalEventSubscriptionRequest {
+            session_id: "lifecycle".to_string(),
+            consumer_id: "recreated-consumer".to_string(),
+            client_kind: TerminalClientKind::Desktop,
+            runtime_generation: third,
+        })
+        .await
+        .expect("subscribe recreated consumer");
+
+    let stale_output =
+        broker.process_output_blocking("lifecycle", second, b"late old-generation output".to_vec());
+    assert_eq!(
+        stale_output,
+        Err(TerminalBrokerError::StaleRuntimeGeneration {
+            expected: third,
+            received: second,
+        })
+    );
+    assert_eq!(
+        broker
+            .unregister_presentation("lifecycle", "recreated-presentation", second)
+            .await,
+        Err(TerminalBrokerError::StaleRuntimeGeneration {
+            expected: third,
+            received: second,
+        })
+    );
+    assert_eq!(
+        broker
+            .subscribe(TerminalEventSubscriptionRequest {
+                session_id: "lifecycle".to_string(),
+                consumer_id: "late-old-consumer".to_string(),
+                client_kind: TerminalClientKind::Remote,
+                runtime_generation: second,
+            })
+            .await,
+        Err(TerminalBrokerError::StaleRuntimeGeneration {
+            expected: third,
+            received: second,
+        })
+    );
+
+    let presentation = broker
+        .report_presentation_viewport(TerminalPresentationViewportRequest {
+            session_id: "lifecycle".to_string(),
+            presentation_id: "recreated-presentation".to_string(),
+            runtime_generation: third,
+            cols: 120,
+            rows: 40,
+        })
+        .await
+        .expect("new presentation survives stale requests");
+    assert_eq!(presentation.presentation_id, "recreated-presentation");
+    let acknowledgements = broker
+        .consumer_acknowledgements("lifecycle")
+        .await
+        .expect("new consumer survives stale requests");
+    assert_eq!(acknowledgements.get("recreated-consumer"), Some(&0));
+    assert!(!acknowledgements.contains_key("late-old-consumer"));
+    assert!(!broker
+        .snapshot("lifecycle")
+        .await
+        .expect("replacement snapshot")
+        .visible_grid
+        .contains("late old-generation output"));
 }
 
 #[tokio::test]
