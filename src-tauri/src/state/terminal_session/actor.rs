@@ -17,6 +17,7 @@ pub const MAX_DEFERRED_TERMINAL_SESSIONS: usize = 256;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_WAKE_COALESCE: Duration = Duration::from_millis(16);
 const ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const RUNTIME_INPUT_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 type ResizeHandler = dyn Fn(TerminalGeometry) -> Result<(), String> + Send + Sync + 'static;
 type BrokerReply<T> = oneshot::Sender<Result<T, TerminalBrokerError>>;
@@ -124,6 +125,10 @@ impl TerminalClientIdentity {
         } else {
             TerminalInteractionCapability::ReadOnly
         }
+    }
+
+    fn initially_fallback_promotion_eligible(&self) -> bool {
+        self.client_kind == TerminalClientKind::Desktop
     }
 }
 
@@ -1432,6 +1437,7 @@ enum TerminalSessionMessage {
 struct PresentationRecord {
     state: TerminalPresentationState,
     last_geometry_sequence: u64,
+    fallback_promotion_eligible: bool,
 }
 
 struct ConsumerRecord {
@@ -1823,11 +1829,19 @@ impl TerminalSessionActor {
             .presentations
             .get(&request.presentation_id)
             .map_or(0, |record| record.last_geometry_sequence);
+        let fallback_promotion_eligible = self
+            .presentations
+            .get(&request.presentation_id)
+            .map_or_else(
+                || identity.initially_fallback_promotion_eligible(),
+                |record| record.fallback_promotion_eligible,
+            );
         self.presentations.insert(
             request.presentation_id,
             PresentationRecord {
                 state: state.clone(),
                 last_geometry_sequence,
+                fallback_promotion_eligible,
             },
         );
         if self
@@ -2092,6 +2106,7 @@ impl TerminalSessionActor {
         }
         if let Some(record) = self.presentations.get_mut(&request.presentation_id) {
             record.state.requires_resync = false;
+            record.fallback_promotion_eligible = true;
         }
         self.cancel_activation_timeout(&ActivationKey::from_ack(&request));
         self.pending_activation = None;
@@ -2239,13 +2254,7 @@ impl TerminalSessionActor {
             return Ok(self.rejected_decision(reason));
         }
         if !request.bytes.is_empty() {
-            self.runtime
-                .as_ref()
-                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
-                .input_tx
-                .send(request.bytes)
-                .await
-                .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+            self.send_runtime_input(request.bytes).await?;
         }
         Ok(self.accepted_decision())
     }
@@ -2311,13 +2320,7 @@ impl TerminalSessionActor {
             return Ok(self.rejected_decision(reason));
         }
         if !bytes.is_empty() {
-            self.runtime
-                .as_ref()
-                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
-                .input_tx
-                .send(bytes)
-                .await
-                .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+            self.send_runtime_input(bytes).await?;
         }
         Ok(self.accepted_decision())
     }
@@ -2327,15 +2330,22 @@ impl TerminalSessionActor {
             return Err(TerminalBrokerError::RuntimeUnavailable);
         }
         if !bytes.is_empty() {
-            self.runtime
-                .as_ref()
-                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
-                .input_tx
-                .send(bytes)
-                .await
-                .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+            self.send_runtime_input(bytes).await?;
         }
         Ok(())
+    }
+
+    async fn send_runtime_input(&self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+        let input_tx = self
+            .runtime
+            .as_ref()
+            .ok_or(TerminalBrokerError::RuntimeUnavailable)?
+            .input_tx
+            .clone();
+        tokio::time::timeout(RUNTIME_INPUT_SEND_TIMEOUT, input_tx.send(bytes))
+            .await
+            .map_err(|_| TerminalBrokerError::RuntimeIo("input_timeout".to_string()))?
+            .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))
     }
 
     fn read_compatibility_output(
@@ -2581,7 +2591,9 @@ impl TerminalSessionActor {
         let candidate = self
             .presentations
             .iter()
-            .filter(|(id, _)| self.presentation_has_active_renderer(id))
+            .filter(|(id, record)| {
+                record.fallback_promotion_eligible && self.presentation_has_active_renderer(id)
+            })
             .max_by_key(|(_, record)| record.state.interaction_sequence)
             .map(|(id, record)| (id.clone(), record.state.desired_geometry));
         if let Some((presentation_id, desired_geometry)) = candidate {

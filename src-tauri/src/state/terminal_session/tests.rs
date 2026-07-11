@@ -77,11 +77,13 @@ fn geometry(cols: u16, rows: u16) -> TerminalGeometry {
     TerminalGeometry { rows, cols }
 }
 
-fn runtime() -> (
+type RuntimeFixture = (
     TerminalRuntimeHandles,
     mpsc::Receiver<Vec<u8>>,
     Arc<Mutex<Vec<TerminalGeometry>>>,
-) {
+);
+
+fn runtime() -> RuntimeFixture {
     let (input_tx, input_rx) = mpsc::channel(256);
     let resizes = Arc::new(Mutex::new(Vec::new()));
     let observed = resizes.clone();
@@ -886,6 +888,90 @@ async fn zero_presentations_do_not_destroy_runtime_state() {
         .await
         .expect("retained runtime snapshot");
     assert!(snapshot.visible_grid.contains("still alive"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_activated_remote_is_not_fallback_promoted_when_owner_detaches() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer).await;
+    register_desktop(&broker, "desktop-owner").await;
+    let active = activate(&broker, "desktop-owner", generation, 0).await;
+    broker
+        .register_presentation(
+            registration(
+                "passive-remote",
+                TerminalClientKind::Remote,
+                TerminalRequestedInteraction::Interactive,
+            ),
+            TerminalClientIdentity::authenticated_remote("passive-remote", true),
+        )
+        .await
+        .expect("register passive remote");
+
+    let state = broker
+        .unregister_presentation("session-1", "desktop-owner", generation)
+        .await
+        .expect("detach owner");
+    assert_eq!(
+        active.broker_state.owner_presentation_id.as_deref(),
+        Some("desktop-owner")
+    );
+    assert_eq!(state.owner_presentation_id, None);
+
+    let begin = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "session-1".to_string(),
+            presentation_id: "passive-remote".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: state.lease_epoch,
+        })
+        .await
+        .expect("passive remote may still explicitly activate");
+    assert_eq!(begin.decision.status, TerminalLeaseDecisionStatus::Accepted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_timeout_does_not_wedge_subsequent_broker_calls() {
+    let timer = Arc::new(ManualTimer::default());
+    let broker = Arc::new(TerminalSessionBroker::with_timer(timer));
+    let (input_tx, _input_rx) = mpsc::channel(1);
+    input_tx
+        .send(b"fills native input channel".to_vec())
+        .await
+        .expect("prefill input channel");
+    let runtime = TerminalRuntimeHandles::new(input_tx, |_| Ok(()));
+    let generation = broker
+        .start_or_replace_runtime("session-1", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+    register_desktop(&broker, "owner").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        broker.send_input(TerminalInputRequest {
+            lease: TerminalLeaseIdentity {
+                session_id: "session-1".to_string(),
+                presentation_id: "owner".to_string(),
+                runtime_generation: generation,
+                lease_epoch: active.broker_state.lease_epoch,
+            },
+            bytes: b"cannot enter full native channel".to_vec(),
+        }),
+    )
+    .await
+    .expect("actor-owned two second timeout")
+    .expect_err("full native channel rejects timed out input");
+    assert_eq!(
+        error,
+        TerminalBrokerError::RuntimeIo("input_timeout".to_string())
+    );
+
+    let state = tokio::time::timeout(Duration::from_millis(100), broker.broker_state("session-1"))
+        .await
+        .expect("actor remains responsive after input timeout")
+        .expect("broker state");
+    assert_eq!(state.runtime_generation, generation);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

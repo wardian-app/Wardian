@@ -221,6 +221,7 @@ export const remoteClient = {
       onError?: (message: string) => void;
       onClose?: () => void;
       onOpen?: () => void;
+      onSocket?: (socket: WebSocket) => void;
     },
   ) {
     const ticket = await this.createTerminalStreamTicket();
@@ -228,9 +229,10 @@ export const remoteClient = {
     const socket = new WebSocket(
       `${protocol}//${window.location.host}/remote/api/agents/${encodeURIComponent(sessionId)}/terminal-stream`,
     );
+    handlers.onSocket?.(socket);
 
     socket.addEventListener("open", () => {
-      socket.send(JSON.stringify({ ticket: ticket.ticket, cols, rows }));
+      socket.send(JSON.stringify({ protocol_version: 2, ticket: ticket.ticket, cols, rows }));
       handlers.onOpen?.();
     });
     socket.addEventListener("message", (event) => {
@@ -246,8 +248,10 @@ export const remoteClient = {
           handlers.onSessionExpired?.();
           return;
         }
-        handlers.onError?.(data.code);
-        return;
+        if (data.fatal) {
+          handlers.onError?.(data.code);
+          return;
+        }
       }
       handlers.onMessage(data);
     });

@@ -631,7 +631,6 @@ pub async fn spawn_agent(
     let pty_provider = provider.clone();
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
-    let terminal_attach = app.state::<AppState>().terminal_attach.clone();
     let terminal_theme_for_pty = app_state.terminal_theme();
     let config_lock_clone = config_lock.clone();
     let terminal_sessions = app_state.terminal_sessions.clone();
@@ -714,7 +713,6 @@ pub async fn spawn_agent(
                             response,
                         );
                     }
-                    terminal_attach.process_output(&sid_for_pty, &buf[0..n]);
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
                     }

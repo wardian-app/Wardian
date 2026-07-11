@@ -2,7 +2,6 @@ use crate::state::active_agent::ActiveAgent;
 use crate::state::conversation_archive::ConversationArchiveState;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
-use crate::state::terminal_attach::TerminalAttachState;
 use crate::state::terminal_session::TerminalSessionBroker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -61,9 +60,6 @@ pub struct AppState {
     // Last frontend-reported effective theme. The frontend resolves "system"
     // before updating this so native PTY fallbacks can answer light/dark probes.
     pub terminal_theme: RwLock<String>,
-    // Lazy remote terminal attach state. This remains idle unless a remote
-    // terminal opens an interactive attachment for an agent.
-    pub terminal_attach: Arc<TerminalAttachState>,
     // Authoritative per-runtime terminal actors. Presentations and feed
     // consumers attach to this broker without owning PTY lifetime or queues.
     pub terminal_sessions: Arc<TerminalSessionBroker>,
@@ -186,7 +182,6 @@ impl Default for AppState {
             conversation_archive: ConversationArchiveState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             terminal_theme: RwLock::new("dark".to_string()),
-            terminal_attach: Arc::new(TerminalAttachState::default()),
             terminal_sessions: Arc::new(TerminalSessionBroker::default()),
         }
     }
@@ -203,7 +198,6 @@ mod tests {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
         assert!(state.workbench_io_lock.try_lock().is_ok());
-        assert!(state.terminal_attach.snapshot("missing-agent").is_none());
         assert!(state
             .terminal_sessions
             .subscribe_wakeups()

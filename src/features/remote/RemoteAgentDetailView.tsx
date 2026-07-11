@@ -17,7 +17,14 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { AgentChatEvent, AgentChatRole, RemoteAgentSummary } from "../../types";
+import type {
+  AgentChatEvent,
+  AgentChatRole,
+  RemoteAgentSummary,
+  RemoteTerminalBrokerEvent,
+  RemoteTerminalPresentationMode,
+  TerminalSnapshot,
+} from "../../types";
 import { toActivityBlock, type ActivityBlockModel } from "../grid/activityBlocks";
 import { parseApprovalChoices } from "../grid/approvalChoices";
 import { ChatMarkdown } from "../grid/markdown/ChatMarkdown";
@@ -34,6 +41,7 @@ import { remoteStatusClassFor } from "./remoteAgentStatus";
 import { useRemoteStore } from "./useRemoteStore";
 import { isUserFacingProviderName, providerDisplayName } from "../agents/providerOptions";
 import { remoteClient } from "./remoteClient";
+import { RemoteTerminalSessionClient } from "./remoteTerminalSessionClient";
 import {
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
@@ -42,6 +50,7 @@ import {
   type TerminalCapabilityContext,
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
+import { calculateTerminalMirrorFit } from "../terminal/terminalRendererBudget";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -73,6 +82,8 @@ const CHAT_ROW_PAGE_SIZE = 60;
 const EDGE_BACK_START_MAX_X = 32;
 const EDGE_BACK_MIN_DELTA_X = 72;
 const EDGE_BACK_MAX_DELTA_Y = 48;
+const MAX_PENDING_CAPABILITY_RESPONSES = 32;
+const MAX_PENDING_CAPABILITY_RESPONSE_BYTES = 64 * 1024;
 
 type RemoteChatRow = PresentedChatRow;
 type ToolDisplayKind = "diff" | "file" | "permission" | "search" | "shell" | "todo" | "generic";
@@ -255,16 +266,6 @@ function installTerminalScrollBridge(
   };
 }
 
-function sendTerminalSocketMessage(socket: WebSocket | null, payload: Record<string, unknown>) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-  try {
-    socket.send(JSON.stringify(payload));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 type RemoteTerminalCompositionInputState = {
   acceptedText: string;
   active: boolean;
@@ -311,6 +312,112 @@ function setTerminalStdinEnabled(terminal: Terminal, enabled: boolean) {
   if (terminalWithOptions.options) {
     terminalWithOptions.options.disableStdin = !enabled;
   }
+}
+
+function writeRemoteTerminal(terminal: Terminal, output: string) {
+  return new Promise<void>((resolve) => {
+    if (!terminal.write) {
+      resolve();
+      return;
+    }
+    terminal.write(output, resolve);
+  });
+}
+
+function proposedRemoteViewport(
+  fitAddon: FitAddon,
+  terminal: Terminal,
+  host: HTMLDivElement,
+  scrollSurface: HTMLDivElement,
+) {
+  const viewport = scrollSurface.getBoundingClientRect();
+  const viewportWidth = viewport.width || scrollSurface.clientWidth;
+  const viewportHeight = viewport.height || scrollSurface.clientHeight;
+  const cell = (
+    terminal as Terminal & {
+      _core?: {
+        _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } };
+      };
+    }
+  )._core?._renderService?.dimensions?.css?.cell;
+  const cellWidth = cell?.width ?? 0;
+  const cellHeight = cell?.height ?? 0;
+  if (
+    viewportWidth > 0
+    && viewportHeight > 0
+    && cellWidth > 0
+    && cellHeight > 0
+  ) {
+    return {
+      cols: Math.max(1, Math.floor(viewportWidth / cellWidth)),
+      rows: Math.max(1, Math.floor(viewportHeight / cellHeight)),
+    };
+  }
+  const saved = {
+    transform: host.style.transform,
+    transformOrigin: host.style.transformOrigin,
+    width: host.style.width,
+    height: host.style.height,
+  };
+  host.style.transform = "";
+  host.style.transformOrigin = "";
+  host.style.width = "100%";
+  host.style.height = "100%";
+  let proposed: { cols: number; rows: number } | undefined;
+  try {
+    proposed = (fitAddon as FitAddon & {
+      proposeDimensions?: () => { cols: number; rows: number } | undefined;
+    }).proposeDimensions?.();
+  } finally {
+    host.style.transform = saved.transform;
+    host.style.transformOrigin = saved.transformOrigin;
+    host.style.width = saved.width;
+    host.style.height = saved.height;
+  }
+  return proposed ?? { cols: terminal.cols || 80, rows: terminal.rows || 24 };
+}
+
+function resetRemoteOwnerLayout(host: HTMLDivElement, scrollSurface: HTMLDivElement) {
+  host.style.transform = "";
+  host.style.transformOrigin = "";
+  host.style.width = "100%";
+  host.style.height = "100%";
+  scrollSurface.style.overflow = "hidden";
+}
+
+function applyRemoteMirrorLayout(
+  terminal: Terminal,
+  host: HTMLDivElement,
+  scrollSurface: HTMLDivElement,
+  canonical: { cols: number; rows: number },
+) {
+  if (terminal.cols !== canonical.cols || terminal.rows !== canonical.rows) {
+    terminal.resize?.(canonical.cols, canonical.rows);
+  }
+  const viewport = scrollSurface.getBoundingClientRect();
+  const viewportWidth = viewport.width || scrollSurface.clientWidth;
+  const viewportHeight = viewport.height || scrollSurface.clientHeight;
+  const cell = (
+    terminal as Terminal & {
+      _core?: {
+        _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } };
+      };
+    }
+  )._core?._renderService?.dimensions?.css?.cell;
+  const fit = calculateTerminalMirrorFit({
+    cols: canonical.cols,
+    rows: canonical.rows,
+    cellWidth: cell?.width ?? Math.max(1, viewportWidth / canonical.cols),
+    cellHeight: cell?.height ?? Math.max(1, viewportHeight / canonical.rows),
+    viewportWidth,
+    viewportHeight,
+  });
+  host.style.transformOrigin = "top left";
+  host.style.transform = `translate(${fit.offset_x}px, ${fit.offset_y}px) scale(${fit.scale})`;
+  host.style.width = `${Math.max(1, fit.content_width / fit.scale)}px`;
+  host.style.height = `${Math.max(1, fit.content_height / fit.scale)}px`;
+  scrollSurface.style.overflowX = fit.pan_x ? "auto" : "hidden";
+  scrollSurface.style.overflowY = fit.pan_y ? "auto" : "hidden";
 }
 
 function chatInputDisabledReason(status: string | null | undefined, isSubmitting: boolean): string | null {
@@ -563,8 +670,11 @@ function TerminalPane({
   const terminalScrollSurfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const sessionClientRef = useRef<RemoteTerminalSessionClient | null>(null);
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
+  const [presentationMode, setPresentationMode] = useState<RemoteTerminalPresentationMode>("connecting");
+  const [leaseNotice, setLeaseNotice] = useState("");
   const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
   const remoteTerminalFontSize = useRemoteStore((state) => state.remoteTerminalFontSize);
 
@@ -574,6 +684,8 @@ function TerminalPane({
     if (!host || !scrollSurface) return;
     host.replaceChildren();
     setConnected(false);
+    setPresentationMode("connecting");
+    setLeaseNotice("");
     setStreamError("");
 
     const terminal = new Terminal({
@@ -599,8 +711,9 @@ function TerminalPane({
     scrollSurface.style.overscrollBehavior = "contain";
     const removeTerminalScrollBridge = installTerminalScrollBridge(terminal, scrollSurface, host);
     terminalRef.current = terminal;
-    let lastSentCols = terminal.cols || 80;
-    let lastSentRows = terminal.rows || 24;
+    let lastViewport = { runtimeGeneration: 0, cols: 0, rows: 0 };
+    let lastOwnerResize = { runtimeGeneration: 0, cols: 0, rows: 0 };
+    let requestedResyncKey = "";
     const compositionInputState: RemoteTerminalCompositionInputState = {
       acceptedText: "",
       active: false,
@@ -618,15 +731,41 @@ function TerminalPane({
     };
     terminalTextarea?.addEventListener("compositionstart", onCompositionStart);
     terminalTextarea?.addEventListener("compositionend", onCompositionEnd);
-    const sendResizeIfChanged = () => {
+    let disposed = false;
+    let terminalSession: RemoteTerminalSessionClient | null = null;
+    const reportViewport = (runtimeGeneration: number, cols: number, rows: number) => {
+      if (
+        lastViewport.runtimeGeneration === runtimeGeneration
+        && lastViewport.cols === cols
+        && lastViewport.rows === rows
+      ) return;
+      if (terminalSession?.reportViewport(cols, rows)) {
+        lastViewport = { runtimeGeneration, cols, rows };
+      }
+    };
+    const updateTerminalLayout = () => {
+      const state = terminalSession?.state;
+      const brokerState = state?.broker_state;
+      if (!state || !brokerState) return;
+      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface);
+      if (state.mode !== "owner") {
+        reportViewport(brokerState.runtime_generation, proposed.cols, proposed.rows);
+        applyRemoteMirrorLayout(terminal, host, scrollSurface, brokerState.geometry);
+        return;
+      }
+      resetRemoteOwnerLayout(host, scrollSurface);
       fitAddon.fit?.();
-      const cols = terminal.cols || 80;
-      const rows = terminal.rows || 24;
-      if (cols === lastSentCols && rows === lastSentRows) return;
-      const socket = socketRef.current;
-      if (sendTerminalSocketMessage(socket, { type: "resize", cols, rows })) {
-        lastSentCols = cols;
-        lastSentRows = rows;
+      const cols = terminal.cols || proposed.cols;
+      const rows = terminal.rows || proposed.rows;
+      reportViewport(brokerState.runtime_generation, cols, rows);
+      if (
+        lastOwnerResize.runtimeGeneration !== brokerState.runtime_generation
+        || lastOwnerResize.cols !== cols
+        || lastOwnerResize.rows !== rows
+      ) {
+        if (terminalSession?.resize(cols, rows)) {
+          lastOwnerResize = { runtimeGeneration: brokerState.runtime_generation, cols, rows };
+        }
       }
     };
 
@@ -634,12 +773,12 @@ function TerminalPane({
       const strippedInput = filterProviderTerminalInput(agent.provider ?? undefined, data);
       const input = normalizeRemoteTerminalCompositionInput(strippedInput, compositionInputState);
       if (input.length === 0) return;
-      sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
+      terminalSession?.sendText(input);
     });
     terminal.onBinary?.((data) => {
       const input = filterProviderTerminalInput(agent.provider ?? undefined, data, { binary: true });
       if (input.length === 0) return;
-      sendTerminalSocketMessage(socketRef.current, { type: "binary", data_base64: binaryStringToBase64(input) });
+      terminalSession?.sendBinary(binaryStringToBase64(input));
     });
 
     const themeObserver =
@@ -651,19 +790,39 @@ function TerminalPane({
       attributes: true,
     });
     const resizeObserver =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => sendResizeIfChanged());
-    resizeObserver?.observe(host);
-    window.addEventListener("resize", sendResizeIfChanged);
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => updateTerminalLayout());
+    resizeObserver?.observe(scrollSurface);
+    window.addEventListener("resize", updateTerminalLayout);
 
-    let disposed = false;
-    let seededInitialSnapshot = false;
-    let attachmentId: string | null = null;
-    let ownerAttachmentId: string | null = null;
     let focusReported = false;
-    const liveDecoder = new TextDecoder();
-    const updateTerminalOwnership = (nextOwnerAttachmentId: string | null) => {
-      ownerAttachmentId = nextOwnerAttachmentId;
-      setTerminalStdinEnabled(terminal, attachmentId !== null && attachmentId === ownerAttachmentId);
+    let liveDecoder = new TextDecoder();
+    const pendingCapabilityResponses: string[] = [];
+    let pendingCapabilityResponseBytes = 0;
+    const sendOrBufferCapabilityResponse = (input: string) => {
+      if (terminalSession?.sendText(input)) return;
+      const state = terminalSession?.state;
+      if (state?.mode !== "owner" || !state.presentation?.requires_resync) return;
+      const inputBytes = new TextEncoder().encode(input).byteLength;
+      while (
+        pendingCapabilityResponses.length > 0
+        && (pendingCapabilityResponses.length >= MAX_PENDING_CAPABILITY_RESPONSES
+          || pendingCapabilityResponseBytes + inputBytes > MAX_PENDING_CAPABILITY_RESPONSE_BYTES)
+      ) {
+        const dropped = pendingCapabilityResponses.shift();
+        if (dropped) pendingCapabilityResponseBytes -= new TextEncoder().encode(dropped).byteLength;
+      }
+      if (inputBytes <= MAX_PENDING_CAPABILITY_RESPONSE_BYTES) {
+        pendingCapabilityResponses.push(input);
+        pendingCapabilityResponseBytes += inputBytes;
+      }
+    };
+    const flushCapabilityResponses = () => {
+      while (pendingCapabilityResponses.length > 0) {
+        const input = pendingCapabilityResponses[0];
+        if (!terminalSession?.sendText(input)) return;
+        pendingCapabilityResponses.shift();
+        pendingCapabilityResponseBytes -= new TextEncoder().encode(input).byteLength;
+      }
     };
     const planRemoteTerminalOutput = (output: string) => {
       const context = {
@@ -673,13 +832,17 @@ function TerminalPane({
       const plan = planTerminalCapabilityResponses(agent.provider ?? undefined, output, context);
       focusReported = plan.focusReported;
       for (const input of plan.outgoingInputs) {
-        sendTerminalSocketMessage(socketRef.current, { type: "input", data: input });
+        sendOrBufferCapabilityResponse(input);
       }
       return { context, output: plan.normalizedOutput };
     };
-    const writeTerminalSnapshot = (stateBase64: string) => {
-      const plan = planRemoteTerminalOutput(base64ToTerminalString(stateBase64));
-      terminal.write?.(
+    const writeTerminalSnapshot = async (snapshot: TerminalSnapshot) => {
+      liveDecoder = new TextDecoder();
+      terminal.reset?.();
+      terminal.resize?.(snapshot.geometry.cols, snapshot.geometry.rows);
+      const plan = planRemoteTerminalOutput(base64ToTerminalString(snapshot.terminal_state_base64));
+      await writeRemoteTerminal(
+        terminal,
         normalizeRemoteTerminalOutput(
           plan.output,
           agent.provider ?? undefined,
@@ -688,12 +851,15 @@ function TerminalPane({
         ),
       );
     };
-    const writeTerminalUpdate = (stateBase64: string) => {
-      const output = liveDecoder.decode(base64ToTerminalBytes(stateBase64), { stream: true });
-      if (output) {
+    const writeTerminalEvents = async (events: readonly RemoteTerminalBrokerEvent[]) => {
+      for (const event of events) {
+        if (event.type !== "output") continue;
+        const output = liveDecoder.decode(base64ToTerminalBytes(event.bytes_base64), { stream: true });
+        if (!output) continue;
         const plan = planRemoteTerminalOutput(output);
         appendRemoteTerminalQueueOutput(agent.session_id, plan.output, agent.provider);
-        terminal.write?.(
+        await writeRemoteTerminal(
+          terminal,
           normalizeRemoteTerminalLiveOutput(
             plan.output,
             agent.provider ?? undefined,
@@ -705,38 +871,71 @@ function TerminalPane({
     void remoteClient
       .openTerminalStream(agent.session_id, terminal.cols || 80, terminal.rows || 24, {
         onMessage: (message) => {
-          if (disposed) return;
-          setConnected(true);
-          if ("owner_attachment_id" in message) {
-            updateTerminalOwnership(message.owner_attachment_id);
-          }
-          if (message.type === "snapshot") {
-            attachmentId = message.attachment_id;
-            updateTerminalOwnership(message.owner_attachment_id);
-            if (!seededInitialSnapshot) {
-              terminal.reset?.();
-              seededInitialSnapshot = true;
+          if (disposed || !terminalSession) return;
+          void terminalSession.handleMessage(message).catch((messageError: unknown) => {
+            if (!disposed) {
+              setStreamError(messageError instanceof Error ? messageError.message : String(messageError));
             }
-            terminal.resize?.(message.cols, message.rows);
-            writeTerminalSnapshot(message.state_base64);
-            return;
-          }
-          if (message.type === "update") {
-            writeTerminalUpdate(message.state_base64);
-            return;
-          }
-          if (message.type === "ownership") {
-            updateTerminalOwnership(message.owner_attachment_id);
-            terminal.resize?.(message.cols, message.rows);
-          }
+          });
         },
         onSessionExpired: () => setStreamError("Remote session expired."),
         onError: (message) => {
-          socketRef.current = null;
           setTerminalStdinEnabled(terminal, false);
           setStreamError(message);
         },
-        onOpen: () => sendResizeIfChanged(),
+        onSocket: (socket) => {
+          if (disposed) {
+            socket.close();
+            return;
+          }
+          socketRef.current = socket;
+          terminalSession = new RemoteTerminalSessionClient(socket, {
+            applySnapshot: writeTerminalSnapshot,
+            applyEvents: writeTerminalEvents,
+            onState: (state) => {
+              if (disposed) return;
+              const mode = state.mode;
+              setConnected(Boolean(state.presentation));
+              setPresentationMode(mode);
+              setTerminalStdinEnabled(
+                terminal,
+                mode === "owner" && !state.presentation?.requires_resync,
+              );
+              if (state.presentation) updateTerminalLayout();
+              if (mode === "owner" && !state.presentation?.requires_resync) {
+                flushCapabilityResponses();
+              }
+              const resyncKey = state.broker_state
+                ? `${state.broker_state.runtime_generation}:${state.broker_state.lease_epoch}`
+                : "";
+              if (
+                mode === "owner"
+                && state.presentation?.requires_resync
+                && resyncKey
+                && resyncKey !== requestedResyncKey
+              ) {
+                requestedResyncKey = resyncKey;
+                terminalSession?.beginOwnerResync();
+              } else if (!state.presentation?.requires_resync) {
+                requestedResyncKey = "";
+              }
+            },
+            onLeaseDecision: (decision) => {
+              if (decision.status === "accepted") {
+                setLeaseNotice("");
+              } else if (!disposed) {
+                setLeaseNotice(decision.reason?.replace(/_/g, " ") ?? "Lease changed");
+              }
+            },
+            onNonfatalError: (code) => {
+              if (!disposed) setLeaseNotice(code.replace(/_/g, " "));
+            },
+            onFatalError: (code) => {
+              if (!disposed) setStreamError(code);
+            },
+          });
+          sessionClientRef.current = terminalSession;
+        },
         onClose: () => {
           socketRef.current = null;
           setTerminalStdinEnabled(terminal, false);
@@ -757,7 +956,9 @@ function TerminalPane({
     return () => {
       disposed = true;
       setTerminalStdinEnabled(terminal, false);
-      sendTerminalSocketMessage(socketRef.current, { type: "detach" });
+      terminalSession?.detach();
+      terminalSession = null;
+      sessionClientRef.current = null;
       socketRef.current?.close();
       socketRef.current = null;
       terminalRef.current = null;
@@ -766,7 +967,7 @@ function TerminalPane({
       resizeObserver?.disconnect();
       terminalTextarea?.removeEventListener("compositionstart", onCompositionStart);
       terminalTextarea?.removeEventListener("compositionend", onCompositionEnd);
-      window.removeEventListener("resize", sendResizeIfChanged);
+      window.removeEventListener("resize", updateTerminalLayout);
       terminal.dispose?.();
       host.replaceChildren();
     };
@@ -779,6 +980,28 @@ function TerminalPane({
         <div className="inline-flex shrink-0 items-center gap-2 text-sm text-muted-neutral">
           <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
           Attaching terminal...
+        </div>
+      )}
+      {connected && (
+        <div className="flex shrink-0 items-center justify-between gap-2" aria-live="polite">
+          <div className="min-w-0 text-xs text-muted-neutral">
+            <span
+              data-testid="remote-terminal-presentation-mode"
+              className="rounded-full border border-wardian-border bg-wardian-card px-2 py-1 font-semibold text-primary"
+            >
+              {presentationMode === "owner" ? "Owner" : "Mirror"}
+            </span>
+            {leaseNotice ? <span className="ml-2">{leaseNotice}</span> : null}
+          </div>
+          {presentationMode === "mirror" ? (
+            <button
+              type="button"
+              className="rounded-md border border-[var(--color-wardian-accent)] px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)]"
+              onClick={() => sessionClientRef.current?.activate()}
+            >
+              Take terminal control
+            </button>
+          ) : null}
         </div>
       )}
       <div
