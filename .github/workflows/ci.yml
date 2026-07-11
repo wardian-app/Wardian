@@ -53,6 +53,10 @@ jobs:
         run: npm run lint
       - name: Unit Tests
         run: npm run test
+      - name: Build Frontend
+        run: npm run build
+      - name: Verify Workbench Cutover
+        run: npm run check:workbench-cutover
       - name: Coverage Report
         run: npm run test:coverage
       - name: Upload Frontend Coverage
@@ -83,10 +87,26 @@ jobs:
       - name: Check Compilation
         run: cargo check --workspace
 
-  e2e-smoke:
-    name: E2E Smoke Tests (Windows)
+  docs-quality:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify llms.txt
+        run: npm run docs:check-llms
+      - name: Build documentation
+        run: npm run docs:build
+
+  browser-workbench:
+    name: Browser E2E (Workbench & Full Suite)
     runs-on: windows-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
       - name: Setup Node
@@ -104,16 +124,61 @@ jobs:
         run: npm ci
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      - name: Run E2E tests
+      - name: Run workbench E2E tests
+        run: npm run test:e2e:workbench
+        env:
+          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-browser
+      - name: Run full browser E2E suite
         run: npm run test:e2e
         env:
-          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-test
+          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-browser
       - name: Upload test artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-results
           path: e2e/test-results/
+
+  native-workbench-smoke:
+    name: Native Workbench Smoke (Windows)
+    runs-on: windows-latest
+    env:
+      WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+      WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: "npm"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Install dependencies
+        run: npm ci
+      - name: Setup native E2E drivers
+        run: npm run setup:e2e:native
+      - name: Build native debug app
+        run: npm run tauri -- build --debug --no-bundle
+      - name: Run focused workbench native suite
+        run: >-
+          npm run test:e2e:native:fast --
+          e2e-native/tests/workbench-persistence-native.test.mjs
+          e2e-native/tests/terminal-presentation-broker-native.test.mjs
+          e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs
+      - name: Upload native failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-workbench-results
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}\wardian-e2e-native-workbench
+            e2e/screenshots/
 
   backend-linux-coverage:
     name: Backend (Linux - Test & Coverage)
