@@ -162,8 +162,8 @@ jobs:
       - name: Build native debug app
         run: npm run tauri -- build --debug --no-bundle
         env:
-          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
-          WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+          WARDIAN_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
+          WARDIAN_E2E_NATIVE_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
       - name: Run focused workbench native suite
         run: >-
           npm run test:e2e:native:fast --
@@ -172,8 +172,8 @@ jobs:
           e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs
           e2e-native/tests/remote-gateway-native.test.mjs
         env:
-          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
-          WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+          WARDIAN_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
+          WARDIAN_E2E_NATIVE_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
       - name: Upload native failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -181,7 +181,7 @@ jobs:
           name: native-workbench-results
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}\wardian-e2e-native-workbench
+            ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
             e2e/screenshots/
 
   backend-linux-coverage:

@@ -62,10 +62,10 @@ describe("CI workflow contract", () => {
     expect(native).toContain("runs-on: windows-latest");
     expect(native).not.toMatch(/^    if:/m);
     expect(native).toContain(
-      "WARDIAN_HOME: ${{ runner.temp }}\\wardian-e2e-native-workbench",
+      "WARDIAN_HOME: ${{ github.workspace }}\\.tmp\\e2e-native\\wardian-e2e-native-workbench",
     );
     expect(native).toContain(
-      "WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\\wardian-e2e-native-workbench",
+      "WARDIAN_E2E_NATIVE_HOME: ${{ github.workspace }}\\.tmp\\e2e-native\\wardian-e2e-native-workbench",
     );
     expect(native).toContain("run: npm run setup:e2e:native");
     expect(native).toContain("run: npm run tauri -- build --debug --no-bundle");
@@ -74,13 +74,14 @@ describe("CI workflow contract", () => {
     expect(native).toContain("e2e-native/tests/terminal-presentation-broker-native.test.mjs");
     expect(native).toContain("e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs");
     expect(native).toContain("e2e-native/tests/remote-gateway-native.test.mjs");
-    expect(native).not.toMatch(
-      /^    env:\s+WARDIAN_HOME: \$\{\{ runner\.temp \}\}/m,
+    expect(native).not.toContain("${{ runner.temp }}\\wardian-e2e-native-workbench");
+    expect(native.match(/WARDIAN_HOME: \$\{\{ github\.workspace \}\}\\\.tmp\\e2e-native\\wardian-e2e-native-workbench/g))
+      .toHaveLength(2);
+    expect(native.match(/WARDIAN_E2E_NATIVE_HOME: \$\{\{ github\.workspace \}\}\\\.tmp\\e2e-native\\wardian-e2e-native-workbench/g))
+      .toHaveLength(2);
+    expect(native).toContain(
+      "${{ github.workspace }}\\.tmp\\e2e-native\\wardian-e2e-native-workbench",
     );
-    expect(native.match(/WARDIAN_HOME: \$\{\{ runner\.temp \}\}\\wardian-e2e-native-workbench/g))
-      .toHaveLength(2);
-    expect(native.match(/WARDIAN_E2E_NATIVE_HOME: \$\{\{ runner\.temp \}\}\\wardian-e2e-native-workbench/g))
-      .toHaveLength(2);
     expect(native).toMatch(/if: failure\(\)[\s\S]*name: native-workbench-results/);
   });
 
