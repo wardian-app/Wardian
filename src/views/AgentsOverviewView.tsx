@@ -64,7 +64,12 @@ export interface AgentsOverviewViewProps {
   tempName: string;
   handleTitleChange: (id: string, title: string) => void;
   getStatusColorClass: (status: string) => string;
-  deriveCurrentThought: (title: string, thought: string, metrics: any, isOff: boolean) => { thought: string, status: string };
+  deriveCurrentThought: (
+    title: string,
+    thought: string | undefined,
+    metrics: AgentTelemetry | undefined,
+    isOff?: boolean,
+  ) => { thought: string; status: string };
   currentThoughts: Record<string, string>;
   offAgentIds: Set<string>;
   onMouseEnterCard: (id: string) => void;
@@ -300,6 +305,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       <div
         ref={gridRef}
         data-testid="agent-grid"
+        data-overview-mode={overviewLayout.presentationMode}
         data-presentation-mode={overviewLayout.presentationMode}
         style={gridStyle}
         onContextMenu={handleBackgroundContextMenu}

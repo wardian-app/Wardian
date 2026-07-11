@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
@@ -43,6 +43,53 @@ describe("WorkbenchHost", () => {
       "data-zoomed-group-id",
       "group-1",
     );
+  });
+
+  it("exposes Reset Workbench through the guarded navigation service", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "agents-overview" }),
+      ]),
+    });
+    const resetWorkbench = vi.fn(async () => "allow" as const);
+    const navigation = {
+      open: vi.fn(),
+      open_to_side: vi.fn(),
+      focus: vi.fn(),
+      close: vi.fn(),
+      close_group: vi.fn(),
+      reset_workbench: resetWorkbench,
+    } as unknown as WorkbenchNavigationService;
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    fireEvent.click(screen.getByRole("button", { name: "Reset Workbench" }));
+
+    await waitFor(() => expect(resetWorkbench).toHaveBeenCalledOnce());
+  });
+
+  it("makes every surface inert while a durable reset is pending", () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "agents-overview" }),
+      ]),
+      durable_token: "opaque-zero",
+    });
+    render(<WorkbenchHost store={store} />);
+
+    act(() => {
+      expect(store.getState().begin_pending_reset(
+        "reset-request",
+        store.getState().transaction_version,
+      )).toBe(true);
+    });
+    expect(screen.getByTestId("workbench-host")).toHaveAttribute("inert", "");
+    expect(screen.getByTestId("workbench-host")).toHaveAttribute("aria-busy", "true");
+
+    act(() => {
+      expect(store.getState().fail_pending_save("reset-request", "cancelled")).toBe(true);
+    });
+    expect(screen.getByTestId("workbench-host")).not.toHaveAttribute("inert");
+    expect(screen.getByTestId("workbench-host")).toHaveAttribute("aria-busy", "false");
   });
 
   it("retains suspended surfaces but recreates state-backed surfaces when hidden", async () => {

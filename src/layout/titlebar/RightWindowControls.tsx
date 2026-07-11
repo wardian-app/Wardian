@@ -6,11 +6,13 @@ const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("
 
 interface RightWindowControlsProps {
   rightCollapsed: boolean;
+  sidebarToggleDisabled?: boolean;
   setRightCollapsed: (collapsed: boolean) => void;
 }
 
 export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
   rightCollapsed,
+  sidebarToggleDisabled = false,
   setRightCollapsed,
 }) => {
   const appWindow = isTauri ? getCurrentWindow() : null;
@@ -44,6 +46,7 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
       <div className="titlebar-right-content">
         {/* ── Right Sidebar Toggle ───────────────────── */}
         <button
+          disabled={sidebarToggleDisabled}
           onClick={() => setRightCollapsed(!rightCollapsed)}
           className={`titlebar-toggle ${!rightCollapsed ? "active" : ""}`}
           title={rightCollapsed ? "Show Agent Roster" : "Hide Agent Roster"}

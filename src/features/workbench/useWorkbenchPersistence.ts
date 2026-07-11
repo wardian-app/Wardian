@@ -57,7 +57,7 @@ export type UseWorkbenchPersistenceResult = {
   save_pending: boolean;
   resolving_conflict: boolean;
   flush: () => Promise<void>;
-  reset: () => Promise<boolean>;
+  reset: (expected_transaction_version?: number) => Promise<boolean>;
   use_disk: () => Promise<boolean>;
   replace_disk: () => Promise<boolean>;
   export_local_json: () => WorkbenchLocalExport;
@@ -327,7 +327,9 @@ export function useWorkbenchPersistence(
     await queueRef.current?.flush();
   }, []);
   const reset = useCallback(
-    () => queueRef.current?.reset() ?? Promise.resolve(false),
+    (expectedTransactionVersion?: number) => queueRef.current?.reset(
+      expectedTransactionVersion,
+    ) ?? Promise.resolve(false),
     [],
   );
   const useDisk = useCallback(async (): Promise<boolean> => {

@@ -14,6 +14,7 @@ const DEFAULT_LEFT_RAIL_WIDTH = 48;
 
 interface CustomTitleBarProps {
   workbenchEnabled: boolean;
+  workbenchBusy?: boolean;
   onQuickOpen: () => void;
   onCommandPalette: () => void;
   viewMode: ViewMode;
@@ -52,6 +53,7 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
       } as React.CSSProperties}
     >
       <LeftSidebarControls
+        disabled={props.workbenchBusy}
         leftCollapsed={props.leftCollapsed}
         setLeftCollapsed={props.setLeftCollapsed}
         telemetry={props.telemetry}
@@ -67,10 +69,10 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
       >
         {props.workbenchEnabled ? (
           <div className="titlebar-zone titlebar-center" aria-label="Workbench commands" role="group">
-            <button type="button" className="titlebar-command" onClick={props.onQuickOpen}>
+            <button type="button" className="titlebar-command" disabled={props.workbenchBusy} onClick={props.onQuickOpen}>
               Quick Open
             </button>
-            <button type="button" className="titlebar-command" onClick={props.onCommandPalette}>
+            <button type="button" className="titlebar-command" disabled={props.workbenchBusy} onClick={props.onCommandPalette}>
               Commands
             </button>
           </div>
@@ -83,6 +85,7 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
       </div>
       <RightWindowControls
         rightCollapsed={props.rightCollapsed}
+        sidebarToggleDisabled={props.workbenchBusy}
         setRightCollapsed={props.setRightCollapsed}
       />
     </div>

@@ -459,6 +459,14 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(root.style.gridTemplateColumns).toBe('1fr');
   });
 
+  it('exposes the resolved Overview presentation through a semantic state attribute', () => {
+    renderGrid(null, agents);
+
+    const root = screen.getByTestId('agent-grid');
+    expect(root).toHaveAttribute('data-overview-mode', 'grid');
+    expect(root).toHaveAttribute('data-presentation-mode', 'grid');
+  });
+
   it('keeps the grid wide enough for terminal input rows when the app shell is narrow', () => {
     renderGrid(null, [agents[0]]);
 

@@ -38,6 +38,7 @@
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",
     "test:watch": "vitest",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:workbench": "playwright test --config e2e/playwright.workbench.config.ts e2e/tests/workbench-navigation.spec.ts e2e/tests/workbench-overview.spec.ts e2e/tests/workbench-recovery.spec.ts e2e/tests/workbench-screenshot.spec.ts",
     "test:e2e:web": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "test:e2e:native": "node scripts/run-native-e2e.mjs",

@@ -117,4 +117,22 @@ describe("CustomTitleBar navigation modes", () => {
     expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
+
+  it("disables shell mutation commands but preserves window controls during reset", () => {
+    render(
+      <CustomTitleBar
+        {...titlebarProps}
+        workbenchEnabled
+        workbenchBusy
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Quick Open" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Commands" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Hide Left Sidebar" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Hide Agent Roster" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+  });
 });

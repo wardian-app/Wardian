@@ -9,6 +9,7 @@ export type AppShellProps = {
   mainContent: ReactNode;
   mainOverlays?: ReactNode;
   roster: ReactNode;
+  contentBusy?: boolean;
 };
 
 /**
@@ -26,6 +27,7 @@ export function AppShell({
   mainContent,
   mainOverlays,
   roster,
+  contentBusy = false,
 }: AppShellProps) {
   return (
     <div
@@ -39,7 +41,12 @@ export function AppShell({
       {titlebar}
       {status}
       {conflictDialog}
-      <div className="flex flex-1 overflow-hidden">
+      <div
+        aria-busy={contentBusy}
+        className="flex flex-1 overflow-hidden"
+        data-testid="app-shell-content"
+        inert={contentBusy ? true : undefined}
+      >
         {leftRail}
         {leftPane}
         <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">

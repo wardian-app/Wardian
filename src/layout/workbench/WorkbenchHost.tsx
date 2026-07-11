@@ -86,6 +86,7 @@ const VISIBLE_COMMANDS: readonly WorkbenchCommandId[] = [
   "workbench.move_tab_next_group",
   "workbench.close_surface",
   "workbench.reopen_closed_surface",
+  "workbench.reset_workbench",
   "workbench.toggle_group_zoom",
   "workbench.focus_left_dock",
   "workbench.focus_right_dock",
@@ -169,6 +170,9 @@ export function WorkbenchHost({
   return (
     <div
       ref={rootRef}
+      aria-busy={state.reset_pending}
+      inert={state.reset_pending ? true : undefined}
+      data-reset-pending={state.reset_pending ? "true" : "false"}
       data-testid="workbench-host"
       data-zoomed-group-id={state.zoomed_group_id ?? "none"}
       className="wardian-workbench-host"

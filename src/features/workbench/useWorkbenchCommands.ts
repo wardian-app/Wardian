@@ -15,6 +15,7 @@ export type WorkbenchCommandId =
   | "workbench.move_tab_previous_group"
   | "workbench.close_surface"
   | "workbench.reopen_closed_surface"
+  | "workbench.reset_workbench"
   | "workbench.toggle_group_zoom"
   | "workbench.open_surface"
   | "workbench.quick_open"
@@ -51,6 +52,7 @@ export const WORKBENCH_COMMAND_ACTIONS: readonly WorkbenchCommandAction[] = Obje
   { command_id: "workbench.command_palette", title: "Show Command Palette" },
   { command_id: "workbench.close_surface", title: "Close Surface" },
   { command_id: "workbench.reopen_closed_surface", title: "Reopen Closed Surface" },
+  { command_id: "workbench.reset_workbench", title: "Reset Workbench" },
   { command_id: "workbench.next_tab", title: "Next Tab" },
   { command_id: "workbench.previous_tab", title: "Previous Tab" },
   { command_id: "workbench.next_group", title: "Focus Next Group" },
@@ -144,12 +146,22 @@ export function useWorkbenchCommands(
   const execute = useCallback(async (commandId: WorkbenchCommandId): Promise<boolean> => {
     const current = optionsRef.current;
     const state = current.store.getState();
+    if (state.reset_pending) return false;
     const document = state.document;
     const activeGroup = document.groups[document.active_group_id];
     const groupIds = groupIdsInTreeOrder(document.root);
     const focusActive = (groupId: string, surfaceId: string | null): void => {
       if (surfaceId) focusSurface(current.root_ref.current, surfaceId);
       else focusGroup(current.root_ref.current, groupId);
+      window.requestAnimationFrame(() => {
+        const latest = current.store.getState().document;
+        if (
+          latest.active_group_id !== groupId
+          || latest.groups[groupId]?.active_surface_id !== surfaceId
+        ) return;
+        if (surfaceId) focusSurface(current.root_ref.current, surfaceId);
+        else focusGroup(current.root_ref.current, groupId);
+      });
     };
     const applyActive = (groupId: string, surfaceId: string | null): boolean => {
       const result = current.store.getState().apply_commands([{
@@ -227,6 +239,8 @@ export function useWorkbenchCommands(
         focusActive(next.active_group_id, next.groups[next.active_group_id].active_surface_id);
         return true;
       }
+      case "workbench.reset_workbench":
+        return await current.navigation.reset_workbench() === "allow";
       case "workbench.toggle_group_zoom":
         current.store.getState().set_zoomed_group_id(
           state.zoomed_group_id === activeGroup.group_id ? null : activeGroup.group_id,

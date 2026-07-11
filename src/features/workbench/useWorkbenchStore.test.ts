@@ -579,6 +579,57 @@ describe("createWorkbenchStore", () => {
     expect(notifications).toBe(0);
   });
 
+  it("reserves reset atomically without mutating the working document", () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([makeSurface("surface-1")]),
+      durable_token: "opaque-zero",
+    });
+    const before = store.getState();
+
+    expect(store.getState().begin_pending_reset(
+      "reset-request",
+      before.transaction_version,
+    )).toBe(true);
+
+    const pending = store.getState();
+    expect(pending.document).toBe(before.document);
+    expect(pending.pending_document).toBe(before.document);
+    expect(pending.pending_revision).toBe(1);
+    expect(pending.pending_transaction_version).toBe(before.transaction_version);
+    expect(pending.reset_pending).toBe(true);
+
+    const mutation = pending.apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-2") },
+    ]);
+    expect(mutation.accepted).toBe(false);
+    if (mutation.accepted) throw new Error("pending reset mutation was accepted");
+    expect(mutation.errors[0]?.path).toBe("$.reset_pending");
+    pending.set_launcher_open(true);
+    pending.set_zoomed_group_id("group-1");
+    expect(store.getState().document).toBe(before.document);
+    expect(store.getState().launcher_open).toBe(false);
+    expect(store.getState().zoomed_group_id).toBeNull();
+  });
+
+  it("rejects a pending reset at the maximum durable revision", () => {
+    const document = {
+      ...makeSingleGroupDocument(),
+      revision: Number.MAX_SAFE_INTEGER,
+    };
+    const store = createWorkbenchStore({
+      initial_document: document,
+      durable_revision: Number.MAX_SAFE_INTEGER,
+      durable_token: "max-token",
+    });
+    const before = store.getState();
+
+    expect(store.getState().begin_pending_reset(
+      "reset-request",
+      before.transaction_version,
+    )).toBe(false);
+    expect(store.getState()).toBe(before);
+  });
+
   it("reconciles zoom atomically when a document mutation removes its group", () => {
     const document = {
       ...makeSingleGroupDocument(),

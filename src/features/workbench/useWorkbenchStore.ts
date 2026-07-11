@@ -58,6 +58,7 @@ type MutableWorkbenchStoreState = {
   durable_token: string | null;
   is_dirty: boolean;
   save_pending: boolean;
+  reset_pending: boolean;
   pending_request_id: string | null;
   pending_revision: number | null;
   pending_document: WorkbenchDocumentV1 | null;
@@ -83,6 +84,11 @@ type MutableWorkbenchStoreState = {
   adopt_durable_state: (durableState: WorkbenchDurableState) => boolean;
   rebase_working_onto_durable: (durableState: WorkbenchDurableState) => boolean;
   begin_pending_save: (requestId: string) => boolean;
+  /** Reserves a durable reset without changing the working document before acknowledgement. */
+  begin_pending_reset: (
+    requestId: string,
+    expectedTransactionVersion: number,
+  ) => boolean;
   acknowledge_pending_save: (
     requestId: string,
     revision: number,
@@ -320,6 +326,13 @@ export function createWorkbenchStore(
           }], true);
           return current;
         }
+        if (current.reset_pending) {
+          outcome = rejected(current.document, [{
+            path: "$.reset_pending",
+            message: "workbench reset is pending",
+          }]);
+          return current;
+        }
         outcome = reduceCommands(current, commands);
         if (!outcome.accepted) return current;
         return {
@@ -349,6 +362,13 @@ export function createWorkbenchStore(
             path: "$.transaction_version",
             message: "workbench reset is stale",
           }], true);
+          return current;
+        }
+        if (current.reset_pending) {
+          outcome = rejected(current.document, [{
+            path: "$.reset_pending",
+            message: "workbench reset is already pending",
+          }]);
           return current;
         }
         const eligibility = mutationEligibility(current);
@@ -412,6 +432,7 @@ export function createWorkbenchStore(
       durable_token: options.durable_token ?? null,
       is_dirty: false,
       save_pending: false,
+      reset_pending: false,
       pending_request_id: null,
       pending_revision: null,
       pending_document: null,
@@ -429,6 +450,7 @@ export function createWorkbenchStore(
       compare_and_reset_document: compareAndReset,
 
       set_zoomed_group_id: (groupId) => {
+        if (get().reset_pending) return;
         if (groupId !== null && !(groupId in get().document.groups)) {
           throw new Error(`group ${groupId} does not exist`);
         }
@@ -441,7 +463,7 @@ export function createWorkbenchStore(
             });
       },
 
-      set_launcher_open: (open) => set((current) => current.launcher_open === open
+      set_launcher_open: (open) => set((current) => current.reset_pending || current.launcher_open === open
         ? current
         : {
             ...current,
@@ -452,7 +474,7 @@ export function createWorkbenchStore(
       touch_surface: (surfaceId) => {
         let touched = false;
         set((current) => {
-          if (!(surfaceId in current.document.surfaces)) return current;
+          if (current.reset_pending || !(surfaceId in current.document.surfaces)) return current;
           touched = true;
           if (current.surface_mru[0] === surfaceId) return current;
           return {
@@ -491,6 +513,7 @@ export function createWorkbenchStore(
           durable_token: token,
           is_dirty: false,
           save_pending: false,
+          reset_pending: false,
           pending_request_id: null,
           pending_revision: null,
           pending_document: null,
@@ -542,6 +565,7 @@ export function createWorkbenchStore(
           durable_token: token,
           is_dirty: true,
           save_pending: false,
+          reset_pending: false,
           pending_request_id: null,
           pending_revision: null,
           pending_document: null,
@@ -574,6 +598,43 @@ export function createWorkbenchStore(
             save_pending: true,
             pending_request_id: requestId,
             pending_revision: current.document.revision,
+            pending_document: current.document,
+            pending_expected_token: current.durable_token,
+            pending_transaction_version: current.transaction_version,
+            used_pending_request_ids: Object.freeze([
+              ...current.used_pending_request_ids,
+              requestId,
+            ]),
+            save_error: null,
+            transaction_version: current.transaction_version + 1,
+          };
+        });
+        return begun;
+      },
+
+      begin_pending_reset: (requestId, expectedTransactionVersion) => {
+        let begun = false;
+        set((current) => {
+          const pendingRevision = nextRevision(current.durable_revision);
+          if (
+            requestId.length === 0
+            || current.transaction_version !== expectedTransactionVersion
+            || pendingRevision === null
+            || current.durable_token === null
+            || current.durable_token.length === 0
+            || current.pending_request_id !== null
+            || current.used_pending_request_ids.includes(requestId)
+            || current.loading
+            || current.read_only
+            || current.conflict !== null
+          ) return current;
+          begun = true;
+          return {
+            ...current,
+            save_pending: true,
+            reset_pending: true,
+            pending_request_id: requestId,
+            pending_revision: pendingRevision,
             pending_document: current.document,
             pending_expected_token: current.durable_token,
             pending_transaction_version: current.transaction_version,
@@ -639,6 +700,7 @@ export function createWorkbenchStore(
             durable_token: durableToken,
             is_dirty: hasNewerWorkingDocument,
             save_pending: false,
+            reset_pending: false,
             pending_request_id: null,
             pending_revision: null,
             pending_document: null,
@@ -702,6 +764,7 @@ export function createWorkbenchStore(
             durable_token: durableToken,
             is_dirty: hasNewerWorkingDocument,
             save_pending: false,
+            reset_pending: false,
             pending_request_id: null,
             pending_revision: null,
             pending_document: null,
@@ -722,6 +785,7 @@ export function createWorkbenchStore(
           return {
             ...current,
             save_pending: false,
+            reset_pending: false,
             pending_request_id: null,
             pending_revision: null,
             pending_document: null,
@@ -744,6 +808,7 @@ export function createWorkbenchStore(
           return {
             ...current,
             save_pending: false,
+            reset_pending: false,
             pending_request_id: null,
             pending_revision: null,
             pending_document: null,

@@ -58,7 +58,7 @@ function surfaceProps(overrides: Partial<AgentsOverviewSurfaceProps> = {}): Agen
     handleTitleChange: vi.fn(),
     getStatusColorClass: () => "",
     deriveCurrentThought: (_title, thought) => ({
-      thought,
+      thought: thought ?? "",
       status: thought || "Idle",
     }),
     currentThoughts: { "agent-1": "Idle", "agent-2": "Processing" },

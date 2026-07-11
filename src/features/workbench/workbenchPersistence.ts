@@ -396,7 +396,7 @@ export type WorkbenchPendingSaveEnvelope = {
 export type WorkbenchSaveQueue = {
   /** Resolves true only when an existing or newly-created save was submitted. */
   flush: () => Promise<boolean>;
-  reset: () => Promise<boolean>;
+  reset: (expected_transaction_version?: number) => Promise<boolean>;
   shutdown: () => Promise<void>;
 };
 
@@ -606,7 +606,7 @@ export function createWorkbenchSaveQueue(
 
   return {
     flush,
-    reset: async () => {
+    reset: async (expectedTransactionVersion) => {
       cancelTimer();
       if (resetInFlight || shuttingDown || disposed) return false;
       if (active !== null) {
@@ -615,21 +615,21 @@ export function createWorkbenchSaveQueue(
       }
       const before = options.store.getState();
       if (
-        before.loading
+        (expectedTransactionVersion !== undefined
+          && before.transaction_version !== expectedTransactionVersion)
+        || before.loading
         || before.read_only
         || before.conflict !== null
         || before.durable_token === null
         || before.durable_token.length === 0
       ) return false;
       resetInFlight = true;
-      const resetResult = before.reset_document();
-      if (!resetResult.accepted) {
-        resetInFlight = false;
-        return false;
-      }
       cancelTimer();
       const requestId = createRequestId();
-      if (!options.store.getState().begin_pending_save(requestId)) {
+      if (!options.store.getState().begin_pending_reset(
+        requestId,
+        before.transaction_version,
+      )) {
         resetInFlight = false;
         return false;
       }

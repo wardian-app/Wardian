@@ -239,6 +239,8 @@ function AppBody() {
     initial_view_mode: viewMode,
     shell_projection: WORKBENCH_SHELL_PROJECTION,
   });
+  const workbenchResetPending = WORKBENCH_FLAGS.workbench_enabled
+    && workbenchPersistence.store.getState().reset_pending;
   const dirtySurfacePrompt = useDirtySurfacePrompt();
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
@@ -247,8 +249,9 @@ function AppBody() {
     () => createWorkbenchNavigationService({
       registry: workbenchRegistry,
       store: workbenchPersistence.store,
+      reset_document: workbenchPersistence.reset,
     }),
-    [workbenchPersistence.store, workbenchRegistry],
+    [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
   );
   const [legacyCachedCanvasViews, setLegacyCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
@@ -1280,8 +1283,10 @@ function AppBody() {
     <AgentResourceContext.Provider value={agentResources}>
       <RosterProvider value={roster}>
         <AppShell
+          contentBusy={workbenchResetPending}
           titlebar={<CustomTitleBar
         workbenchEnabled={WORKBENCH_FLAGS.workbench_enabled}
+        workbenchBusy={workbenchResetPending}
         onQuickOpen={openWorkbenchLauncher}
         onCommandPalette={openWorkbenchLauncher}
         viewMode={viewMode}

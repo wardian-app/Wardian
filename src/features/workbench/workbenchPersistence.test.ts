@@ -8,6 +8,7 @@ import {
   readLegacyWorkbenchMigration,
   decideWorkbenchSaveResponse,
   type WorkbenchPersistenceAdapter,
+  type WorkbenchResetResult,
   type WorkbenchSaveResult,
 } from "./workbenchPersistence";
 
@@ -601,6 +602,73 @@ describe("createWorkbenchSaveQueue", () => {
     expect(store.getState().pending_request_id).toBeNull();
     expect(store.getState().durable_revision).toBe(1);
     expect(store.getState().durable_token).toBe("reset-token");
+  });
+
+  it("leaves the working document intact when durable reset conflicts or fails", async () => {
+    for (const reset of [
+      vi.fn().mockResolvedValue({
+        outcome: "revision_conflict",
+        durable_revision: 2,
+        durable_token: "disk-token",
+        request_id: "reset-request",
+      } satisfies WorkbenchResetResult),
+      vi.fn().mockRejectedValue(new Error("reset unavailable")),
+    ]) {
+      const store = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([makeSurface("before-reset")]),
+        durable_token: "opaque-zero",
+      });
+      const before = store.getState().document;
+      const queue = createWorkbenchSaveQueue({
+        store,
+        adapter: { save: vi.fn(), reset },
+        request_id: () => "reset-request",
+      });
+
+      await expect(queue.reset(store.getState().transaction_version)).resolves.toBe(false);
+
+      expect(store.getState().document).toBe(before);
+      expect(store.getState().document.surfaces["before-reset"]).toBeDefined();
+      expect(store.getState().durable_revision).toBe(0);
+    }
+  });
+
+  it("does not reset state that changed while an active save was draining", async () => {
+    const activeSave = deferred<WorkbenchSaveResult>();
+    const reset = vi.fn();
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument(),
+      durable_token: "opaque-zero",
+    });
+    const queue = createWorkbenchSaveQueue({
+      store,
+      adapter: {
+        save: vi.fn(() => activeSave.promise),
+        reset,
+      },
+      request_id: () => "request-1",
+    });
+    store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-a") },
+    ]);
+    void queue.flush();
+    const expectedTransactionVersion = store.getState().transaction_version;
+    const resetting = queue.reset(expectedTransactionVersion);
+
+    store.getState().apply_commands([
+      { type: "open_surface", surface: makeSurface("surface-b") },
+    ]);
+    activeSave.resolve({
+      outcome: "saved",
+      durable_revision: 1,
+      durable_token: "opaque-one",
+      request_id: "request-1",
+    });
+
+    await expect(resetting).resolves.toBe(false);
+    expect(reset).not.toHaveBeenCalled();
+    expect(store.getState().document.surfaces["surface-a"]).toBeDefined();
+    expect(store.getState().document.surfaces["surface-b"]).toBeDefined();
   });
 
   it("drains one newest snapshot after shutdown waits for an active save", async () => {

@@ -369,6 +369,35 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["surface-new"]).toBeDefined();
   });
 
+  it("delegates the durable reset only after every close guard allows it", async () => {
+    const canClose = vi.fn(async () => "allow" as const);
+    const registry = createSurfaceRegistry([
+      definition("guarded", {
+        close_policy: "confirm_if_dirty",
+        can_close: canClose,
+      }),
+    ]);
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "guarded" }),
+      ]),
+    });
+    const resetDocument = vi.fn((expectedTransactionVersion: number) => {
+      expect(expectedTransactionVersion).toBe(store.getState().transaction_version);
+      return store.getState().compare_and_reset_document(expectedTransactionVersion).accepted;
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      reset_document: resetDocument,
+    });
+
+    await expect(navigation.reset_workbench()).resolves.toBe("allow");
+    expect(canClose).toHaveBeenCalledOnce();
+    expect(resetDocument).toHaveBeenCalledOnce();
+    expect(Object.keys(store.getState().document.surfaces)).toHaveLength(0);
+  });
+
   it("atomically rejects a final-microtask runtime race after an allowed guard", async () => {
     let releaseGuard: ((decision: "allow") => void) | undefined;
     const guard = new Promise<"allow">((resolve) => {

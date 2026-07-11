@@ -14,6 +14,7 @@ export type WorkbenchNavigationOptions = {
   registry: WorkbenchSurfaceRegistry;
   store: WorkbenchStore;
   create_id?: (kind: WorkbenchIdKind) => string;
+  reset_document?: (expected_transaction_version: number) => boolean | Promise<boolean>;
 };
 
 export interface WorkbenchNavigationService {
@@ -226,6 +227,12 @@ export function createWorkbenchNavigationService(
       if (
         await guardSurfaces(snapshot, snapshotState.transaction_version, surfaceIds) === "cancel"
       ) return "cancel";
+      if (options.reset_document) {
+        if (store.getState().transaction_version !== snapshotState.transaction_version) {
+          return "cancel";
+        }
+        return await options.reset_document(snapshotState.transaction_version) ? "allow" : "cancel";
+      }
       const result = store.getState().compare_and_reset_document(
         snapshotState.transaction_version,
       );

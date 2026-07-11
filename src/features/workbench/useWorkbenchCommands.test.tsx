@@ -113,7 +113,7 @@ describe("useWorkbenchCommands", () => {
     expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
   });
 
-  it("executes split, move, close/reopen, zoom, launcher, palette, and dock actions", async () => {
+  it("executes split, move, close/reopen, reset, zoom, launcher, palette, and dock actions", async () => {
     const store = createWorkbenchStore({ initial_document: makeCommandDocument() });
     let router: WorkbenchCommandRouter | null = null;
     const onQuickOpen = vi.fn();
@@ -164,6 +164,9 @@ describe("useWorkbenchCommands", () => {
     expect(onCommandPalette).toHaveBeenCalledOnce();
     expect(onLeftDock).toHaveBeenCalledOnce();
     expect(onRightDock).toHaveBeenCalledOnce();
+
+    await act(() => commandRouter.execute("workbench.reset_workbench"));
+    expect(Object.keys(store.getState().document.surfaces)).toHaveLength(0);
   });
 
   it("routes keyboard Quick Open and command palette actions", () => {
