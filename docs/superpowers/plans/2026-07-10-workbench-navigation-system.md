@@ -658,11 +658,11 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 
 **Semantic helper contract:** `activeWorkbenchGroup(page)`, `surfaceTab(page, surface_type, resource_key?)`, `surfacePanel(...)`, and `openSurface(...)` consume the DOM contract from Task 6. Do not encode Dockview class names.
 
-- [ ] **Step 1: Run the audited legacy regex** from `docs/research/workbench-navigation/legacy-titlebar-audit.md` against `e2e`, `e2e-native`, `scripts`, `src`, and `.github`. At commit `d53842dc`, expected count is exactly 25. Record every path as migrated, retained only for the flag-off comparison until Task 19, scheduled in Tasks 17/18/20, or intentionally unrelated (`remote-pwa`, `RemoteMobileApp`, Settings density).
-- [ ] **Step 2: Write the semantic Playwright helper** with typed core surface names and role/data-attribute selectors.
-- [ ] **Step 3: Replace all 13 desktop browser suites' fixed-button navigation.** Preserve remote PWA's own mobile Queue navigation. Configure these runs with `VITE_WARDIAN_WORKBENCH=1`; do not delete the flag-off product branch yet.
-- [ ] **Step 4: Run** the 13 selected Playwright files with `VITE_WARDIAN_WORKBENCH=1`. **Expected:** PASS; no selected desktop suite clicks a fixed titlebar button and the audit accounts for all original hits.
-- [ ] **Step 5: Commit** `test(workbench): migrate desktop surface navigation selectors`.
+- [x] **Step 1: Run the audited legacy regex** from `docs/research/workbench-navigation/legacy-titlebar-audit.md` against `e2e`, `e2e-native`, `scripts`, `src`, and `.github`. At commit `d53842dc`, expected count is exactly 25. Record every path as migrated, retained only for the flag-off comparison until Task 19, scheduled in Tasks 17/18/20, or intentionally unrelated (`remote-pwa`, `RemoteMobileApp`, Settings density).
+- [x] **Step 2: Write the semantic Playwright helper** with typed core surface names and role/data-attribute selectors.
+- [x] **Step 3: Replace all 13 desktop browser suites' fixed-button navigation.** Preserve remote PWA's own mobile Queue navigation. Configure these runs with `VITE_WARDIAN_WORKBENCH=1`; do not delete the flag-off product branch yet.
+- [x] **Step 4: Run** the 13 selected Playwright files with `VITE_WARDIAN_WORKBENCH=1`. **Expected:** PASS; no selected desktop suite clicks a fixed titlebar button and the audit accounts for all original hits.
+- [x] **Step 5: Commit** `test(workbench): migrate desktop surface navigation selectors`.
 
 ### Task 16: Add complete browser E2E for workbench behavior and recovery
 
