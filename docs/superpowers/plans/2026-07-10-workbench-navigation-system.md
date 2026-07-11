@@ -583,12 +583,12 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 - Modify: `src/layout/watchlist/AgentWatchlist.test.tsx`
 - Modify: `src/views/App.test.tsx`
 
-- [ ] **Step 1: Register `agent-session`** with focus-resource normal open, explicit duplicates, suspend-when-hidden, runtime-backed close-view behavior, state version/size, missing-agent placeholder, and resource key = agent/session UUID.
-- [ ] **Step 2: Write tests** proving normal open focuses the most recent matching presentation, Open to Side creates a new surface/group, closing the final tab never invokes kill, and owner/mirror badges follow broker state.
-- [ ] **Step 3: Split roster callbacks** into target-selection and `onOpenAgent` / `onOpenAgentToSide`. Double-click, Enter, explicit Open, and context menu navigate; plain/multiselect does not. Delete `scrollToAgent` as the navigation route.
-- [ ] **Step 4: Ensure focused agent state is surface-local** and never overwrites global command targets.
-- [ ] **Step 5: Run** focused surface/watchlist/App tests. **Expected:** PASS.
-- [ ] **Step 6: Commit** `feat(workbench): open agent sessions from the roster`.
+- [x] **Step 1: Register `agent-session`** with focus-resource normal open, explicit duplicates, suspend-when-hidden, runtime-backed close-view behavior, state version/size, missing-agent placeholder, and resource key = agent/session UUID.
+- [x] **Step 2: Write tests** proving normal open focuses the most recent matching presentation, Open to Side creates a new surface/group, closing the final tab never invokes kill, and owner/mirror badges follow broker state.
+- [x] **Step 3: Split roster callbacks** into target-selection and `onOpenAgent` / `onOpenAgentToSide`. Double-click, Enter, explicit Open, and context menu navigate; plain/multiselect does not. Delete `scrollToAgent` as the navigation route.
+- [x] **Step 4: Ensure focused agent state is surface-local** and never overwrites global command targets.
+- [x] **Step 5: Run** focused surface/watchlist/App tests. **Expected:** PASS.
+- [x] **Step 6: Commit** `feat(workbench): open agent sessions from the roster`.
 
 ### Task 13: Register and migrate Dashboard, Queue, Graph, Garden, Library, and Workflows
 
