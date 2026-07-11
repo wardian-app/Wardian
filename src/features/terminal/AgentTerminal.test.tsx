@@ -329,7 +329,9 @@ describe("AgentTerminal scrollback", () => {
     expect(screen.getAllByTestId("agent-terminal-host")).toHaveLength(2);
   });
 
-  it("keeps DOM focus passive, then activates through the two-phase handshake on click", async () => {
+  async function assertFocusIsPassiveBeforeExplicitActivation(
+    activation: "click" | "keyboard",
+  ) {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       if (command === "register_terminal_presentation") {
@@ -401,12 +403,21 @@ describe("AgentTerminal scrollback", () => {
     fireEvent.focus(host);
     expect(mockInvoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
 
-    fireEvent.click(host);
+    if (activation === "click") {
+      fireEvent.click(host);
+    } else {
+      fireEvent.keyDown(host, { key: "Enter" });
+    }
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
       expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_activation", expect.anything());
     });
-  });
+  }
+
+  it.each(["click", "keyboard"] as const)(
+    "keeps DOM focus passive, then activates through the two-phase handshake by %s",
+    assertFocusIsPassiveBeforeExplicitActivation,
+  );
 
   it("resyncs a restored hidden owner after its renderer mounts", async () => {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
