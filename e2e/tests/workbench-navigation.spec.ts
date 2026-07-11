@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import type { WorkbenchDocumentV1 } from "../../src/types";
 import type { WorkbenchLoadResult } from "../../src/features/workbench/workbenchPersistence";
@@ -107,6 +107,17 @@ function twoGroupDocument(): WorkbenchDocumentV1 {
   });
 }
 
+async function choosePaneAction(
+  page: Page,
+  group: Locator,
+  action: string,
+): Promise<void> {
+  await group.getByLabel("Pane actions", { exact: true }).click();
+  await page.getByRole("menu", { name: "Pane actions", exact: true })
+    .getByRole("menuitem", { name: action, exact: true })
+    .click();
+}
+
 test("opens every migrated surface and focuses an existing singleton", async ({ page }) => {
   await bootWorkbench(page, makeWorkbenchDocument(), [ALPHA_AGENT]);
 
@@ -135,39 +146,42 @@ test("splits, moves, zooms, joins, closes, and reopens through semantic controls
 
   const groups = page.getByTestId("workbench-group");
   const groupOne = groups.and(page.locator('[data-group-id="group-1"]'));
-  await groupOne.getByLabel("Split group-1 right", { exact: true }).click();
+  await choosePaneAction(page, groupOne, "Split pane right");
   await expect(groups).toHaveCount(2);
 
   await expect.poll(async () => activeWorkbenchGroup(page).getAttribute("data-group-id"))
     .not.toBe("group-1");
-  const newGroupId = await activeWorkbenchGroup(page).getAttribute("data-group-id");
-  expect(newGroupId).toBeTruthy();
 
   await surfaceTab(page, "dashboard").click();
   await expect(groupOne).toHaveAttribute("data-active", "true");
-  await page.getByRole("button", { name: "Move Tab to Next Group", exact: true }).click();
+  await surfaceTab(page, "dashboard").focus();
+  await page.keyboard.press("Alt+Shift+ArrowRight");
 
-  const newGroup = groups.and(page.locator(`[data-group-id=${JSON.stringify(newGroupId)}]`));
-  await expect(newGroup.getByRole("tab", { name: "Dashboard", exact: true })).toBeVisible();
+  await expect(surfaceTab(page, "dashboard")).toHaveAttribute("aria-selected", "true");
+  const newGroup = surfaceTab(page, "dashboard")
+    .locator('xpath=ancestor::*[@data-testid="workbench-group"][1]');
   await expect(newGroup).toHaveAttribute("data-active", "true");
+  const newGroupId = await newGroup.getAttribute("data-group-id");
+  expect(newGroupId).toBeTruthy();
+  expect(newGroupId).not.toBe("group-1");
 
-  await page.getByRole("button", { name: "Toggle Group Zoom", exact: true }).click();
+  await choosePaneAction(page, newGroup, "Zoom pane");
   await expect(page.getByTestId("workbench-host")).toHaveAttribute(
     "data-zoomed-group-id",
     newGroupId!,
   );
   await expect(groups).toHaveCount(2);
-  await page.getByRole("button", { name: "Toggle Group Zoom", exact: true }).click();
+  await choosePaneAction(page, newGroup, "Restore pane");
   await expect(page.getByTestId("workbench-host")).toHaveAttribute(
     "data-zoomed-group-id",
     "none",
   );
 
-  await newGroup.getByLabel(`Join ${newGroupId} into group-1`, { exact: true }).click();
+  await choosePaneAction(page, newGroup, "Merge into previous pane");
   await expect(groups).toHaveCount(1);
   await expect(groupOne.getByRole("tab")).toHaveCount(2);
 
-  await groupOne.getByLabel("Close group-1", { exact: true }).click();
+  await choosePaneAction(page, groupOne, "Close pane");
   await expect(groupOne.getByRole("tab")).toHaveCount(0);
   await expect(groupOne.getByRole("heading", { name: "New Surface" })).toBeVisible();
 
@@ -227,23 +241,24 @@ test("separates roster selection from open and duplicates Agent Session only to 
   );
 
   const alphaRow = page.getByLabel("Agent Alpha", { exact: true });
-  await alphaRow.click();
-  await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
-
   await activeWorkbenchGroup(page).getByLabel("Open Surface", { exact: true }).click();
   const launcher = page.getByRole("dialog", { name: "Open Surface", exact: true });
-  const agentSessionOption = launcher
+  await expect(launcher
     .getByRole("option")
-    .and(page.locator('[data-surface-type="agent-session"]'));
-  await expect(agentSessionOption).toHaveAttribute("aria-disabled", "false");
+    .and(page.locator('[data-surface-type="agent-session"]'))).toHaveCount(0);
   await page.keyboard.press("Escape");
+
+  await alphaRow.click();
+  await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
 
   await alphaRow.dblclick();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(1);
 
   await alphaRow.click();
   await activeWorkbenchGroup(page).getByLabel("Open Surface", { exact: true }).click();
-  await page.getByRole("button", { name: "Open Agent Session to Side", exact: true }).click();
+  await launcher.getByRole("option")
+    .and(page.locator('[data-surface-type="agent-session"]'))
+    .click({ modifiers: ["ControlOrMeta"] });
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(2);
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
 });
@@ -265,7 +280,7 @@ test("cancelling one dirty close guard leaves the complete group unchanged", asy
 
   await page.getByRole("textbox", { name: "Workflow name" }).fill("Edited workflow");
   const group = activeWorkbenchGroup(page);
-  await group.getByLabel("Close group-1", { exact: true }).click();
+  await choosePaneAction(page, group, "Close pane");
 
   const prompt = page.getByRole("dialog", { name: "Unsaved Workflows changes" });
   await expect(prompt).toBeVisible();
@@ -273,7 +288,7 @@ test("cancelling one dirty close guard leaves the complete group unchanged", asy
   await expect(group.getByRole("tab")).toHaveCount(2);
   await expect(surfaceTab(page, "workflows")).toHaveAttribute("aria-selected", "true");
 
-  await group.getByLabel("Close group-1", { exact: true }).click();
+  await choosePaneAction(page, group, "Close pane");
   await page.getByRole("dialog", { name: "Unsaved Workflows changes" })
     .getByRole("button", { name: "Discard", exact: true })
     .click();

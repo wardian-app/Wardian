@@ -3,11 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { CustomTitleBar } from "./CustomTitleBar";
 
 const titlebarProps = {
-  workbenchEnabled: false,
-  onQuickOpen: vi.fn(),
-  onCommandPalette: vi.fn(),
-  viewMode: "grid" as const,
-  setViewMode: vi.fn(),
   leftCollapsed: false,
   setLeftCollapsed: vi.fn(),
   rightCollapsed: false,
@@ -48,36 +43,17 @@ describe("CustomTitleBar density", () => {
   });
 });
 
-describe("CustomTitleBar navigation modes", () => {
-  it("retains the fixed workspace launcher only for the rollback path", () => {
+describe("CustomTitleBar navigation", () => {
+  it("keeps a quiet draggable center without fixed commands or global-view launchers", () => {
     render(<CustomTitleBar {...titlebarProps} />);
-
-    expect(screen.getByTestId("titlebar-center")).toHaveAttribute(
-      "data-navigation-mode",
-      "legacy",
-    );
-    expect(screen.getByRole("button", { name: "Grid" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Workflows" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
-    expect(titlebarProps.setViewMode).toHaveBeenCalledWith("queue");
-  });
-
-  it("omits the fixed global launcher in workbench mode", () => {
-    const onQuickOpen = vi.fn();
-    const onCommandPalette = vi.fn();
-    render(
-      <CustomTitleBar
-        {...titlebarProps}
-        workbenchEnabled
-        onQuickOpen={onQuickOpen}
-        onCommandPalette={onCommandPalette}
-      />,
-    );
 
     const center = screen.getByTestId("titlebar-center");
     expect(center).toHaveAttribute("data-navigation-mode", "workbench");
-    expect(within(center).getByRole("group", { name: "Workbench commands" })).toBeInTheDocument();
+    expect(center).toHaveAttribute("data-tauri-drag-region");
+    expect(center).toBeEmptyDOMElement();
+    expect(within(center).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Quick Open" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Commands" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Grid" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dashboard" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Queue" })).not.toBeInTheDocument();
@@ -85,19 +61,14 @@ describe("CustomTitleBar navigation modes", () => {
     expect(screen.queryByRole("button", { name: "Garden" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Library" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Workflows" })).not.toBeInTheDocument();
-    fireEvent.click(within(center).getByRole("button", { name: "Quick Open" }));
-    fireEvent.click(within(center).getByRole("button", { name: "Commands" }));
-    expect(onQuickOpen).toHaveBeenCalledOnce();
-    expect(onCommandPalette).toHaveBeenCalledOnce();
   });
 
-  it("preserves telemetry, sidebar toggles, and window controls in workbench mode", () => {
+  it("preserves telemetry, sidebar toggles, and window controls", () => {
     const setLeftCollapsed = vi.fn();
     const setRightCollapsed = vi.fn();
     const { container } = render(
       <CustomTitleBar
         {...titlebarProps}
-        workbenchEnabled
         setLeftCollapsed={setLeftCollapsed}
         setRightCollapsed={setRightCollapsed}
       />,
@@ -118,17 +89,14 @@ describe("CustomTitleBar navigation modes", () => {
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 
-  it("disables shell mutation commands but preserves window controls during reset", () => {
+  it("disables sidebar toggles but preserves window controls during reset", () => {
     render(
       <CustomTitleBar
         {...titlebarProps}
-        workbenchEnabled
         workbenchBusy
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Quick Open" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Commands" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Hide Left Sidebar" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Hide Agent Roster" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Minimize" })).toBeEnabled();

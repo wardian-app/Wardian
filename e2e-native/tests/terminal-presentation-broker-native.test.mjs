@@ -227,9 +227,7 @@ test(
     const harness = await createNativeHarness();
     prepareIsolatedHome(harness);
     const mockScript = writeBrokerMockScript(harness);
-    const previousWorkbenchFlag = process.env.VITE_WARDIAN_WORKBENCH;
     const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
-    process.env.VITE_WARDIAN_WORKBENCH = "1";
     process.env.WARDIAN_MOCK_SCRIPT = mockScript;
 
     let session = null;
@@ -238,8 +236,6 @@ test(
       assert.ok(harness.appPath, "Expected a native Wardian application path");
       session = await startNativeSession(harness);
     } finally {
-      if (previousWorkbenchFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-      else process.env.VITE_WARDIAN_WORKBENCH = previousWorkbenchFlag;
       if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
       else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
     }

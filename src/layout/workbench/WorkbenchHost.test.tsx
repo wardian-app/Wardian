@@ -35,7 +35,8 @@ describe("WorkbenchHost", () => {
     const documentBefore = store.getState().document;
 
     render(<WorkbenchHost store={store} />);
-    fireEvent.click(screen.getByRole("button", { name: "Toggle zoom for group-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pane actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Zoom pane" }));
 
     expect(store.getState().zoomed_group_id).toBe("group-1");
     expect(store.getState().document).toBe(documentBefore);
@@ -45,7 +46,7 @@ describe("WorkbenchHost", () => {
     );
   });
 
-  it("exposes Reset Workbench through the guarded navigation service", async () => {
+  it("exposes guarded actions through a shortcut-opened command palette, not a permanent bar", async () => {
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([
         makeSurface("surface-1", { surface_type: "agents-overview" }),
@@ -62,7 +63,14 @@ describe("WorkbenchHost", () => {
     } as unknown as WorkbenchNavigationService;
 
     render(<WorkbenchHost store={store} navigation={navigation} />);
-    fireEvent.click(screen.getByRole("button", { name: "Reset Workbench" }));
+    expect(screen.queryByRole("navigation", { name: "Workbench commands" })).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("workbench-host"), {
+      key: "p",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(await screen.findByRole("dialog", { name: "Command Palette" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Reset Workbench" }));
 
     await waitFor(() => expect(resetWorkbench).toHaveBeenCalledOnce());
   });

@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { HomeSurface } from "../../features/workbench/HomeSurface";
+import { WorkbenchCommandPalette } from "../../features/workbench/WorkbenchCommandPalette";
 import {
   OpenSurfaceDialog,
   createCoreWorkbenchSurfaceRegistry,
@@ -18,10 +19,7 @@ import {
 } from "../../features/workbench/navigationService";
 import type { WorkbenchCommand } from "../../features/workbench/workbenchModel";
 import type { WorkbenchSurfaceRegistry } from "../../features/workbench/surfaceRegistry";
-import {
-  useWorkbenchCommands,
-  type WorkbenchCommandId,
-} from "../../features/workbench/useWorkbenchCommands";
+import { useWorkbenchCommands } from "../../features/workbench/useWorkbenchCommands";
 import type { WorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import {
   DockviewLayoutAdapter,
@@ -39,7 +37,6 @@ export type WorkbenchHostProps = {
   render_surface?: WorkbenchSurfaceRenderer;
   surface_title?: WorkbenchSurfaceTitle;
   on_quick_open?: () => void;
-  on_command_palette?: () => void;
   on_focus_left_dock?: () => void;
   on_focus_right_dock?: () => void;
   create_id?: (kind: WorkbenchIdKind) => string;
@@ -78,20 +75,6 @@ export function workbenchEdgeDropCommands(
   ];
 }
 
-const VISIBLE_COMMANDS: readonly WorkbenchCommandId[] = [
-  "workbench.quick_open",
-  "workbench.split_right",
-  "workbench.split_down",
-  "workbench.move_tab_previous_group",
-  "workbench.move_tab_next_group",
-  "workbench.close_surface",
-  "workbench.reopen_closed_surface",
-  "workbench.reset_workbench",
-  "workbench.toggle_group_zoom",
-  "workbench.focus_left_dock",
-  "workbench.focus_right_dock",
-];
-
 /** Subscribes the renderer and command boundaries to one canonical store. */
 export function WorkbenchHost({
   store,
@@ -102,7 +85,6 @@ export function WorkbenchHost({
   render_surface,
   surface_title,
   on_quick_open,
-  on_command_palette,
   on_focus_left_dock,
   on_focus_right_dock,
   create_id,
@@ -120,17 +102,19 @@ export function WorkbenchHost({
   );
   const navigation = suppliedNavigation ?? ownedNavigation;
   const [launcherGroupId, setLauncherGroupId] = useState<string | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const state = useSyncExternalStore(
     (listener) => store.subscribe(() => listener()),
     store.getState,
     store.getInitialState,
   );
+  const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
   const commands = useWorkbenchCommands({
     store,
     navigation,
     root_ref: rootRef,
     on_quick_open,
-    on_command_palette: on_command_palette ?? (() => store.getState().set_launcher_open(true)),
+    on_command_palette: openCommandPalette,
     on_focus_left_dock,
     on_focus_right_dock,
     create_id,
@@ -177,17 +161,6 @@ export function WorkbenchHost({
       data-zoomed-group-id={state.zoomed_group_id ?? "none"}
       className="wardian-workbench-host"
     >
-      <nav aria-label="Workbench commands" className="wardian-workbench-command-bar">
-        {commands.actions.filter((action) => VISIBLE_COMMANDS.includes(action.command_id)).map((action) => (
-          <button
-            key={action.command_id}
-            type="button"
-            onClick={() => { void commands.execute(action.command_id); }}
-          >
-            {action.title}
-          </button>
-        ))}
-      </nav>
       <DockviewLayoutAdapter
         document={state.document}
         safe_mode={safe_mode}
@@ -244,6 +217,13 @@ export function WorkbenchHost({
         recently_closed={state.document.recently_closed}
         on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
         on_close={closeLauncher}
+      />
+      <WorkbenchCommandPalette
+        open={commandPaletteOpen}
+        actions={commands.actions}
+        is_enabled={commands.is_enabled}
+        on_execute={commands.execute}
+        on_close={() => setCommandPaletteOpen(false)}
       />
     </div>
   );

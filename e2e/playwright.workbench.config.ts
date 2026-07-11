@@ -1,4 +1,4 @@
 import { createE2eConfig } from "./playwright.config";
 
-/** Flagged workbench runs always start their own correctly-configured server. */
-export default createE2eConfig({ workbench: true });
+/** Workbench-focused runs use a fresh isolated server for deterministic state. */
+export default createE2eConfig({ isolated_server: true });

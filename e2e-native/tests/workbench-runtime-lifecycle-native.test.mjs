@@ -137,13 +137,11 @@ test(
   async (t) => {
     const harness = await createNativeHarness();
     const mockScript = createRuntimeMockScript();
-    const previousWorkbenchFlag = process.env.VITE_WARDIAN_WORKBENCH;
     const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
     const previousSafeMode = process.env.WARDIAN_WORKBENCH_SAFE_MODE;
     let normalSession = null;
     let safeSession = null;
 
-    process.env.VITE_WARDIAN_WORKBENCH = "1";
     process.env.WARDIAN_MOCK_SCRIPT = mockScript;
     delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
 
@@ -151,8 +149,6 @@ test(
       await safeSession?.close();
       await normalSession?.close();
       fs.rmSync(mockScript, { force: true });
-      if (previousWorkbenchFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-      else process.env.VITE_WARDIAN_WORKBENCH = previousWorkbenchFlag;
       if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
       else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
       if (previousSafeMode === undefined) delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
@@ -232,8 +228,17 @@ test(
     assert.ok(afterReopen.sequence_barrier >= afterClose.snapshot.sequence_barrier);
     assert.ok(snapshotText(afterReopen).includes("runtime-start:"));
 
+    const paneActions = await driver.wait(
+      until.elementLocated(By.css(
+        '[data-testid="workbench-group"][data-active="true"] button[aria-label="Pane actions"]',
+      )),
+      20000,
+    );
+    await paneActions.click();
     const splitRight = await driver.wait(
-      until.elementLocated(By.xpath("//button[normalize-space(.)='Split Right']")),
+      until.elementLocated(By.xpath(
+        "//div[@role='menu' and @aria-label='Pane actions']//button[normalize-space(.)='Split pane right']",
+      )),
       20000,
     );
     await splitRight.click();

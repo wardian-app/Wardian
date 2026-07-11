@@ -49,14 +49,16 @@ fixture. The profiler stages that fixture inside the isolated home as
 the machine-readable baseline records, not a second input. The fixture contains
 20 persisted tabs in four groups, 20 mock agents, one terminal owner, and three
 mirrors of the same runtime. It includes Agents Overview, Graph, Garden, Queue,
-Library, and Workflows. The profiler builds and serves Wardian's flagged
+Library, and Workflows. The profiler builds and serves Wardian's canonical
 production output rather than the Phase 0 proof route. It measures five fresh
 restores, 20 tab activations, four group focus changes, ten ordered terminal
 bursts, six Overview resizes, and four heavy-surface resume cycles. React
 commits, live xterm renderers, live WebGL contexts, and stream sequence gaps are
-instrumented in page. A separate flag-off/flag-on production build comparison
-supplies the gzip bundle delta. No observed result is supplied by the fixture or
-defaulted when instrumentation is absent.
+instrumented in page. The gzip bundle delta compares the canonical production
+build with the frozen pre-cutover base recorded in the machine-readable
+baseline. The historical base remains stable after the legacy flag-off path is
+deleted. No observed result is supplied by the fixture or defaulted when
+instrumentation is absent.
 
 | Production measure | Observed | Gate | Result |
 |---|---:|---:|---|

@@ -31,7 +31,10 @@ import type {
   ReadonlyWorkbenchDocumentV1,
 } from "../../features/workbench/useWorkbenchStore";
 import type { WorkbenchNodeV1, WorkbenchSurfaceV1 } from "../../types";
-import { WorkbenchGroupHeader } from "./WorkbenchGroupHeader";
+import {
+  WorkbenchGroupHeader,
+  type WorkbenchPaneTarget,
+} from "./WorkbenchGroupHeader";
 import { WorkbenchTab } from "./WorkbenchTab";
 
 export type WorkbenchSurfaceRenderLifecycle = {
@@ -89,7 +92,15 @@ type AdapterRuntime = Pick<
   | "on_close_surface"
   | "on_join_group"
   | "render_home"
-> & { zoomed_group_id: string | null };
+> & {
+  zoomed_group_id: string | null;
+  on_move_surface: (surfaceId: string, targetGroupId: string) => void;
+  on_split_surface: (
+    surfaceId: string,
+    groupId: string,
+    direction: "horizontal" | "vertical",
+  ) => void;
+};
 
 const AdapterRuntimeContext = createContext<AdapterRuntime | null>(null);
 const WARDIAN_DOCKVIEW_THEME = {
@@ -138,6 +149,23 @@ function groupIdsInTreeOrder(node: ReadonlyWorkbenchDocumentV1["root"]): string[
   return node.kind === "group"
     ? [node.group_id]
     : [...groupIdsInTreeOrder(node.first), ...groupIdsInTreeOrder(node.second)];
+}
+
+/** Names the immediate spatially valid pane before and after a group without leaking group IDs. */
+export function workbenchPaneTargets(
+  root: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+): WorkbenchPaneTarget[] {
+  const ordered = groupIdsInTreeOrder(root);
+  const index = ordered.indexOf(groupId);
+  if (index < 0) return [];
+  return ([
+    { group_id: ordered[index - 1], position: "previous" as const },
+    { group_id: ordered[index + 1], position: "next" as const },
+  ]).filter((target): target is WorkbenchPaneTarget => (
+    target.group_id !== undefined
+    && groupsAreWorkbenchAdjacent(root, groupId, target.group_id)
+  ));
 }
 
 function firstGroupId(node: DeepReadonly<WorkbenchNodeV1>): string {
@@ -380,13 +408,25 @@ function DockviewSurfacePanel({ params }: IDockviewPanelProps<WorkbenchPanelPara
   );
 }
 
-function DockviewSurfaceTab({ params }: IDockviewPanelHeaderProps<WorkbenchPanelParams>) {
+function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<WorkbenchPanelParams>) {
   const runtime = useAdapterRuntime();
+  const groupId = api.group.id;
   return (
     <WorkbenchTab
       surface={params.surface}
       title={params.title}
+      group_id={groupId}
+      pane_targets={workbenchPaneTargets(runtime.document.root, groupId)}
       on_close={() => runtime.on_close_surface?.(params.surface.surface_id)}
+      on_split={(direction) => runtime.on_split_surface(
+        params.surface.surface_id,
+        groupId,
+        direction,
+      )}
+      on_move={(targetGroupId) => runtime.on_move_surface(
+        params.surface.surface_id,
+        targetGroupId,
+      )}
     />
   );
 }
@@ -396,10 +436,8 @@ function DockviewGroupActions({ group }: IDockviewHeaderActionsProps) {
   return (
     <WorkbenchGroupHeader
       group_id={group.id}
-      join_target_ids={groupIdsInTreeOrder(runtime.document.root).filter(
-        (id) => id !== group.id
-          && groupsAreWorkbenchAdjacent(runtime.document.root, group.id, id),
-      )}
+      pane_targets={workbenchPaneTargets(runtime.document.root, group.id)}
+      is_zoomed={runtime.zoomed_group_id === group.id}
       on_open_surface={runtime.on_open_surface}
       on_toggle_zoom={runtime.on_toggle_zoom}
       on_split_group={runtime.on_split_group}
@@ -595,6 +633,7 @@ function reconcileDockview(
 
 function SafeWorkbenchLayout({
   document,
+  zoomed_group_id = null,
   render_surface,
   surface_title,
   on_command,
@@ -604,6 +643,7 @@ function SafeWorkbenchLayout({
   on_close_group,
   on_close_surface,
   on_join_group,
+  on_surface_drop,
   render_home,
 }: DockviewLayoutAdapterProps) {
   const group = document.groups[document.active_group_id];
@@ -623,11 +663,11 @@ function SafeWorkbenchLayout({
             const surface = document.surfaces[surfaceId];
             const active = surfaceId === group.active_surface_id;
             return (
-              <button
+              <div
                 key={surface.surface_id}
                 id={`workbench-tab-${surface.surface_id}`}
-                type="button"
                 role="tab"
+                aria-label={surface_title?.(surface) ?? surfaceTitle(surface)}
                 aria-selected={active}
                 aria-controls={`workbench-panel-${surface.surface_id}`}
                 tabIndex={active ? 0 : -1}
@@ -641,25 +681,33 @@ function SafeWorkbenchLayout({
                   group_id: group.group_id,
                   surface_id: surface.surface_id,
                 })}
-                onKeyDownCapture={(event) => {
-                  if (event.key !== "Delete" && event.key !== "Backspace") return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  event.nativeEvent.stopImmediatePropagation();
-                  on_close_surface?.(surface.surface_id);
-                }}
               >
-                {surface_title?.(surface) ?? surfaceTitle(surface)}
-              </button>
+                <WorkbenchTab
+                  surface={surface}
+                  title={surface_title?.(surface) ?? surfaceTitle(surface)}
+                  group_id={group.group_id}
+                  pane_targets={workbenchPaneTargets(document.root, group.group_id)}
+                  on_close={() => on_close_surface?.(surface.surface_id)}
+                  on_split={(direction) => on_surface_drop?.(
+                    surface.surface_id,
+                    group.group_id,
+                    direction === "horizontal" ? "right" : "bottom",
+                  )}
+                  on_move={(targetGroupId) => on_command?.({
+                    type: "move_surface",
+                    surface_id: surface.surface_id,
+                    group_id: targetGroupId,
+                    index: document.groups[targetGroupId]?.surface_ids.length ?? 0,
+                  })}
+                />
+              </div>
             );
           })}
         </div>
         <WorkbenchGroupHeader
           group_id={group.group_id}
-          join_target_ids={groupIdsInTreeOrder(document.root).filter(
-            (id) => id !== group.group_id
-              && groupsAreWorkbenchAdjacent(document.root, group.group_id, id),
-          )}
+          pane_targets={workbenchPaneTargets(document.root, group.group_id)}
+          is_zoomed={zoomed_group_id === group.group_id}
           on_open_surface={on_open_surface}
           on_toggle_zoom={on_toggle_zoom}
           on_split_group={on_split_group}
@@ -750,12 +798,29 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     on_join_group: props.on_join_group,
     render_home: props.render_home,
     zoomed_group_id,
+    on_move_surface: (surfaceId, targetGroupId) => {
+      emitCommand({
+        type: "move_surface",
+        surface_id: surfaceId,
+        group_id: targetGroupId,
+        index: document.groups[targetGroupId]?.surface_ids.length ?? 0,
+      });
+    },
+    on_split_surface: (surfaceId, groupId, direction) => {
+      props.on_surface_drop?.(
+        surfaceId,
+        groupId,
+        direction === "horizontal" ? "right" : "bottom",
+      );
+    },
   }), [
     document,
+    emitCommand,
     props.on_close_group,
     props.on_close_surface,
     props.on_join_group,
     props.on_open_surface,
+    props.on_surface_drop,
     props.on_split_group,
     props.on_toggle_zoom,
     props.render_home,

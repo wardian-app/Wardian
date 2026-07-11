@@ -194,29 +194,28 @@ async function gzipBytes(directory) {
 async function productionBundleDelta(home) {
   const { build } = await import("vite");
   const root = path.join(home, "bundle-measurement");
-  const base = path.join(root, "flag-off");
-  const candidate = path.join(root, "flag-on");
-  for (const target of [root, base, candidate]) assertInsideHome(home, target);
+  const candidate = path.join(root, "canonical");
+  for (const target of [root, candidate]) assertInsideHome(home, target);
   await fs.mkdir(root, { recursive: true });
-  const previous = process.env.VITE_WARDIAN_WORKBENCH;
+  const reference = JSON.parse(await fs.readFile(baselinePath, "utf8"));
+  const baseGzip = reference?.bundle?.base_gzip_bytes;
+  if (!Number.isSafeInteger(baseGzip) || baseGzip <= 0) {
+    throw new Error(
+      `Refusing to measure bundle delta without a positive integer bundle.base_gzip_bytes in ${baselinePath}.`,
+    );
+  }
   const previousPerf = process.env.VITE_WARDIAN_WORKBENCH_PERF;
   const previousGrace = process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
   try {
     delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
     delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
-    process.env.VITE_WARDIAN_WORKBENCH = "0";
-    await build({ root: repoRoot, logLevel: "warn", build: { outDir: base, emptyOutDir: true } });
-    process.env.VITE_WARDIAN_WORKBENCH = "1";
     await build({ root: repoRoot, logLevel: "warn", build: { outDir: candidate, emptyOutDir: true } });
   } finally {
-    if (previous === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-    else process.env.VITE_WARDIAN_WORKBENCH = previous;
     if (previousPerf === undefined) delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
     else process.env.VITE_WARDIAN_WORKBENCH_PERF = previousPerf;
     if (previousGrace === undefined) delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
     else process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS = previousGrace;
   }
-  const baseGzip = await gzipBytes(base);
   const candidateGzip = await gzipBytes(candidate);
   return {
     base_gzip_bytes: baseGzip,
@@ -244,11 +243,9 @@ async function buildProductionRuntime(home, fixture) {
   const { build } = await import("vite");
   const outDir = path.join(home, "runtime-build");
   assertInsideHome(home, outDir);
-  const previousFlag = process.env.VITE_WARDIAN_WORKBENCH;
   const previousPerf = process.env.VITE_WARDIAN_WORKBENCH_PERF;
   const previousGrace = process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
   try {
-    process.env.VITE_WARDIAN_WORKBENCH = "1";
     process.env.VITE_WARDIAN_WORKBENCH_PERF = "1";
     process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS = String(
       fixture.benchmark.heavy_surface_hidden_grace_ms,
@@ -261,8 +258,6 @@ async function buildProductionRuntime(home, fixture) {
       build: { outDir, emptyOutDir: true },
     });
   } finally {
-    if (previousFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-    else process.env.VITE_WARDIAN_WORKBENCH = previousFlag;
     if (previousPerf === undefined) delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
     else process.env.VITE_WARDIAN_WORKBENCH_PERF = previousPerf;
     if (previousGrace === undefined) delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;

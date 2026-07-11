@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { AgentsOverviewMode, CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
+import type { CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -29,24 +29,15 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { SidebarIconRail, SidebarTab } from "../layout/SidebarIconRail";
 import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
-import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
 import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
-import { DashboardView } from "./DashboardView";
-import { AgentsOverviewView } from "./AgentsOverviewView";
-import { GraphView } from "./GraphView";
-import { GardenView } from "./GardenView";
-import { QueueView } from "./QueueView";
-import { WorkflowsView } from "./WorkflowsView";
-import { LibraryView } from "./LibraryView";
 import { useQueueStore } from "../store/useQueueStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 import { CustomCloneModal } from "../features/agents/CustomCloneModal";
-import { WORKBENCH_FLAGS } from "../config/workbenchFlags";
 import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflictDialog";
 import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
 import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
@@ -99,9 +90,6 @@ const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
 const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
 const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
-// Flag-off comparison path only. Workbench Graph/Garden use registered suspend
-// lifecycles and release their heavy renderer after the bounded grace period.
-const LEGACY_CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
 const WORKBENCH_PERSISTENCE_ADAPTER = createWorkbenchInvokeAdapter(
   (command, args) => invoke(command, args),
 );
@@ -213,12 +201,6 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
-function legacyCachedCanvasPaneClass(active: boolean) {
-  return active
-    ? "flex-1 flex flex-col min-h-0"
-    : "absolute inset-2 flex flex-col min-h-0 invisible pointer-events-none";
-}
-
 function App() {
   return (
     <ErrorBoundary>
@@ -230,17 +212,14 @@ function App() {
 function AppBody() {
   const confirm = useConfirm();
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
-  const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const workbenchPersistence = useWorkbenchPersistence({
-    enabled: WORKBENCH_FLAGS.workbench_enabled,
+    enabled: true,
     adapter: WORKBENCH_PERSISTENCE_ADAPTER,
     legacy_storage: window.localStorage,
     viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
-    initial_view_mode: viewMode,
     shell_projection: WORKBENCH_SHELL_PROJECTION,
   });
-  const workbenchResetPending = WORKBENCH_FLAGS.workbench_enabled
-    && workbenchPersistence.store.getState().reset_pending;
+  const workbenchResetPending = workbenchPersistence.store.getState().reset_pending;
   const dirtySurfacePrompt = useDirtySurfacePrompt();
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
@@ -253,7 +232,6 @@ function AppBody() {
     }),
     [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
   );
-  const [legacyCachedCanvasViews, setLegacyCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
@@ -346,45 +324,14 @@ function AppBody() {
     );
   }, [addActionNeeded]);
 
-  useEffect(() => {
-    if (WORKBENCH_FLAGS.workbench_enabled) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "Tab") {
-        e.preventDefault();
-        setViewMode(prev => {
-          const modes: ViewMode[] = ["grid", "dashboard", "queue", "library", "workflows", "graph", "garden"];
-          const currentIndex = modes.indexOf(prev);
-          const nextIndex = e.shiftKey ? (currentIndex - 1 + modes.length) % modes.length : (currentIndex + 1) % modes.length;
-          return modes[nextIndex];
-        });
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
   // A library deep-link (e.g. "Manage skills" from the agent config panel)
   // bumps the store's navigationRequest; switch the main view to the
   // library whenever that happens, but not on initial mount.
   useEffect(() => {
     if (seenLibraryNavigationRequestRef.current === libraryNavigationRequest) return;
     seenLibraryNavigationRequestRef.current = libraryNavigationRequest;
-    if (WORKBENCH_FLAGS.workbench_enabled) {
-      workbenchNavigation.open({ surface_type: "library" });
-    } else {
-      setViewMode("library");
-    }
+    workbenchNavigation.open({ surface_type: "library" });
   }, [libraryNavigationRequest, workbenchNavigation]);
-
-  useEffect(() => {
-    if (!LEGACY_CACHED_CANVAS_VIEWS.has(viewMode)) return;
-    setLegacyCachedCanvasViews((prev) => {
-      if (prev.has(viewMode)) return prev;
-      const next = new Set(prev);
-      next.add(viewMode);
-      return next;
-    });
-  }, [viewMode]);
 
   const [broadcastMessage, setBroadcastMessage] = useState("");
 
@@ -393,8 +340,6 @@ function AppBody() {
   const setLeftCollapsed = useLayoutStore((state) => state.setLeftSidebarCollapsed);
   const rightCollapsed = useLayoutStore((state) => state.rightSidebarCollapsed);
   const setRightCollapsed = useLayoutStore((state) => state.setRightSidebarCollapsed);
-  const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
-  const [legacyOverviewMode, setLegacyOverviewMode] = useState<AgentsOverviewMode>("grid");
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const {
@@ -471,7 +416,6 @@ function AppBody() {
     selectedAgentIds,
     setSelectedAgentIds,
     selectAgent,
-    clearSelection,
   } = roster;
   const filteredAgents = useMemo(
     () => getAgentsForList(agents, activeList, teams),
@@ -805,13 +749,9 @@ function AppBody() {
   }, [draggedAgentId]);
 
   const scrollToAgent = useCallback((agentId: string) => {
-    if (viewMode === "grid" && legacyOverviewMode === "single") {
-      setMaximizedAgentId(agentId);
-      return;
-    }
     const el = document.getElementById(`agent-card-${agentId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, [legacyOverviewMode, viewMode]);
+  }, []);
 
   const fetchAgentClasses = async () => {
     try {
@@ -978,17 +918,7 @@ function AppBody() {
     : undefined;
 
   const openAuxiliarySurface = useCallback((request: OpenSurfaceRequest) => {
-    if (WORKBENCH_FLAGS.workbench_enabled) {
-      workbenchNavigation.open(request);
-      return;
-    }
-    const legacyMode = request.surface_type === "agents-overview"
-      ? "grid"
-      : request.surface_type;
-    if (["grid", "dashboard", "queue", "graph", "garden", "library", "workflows"].includes(legacyMode)) {
-      setViewMode(legacyMode as ViewMode);
-      if (legacyMode === "workflows") setActiveTab("workflows");
-    }
+    workbenchNavigation.open(request);
   }, [workbenchNavigation]);
 
   const openWorkflowsView = useCallback(() => {
@@ -996,47 +926,29 @@ function AppBody() {
   }, [openAuxiliarySurface]);
 
   const openAgent = useCallback((sessionId: string) => {
-    if (WORKBENCH_FLAGS.workbench_enabled) {
-      workbenchNavigation.open({
-        surface_type: "agent-session",
-        resource_key: sessionId,
-      });
-      return;
-    }
-    setViewMode("grid");
-    window.setTimeout(() => scrollToAgent(sessionId), 0);
-  }, [scrollToAgent, workbenchNavigation]);
+    workbenchNavigation.open({
+      surface_type: "agent-session",
+      resource_key: sessionId,
+    });
+  }, [workbenchNavigation]);
 
   const openAgentToSide = useCallback((sessionId: string) => {
-    if (WORKBENCH_FLAGS.workbench_enabled) {
-      workbenchNavigation.open_to_side({
-        surface_type: "agent-session",
-        resource_key: sessionId,
-      });
-      return;
-    }
-    openAgent(sessionId);
-  }, [openAgent, workbenchNavigation]);
+    workbenchNavigation.open_to_side({
+      surface_type: "agent-session",
+      resource_key: sessionId,
+    });
+  }, [workbenchNavigation]);
 
-  const openAgentFromQueue = useCallback((sessionId: string) => {
-    setViewMode("grid");
-    setSelectedAgentIds(new Set([sessionId]));
-    window.setTimeout(() => scrollToAgent(sessionId), 0);
-  }, [scrollToAgent, setSelectedAgentIds]);
-  const shouldRenderGraph = viewMode === "graph" || legacyCachedCanvasViews.has("graph");
-  const shouldRenderGarden = viewMode === "garden" || legacyCachedCanvasViews.has("garden");
-  const workbenchNotice = WORKBENCH_FLAGS.workbench_enabled
-    ? [
-        workbenchPersistence.notice,
-        workbenchPersistence.safe_mode
-          ? "Workbench safe mode is active; the durable document is preserved."
-          : null,
-        workbenchPersistence.save_error,
-        workbenchPersistence.save_pending || workbenchPersistence.is_dirty
-          ? "Saving workbench changes…"
-          : null,
-      ].filter((message): message is string => Boolean(message)).join(" ") || null
-    : null;
+  const workbenchNotice = [
+    workbenchPersistence.notice,
+    workbenchPersistence.safe_mode
+      ? "Workbench safe mode is active; the durable document is preserved."
+      : null,
+    workbenchPersistence.save_error,
+    workbenchPersistence.save_pending || workbenchPersistence.is_dirty
+      ? "Saving workbench changes…"
+      : null,
+  ].filter((message): message is string => Boolean(message)).join(" ") || null;
 
   const exportLocalWorkbench = useCallback(() => {
     const exported = workbenchPersistence.export_local_json();
@@ -1285,12 +1197,7 @@ function AppBody() {
         <AppShell
           contentBusy={workbenchResetPending}
           titlebar={<CustomTitleBar
-        workbenchEnabled={WORKBENCH_FLAGS.workbench_enabled}
         workbenchBusy={workbenchResetPending}
-        onQuickOpen={openWorkbenchLauncher}
-        onCommandPalette={openWorkbenchLauncher}
-        viewMode={viewMode}
-        setViewMode={setViewMode}
         leftCollapsed={leftCollapsed}
         setLeftCollapsed={setLeftCollapsed}
         rightCollapsed={rightCollapsed}
@@ -1320,8 +1227,7 @@ function AppBody() {
         </div>
           ) : null}
 
-          conflictDialog={WORKBENCH_FLAGS.workbench_enabled
-        && (workbenchPersistence.conflict === "revision_conflict"
+          conflictDialog={(workbenchPersistence.conflict === "revision_conflict"
           || workbenchPersistence.conflict === "future_schema") && (
         <WorkbenchConflictDialog
           mode={workbenchPersistence.conflict}
@@ -1359,14 +1265,13 @@ function AppBody() {
           onOpenSurface={openAuxiliarySurface}
           />}
 
-          mainContent={WORKBENCH_FLAGS.workbench_enabled ? (
+          mainContent={(
             <WorkbenchHost
               store={workbenchPersistence.store}
               safe_mode={workbenchPersistence.safe_mode}
               registry={workbenchRegistry}
               navigation={workbenchNavigation}
               on_quick_open={openWorkbenchLauncher}
-              on_command_palette={openWorkbenchLauncher}
               resource_key={selectedWorkbenchResourceKey}
               render_surface={renderWorkbenchSurface}
               surface_title={(surface) => {
@@ -1377,168 +1282,6 @@ function AppBody() {
                 return workbenchRegistry.presentation(surface).title;
               }}
             />
-          ) : (
-          <div
-            className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2 flex flex-col"
-            onClick={clearSelection}
-          >
-            {viewMode === "workflows" && (
-              <div className="flex-1 min-h-0 bg-wardian-bg">
-                <WorkflowsView theme={theme} />
-              </div>
-            )}
-
-            {viewMode === "library" && (
-              <LibraryView selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={openWorkflowsView} />
-            )}
-
-            {viewMode === "queue" && (
-              <div className="flex-1 flex flex-col min-h-0">
-                <QueueView onOpenAgent={openAgentFromQueue} onSendAgentPrompt={sendCommand} />
-              </div>
-            )}
-
-            {shouldRenderGraph && (
-              <div
-                className={legacyCachedCanvasPaneClass(viewMode === "graph")}
-                aria-hidden={viewMode !== "graph"}
-              >
-                <GraphView
-                  filteredAgents={filteredAgents}
-                  allAgents={agents}
-                  telemetry={telemetry}
-                  terminalTitles={terminalTitles}
-                  currentThoughts={currentThoughts}
-                  selectedAgentIds={selectedAgentIds}
-                  offAgentIds={offAgentIds}
-                  watchlists={watchlists}
-                  activeList={activeList}
-                  teams={teams}
-                  interactions={agentInteractions}
-                  onSelectionChange={setSelectedAgentIds}
-                  onOpenAgentInGrid={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                  onInitiateRename={(id) => {
-                    const agent = agents.find((candidate) => candidate.session_id === id);
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    setEditingAgentId(id);
-                    setTempName(agent?.session_name ?? "");
-                  }}
-                  onQuery={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                  onPause={onPause}
-                  onRestart={onRestart}
-                  onClear={onClear}
-                  onClone={onClone}
-                  onAddToList={handleAddToList}
-                  onRemoveFromList={handleRemoveFromList}
-                  onAddAgentsToList={handleAddAgentsToList}
-                  onRemoveAgentsFromList={handleRemoveAgentsFromList}
-                  onDelete={onDelete}
-                  onDeleteAgents={onDeleteAgents}
-                  deriveCurrentThought={deriveCurrentThought}
-                />
-              </div>
-            )}
-
-            {shouldRenderGarden && (
-              <div
-                className={legacyCachedCanvasPaneClass(viewMode === "garden")}
-                aria-hidden={viewMode !== "garden"}
-              >
-                <GardenView
-                  filteredAgents={filteredAgents}
-                  telemetry={telemetry}
-                  teams={teams}
-                  activeList={activeList}
-                  interactions={agentInteractions}
-                  selectedAgentIds={selectedAgentIds}
-                  offAgentIds={offAgentIds}
-                  onSelectionChange={setSelectedAgentIds}
-                  onOpenAgentInGrid={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                />
-              </div>
-            )}
-
-            {viewMode === "grid" && (
-              <AgentsOverviewView
-                surfaceId="legacy-agents-overview"
-                mode={legacyOverviewMode}
-                recentAgentIds={recentAgentIds}
-                filteredAgents={filteredAgents}
-                telemetry={telemetry}
-                terminalTitles={terminalTitles}
-                currentThoughts={currentThoughts}
-                selectedAgentIds={selectedAgentIds}
-                offAgentIds={offAgentIds}
-                focusedAgentId={maximizedAgentId}
-                draggedAgentId={draggedAgentId}
-                dragOverAgentId={dragOverAgentId}
-                editingAgentId={editingAgentId}
-                tempName={tempName}
-                theme={theme}
-          watchlists={watchlists}
-          onAddToList={handleAddToList}
-                onRemoveFromList={handleRemoveFromList}
-                onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-                onPause={onPause}
-                onRestart={onRestart}
-                onClear={onClear}
-                onClone={onClone}
-                onMouseEnterCard={handleMouseEnterCard}
-                onMouseUp={handleMouseUp}
-                onMouseDown={handleMouseDown}
-                onCardClick={handleAgentCardClick}
-                onModeChange={(nextMode) => {
-                  const legacyMode = nextMode === "single" ? "single" : "grid";
-                  setLegacyOverviewMode(legacyMode);
-                  if (legacyMode !== "single") setMaximizedAgentId(null);
-                }}
-                onFocusedAgentChange={setMaximizedAgentId}
-                onDelete={onDelete}
-                onRename={renameAgent}
-                setEditingAgentId={setEditingAgentId}
-                setTempName={setTempName}
-                handleTitleChange={handleTitleChange}
-                deriveCurrentThought={deriveCurrentThought}
-                getStatusColorClass={getStatusColorClass}
-              />
-            )}
-
-            {viewMode === "dashboard" && (
-              <DashboardView 
-                filteredAgents={filteredAgents}
-                telemetry={telemetry}
-                terminalTitles={terminalTitles}
-                currentThoughts={currentThoughts}
-                selectedAgentIds={selectedAgentIds}
-                offAgentIds={offAgentIds}
-                draggedAgentId={draggedAgentId}
-                dragOverAgentId={dragOverAgentId}
-                onMouseEnterCard={handleMouseEnterCard}
-                onMouseUp={handleMouseUp}
-                onMouseDown={handleMouseDown}
-                onCardClick={handleAgentCardClick}
-                onPause={onPause}
-                onRestart={onRestart}
-                onDelete={onDelete}
-                onQuery={sendCommand}
-                deriveCurrentThought={deriveCurrentThought}
-                getStatusColorClass={getStatusColorClass}
-              />
-            )}
-          </div>
           )}
           mainOverlays={<>
             {dirtySurfacePrompt.dialog}

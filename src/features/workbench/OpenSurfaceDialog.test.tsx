@@ -22,7 +22,7 @@ function createNavigationFixture() {
 }
 
 describe("OpenSurfaceDialog", () => {
-  it("groups core choices, gates Agent Session by resource, and reserves future types", () => {
+  it("lists only actionable surfaces instead of rendering unavailable controls", () => {
     const fixture = createNavigationFixture();
     render(
       <OpenSurfaceDialog
@@ -35,9 +35,7 @@ describe("OpenSurfaceDialog", () => {
     );
 
     expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Core views" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Reserved" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Open a surface" })).toBeInTheDocument();
     for (const surfaceType of [
       "agents-overview",
       "dashboard",
@@ -46,21 +44,18 @@ describe("OpenSurfaceDialog", () => {
       "garden",
       "library",
       "workflows",
-      "agent-session",
-      "file-editor",
-      "browser",
     ]) {
       expect(document.querySelector(`[role="option"][data-surface-type="${surfaceType}"]`)).not.toBeNull();
     }
     expect(document.querySelector('[role="option"][data-surface-type="agent-session"]'))
-      .toHaveAttribute("aria-disabled", "true");
+      .toBeNull();
     expect(document.querySelector('[role="option"][data-surface-type="file-editor"]'))
-      .toHaveAttribute("aria-disabled", "true");
+      .toBeNull();
     expect(document.querySelector('[role="option"][data-surface-type="browser"]'))
-      .toHaveAttribute("aria-disabled", "true");
+      .toBeNull();
   });
 
-  it("uses roving listbox focus and keeps Open to Side actions outside the composite", () => {
+  it("filters and keyboard-navigates one compact option list", () => {
     const fixture = createNavigationFixture();
     render(
       <OpenSurfaceDialog
@@ -72,20 +67,19 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
 
-    const listbox = screen.getByRole("listbox", { name: "Core views" });
+    const input = screen.getByRole("combobox", { name: "Open a surface" });
+    const listbox = screen.getByRole("listbox", { name: "Available surfaces" });
     const options = within(listbox).getAllByRole("option");
-    expect(options[0]).toHaveAttribute("tabindex", "0");
-    expect(options[1]).toHaveAttribute("tabindex", "-1");
-    options[0].focus();
-    fireEvent.keyDown(options[0], { key: "ArrowDown" });
-    expect(options[1]).toHaveFocus();
-    expect(options[0]).toHaveAttribute("tabindex", "-1");
-    expect(options[1]).toHaveAttribute("tabindex", "0");
-    fireEvent.keyDown(options[1], { key: "End" });
-    expect(options[options.length - 1]).toHaveFocus();
-    expect(within(listbox).queryByRole("button", { name: /to Side/ })).toBeNull();
-    expect(screen.getByRole("group", { name: "Core views Open to Side" }))
-      .toContainElement(screen.getByRole("button", { name: "Open Agents Overview to Side" }));
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(options[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.change(input, { target: { value: "graph" } });
+    expect(within(listbox).getAllByRole("option")).toHaveLength(1);
+    expect(within(listbox).getByRole("option", { name: "Graph" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("button", { name: /to Side/ })).toBeNull();
   });
 
   it("keeps singleton focus authoritative for repeated Open to Side", () => {
@@ -126,7 +120,10 @@ describe("OpenSurfaceDialog", () => {
         on_close={onClose}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Open Agents Overview to Side" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Open a surface" }), {
+      key: "Enter",
+      ctrlKey: true,
+    });
     expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(1);
     expect(Object.keys(fixture.store.getState().document.groups)).toHaveLength(1);
   });
@@ -152,13 +149,13 @@ describe("OpenSurfaceDialog", () => {
     );
 
     expect(document.querySelector('[role="option"][data-surface-type="agent-session"]'))
-      .toHaveAttribute("aria-disabled", "false");
+      .not.toBeNull();
     fireEvent.click(screen.getByRole("option", { name: "Agent Session" }));
     expect(Object.values(fixture.store.getState().document.surfaces)[0]).toMatchObject({
       surface_type: "agent-session",
       resource_key: "agent-7",
     });
-    fireEvent.click(screen.getByRole("button", { name: "Reopen Queue" }));
+    fireEvent.click(screen.getByRole("option", { name: "Reopen Queue" }));
     expect(onReopen).toHaveBeenCalledOnce();
   });
 
@@ -184,7 +181,7 @@ describe("OpenSurfaceDialog", () => {
     );
 
     expect(document.querySelector('[role="option"][data-surface-type="agent-session"]'))
-      .toHaveAttribute("aria-disabled", "true");
+      .toBeNull();
   });
 
   it("offers only the top recently closed entry because reopen is stack ordered", () => {
@@ -211,8 +208,8 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Reopen Queue" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Reopen Dashboard" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Reopen Queue" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Reopen Dashboard" })).not.toBeInTheDocument();
   });
 
   it("restores focus to the launcher trigger after Escape", () => {

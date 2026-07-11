@@ -27,10 +27,12 @@ export type WorkbenchCommandId =
 export type WorkbenchCommandAction = {
   command_id: WorkbenchCommandId;
   title: string;
+  shortcut?: string;
 };
 
 export type WorkbenchCommandRouter = {
   actions: readonly WorkbenchCommandAction[];
+  is_enabled: (commandId: WorkbenchCommandId) => boolean;
   execute: (commandId: WorkbenchCommandId) => Promise<boolean>;
 };
 
@@ -47,24 +49,24 @@ export type UseWorkbenchCommandsOptions = {
 };
 
 export const WORKBENCH_COMMAND_ACTIONS: readonly WorkbenchCommandAction[] = Object.freeze([
-  { command_id: "workbench.open_surface", title: "Open Surface" },
-  { command_id: "workbench.quick_open", title: "Quick Open" },
-  { command_id: "workbench.command_palette", title: "Show Command Palette" },
-  { command_id: "workbench.close_surface", title: "Close Surface" },
-  { command_id: "workbench.reopen_closed_surface", title: "Reopen Closed Surface" },
+  { command_id: "workbench.open_surface", title: "Open Surface", shortcut: "Mod+Shift+O" },
+  { command_id: "workbench.quick_open", title: "Quick Open", shortcut: "Mod+P" },
+  { command_id: "workbench.command_palette", title: "Show Command Palette", shortcut: "Mod+Shift+P" },
+  { command_id: "workbench.close_surface", title: "Close Surface", shortcut: "Mod+W" },
+  { command_id: "workbench.reopen_closed_surface", title: "Reopen Closed Surface", shortcut: "Mod+Shift+T" },
   { command_id: "workbench.reset_workbench", title: "Reset Workbench" },
-  { command_id: "workbench.next_tab", title: "Next Tab" },
-  { command_id: "workbench.previous_tab", title: "Previous Tab" },
-  { command_id: "workbench.next_group", title: "Focus Next Group" },
-  { command_id: "workbench.previous_group", title: "Focus Previous Group" },
-  { command_id: "workbench.split_right", title: "Split Right" },
-  { command_id: "workbench.split_down", title: "Split Down" },
-  { command_id: "workbench.move_tab_next_group", title: "Move Tab to Next Group" },
-  { command_id: "workbench.move_tab_previous_group", title: "Move Tab to Previous Group" },
-  { command_id: "workbench.toggle_group_zoom", title: "Toggle Group Zoom" },
-  { command_id: "workbench.focus_left_dock", title: "Focus Left Dock" },
-  { command_id: "workbench.focus_right_dock", title: "Focus Right Dock" },
-  { command_id: "workbench.focus_workbench", title: "Focus Workbench" },
+  { command_id: "workbench.next_tab", title: "Next Tab", shortcut: "Mod+]" },
+  { command_id: "workbench.previous_tab", title: "Previous Tab", shortcut: "Mod+[" },
+  { command_id: "workbench.next_group", title: "Focus Next Group", shortcut: "F6" },
+  { command_id: "workbench.previous_group", title: "Focus Previous Group", shortcut: "Shift F6" },
+  { command_id: "workbench.split_right", title: "Split Right", shortcut: "Mod+Alt+Right" },
+  { command_id: "workbench.split_down", title: "Split Down", shortcut: "Mod+Alt+Down" },
+  { command_id: "workbench.move_tab_next_group", title: "Move Tab to Next Group", shortcut: "Alt+Shift+Right" },
+  { command_id: "workbench.move_tab_previous_group", title: "Move Tab to Previous Group", shortcut: "Alt+Shift+Left" },
+  { command_id: "workbench.toggle_group_zoom", title: "Toggle Group Zoom", shortcut: "Alt+Shift+Z" },
+  { command_id: "workbench.focus_left_dock", title: "Focus Left Dock", shortcut: "Mod+Alt+L" },
+  { command_id: "workbench.focus_right_dock", title: "Focus Right Dock", shortcut: "Mod+Alt+R" },
+  { command_id: "workbench.focus_workbench", title: "Focus Workbench", shortcut: "Mod+0" },
 ]);
 
 function defaultCreateId(kind: WorkbenchIdKind): string {
@@ -143,7 +145,41 @@ export function useWorkbenchCommands(
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
+  const isEnabled = useCallback((commandId: WorkbenchCommandId): boolean => {
+    const current = optionsRef.current;
+    const state = current.store.getState();
+    if (state.reset_pending) return false;
+    const document = state.document;
+    const activeGroup = document.groups[document.active_group_id];
+    if (!activeGroup) return false;
+    const groupCount = groupIdsInTreeOrder(document.root).length;
+    switch (commandId) {
+      case "workbench.next_tab":
+      case "workbench.previous_tab":
+        return activeGroup.surface_ids.length > 1;
+      case "workbench.next_group":
+      case "workbench.previous_group":
+        return groupCount > 1;
+      case "workbench.move_tab_next_group":
+      case "workbench.move_tab_previous_group":
+        return activeGroup.active_surface_id !== null && groupCount > 1;
+      case "workbench.close_surface":
+        return activeGroup.active_surface_id !== null;
+      case "workbench.reopen_closed_surface":
+        return document.recently_closed.length > 0;
+      case "workbench.command_palette":
+        return current.on_command_palette !== undefined;
+      case "workbench.focus_left_dock":
+        return current.on_focus_left_dock !== undefined;
+      case "workbench.focus_right_dock":
+        return current.on_focus_right_dock !== undefined;
+      default:
+        return true;
+    }
+  }, []);
+
   const execute = useCallback(async (commandId: WorkbenchCommandId): Promise<boolean> => {
+    if (!isEnabled(commandId)) return false;
     const current = optionsRef.current;
     const state = current.store.getState();
     if (state.reset_pending) return false;
@@ -266,17 +302,21 @@ export function useWorkbenchCommands(
         focusActive(activeGroup.group_id, activeGroup.active_surface_id);
         return true;
     }
-  }, []);
+  }, [isEnabled]);
 
   useEffect(() => {
     if (options.enabled === false) return;
     const handleKeyDown = (event: KeyboardEvent): void => {
-      const root = optionsRef.current.root_ref.current;
-      if (!(event.target instanceof Node) || !root?.contains(event.target)) return;
       const commandId = shortcutForEvent(event);
       if (!commandId) return;
+      const isGlobalPalette = commandId === "workbench.command_palette"
+        || commandId === "workbench.quick_open";
+      const root = optionsRef.current.root_ref.current;
+      if (!isGlobalPalette
+        && (!(event.target instanceof Node) || !root?.contains(event.target))) return;
       const isGroupTraversal = event.key === "F6";
-      if (!isGroupTraversal && (isEditableTarget(event.target) || terminalOwnsShortcut(event.target))) {
+      if (!isGroupTraversal && !isGlobalPalette
+        && (isEditableTarget(event.target) || terminalOwnsShortcut(event.target))) {
         return;
       }
       event.preventDefault();
@@ -287,5 +327,8 @@ export function useWorkbenchCommands(
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [execute, options.enabled]);
 
-  return useMemo(() => ({ actions: WORKBENCH_COMMAND_ACTIONS, execute }), [execute]);
+  return useMemo(
+    () => ({ actions: WORKBENCH_COMMAND_ACTIONS, is_enabled: isEnabled, execute }),
+    [execute, isEnabled],
+  );
 }

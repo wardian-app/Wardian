@@ -338,9 +338,7 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   const sessionId = `e2e-remote-gateway-${RUN_ID}`;
   const sessionName = `E2E-REMOTE-GATEWAY-${RUN_ID}`;
   const mockScript = writePersistentRemoteMockScript(harness, sessionId);
-  const previousWorkbenchFlag = process.env.VITE_WARDIAN_WORKBENCH;
   const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
-  process.env.VITE_WARDIAN_WORKBENCH = "1";
   process.env.WARDIAN_MOCK_SCRIPT = mockScript;
 
   let session = null;
@@ -349,8 +347,6 @@ test("remote gateway authenticates broker ownership transitions across desktop a
     assert.ok(harness.appPath, "Expected a native Wardian application path");
     session = await startNativeSession(harness);
   } finally {
-    if (previousWorkbenchFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-    else process.env.VITE_WARDIAN_WORKBENCH = previousWorkbenchFlag;
     if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
     else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
   }

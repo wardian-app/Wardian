@@ -14,8 +14,8 @@ const e2eViewport = {
   height: Number.isFinite(parsedViewportHeight) && parsedViewportHeight > 0 ? parsedViewportHeight : 1080,
 };
 
-export function createE2eConfig(options: { workbench?: boolean } = {}) {
-  const workbench = options.workbench === true;
+export function createE2eConfig(options: { isolated_server?: boolean } = {}) {
+  const isolatedServer = options.isolated_server === true;
   return defineConfig({
     testDir: "./tests",
     workers: 1,
@@ -35,10 +35,9 @@ export function createE2eConfig(options: { workbench?: boolean } = {}) {
       command: `npm run vite -- --host ${e2eHost} --port ${e2ePort} --strictPort`,
       url: baseURL,
       timeout: 180_000,
-      reuseExistingServer: workbench ? false : reuseExistingServer,
+      reuseExistingServer: isolatedServer ? false : reuseExistingServer,
       env: {
         WARDIAN_HOME: testHome,
-        ...(workbench ? { VITE_WARDIAN_WORKBENCH: "1" } : {}),
       },
     },
 

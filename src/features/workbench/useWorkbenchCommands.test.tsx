@@ -169,7 +169,7 @@ describe("useWorkbenchCommands", () => {
     expect(Object.keys(store.getState().document.surfaces)).toHaveLength(0);
   });
 
-  it("routes keyboard Quick Open and command palette actions", () => {
+  it("routes global Quick Open and command palette shortcuts even from editable surfaces", () => {
     const store = createWorkbenchStore({ initial_document: makeCommandDocument() });
     const onQuickOpen = vi.fn();
     const onCommandPalette = vi.fn();
@@ -182,8 +182,11 @@ describe("useWorkbenchCommands", () => {
       />,
     );
 
-    fireEvent.keyDown(screen.getByTestId("command-root"), { key: "p", ctrlKey: true });
-    fireEvent.keyDown(screen.getByTestId("command-root"), {
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Editable" }), {
+      key: "p",
+      ctrlKey: true,
+    });
+    fireEvent.keyDown(document.body, {
       key: "p",
       ctrlKey: true,
       shiftKey: true,

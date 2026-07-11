@@ -628,7 +628,7 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 
 - [x] **Step 1: Replace auxiliary bridge callbacks** with typed `onOpenSurface`/NavigationService requests. Rail clicks still only select auxiliary panes.
 - [x] **Step 2: Prove every old destination is reachable** from Home/`+`, Quick Open, command palette, or contextual object action before deleting the titlebar list.
-- [x] **Step 3: Make the flagged titlebar correct.** With `VITE_WARDIAN_WORKBENCH=1`, omit the fixed launcher and expose only workbench commands while preserving drag/telemetry/side/window controls. With the flag off, retain `WorkspaceTabs` and `viewMode` solely as the rollback comparison path until Task 19.
+- [x] **Step 3: Make the flagged titlebar correct.** With `VITE_WARDIAN_WORKBENCH=1`, omit the fixed launcher and keep the center as quiet drag space while preserving telemetry/side/window controls. Put workbench actions in transient palettes and pane/tab context menus. With the flag off, retain `WorkspaceTabs` and `viewMode` solely as the rollback comparison path until Task 19.
 - [x] **Step 4: Keep the workbench flag default off.** Safe mode and the normal flagged adapter consume the same model/registry; neither overwrites legacy state before migration acknowledgement.
 - [x] **Step 5: Run** focused App/titlebar/sidebar tests, `npm run lint`, and `npm run build` in flag-off and flag-on configurations. **Expected:** both paths pass; the flagged path contains no fixed global launcher.
 - [x] **Step 6: Commit** `feat(workbench): complete flagged surface migration`.
@@ -761,12 +761,13 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - Modify: `package.json`
 - Modify: `e2e/playwright.config.ts` and native build setup to remove the now-unnecessary developer flag
 
-- [ ] **Step 1: Re-run the prerequisite gates with `VITE_WARDIAN_WORKBENCH=1` set in the current shell:** `npm run test:e2e:workbench`, targeted native build/tests, and `npm run perf:workbench:check`. **Expected:** PASS. Any failure returns to the owning task; do not cut over.
-- [ ] **Step 2: Prove safe mode before deletion.** Normal → `WARDIAN_WORKBENCH_SAFE_MODE=1` → normal preserves the workbench bytes/tree exactly; safe mode can change the active group without flattening splits and uses the same persistence/CAS path.
-- [ ] **Step 3: Remove the legacy navigation path.** Delete `WorkspaceTabs`, `ViewMode`, `setViewMode`, `viewMode`, `CACHED_CANVAS_VIEWS`, cached global switching, old Ctrl+Tab cycling, and the default-off `VITE_WARDIAN_WORKBENCH` branch. Workbench becomes the only model; retain runtime safe mode.
-- [ ] **Step 4: Add the final cutover verifier.** It fails on the audited legacy symbols/selectors and direct desktop surface-launch button clicks across tracked `src`, `e2e`, `e2e-native`, and `scripts`; allow only documented non-desktop-navigation matches with reasons.
-- [ ] **Step 5: Run** focused App/titlebar/safe-mode/cutover tests, `npm run check:workbench-cutover`, `npm run lint`, `npm run build`, full browser E2E, and targeted native workbench E2E without the developer flag. **Expected:** PASS and all 25 audit entries are migrated/removed/intentionally unrelated.
-- [ ] **Step 6: Commit** `feat(workbench): make surface navigation canonical`.
+- [x] **Step 1: Re-run the prerequisite gates with `VITE_WARDIAN_WORKBENCH=1` set in the current shell:** `npm run test:e2e:workbench`, targeted native build/tests, and `npm run perf:workbench:check`. **Expected:** PASS. Any failure returns to the owning task; do not cut over.
+- [x] **Step 2: Prove safe mode before deletion.** Normal → `WARDIAN_WORKBENCH_SAFE_MODE=1` → normal preserves the workbench bytes/tree exactly; safe mode can change the active group without flattening splits and uses the same persistence/CAS path.
+- [x] **Step 3: Remove the legacy navigation path.** Delete `WorkspaceTabs`, `ViewMode`, `setViewMode`, `viewMode`, `CACHED_CANVAS_VIEWS`, cached global switching, old Ctrl+Tab cycling, and the default-off `VITE_WARDIAN_WORKBENCH` branch. Workbench becomes the only model; retain runtime safe mode.
+- [x] **Step 4: Add the final cutover verifier.** It fails on the audited legacy symbols/selectors and direct desktop surface-launch button clicks across tracked `src`, `e2e`, `e2e-native`, and `scripts`; allow only documented non-desktop-navigation matches with reasons.
+- [x] **Step 5: Run** focused App/titlebar/safe-mode/cutover tests, `npm run check:workbench-cutover`, `npm run lint`, `npm run build`, full browser E2E, and targeted native workbench E2E without the developer flag. **Expected:** PASS and all 25 audit entries are migrated/removed/intentionally unrelated.
+- [x] **UX correction:** remove the permanent workbench command bar, keep the titlebar center as drag space, render pane-local tab strips with only `+` and `…` as persistent controls, move tab/pane actions to context menus, and expose Quick Open and commands as searchable transient palettes.
+- [x] **Step 6: Commit** `feat(workbench): make surface navigation canonical`.
 
 ## Phase 5 — Documentation, evidence, CI, and PR
 
@@ -797,7 +798,7 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - Modify: `scripts/capture-doc-screenshots.mjs`
 - Modify: `scripts/capture-readme-demo-real.mjs`
 
-- [ ] **Step 1: Document the user model:** `+`, Home, Quick Open, commands, pane tabs/splits/move/join/zoom/reopen, auxiliary rail boundary, roster targeting versus Open/Open to Side, Overview modes, restore/placeholders/reset, explicit terminal activation, and presentation close versus agent kill.
+- [ ] **Step 1: Document the user model:** quiet titlebar, pane-local tabs with `+` and `…`, transient Quick Open and command palettes, Home, pane context menus, splits/move/join/zoom/reopen, auxiliary rail boundary, roster targeting versus Open/Open to Side, Overview modes, restore/placeholders/reset, explicit terminal activation, and presentation close versus agent kill.
 - [ ] **Step 2: Keep `grid.md` as a compatibility entry** explaining Grid is now an Agents Overview mode, not a global page.
 - [ ] **Step 3: Document developer contracts:** registry/open/render/runtime/close policies, size/version limits, persistence migrations, adapter boundary/safe mode, broker generation/epoch/snapshot/sequence/geometry, renderer budgets, and test-layer boundaries.
 - [ ] **Step 4: Update capture automation** to semantic workbench helpers and remove every fixed titlebar click.

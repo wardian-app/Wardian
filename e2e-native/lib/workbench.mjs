@@ -210,18 +210,18 @@ export async function openWorkbenchSurface(
   );
   await driver.wait(until.elementIsVisible(dialog), timeoutMs);
 
+  const option = await dialog.findElement(By.css(
+    `[role="option"]${attributeSelector("surface-type", surfaceType)}`,
+  ));
   if (toSide) {
-    const title = surfaceType.split("-").map((part) => (
-      part.length === 0 ? part : `${part[0].toUpperCase()}${part.slice(1)}`
-    )).join(" ");
-    const side = await dialog.findElement(By.css(
-      `button[aria-label=${JSON.stringify(`Open ${title} to Side`)}]`,
-    ));
-    await side.click();
+    const platform = await driver.executeScript(() => navigator.platform);
+    const primaryKey = /Mac|iPhone|iPad/.test(String(platform)) ? Key.COMMAND : Key.CONTROL;
+    await driver.actions()
+      .keyDown(primaryKey)
+      .click(option)
+      .keyUp(primaryKey)
+      .perform();
   } else {
-    const option = await dialog.findElement(By.css(
-      `[role="option"]${attributeSelector("surface-type", surfaceType)}`,
-    ));
     await option.click();
   }
 

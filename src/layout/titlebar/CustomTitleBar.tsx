@@ -1,24 +1,15 @@
 import React from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LeftSidebarControls } from "./LeftSidebarControls";
-import { WorkspaceTabs } from "./WorkspaceTabs";
-import type { ViewMode } from "./WorkspaceTabs";
 import { RightWindowControls } from "./RightWindowControls";
 import type { AgentTelemetry, AgentConfig, AppTelemetry } from "../../types";
-
-export type { ViewMode };
 
 const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
 const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
 const DEFAULT_LEFT_RAIL_WIDTH = 48;
 
 interface CustomTitleBarProps {
-  workbenchEnabled: boolean;
   workbenchBusy?: boolean;
-  onQuickOpen: () => void;
-  onCommandPalette: () => void;
-  viewMode: ViewMode;
-  setViewMode: (mode: ViewMode) => void;
   leftCollapsed: boolean;
   setLeftCollapsed: (collapsed: boolean) => void;
   rightCollapsed: boolean;
@@ -63,26 +54,11 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
         titlebarTelemetryVisible={props.titlebarTelemetryVisible}
       />
       <div
-        className="titlebar-center-container"
+        className="titlebar-drag-space"
         data-testid="titlebar-center"
-        data-navigation-mode={props.workbenchEnabled ? "workbench" : "legacy"}
-      >
-        {props.workbenchEnabled ? (
-          <div className="titlebar-zone titlebar-center" aria-label="Workbench commands" role="group">
-            <button type="button" className="titlebar-command" disabled={props.workbenchBusy} onClick={props.onQuickOpen}>
-              Quick Open
-            </button>
-            <button type="button" className="titlebar-command" disabled={props.workbenchBusy} onClick={props.onCommandPalette}>
-              Commands
-            </button>
-          </div>
-        ) : (
-          <WorkspaceTabs
-            viewMode={props.viewMode}
-            setViewMode={props.setViewMode}
-          />
-        )}
-      </div>
+        data-navigation-mode="workbench"
+        data-tauri-drag-region
+      />
       <RightWindowControls
         rightCollapsed={props.rightCollapsed}
         sidebarToggleDisabled={props.workbenchBusy}

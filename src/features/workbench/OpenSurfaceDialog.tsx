@@ -1,8 +1,9 @@
 import {
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
-  type KeyboardEvent as ReactKeyboardEvent,
+  useState,
 } from "react";
 
 import type { ClosedSurfaceV1, OpenSurfaceRequest } from "../../types";
@@ -44,27 +45,6 @@ function titleForType(surfaceType: string): string {
     ?? surfaceType;
 }
 
-function handleOptionListKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>): void {
-  const listbox = event.currentTarget.closest<HTMLElement>('[role="listbox"]');
-  const options = [...(listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])];
-  const currentIndex = options.indexOf(event.currentTarget);
-  if (currentIndex < 0 || options.length === 0) return;
-  const targetIndex = event.key === "ArrowDown" || event.key === "ArrowRight"
-    ? (currentIndex + 1) % options.length
-    : event.key === "ArrowUp" || event.key === "ArrowLeft"
-      ? (currentIndex - 1 + options.length) % options.length
-      : event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? options.length - 1
-          : null;
-  if (targetIndex === null) return;
-  event.preventDefault();
-  for (const option of options) option.tabIndex = -1;
-  options[targetIndex].tabIndex = 0;
-  options[targetIndex].focus();
-}
-
 export function OpenSurfaceDialog({
   open,
   group_id,
@@ -78,13 +58,36 @@ export function OpenSurfaceDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const primaryModifier = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
+    ? "⌘"
+    : "Ctrl";
+
+  const availableChoices = useMemo(() => CONTRIBUTION_GROUPS.flatMap((group) => (
+    CORE_SURFACE_CONTRIBUTIONS.filter(
+      (choice) => choice.group === group && !choiceDisabled(choice, registry, resource_key),
+    )
+  )), [registry, resource_key]);
+  const filteredChoices = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return availableChoices;
+    return availableChoices.filter((choice) => (
+      `${choice.title} ${choice.description} ${choice.group}`.toLocaleLowerCase().includes(normalized)
+    ));
+  }, [availableChoices, query]);
+  const showRecent = Boolean(recently_closed[0] && !query.trim());
+  const optionCount = filteredChoices.length + (showRecent ? 1 : 0);
 
   useLayoutEffect(() => {
     if (open && !wasOpenRef.current) {
       returnFocusRef.current = document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-      dialogRef.current?.focus();
+      setQuery("");
+      setActiveIndex(0);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
     }
     wasOpenRef.current = open;
   }, [open]);
@@ -114,103 +117,123 @@ export function OpenSurfaceDialog({
     requestClose();
   };
 
+  const activateIndex = (index: number, toSide: boolean): void => {
+    if (showRecent) {
+      if (index === 0) {
+        on_reopen_closed?.();
+        requestClose();
+        return;
+      }
+      index -= 1;
+    }
+    const choice = filteredChoices[index];
+    if (!choice) return;
+    if (toSide) openChoiceToSide(choice);
+    else openChoice(choice);
+  };
+
   return (
     <div
-      ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Open Surface"
-      tabIndex={-1}
-      className="wardian-open-surface-dialog"
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        requestClose();
+      className="wardian-palette-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) requestClose();
       }}
     >
-      <header>
-        <div>
-          <p>Workbench</p>
-          <h2>Open Surface</h2>
-        </div>
-        <button type="button" aria-label="Close Open Surface" onClick={requestClose}>×</button>
-      </header>
-      {recently_closed[0] && (
-        <section aria-labelledby="open-surface-recent-heading">
-          <h3 id="open-surface-recent-heading">Recent</h3>
-          <button
-            type="button"
-            onClick={() => {
-              on_reopen_closed?.();
-              requestClose();
-            }}
-          >
-            Reopen {titleForType(recently_closed[0].surface.surface_type)}
-          </button>
-        </section>
-      )}
-      {CONTRIBUTION_GROUPS.map((group) => (
-        <section key={group} aria-labelledby={`open-surface-${group.replace(" ", "-").toLowerCase()}`}>
-          <h3 id={`open-surface-${group.replace(" ", "-").toLowerCase()}`}>{group}</h3>
-          <div className="wardian-open-surface-choice-layout">
-            <div role="listbox" aria-label={group}>
-              {CORE_SURFACE_CONTRIBUTIONS.filter((choice) => choice.group === group).map((choice, index) => {
-                const disabled = choiceDisabled(choice, registry, resource_key);
-                return (
-                  <button
-                    key={choice.surface_type}
-                    type="button"
-                    role="option"
-                    aria-label={choice.title}
-                    aria-selected="false"
-                    aria-disabled={disabled}
-                    data-surface-type={choice.surface_type}
-                    tabIndex={index === 0 ? 0 : -1}
-                    className="wardian-open-surface-option"
-                    onFocus={(event) => {
-                      const options = event.currentTarget.parentElement
-                        ?.querySelectorAll<HTMLButtonElement>('[role="option"]');
-                      options?.forEach((option) => { option.tabIndex = -1; });
-                      event.currentTarget.tabIndex = 0;
-                    }}
-                    onKeyDown={handleOptionListKeyDown}
-                    onClick={() => openChoice(choice)}
-                  >
-                    <span>{choice.title}</span>
-                    <small>{choice.description}</small>
-                  </button>
-                );
-              })}
-            </div>
-            {CORE_SURFACE_CONTRIBUTIONS.some(
-              (choice) => choice.group === group && !choice.reserved,
-            ) && (
-              <div
-                role="group"
-                aria-label={`${group} Open to Side`}
-                className="wardian-open-surface-side-actions"
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Open Surface"
+        className="wardian-open-surface-dialog"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            requestClose();
+            return;
+          }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (optionCount === 0) return;
+            setActiveIndex((current) => (
+              event.key === "ArrowDown"
+                ? (current + 1) % optionCount
+                : (current - 1 + optionCount) % optionCount
+            ));
+            return;
+          }
+          if (event.key === "Home" || event.key === "End") {
+            event.preventDefault();
+            setActiveIndex(event.key === "Home" ? 0 : Math.max(0, optionCount - 1));
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            activateIndex(activeIndex, event.ctrlKey || event.metaKey);
+          }
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="search"
+          role="combobox"
+          aria-label="Open a surface"
+          aria-controls="workbench-open-surface-options"
+          aria-expanded="true"
+          aria-activedescendant={optionCount > 0 ? `workbench-open-option-${activeIndex}` : undefined}
+          placeholder="Open a surface…"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setActiveIndex(0);
+          }}
+        />
+        <div id="workbench-open-surface-options" role="listbox" aria-label="Available surfaces">
+          {showRecent && recently_closed[0] && (
+            <button
+              id="workbench-open-option-0"
+              type="button"
+              role="option"
+              aria-label={`Reopen ${titleForType(recently_closed[0].surface.surface_type)}`}
+              aria-selected={activeIndex === 0}
+              className="wardian-palette-option"
+              onMouseEnter={() => setActiveIndex(0)}
+              onClick={() => activateIndex(0, false)}
+            >
+              <span>Reopen {titleForType(recently_closed[0].surface.surface_type)}</span>
+              <small>Recently closed</small>
+            </button>
+          )}
+          {filteredChoices.map((choice, index) => {
+            const optionIndex = index + (showRecent ? 1 : 0);
+            return (
+              <button
+                id={`workbench-open-option-${optionIndex}`}
+                key={choice.surface_type}
+                type="button"
+                role="option"
+                aria-label={choice.title}
+                aria-selected={activeIndex === optionIndex}
+                data-surface-type={choice.surface_type}
+                className="wardian-palette-option"
+                onMouseEnter={() => setActiveIndex(optionIndex)}
+                onClick={(event) => activateIndex(
+                  optionIndex,
+                  event.ctrlKey || event.metaKey,
+                )}
               >
-                {CORE_SURFACE_CONTRIBUTIONS.filter(
-                  (choice) => choice.group === group && !choice.reserved,
-                ).map((choice) => {
-                  const disabled = choiceDisabled(choice, registry, resource_key);
-                  return (
-                    <button
-                      key={choice.surface_type}
-                      type="button"
-                      aria-label={`Open ${choice.title} to Side`}
-                      disabled={disabled}
-                      onClick={() => openChoiceToSide(choice)}
-                    >
-                      {choice.title} to Side
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-      ))}
+                <span>{choice.title}</span>
+                <small>{choice.description}</small>
+              </button>
+            );
+          })}
+          {optionCount === 0 && <p className="wardian-palette-empty">No matching surfaces</p>}
+        </div>
+        <footer>
+          <span><kbd>Enter</kbd> Open</span>
+          <span><kbd>{primaryModifier}</kbd>+<kbd>Enter</kbd> Open to side</span>
+          <span><kbd>Esc</kbd> Close</span>
+        </footer>
+      </div>
     </div>
   );
 }

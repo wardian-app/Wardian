@@ -71,7 +71,7 @@ second hierarchy of Sites or couple layout state to an unproven Cohort model.
 
 ```text
 AppShell
-├── CustomTitleBar             window controls, global commands, no view launcher
+├── CustomTitleBar             telemetry, drag space, side/window controls
 ├── LeftControlRegion
 │   ├── SidebarIconRail        auxiliary-tool selector only
 │   └── SidebarContentPane     contextual tool content
@@ -119,6 +119,13 @@ Central surface discovery uses:
 - recent surfaces and typed registry contributions.
 
 There is no mandatory Home hop between normal tasks.
+
+The titlebar is intentionally quiet. It does not expose persistent surface or
+command buttons. Each pane owns a browser-like tab strip; its persistent
+controls are limited to New Surface (`+`) and More Actions (`…`). Tab-specific
+actions live in the tab context menu, pane structure actions live in the pane
+menu, and the searchable Quick Open and command palettes appear only while
+invoked.
 
 ### Groups, tabs, and splits
 
@@ -708,6 +715,11 @@ Surface, Next/Previous Tab, Focus Next/Previous Group, Move Tab to Group,
 Split Right/Down, Toggle Group Zoom, Focus Left/Right Dock, and Reset Workbench.
 Defaults follow platform conventions and remain remappable when Wardian's
 command system supports keybinding customization.
+
+`Ctrl/Cmd+P` opens the transient Quick Open palette and
+`Ctrl/Cmd+Shift+P` opens the transient command palette. Neither is a permanent
+toolbar or command bar. Search, arrow-key selection, Enter, Escape, disabled
+command state, and focus return are part of the palette contract.
 
 Tab strips use the ARIA tabs pattern with roving focus. Split separators are
 keyboard adjustable and expose values to assistive technology. Drag/drop always

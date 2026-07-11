@@ -17,15 +17,6 @@ import type { AgentInteractions } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
 
-const workbenchFlagState = vi.hoisted(() => ({ enabled: false }));
-vi.mock("../config/workbenchFlags", () => ({
-  WORKBENCH_FLAGS: {
-    get workbench_enabled() {
-      return workbenchFlagState.enabled;
-    },
-  },
-}));
-
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -152,6 +143,33 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
   currentQueuePreferences = {};
   mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
     switch (cmd) {
+      case "get_workbench_boot_config":
+        return { safe_mode: false };
+      case "load_workbench_state":
+        return {
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("overview-surface", {
+              surface_type: "agents-overview",
+              state: {
+                mode: "grid",
+                focused_agent_id: null,
+                search_query: "",
+                status_filter: [],
+              },
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "test-durable-zero",
+        };
+      case "save_workbench_state":
+        return {
+          outcome: "saved",
+          durable_revision: args?.document?.revision,
+          durable_token: `test-durable-${args?.document?.revision}`,
+          request_id: args?.request_id,
+        };
       case "list_agents":
         return currentAgents;
       case "list_agent_classes":
@@ -376,6 +394,23 @@ function captureQueueAgentListeners() {
   };
 }
 
+async function openWorkbenchSurface(surfaceType: string) {
+  const dialog = await openWorkbenchLauncher();
+  const option = dialog.querySelector<HTMLElement>(
+    `[role="option"][data-surface-type="${surfaceType}"]`,
+  );
+  if (!option) throw new Error(`Workbench launcher option not found: ${surfaceType}`);
+  fireEvent.click(option);
+}
+
+async function openWorkbenchLauncher() {
+  fireEvent.keyDown(screen.getByRole("tab", { selected: true }), {
+    key: "p",
+    ctrlKey: true,
+  });
+  return screen.findByRole("dialog", { name: "Open Surface" });
+}
+
 const defaultClasses: AgentClassDefinition[] = [
   { name: "Coder", description: "Writes code", is_default: true },
   { name: "Architect", description: "Designs systems", is_default: true },
@@ -404,7 +439,6 @@ const opencodeAgents: AgentConfig[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
-  workbenchFlagState.enabled = false;
   localStorage.clear();
   useLayoutStore.getState().resetLayout();
   useSettingsStore.setState({
@@ -430,33 +464,40 @@ beforeEach(() => {
 });
 
 describe("Workbench persistence boot integration", () => {
-  it("keeps flag-off navigation unchanged without reading or deleting legacy layout", async () => {
+  it("boots the canonical workbench and migrates legacy layout state", async () => {
     setupDefaultMocks([], defaultClasses);
     localStorage.setItem("wardian-layout", "legacy-layout-bytes");
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "default",
+          document: makeSingleGroupDocument(),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "test-durable-zero",
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
 
     render(<App />);
     await screen.findByText("No Active Instances");
 
-    expect(mockInvoke).not.toHaveBeenCalledWith("get_workbench_boot_config");
-    expect(mockInvoke).not.toHaveBeenCalledWith("load_workbench_state");
-    expect(localStorage.getItem("wardian-layout")).toBe("legacy-layout-bytes");
-    expect(screen.queryByTestId("workbench-persistence-notice")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("workbench-host")).not.toBeInTheDocument();
-    expect(screen.getByTestId("titlebar-center")).toHaveAttribute("data-navigation-mode", "legacy");
-    expect(within(screen.getByTestId("titlebar-center")).getByRole("button", { name: "Grid" }))
-      .toBeInTheDocument();
-    expect(within(screen.getByTestId("titlebar-center")).getByRole("button", { name: "Workflows" }))
-      .toBeInTheDocument();
-    const legacyCycle = new KeyboardEvent("keydown", {
+    expect(mockInvoke).toHaveBeenCalledWith("get_workbench_boot_config", undefined);
+    expect(mockInvoke).toHaveBeenCalledWith("load_workbench_state", undefined);
+    expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
+    const titlebarCenter = screen.getByTestId("titlebar-center");
+    expect(titlebarCenter).toHaveAttribute("data-navigation-mode", "workbench");
+    expect(titlebarCenter).toHaveAttribute("data-tauri-drag-region");
+    expect(within(titlebarCenter).queryByRole("button")).not.toBeInTheDocument();
+    const cycle = new KeyboardEvent("keydown", {
       key: "Tab",
       ctrlKey: true,
       cancelable: true,
     });
-    window.dispatchEvent(legacyCycle);
-    expect(legacyCycle.defaultPrevented).toBe(true);
-    await waitFor(() => expect(within(screen.getByTestId("titlebar-center"))
-      .getByRole("button", { name: "Dashboard" })).toHaveClass("active"));
-    expect(screen.getAllByText("Grid").length).toBeGreaterThanOrEqual(1);
+    window.dispatchEvent(cycle);
+    expect(cycle.defaultPrevented).toBe(false);
     expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
   });
 
@@ -479,8 +520,7 @@ describe("Workbench persistence boot integration", () => {
     }
   });
 
-  it("shows nonblocking recovery and backend safe-mode state behind the flag", async () => {
-    workbenchFlagState.enabled = true;
+  it("shows nonblocking recovery and backend safe-mode state", async () => {
     setupDefaultMocks([], defaultClasses);
     const defaultInvoke = mockInvoke.getMockImplementation();
     mockInvoke.mockImplementation((command, args) => {
@@ -517,12 +557,8 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
     const titlebarCenter = screen.getByTestId("titlebar-center");
     expect(titlebarCenter).toHaveAttribute("data-navigation-mode", "workbench");
-    expect(within(titlebarCenter).getByRole("button", { name: "Quick Open" }))
-      .toBeInTheDocument();
-    expect(within(titlebarCenter).getByRole("button", { name: "Commands" }))
-      .toBeInTheDocument();
-    expect(within(titlebarCenter).queryByRole("button", { name: "Grid" }))
-      .not.toBeInTheDocument();
+    expect(titlebarCenter).toHaveAttribute("data-tauri-drag-region");
+    expect(within(titlebarCenter).queryByRole("button")).not.toBeInTheDocument();
     const flaggedLegacyCycle = new KeyboardEvent("keydown", {
       key: "Tab",
       ctrlKey: true,
@@ -554,8 +590,7 @@ describe("Workbench persistence boot integration", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: "Library" }))
       .toHaveAttribute("aria-selected", "true"));
 
-    fireEvent.click(within(titlebarCenter).getByRole("button", { name: "Quick Open" }));
-    expect(await screen.findByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+    expect(await openWorkbenchLauncher()).toBeInTheDocument();
     for (const surfaceType of [
       "agents-overview",
       "dashboard",
@@ -571,7 +606,6 @@ describe("Workbench persistence boot integration", () => {
   });
 
   it("routes roster Open and Open to Side into Agent Session surfaces", async () => {
-    workbenchFlagState.enabled = true;
     setupDefaultMocks(sampleAgents, defaultClasses);
     const defaultInvoke = mockInvoke.getMockImplementation();
     mockInvoke.mockImplementation((command, args) => {
@@ -647,7 +681,6 @@ describe("Workbench persistence boot integration", () => {
   });
 
   it("routes Queue agent actions to an Agent Session surface", async () => {
-    workbenchFlagState.enabled = true;
     setupDefaultMocks(sampleAgents, defaultClasses);
     currentQueueItems = [{
       id: "queue-agent-2",
@@ -1892,20 +1925,11 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("replaces the maximized grid agent when double-clicking another watchlist row", async () => {
+  it("opens another agent in its own surface without repurposing the overview", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     render(<App />);
 
-    const alphaTerminal = await screen.findByTestId("terminal-agent-1");
-    const alphaCard = alphaTerminal.closest('[data-testid="agent-card"]');
-    expect(alphaCard).not.toBeNull();
-
-    fireEvent.click(within(alphaCard as HTMLElement).getByRole("button", { name: "Maximize Alpha" }));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("terminal-agent-1")).toBeVisible();
-      expect(screen.getByTestId("terminal-agent-2")).not.toBeVisible();
-    });
+    await screen.findByTestId("agents-overview-surface");
 
     const betaWatchlistRow = screen
       .getAllByText("Beta")
@@ -1915,10 +1939,10 @@ describe("Agent Watchlist Sidebar", () => {
 
     fireEvent.doubleClick(betaWatchlistRow);
 
-    await waitFor(() => {
-      expect(screen.getByTestId("terminal-agent-1")).not.toBeVisible();
-      expect(screen.getByTestId("terminal-agent-2")).toBeVisible();
-    });
+    const sessionSurface = await screen.findByTestId("agent-session-surface");
+    expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Agents Overview" })).toBeInTheDocument();
   });
 
   it("keeps command targets unchanged when a terminal receives focus", async () => {
@@ -2024,13 +2048,16 @@ describe("Agent Watchlist Sidebar", () => {
 
 // ── View Mode Toggle Tests ─────────────────────────────────────────────
 
-describe("View Mode Toggle", () => {
-  it("renders Grid and Dashboard toggle buttons", async () => {
+describe("Workbench surface navigation", () => {
+  it("keeps layout modes inside Agents Overview instead of the titlebar", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByText("Grid")).toBeInTheDocument();
-    expect(screen.getByText("Dashboard")).toBeInTheDocument();
+    const overview = screen.getByTestId("agents-overview-surface");
+    expect(within(overview).getByText("Grid")).toBeInTheDocument();
+    const titlebar = screen.getByTestId("titlebar-center");
+    expect(within(titlebar).queryByRole("button", { name: "Dashboard" })).not.toBeInTheDocument();
+    expect(within(titlebar).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("renders the graph view instead of the graph placeholder", async () => {
@@ -2038,7 +2065,7 @@ describe("View Mode Toggle", () => {
     render(<App />);
     await screen.findByTestId("agent-grid");
 
-    fireEvent.click(screen.getByText("Graph"));
+    await openWorkbenchSurface("graph");
 
     expect(screen.queryByText(/Advanced graph features coming/i)).not.toBeInTheDocument();
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
@@ -2052,7 +2079,7 @@ describe("View Mode Toggle", () => {
     render(<App />);
     await screen.findByTestId("agent-grid");
 
-    fireEvent.click(screen.getByText("Graph"));
+    await openWorkbenchSurface("graph");
     await screen.findByTestId("graph-view");
     const initialFilteredAgents =
       graphViewFilteredAgentsSpy.mock.calls[graphViewFilteredAgentsSpy.mock.calls.length - 1]?.[0];
@@ -2065,7 +2092,7 @@ describe("View Mode Toggle", () => {
     expect(graphViewFilteredAgentsSpy.mock.calls[graphViewFilteredAgentsSpy.mock.calls.length - 1]?.[0]).toBe(initialFilteredAgents);
   });
 
-  it("keeps heavy canvas views mounted after first visit so tab switches stay warm", async () => {
+  it("keeps heavy surface presentations warm while switching tabs", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     render(<App />);
     await screen.findByTestId("agent-grid");
@@ -2073,17 +2100,17 @@ describe("View Mode Toggle", () => {
     expect(screen.queryByTestId("graph-view")).not.toBeInTheDocument();
     expect(screen.queryByTestId("garden-canvas")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Graph"));
+    await openWorkbenchSurface("graph");
     expect(await screen.findByTestId("graph-view")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Grid"));
+    fireEvent.click(screen.getByRole("tab", { name: "Agents Overview" }));
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Garden"));
+    await openWorkbenchSurface("garden");
     expect(await screen.findByTestId("garden-canvas")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Grid"));
+    fireEvent.click(screen.getByRole("tab", { name: "Agents Overview" }));
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByTestId("garden-canvas")).toBeInTheDocument();

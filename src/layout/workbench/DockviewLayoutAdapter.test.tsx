@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkbenchDocumentV1 } from "../../types";
@@ -13,6 +13,7 @@ import {
   projectWorkbenchGroupSizes,
   routeWorkbenchDockviewDrop,
   shouldRecoverUnexpectedPanelRemoval,
+  workbenchPaneTargets,
   workbenchSplitRatioCommands,
 } from "./DockviewLayoutAdapter";
 import type { DockviewApi, DockviewWillDropEvent } from "dockview-react";
@@ -437,6 +438,87 @@ describe("DockviewLayoutAdapter", () => {
     },
   );
 
+  it("routes tab context actions through close, edge-split, and canonical move boundaries", async () => {
+    const onCloseSurface = vi.fn();
+    const onSurfaceDrop = vi.fn();
+    const onCommand = vi.fn(() => true);
+    render(
+      <DockviewLayoutAdapter
+        document={makeTwoGroupDocument()}
+        on_close_surface={onCloseSurface}
+        on_surface_drop={onSurfaceDrop}
+        on_command={onCommand}
+      />,
+    );
+
+    const tab = await screen.findByRole("tab", { name: /agents overview/i });
+    fireEvent.contextMenu(tab, { clientX: 80, clientY: 40 });
+    let menu = screen.getByRole("menu", { name: "Agents Overview tab actions" });
+    expect(within(menu).getByRole("menuitem", { name: "Close tab" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Split tab right" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Split tab down" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Move to next pane" })).toBeInTheDocument();
+    expect(menu).not.toHaveTextContent("group-");
+
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Split tab right" }));
+    expect(onSurfaceDrop).toHaveBeenCalledWith("surface-1", "group-1", "right");
+
+    fireEvent.contextMenu(tab, { clientX: 80, clientY: 40 });
+    menu = screen.getByRole("menu", { name: "Agents Overview tab actions" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to next pane" }));
+    expect(onCommand).toHaveBeenCalledWith({
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-2",
+      index: 1,
+    });
+
+    fireEvent.contextMenu(tab, { clientX: 80, clientY: 40 });
+    menu = screen.getByRole("menu", { name: "Agents Overview tab actions" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Close tab" }));
+    expect(onCloseSurface).toHaveBeenCalledWith("surface-1");
+  });
+
+  it("keeps pane chrome compact and puts layout commands in its contextual menu", async () => {
+    const onToggleZoom = vi.fn();
+    const onSplitGroup = vi.fn();
+    const onCloseGroup = vi.fn();
+    render(
+      <DockviewLayoutAdapter
+        document={makeTwoGroupDocument()}
+        zoomed_group_id="group-1"
+        on_toggle_zoom={onToggleZoom}
+        on_split_group={onSplitGroup}
+        on_close_group={onCloseGroup}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(2));
+    const group = document.querySelector<HTMLElement>('[data-group-id="group-1"]');
+    if (!group) throw new Error("expected first workbench group");
+    expect(within(group).getAllByRole("button").map((button) => button.getAttribute("aria-label")))
+      .toEqual(["Close Agents Overview", "Open Surface", "Pane actions"]);
+
+    fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
+    let menu = screen.getByRole("menu", { name: "Pane actions" });
+    expect(within(menu).getByRole("menuitem", { name: "Restore pane" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Split pane right" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Split pane down" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Close pane" })).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Restore pane" }));
+    expect(onToggleZoom).toHaveBeenCalledWith("group-1");
+
+    fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
+    menu = screen.getByRole("menu", { name: "Pane actions" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Split pane down" }));
+    expect(onSplitGroup).toHaveBeenCalledWith("group-1", "vertical");
+
+    fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
+    menu = screen.getByRole("menu", { name: "Pane actions" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Close pane" }));
+    expect(onCloseGroup).toHaveBeenCalledWith("group-1");
+  });
+
   it("reprojects canonical activation after an explicit writer rejection", async () => {
     const first = makeSurface("surface-1", { surface_type: "agents-overview" });
     const second = makeSurface("surface-2", { surface_type: "library" });
@@ -462,13 +544,29 @@ describe("DockviewLayoutAdapter", () => {
     expect(firstTab).toHaveAttribute("aria-selected", "false");
   });
 
-  it("offers only spatially adjacent join targets and one positioned focus target per split", async () => {
-    render(<DockviewLayoutAdapter document={makeMixedDepthThreeDocument()} />);
+  it("offers contextual previous/next pane actions without exposing internal group IDs", async () => {
+    const documentModel = makeMixedDepthThreeDocument();
+    const onJoinGroup = vi.fn();
+    render(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        on_join_group={onJoinGroup}
+      />,
+    );
 
     await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(4));
-    expect(screen.getByRole("button", { name: "Join group-1 into group-2" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Join group-1 into group-3" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Join group-1 into group-4" })).toBeNull();
+    expect(workbenchPaneTargets(documentModel.root, "group-1")).toEqual([
+      { group_id: "group-3", position: "next" },
+    ]);
+    const firstGroup = document.querySelector<HTMLElement>('[data-group-id="group-1"]');
+    if (!firstGroup) throw new Error("expected first workbench group");
+    fireEvent.click(within(firstGroup).getByRole("button", { name: "Pane actions" }));
+    const paneMenu = screen.getByRole("menu", { name: "Pane actions" });
+    expect(within(paneMenu).getByRole("menuitem", { name: "Merge into next pane" }))
+      .toBeInTheDocument();
+    expect(paneMenu).not.toHaveTextContent("group-");
+    fireEvent.click(within(paneMenu).getByRole("menuitem", { name: "Merge into next pane" }));
+    expect(onJoinGroup).toHaveBeenCalledWith("group-1", "group-3");
 
     const separators = screen.getAllByRole("separator");
     expect(separators).toHaveLength(3);

@@ -99,9 +99,7 @@ async function waitForExactUiDocument(driver, document, timeoutMs = PERSISTENCE_
 }
 
 test("native workbench persistence restores exact state and preserves recovery files", { timeout: 240_000 }, async (t) => {
-  const previousWorkbenchFlag = process.env.VITE_WARDIAN_WORKBENCH;
   const previousSafeMode = process.env.WARDIAN_WORKBENCH_SAFE_MODE;
-  process.env.VITE_WARDIAN_WORKBENCH = "1";
   delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
 
   const harness = await createNativeHarness();
@@ -127,8 +125,6 @@ test("native workbench persistence restores exact state and preserves recovery f
 
   t.after(async () => {
     await closeSession();
-    if (previousWorkbenchFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
-    else process.env.VITE_WARDIAN_WORKBENCH = previousWorkbenchFlag;
     if (previousSafeMode === undefined) delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
     else process.env.WARDIAN_WORKBENCH_SAFE_MODE = previousSafeMode;
   });

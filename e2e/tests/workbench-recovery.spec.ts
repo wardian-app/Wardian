@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { surfacePanel, surfaceTab } from "../fixtures/workbench";
 import {
@@ -16,6 +16,15 @@ const candidateAgent: WorkbenchAgentFixture = {
   provider: "claude",
   is_off: false,
 };
+
+async function executeWorkbenchCommand(page: Page, query: string): Promise<void> {
+  await page.getByRole("tab", { selected: true }).focus();
+  await page.keyboard.press("ControlOrMeta+Shift+P");
+  const palette = page.getByRole("dialog", { name: "Command Palette", exact: true });
+  await expect(palette).toBeVisible();
+  await palette.getByRole("combobox", { name: "Search commands", exact: true }).fill(query);
+  await page.keyboard.press("Enter");
+}
 
 test.describe("Workbench recovery", () => {
   test("restores the exact split document, shell sizes, and an inert unknown surface", async ({ page }) => {
@@ -270,7 +279,7 @@ test.describe("Workbench recovery", () => {
     await page.goto("/");
     const workflowName = page.getByRole("textbox", { name: "Workflow name" });
     await workflowName.fill("Edited workflow");
-    await page.getByRole("button", { name: "Reset Workbench", exact: true }).click();
+    await executeWorkbenchCommand(page, "Reset Workbench");
 
     const prompt = page.getByRole("dialog", { name: "Unsaved Workflows changes" });
     await expect(prompt).toBeVisible();
@@ -279,7 +288,7 @@ test.describe("Workbench recovery", () => {
     await expect(surfaceTab(page, "dashboard")).toHaveCount(1);
     await expect(surfaceTab(page, "workflows")).toHaveCount(1);
 
-    await page.getByRole("button", { name: "Reset Workbench", exact: true }).click();
+    await executeWorkbenchCommand(page, "Reset Workbench");
     await page.getByRole("dialog", { name: "Unsaved Workflows changes" })
       .getByRole("button", { name: "Discard", exact: true })
       .click();
@@ -322,7 +331,7 @@ test.describe("Workbench recovery", () => {
       (element) => element.getBoundingClientRect().width,
     ))).toBe(300);
     const widthBefore = await sidebar.evaluate((element) => element.getBoundingClientRect().width);
-    await page.getByRole("button", { name: "Reset Workbench", exact: true }).click();
+    await executeWorkbenchCommand(page, "Reset Workbench");
 
     const content = page.getByTestId("app-shell-content");
     await expect(content).toHaveAttribute("inert", "");
