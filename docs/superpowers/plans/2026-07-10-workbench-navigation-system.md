@@ -626,12 +626,12 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 - Modify: `src/views/App.tsx`
 - Modify: `src/views/App.test.tsx`
 
-- [ ] **Step 1: Replace auxiliary bridge callbacks** with typed `onOpenSurface`/NavigationService requests. Rail clicks still only select auxiliary panes.
-- [ ] **Step 2: Prove every old destination is reachable** from Home/`+`, Quick Open, command palette, or contextual object action before deleting the titlebar list.
-- [ ] **Step 3: Make the flagged titlebar correct.** With `VITE_WARDIAN_WORKBENCH=1`, omit the fixed launcher and expose only workbench commands while preserving drag/telemetry/side/window controls. With the flag off, retain `WorkspaceTabs` and `viewMode` solely as the rollback comparison path until Task 19.
-- [ ] **Step 4: Keep the workbench flag default off.** Safe mode and the normal flagged adapter consume the same model/registry; neither overwrites legacy state before migration acknowledgement.
-- [ ] **Step 5: Run** focused App/titlebar/sidebar tests, `npm run lint`, and `npm run build` in flag-off and flag-on configurations. **Expected:** both paths pass; the flagged path contains no fixed global launcher.
-- [ ] **Step 6: Commit** `feat(workbench): complete flagged surface migration`.
+- [x] **Step 1: Replace auxiliary bridge callbacks** with typed `onOpenSurface`/NavigationService requests. Rail clicks still only select auxiliary panes.
+- [x] **Step 2: Prove every old destination is reachable** from Home/`+`, Quick Open, command palette, or contextual object action before deleting the titlebar list.
+- [x] **Step 3: Make the flagged titlebar correct.** With `VITE_WARDIAN_WORKBENCH=1`, omit the fixed launcher and expose only workbench commands while preserving drag/telemetry/side/window controls. With the flag off, retain `WorkspaceTabs` and `viewMode` solely as the rollback comparison path until Task 19.
+- [x] **Step 4: Keep the workbench flag default off.** Safe mode and the normal flagged adapter consume the same model/registry; neither overwrites legacy state before migration acknowledgement.
+- [x] **Step 5: Run** focused App/titlebar/sidebar tests, `npm run lint`, and `npm run build` in flag-off and flag-on configurations. **Expected:** both paths pass; the flagged path contains no fixed global launcher.
+- [x] **Step 6: Commit** `feat(workbench): complete flagged surface migration`.
 
 ## Phase 4 — Prove migration, recovery, and runtime continuity
 
