@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -6,7 +7,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { Ellipsis, Plus } from "lucide-react";
 
 export type WorkbenchPaneTarget = {
@@ -24,6 +25,7 @@ export type WorkbenchContextMenuProps = {
   aria_label: string;
   items: readonly WorkbenchMenuItem[];
   position: { x: number; y: number };
+  return_focus?: HTMLElement | null | (() => HTMLElement | null | undefined);
   on_close: () => void;
 };
 
@@ -31,6 +33,7 @@ export function WorkbenchContextMenu({
   aria_label,
   items,
   position,
+  return_focus,
   on_close,
 }: WorkbenchContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -41,14 +44,23 @@ export function WorkbenchContextMenu({
     top: Math.max(4, Math.min(position.y, window.innerHeight - estimatedHeight - 4)),
   };
 
+  const dismiss = useCallback((): void => {
+    flushSync(on_close);
+    const target = typeof return_focus === "function" ? return_focus() : return_focus;
+    if (target?.isConnected) target.focus();
+  }, [on_close, return_focus]);
+
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent): void => {
-      if (!menuRef.current?.contains(event.target as Node)) on_close();
+      if (!menuRef.current?.contains(event.target as Node)) dismiss();
     };
     const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
-      if (event.key === "Escape") on_close();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
     };
-    const closeOnViewportChange = (): void => on_close();
+    const closeOnViewportChange = (): void => dismiss();
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     document.addEventListener("keydown", closeOnEscape);
     window.addEventListener("blur", closeOnViewportChange);
@@ -62,7 +74,7 @@ export function WorkbenchContextMenu({
       window.removeEventListener("resize", closeOnViewportChange);
       document.removeEventListener("wheel", closeOnViewportChange);
     };
-  }, [on_close]);
+  }, [dismiss]);
 
   const moveFocus = (event: KeyboardEvent<HTMLDivElement>): void => {
     const menuItems = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(
@@ -103,7 +115,7 @@ export function WorkbenchContextMenu({
           onClick={(event) => {
             event.stopPropagation();
             item.on_select();
-            on_close();
+            dismiss();
           }}
         >
           {item.label}
@@ -135,11 +147,17 @@ export function WorkbenchGroupHeader({
   on_close_group,
   on_join_group,
 }: WorkbenchGroupHeaderProps) {
-  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [menuState, setMenuState] = useState<{
+    position: { x: number; y: number };
+    invoker: HTMLButtonElement;
+  } | null>(null);
   const openMenu = (event: MouseEvent<HTMLButtonElement>): void => {
     event.stopPropagation();
     const bounds = event.currentTarget.getBoundingClientRect();
-    setMenuPosition({ x: bounds.right - 224, y: bounds.bottom + 2 });
+    setMenuState({
+      position: { x: bounds.right - 224, y: bounds.bottom + 2 },
+      invoker: event.currentTarget,
+    });
   };
   const menuItems: WorkbenchMenuItem[] = [
     {
@@ -174,18 +192,23 @@ export function WorkbenchGroupHeader({
         className="wardian-workbench-header-action"
         aria-label="Pane actions"
         aria-haspopup="menu"
-        aria-expanded={menuPosition !== null}
+        aria-expanded={menuState !== null}
         title="Pane actions"
         onClick={openMenu}
       >
         <Ellipsis aria-hidden="true" size={17} strokeWidth={1.75} />
       </button>
-      {menuPosition && (
+      {menuState && (
         <WorkbenchContextMenu
           aria_label="Pane actions"
           items={menuItems}
-          position={menuPosition}
-          on_close={() => setMenuPosition(null)}
+          position={menuState.position}
+          return_focus={() => (
+            (menuState.invoker.isConnected ? menuState.invoker : null)
+            ?? [...document.querySelectorAll<HTMLButtonElement>('[data-group-id] button[aria-label="Pane actions"]')]
+              .find((button) => button.closest<HTMLElement>('[data-group-id]')?.dataset.groupId === group_id)
+          )}
+          on_close={() => setMenuState(null)}
         />
       )}
     </div>

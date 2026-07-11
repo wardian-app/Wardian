@@ -21,7 +21,7 @@ describe("WorkbenchHost", () => {
     } as unknown as WorkbenchNavigationService;
 
     render(<WorkbenchHost store={store} navigation={navigation} />);
-    const tab = await screen.findByRole("tab", { name: /agents overview/i });
+    const tab = await screen.findByRole("tab", { name: /agents-overview/i });
     tab.focus();
     fireEvent.keyDown(tab, { key: "Delete" });
 

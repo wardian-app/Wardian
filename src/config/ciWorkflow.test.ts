@@ -73,6 +73,14 @@ describe("CI workflow contract", () => {
     expect(native).toContain("e2e-native/tests/workbench-persistence-native.test.mjs");
     expect(native).toContain("e2e-native/tests/terminal-presentation-broker-native.test.mjs");
     expect(native).toContain("e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs");
+    expect(native).toContain("e2e-native/tests/remote-gateway-native.test.mjs");
+    expect(native).not.toMatch(
+      /^    env:\s+WARDIAN_HOME: \$\{\{ runner\.temp \}\}/m,
+    );
+    expect(native.match(/WARDIAN_HOME: \$\{\{ runner\.temp \}\}\\wardian-e2e-native-workbench/g))
+      .toHaveLength(2);
+    expect(native.match(/WARDIAN_E2E_NATIVE_HOME: \$\{\{ runner\.temp \}\}\\wardian-e2e-native-workbench/g))
+      .toHaveLength(2);
     expect(native).toMatch(/if: failure\(\)[\s\S]*name: native-workbench-results/);
   });
 

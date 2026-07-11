@@ -77,10 +77,10 @@ export function WorkbenchTab({
       data-tab-group-id={group_id}
     >
       <span className="wardian-workbench-tab-label">{title}</span>
-      <button
-        type="button"
+      <span
         className="wardian-workbench-tab-close"
-        aria-label={`Close ${title}`}
+        aria-hidden="true"
+        data-tab-close
         title={`Close ${title}`}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
@@ -90,12 +90,17 @@ export function WorkbenchTab({
         }}
       >
         <X aria-hidden="true" size={14} strokeWidth={1.75} />
-      </button>
+      </span>
       {menuPosition && (
         <WorkbenchContextMenu
           aria_label={`${title} tab actions`}
           items={menuItems}
           position={menuPosition}
+          return_focus={() => (
+            descriptorRef.current?.closest<HTMLElement>('[role="tab"]')
+            ?? [...document.querySelectorAll<HTMLElement>('[role="tab"][data-surface-id]')]
+              .find((tab) => tab.dataset.surfaceId === surface.surface_id)
+          )}
           on_close={() => setMenuPosition(null)}
         />
       )}

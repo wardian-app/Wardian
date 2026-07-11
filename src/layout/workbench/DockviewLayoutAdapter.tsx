@@ -89,11 +89,11 @@ type AdapterRuntime = Pick<
   | "on_toggle_zoom"
   | "on_split_group"
   | "on_close_group"
-  | "on_close_surface"
   | "on_join_group"
   | "render_home"
 > & {
   zoomed_group_id: string | null;
+  on_close_surface: (surfaceId: string) => void;
   on_move_surface: (surfaceId: string, targetGroupId: string) => void;
   on_split_surface: (
     surfaceId: string,
@@ -417,7 +417,7 @@ function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<Workbench
       title={params.title}
       group_id={groupId}
       pane_targets={workbenchPaneTargets(runtime.document.root, groupId)}
-      on_close={() => runtime.on_close_surface?.(params.surface.surface_id)}
+      on_close={() => runtime.on_close_surface(params.surface.surface_id)}
       on_split={(direction) => runtime.on_split_surface(
         params.surface.surface_id,
         groupId,
@@ -766,6 +766,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   const ratioFeedbackScheduledRef = useRef(false);
   const reconcileScheduledRef = useRef(false);
   const lastApiSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const pendingCloseFocusRef = useRef<{ surface_id: string; group_id: string } | null>(null);
   const documentRef = useRef(document);
   const onCommandRef = useRef(on_command);
   documentRef.current = document;
@@ -788,13 +789,23 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     [document.root],
   );
 
+  const requestSurfaceClose = useCallback((surfaceId: string): void => {
+    const currentDocument = documentRef.current;
+    const group = Object.values(currentDocument.groups)
+      .find((candidate) => candidate.surface_ids.includes(surfaceId));
+    if (group?.active_surface_id === surfaceId) {
+      pendingCloseFocusRef.current = { surface_id: surfaceId, group_id: group.group_id };
+    }
+    props.on_close_surface?.(surfaceId);
+  }, [props.on_close_surface]);
+
   const runtime = useMemo<AdapterRuntime>(() => ({
     document,
     on_open_surface: props.on_open_surface,
     on_toggle_zoom: props.on_toggle_zoom,
     on_split_group: props.on_split_group,
     on_close_group: props.on_close_group,
-    on_close_surface: props.on_close_surface,
+    on_close_surface: requestSurfaceClose,
     on_join_group: props.on_join_group,
     render_home: props.render_home,
     zoomed_group_id,
@@ -817,13 +828,13 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     document,
     emitCommand,
     props.on_close_group,
-    props.on_close_surface,
     props.on_join_group,
     props.on_open_surface,
     props.on_surface_drop,
     props.on_split_group,
     props.on_toggle_zoom,
     props.render_home,
+    requestSurfaceClose,
     zoomed_group_id,
   ]);
 
@@ -857,6 +868,27 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       releaseProjectionGuard();
     }
   }, [api, document, reconcileNonce, render_surface, renderer_policy, safe_mode, surface_title, zoomed_group_id]);
+
+  useLayoutEffect(() => {
+    const pending = pendingCloseFocusRef.current;
+    if (!pending) return;
+    if (document.surfaces[pending.surface_id]) {
+      if (document.groups[pending.group_id]?.active_surface_id !== pending.surface_id) {
+        pendingCloseFocusRef.current = null;
+      }
+      return;
+    }
+    pendingCloseFocusRef.current = null;
+    const group = document.groups[pending.group_id];
+    const targetSurfaceId = group?.active_surface_id;
+    const targetTab = targetSurfaceId
+      ? [...globalThis.document.querySelectorAll<HTMLElement>('[role="tab"][data-surface-id]')]
+          .find((tab) => tab.dataset.surfaceId === targetSurfaceId)
+      : undefined;
+    const targetGroup = [...globalThis.document.querySelectorAll<HTMLElement>('[data-group-id]')]
+      .find((element) => element.dataset.groupId === pending.group_id);
+    (targetTab ?? targetGroup)?.focus();
+  }, [document]);
 
   useLayoutEffect(() => {
     if (!api || safe_mode) return;
@@ -973,7 +1005,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         data-zoomed-group-id={zoomed_group_id ?? "none"}
       >
         {safe_mode ? (
-          <SafeWorkbenchLayout {...props} />
+          <SafeWorkbenchLayout {...props} on_close_surface={requestSurfaceClose} />
         ) : (
           <DockviewReact
             components={DOCKVIEW_COMPONENTS}

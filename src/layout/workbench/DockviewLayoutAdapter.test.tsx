@@ -438,6 +438,72 @@ describe("DockviewLayoutAdapter", () => {
     },
   );
 
+  it("keeps tab close chrome out of the tab stop model and focuses the successor after close", async () => {
+    const first = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const second = makeSurface("surface-2", { surface_type: "library" });
+    let documentModel = makeSingleGroupDocument([first, second]);
+    let view: ReturnType<typeof render>;
+    const onCloseSurface = (surfaceId: string): void => {
+      documentModel = apply(documentModel, { type: "close_surface", surface_id: surfaceId });
+      view.rerender(
+        <DockviewLayoutAdapter
+          document={documentModel}
+          safe_mode
+          on_close_surface={onCloseSurface}
+        />,
+      );
+    };
+    view = render(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        safe_mode
+        on_close_surface={onCloseSurface}
+      />,
+    );
+
+    const activeTab = screen.getByRole("tab", { name: "Library" });
+    expect(activeTab).toHaveAttribute("aria-selected", "true");
+    expect(within(activeTab).queryByRole("button")).not.toBeInTheDocument();
+    const closeAction = activeTab.querySelector<HTMLElement>("[data-tab-close]");
+    expect(closeAction).not.toHaveAttribute("tabindex");
+    if (!closeAction) throw new Error("expected pointer close affordance");
+    fireEvent.click(closeAction);
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Agents Overview" })).toHaveFocus());
+  });
+
+  it("focuses an emptied pane after its active tab closes", async () => {
+    let documentModel = makeSingleGroupDocument([
+      makeSurface("surface-1", { surface_type: "agents-overview" }),
+    ]);
+    let view: ReturnType<typeof render>;
+    const onCloseSurface = (surfaceId: string): void => {
+      documentModel = apply(documentModel, { type: "close_surface", surface_id: surfaceId });
+      view.rerender(
+        <DockviewLayoutAdapter
+          document={documentModel}
+          safe_mode
+          on_close_surface={onCloseSurface}
+        />,
+      );
+    };
+    view = render(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        safe_mode
+        on_close_surface={onCloseSurface}
+      />,
+    );
+
+    const activeTab = screen.getByRole("tab", { name: "Agents Overview" });
+    const closeAction = activeTab.querySelector<HTMLElement>("[data-tab-close]");
+    if (!closeAction) throw new Error("expected pointer close affordance");
+    fireEvent.click(closeAction);
+
+    await waitFor(() => expect(screen.getByTestId("workbench-group")).toHaveFocus());
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
   it("routes tab context actions through close, edge-split, and canonical move boundaries", async () => {
     const onCloseSurface = vi.fn();
     const onSurfaceDrop = vi.fn();
@@ -460,8 +526,15 @@ describe("DockviewLayoutAdapter", () => {
     expect(within(menu).getByRole("menuitem", { name: "Move to next pane" })).toBeInTheDocument();
     expect(menu).not.toHaveTextContent("group-");
 
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Agents Overview tab actions" })).not.toBeInTheDocument();
+    await waitFor(() => expect(tab).toHaveFocus());
+
+    fireEvent.contextMenu(tab, { clientX: 80, clientY: 40 });
+    menu = screen.getByRole("menu", { name: "Agents Overview tab actions" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Split tab right" }));
     expect(onSurfaceDrop).toHaveBeenCalledWith("surface-1", "group-1", "right");
+    await waitFor(() => expect(tab).toHaveFocus());
 
     fireEvent.contextMenu(tab, { clientX: 80, clientY: 40 });
     menu = screen.getByRole("menu", { name: "Agents Overview tab actions" });
@@ -497,9 +570,10 @@ describe("DockviewLayoutAdapter", () => {
     const group = document.querySelector<HTMLElement>('[data-group-id="group-1"]');
     if (!group) throw new Error("expected first workbench group");
     expect(within(group).getAllByRole("button").map((button) => button.getAttribute("aria-label")))
-      .toEqual(["Close Agents Overview", "Open Surface", "Pane actions"]);
+      .toEqual(["Open Surface", "Pane actions"]);
 
-    fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
+    const paneActions = within(group).getByRole("button", { name: "Pane actions" });
+    fireEvent.click(paneActions);
     let menu = screen.getByRole("menu", { name: "Pane actions" });
     expect(within(menu).getByRole("menuitem", { name: "Restore pane" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "Split pane right" })).toBeInTheDocument();
@@ -507,6 +581,7 @@ describe("DockviewLayoutAdapter", () => {
     expect(within(menu).getByRole("menuitem", { name: "Close pane" })).toBeInTheDocument();
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Restore pane" }));
     expect(onToggleZoom).toHaveBeenCalledWith("group-1");
+    await waitFor(() => expect(paneActions).toHaveFocus());
 
     fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
     menu = screen.getByRole("menu", { name: "Pane actions" });

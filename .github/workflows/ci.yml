@@ -142,9 +142,6 @@ jobs:
   native-workbench-smoke:
     name: Native Workbench Smoke (Windows)
     runs-on: windows-latest
-    env:
-      WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
-      WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
     steps:
       - uses: actions/checkout@v6
       - name: Setup Node
@@ -164,12 +161,19 @@ jobs:
         run: npm run setup:e2e:native
       - name: Build native debug app
         run: npm run tauri -- build --debug --no-bundle
+        env:
+          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+          WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
       - name: Run focused workbench native suite
         run: >-
           npm run test:e2e:native:fast --
           e2e-native/tests/workbench-persistence-native.test.mjs
           e2e-native/tests/terminal-presentation-broker-native.test.mjs
           e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs
+          e2e-native/tests/remote-gateway-native.test.mjs
+        env:
+          WARDIAN_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
+          WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}\wardian-e2e-native-workbench
       - name: Upload native failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7
