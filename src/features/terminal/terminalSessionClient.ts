@@ -36,6 +36,8 @@ type PresentationBinding = {
   callbacks: TerminalPresentationCallbacks;
   registration: TerminalPresentationRegistration;
   state: TerminalPresentationState | null;
+  runtimeGeneration: number;
+  appliedSequence: number;
 };
 
 function consumerId(sessionId: string) {
@@ -101,40 +103,43 @@ export class TerminalSessionClient {
     if (registration.session_id !== this.sessionId) {
       throw new Error("Presentation registration targets a different terminal session");
     }
-    this.#destroyed = false;
-    this.#presentations.set(registration.presentation_id, {
-      callbacks,
-      registration,
-      state: null,
-    });
-    await this.#ensureListeners();
-
-    try {
-      const result = await invoke<TerminalPresentationRegistrationResult>(
-        "register_terminal_presentation",
-        { request: registration },
-      );
-      if (!result) {
-        this.#presentations.delete(registration.presentation_id);
-        throw new Error("TerminalSessionProtocolUnavailable");
-      }
-      const binding = this.#presentations.get(registration.presentation_id);
-      if (!binding) {
+    return this.#serialize(async () => {
+      await this.#ensureListeners();
+      this.#destroyed = false;
+      const binding: PresentationBinding = {
+        callbacks,
+        registration,
+        state: null,
+        runtimeGeneration: 0,
+        appliedSequence: 0,
+      };
+      this.#presentations.set(registration.presentation_id, binding);
+      try {
+        const result = await invoke<TerminalPresentationRegistrationResult>(
+          "register_terminal_presentation",
+          { request: registration },
+        );
+        if (!result) {
+          this.#presentations.delete(registration.presentation_id);
+          throw new Error("TerminalSessionProtocolUnavailable");
+        }
+        if (this.#presentations.get(registration.presentation_id) !== binding) {
+          return result;
+        }
+        binding.state = result.presentation;
+        this.#setBrokerState(result.broker_state);
+        await this.#applySnapshot(binding, result.initial_snapshot);
+        await this.#ensureSubscription(result.broker_state.runtime_generation);
         return result;
+      } catch (error) {
+        // A restoring placeholder can register before its PTY exists. Keep the
+        // logical binding and retry when the broker announces a newer runtime.
+        if (!String(error).includes("SessionNotFound")) {
+          this.#presentations.delete(registration.presentation_id);
+        }
+        throw error;
       }
-      binding.state = result.presentation;
-      this.#setBrokerState(result.broker_state);
-      await callbacks.applySnapshot(result.initial_snapshot);
-      await this.#ensureSubscription(result.broker_state.runtime_generation);
-      return result;
-    } catch (error) {
-      // A restoring placeholder can register before its PTY exists. Keep the
-      // logical binding and retry when the broker announces a newer runtime.
-      if (!String(error).includes("SessionNotFound")) {
-        this.#presentations.delete(registration.presentation_id);
-      }
-      throw error;
-    }
+    });
   }
 
   async updatePresentation(
@@ -176,27 +181,32 @@ export class TerminalSessionClient {
   }
 
   async unregisterPresentation(presentationId: string) {
-    const binding = this.#presentations.get(presentationId);
-    this.#presentations.delete(presentationId);
-    if (binding) {
+    return this.#serialize(async () => {
+      const binding = this.#presentations.get(presentationId);
+      this.#presentations.delete(presentationId);
       try {
-        const state = await invoke<TerminalBrokerState>("unregister_terminal_presentation", {
-          request: {
-            session_id: this.sessionId,
-            presentation_id: presentationId,
-            runtime_generation: this.#brokerState?.runtime_generation ?? 0,
-          },
-        });
-        this.#setBrokerState(state);
-      } catch (error) {
-        if (!String(error).includes("SessionNotFound")) {
-          throw error;
+        if (binding) {
+          try {
+            const state = await invoke<TerminalBrokerState>("unregister_terminal_presentation", {
+              request: {
+                session_id: this.sessionId,
+                presentation_id: presentationId,
+                runtime_generation: this.#brokerState?.runtime_generation ?? 0,
+              },
+            });
+            this.#setBrokerState(state);
+          } catch (error) {
+            if (!String(error).includes("SessionNotFound")) {
+              throw error;
+            }
+          }
+        }
+      } finally {
+        if (this.#presentations.size === 0) {
+          await this.destroy();
         }
       }
-    }
-    if (this.#presentations.size === 0) {
-      await this.destroy();
-    }
+    });
   }
 
   async requestPresentationSnapshot(presentationId: string) {
@@ -205,7 +215,7 @@ export class TerminalSessionClient {
       const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
         request: { session_id: this.sessionId },
       });
-      await binding.callbacks.applySnapshot(snapshot);
+      await this.#applySnapshot(binding, snapshot, true);
       if (snapshot.runtime_generation > this.#runtimeGeneration) {
         this.#runtimeGeneration = snapshot.runtime_generation;
       }
@@ -229,7 +239,7 @@ export class TerminalSessionClient {
       if (begin.decision.status !== "accepted" || !begin.activation_id || !begin.snapshot) {
         return { begin, ack: null };
       }
-      await binding.callbacks.applySnapshot(begin.snapshot);
+      await this.#applySnapshot(binding, begin.snapshot);
       const ack = await invoke<TerminalActivationAckResult>("ack_terminal_activation", {
         request: {
           session_id: this.sessionId,
@@ -242,7 +252,7 @@ export class TerminalSessionClient {
       this.#setBrokerState(ack.broker_state);
       this.#notifyDecision(ack.decision);
       if (ack.snapshot) {
-        await binding.callbacks.applySnapshot(ack.snapshot);
+        await this.#applySnapshot(binding, ack.snapshot);
       }
       this.queueDrain();
       return { begin, ack };
@@ -268,7 +278,7 @@ export class TerminalSessionClient {
       if (begin.decision.status !== "accepted" || !begin.resync_id || !begin.snapshot) {
         return { begin, ack: null };
       }
-      await binding.callbacks.applySnapshot(begin.snapshot);
+      await this.#applySnapshot(binding, begin.snapshot);
       const ack = await invoke<TerminalOwnerResyncAckResult>("ack_terminal_owner_resync", {
         request: {
           session_id: this.sessionId,
@@ -433,22 +443,27 @@ export class TerminalSessionClient {
         "terminal-session-lifecycle",
         (event) => {
           const notification = event.payload;
-          if (
-            notification.session_id !== this.sessionId ||
-            notification.runtime_generation < this.#runtimeGeneration
-          ) {
+          if (notification.session_id !== this.sessionId) {
             return;
           }
-          for (const binding of this.#presentations.values()) {
-            binding.callbacks.onLifecycle?.(notification);
-          }
-          if (notification.runtime_generation > this.#runtimeGeneration) {
-            this.#runtimeGeneration = notification.runtime_generation;
-            this.#subscription = null;
-            void this.#retryRegistrationsForGeneration();
-          } else {
-            this.queueDrain();
-          }
+          void this.#serialize(async () => {
+            if (
+              this.#destroyed ||
+              notification.runtime_generation < this.#runtimeGeneration
+            ) {
+              return;
+            }
+            for (const binding of this.#presentations.values()) {
+              binding.callbacks.onLifecycle?.(notification);
+            }
+            if (notification.runtime_generation > this.#runtimeGeneration) {
+              this.#runtimeGeneration = notification.runtime_generation;
+              this.#subscription = null;
+              await this.#retryRegistrationsForGeneration();
+            } else {
+              this.queueDrain();
+            }
+          }).catch(() => undefined);
         },
       ).then((unlisten) => {
         if (this.#destroyed) {
@@ -473,7 +488,7 @@ export class TerminalSessionClient {
         }
         binding.state = result.presentation;
         this.#setBrokerState(result.broker_state);
-        await binding.callbacks.applySnapshot(result.initial_snapshot);
+        await this.#applySnapshot(binding, result.initial_snapshot);
       } catch {
         // A later lifecycle notification or explicit remount retries again.
       }
@@ -557,7 +572,7 @@ export class TerminalSessionClient {
         this.#applyBrokerEventState(batch.events);
         await Promise.all(
           Array.from(this.#presentations.values(), (binding) =>
-            binding.callbacks.applyEvents(batch.events),
+            this.#applyEvents(binding, batch.events),
           ),
         );
       }
@@ -580,9 +595,43 @@ export class TerminalSessionClient {
   async #applySnapshotToAll(snapshot: TerminalSnapshot) {
     await Promise.all(
       Array.from(this.#presentations.values(), (binding) =>
-        binding.callbacks.applySnapshot(snapshot),
+        this.#applySnapshot(binding, snapshot),
       ),
     );
+  }
+
+  async #applySnapshot(
+    binding: PresentationBinding,
+    snapshot: TerminalSnapshot,
+    force = false,
+  ) {
+    if (
+      !force &&
+      (snapshot.runtime_generation < binding.runtimeGeneration ||
+        (snapshot.runtime_generation === binding.runtimeGeneration &&
+          snapshot.sequence_barrier <= binding.appliedSequence))
+    ) {
+      return;
+    }
+    await binding.callbacks.applySnapshot(snapshot);
+    binding.runtimeGeneration = snapshot.runtime_generation;
+    binding.appliedSequence = snapshot.sequence_barrier;
+  }
+
+  async #applyEvents(
+    binding: PresentationBinding,
+    events: readonly TerminalBrokerEvent[],
+  ) {
+    const pending = events.filter(
+      (event) =>
+        event.runtime_generation === binding.runtimeGeneration &&
+        event.sequence > binding.appliedSequence,
+    );
+    if (pending.length === 0) {
+      return;
+    }
+    await binding.callbacks.applyEvents(pending);
+    binding.appliedSequence = pending[pending.length - 1]?.sequence ?? binding.appliedSequence;
   }
 
   #applyBrokerEventState(events: readonly TerminalBrokerEvent[]) {

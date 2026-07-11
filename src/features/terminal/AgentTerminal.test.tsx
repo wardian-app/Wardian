@@ -6,7 +6,12 @@ import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { AgentTerminal, __terminalTesting, shouldExposeTerminalDebug } from "./AgentTerminal";
+import type { ComponentProps } from "react";
+import {
+  AgentTerminal as BrokerAgentTerminal,
+  __terminalTesting,
+  shouldExposeTerminalDebug,
+} from "./AgentTerminal";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import { resetTerminalSessionClientsForTesting } from "./terminalSessionClient";
@@ -19,6 +24,37 @@ const mockHeadlessTerminal = vi.mocked(HeadlessTerminal);
 const mockSerializeAddon = vi.mocked(SerializeAddon);
 const mockFitAddon = vi.mocked(FitAddon);
 const mockWebglAddon = vi.mocked(WebglAddon);
+
+type TestAgentTerminalProps = Omit<
+  ComponentProps<typeof BrokerAgentTerminal>,
+  "presentationId" | "visibility" | "renderState" | "requestedInteraction"
+> &
+  Partial<
+    Pick<
+      ComponentProps<typeof BrokerAgentTerminal>,
+      "presentationId" | "visibility" | "renderState" | "requestedInteraction"
+    >
+  >;
+
+function AgentTerminal({
+  sessionId,
+  presentationId = sessionId,
+  visibility = "visible",
+  renderState = "mounted",
+  requestedInteraction = "interactive",
+  ...props
+}: TestAgentTerminalProps) {
+  return (
+    <BrokerAgentTerminal
+      {...props}
+      sessionId={sessionId}
+      presentationId={presentationId}
+      visibility={visibility}
+      renderState={renderState}
+      requestedInteraction={requestedInteraction}
+    />
+  );
+}
 
 function getLatestTerminalInstance() {
   return mockTerminal.mock.results[mockTerminal.mock.results.length - 1]?.value as any;
@@ -329,6 +365,50 @@ describe("AgentTerminal scrollback", () => {
     ).toHaveLength(1);
     expect(mockTerminal).toHaveBeenCalledTimes(2);
     expect(screen.getAllByTestId("agent-terminal-host")).toHaveLength(2);
+  });
+
+  it("compensates an unmount while broker registration is still in flight", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        return registrationGate.promise;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      return null;
+    });
+
+    const mounted = render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-race"
+        visibility="visible"
+        renderState="mounted"
+        requestedInteraction="interactive"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+
+    mounted.unmount();
+    registrationGate.resolve(modernRegistrationResult("pane-race"));
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "unregister_terminal_presentation",
+      expect.anything(),
+    ));
+    expect(mockInvoke).toHaveBeenCalledWith("unsubscribe_terminal_events", expect.anything());
   });
 
   async function assertFocusIsPassiveBeforeExplicitActivation(
@@ -767,7 +847,7 @@ describe("AgentTerminal scrollback", () => {
     expect(firstInstance.dispose).not.toHaveBeenCalled();
   });
 
-  it("disposes the renderer once a session stays unmounted past the grace window", async () => {
+  it("disposes the presentation entry once it stays unmounted past the grace window", async () => {
     const firstRender = render(
       <AgentTerminal sessionId="codex-grace" provider="codex" theme="dark" />,
     );
@@ -789,7 +869,7 @@ describe("AgentTerminal scrollback", () => {
       vi.advanceTimersByTime(30_000);
 
       expect(instance.dispose).toHaveBeenCalled();
-      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeNull();
+      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")).toBeNull();
     } finally {
       vi.useRealTimers();
     }

@@ -1190,17 +1190,16 @@ function cancelRendererDisposal(entry: TerminalSessionEntry) {
 // only if the session stays unmounted past the grace window.
 function scheduleRendererDisposal(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
-  if (!entry || entry.disposed || !entry.renderer || entry.rendererDisposeTimer) {
+  if (!entry || entry.disposed || entry.rendererDisposeTimer) {
     return;
   }
   entry.rendererDisposeTimer = setTimeout(() => {
     const current = terminalSessionMap.get(sessionId);
-    if (!current || current.disposed || !current.renderer) {
+    if (!current || current.disposed) {
       return;
     }
     current.rendererDisposeTimer = null;
-    disposeRenderer(current.renderer, sessionId);
-    current.renderer = null;
+    disposeTerminalSession(sessionId);
   }, RENDERER_DISPOSE_GRACE_MS);
 }
 
@@ -2305,10 +2304,10 @@ function mountRenderer(
 
 export const AgentTerminal = memo(function AgentTerminal({
   sessionId,
-  presentationId = sessionId,
-  visibility = "visible",
-  renderState = "mounted",
-  requestedInteraction = "interactive",
+  presentationId,
+  visibility,
+  renderState,
+  requestedInteraction,
   provider,
   isMaximized,
   theme,
@@ -2317,10 +2316,10 @@ export const AgentTerminal = memo(function AgentTerminal({
   onTerminalFocus,
 }: {
   sessionId: string;
-  presentationId?: string;
-  visibility?: TerminalVisibility;
-  renderState?: TerminalRenderState;
-  requestedInteraction?: TerminalRequestedInteraction;
+  presentationId: string;
+  visibility: TerminalVisibility;
+  renderState: TerminalRenderState;
+  requestedInteraction: TerminalRequestedInteraction;
   provider?: string;
   isMaximized?: boolean;
   theme: "dark" | "light" | "system";
@@ -2689,7 +2688,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         clearTimeout(visibilityDemoteTimer);
         visibilityDemoteTimer = null;
       }
-      if (entry && !entry.disposed && entry.renderer) {
+      if (entry && !entry.disposed) {
         scheduleRendererDisposal(terminalKey);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {

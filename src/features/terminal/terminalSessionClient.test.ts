@@ -117,6 +117,14 @@ async function settle() {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("TerminalSessionClient", () => {
   beforeEach(async () => {
     await resetTerminalSessionClientsForTesting();
@@ -177,6 +185,100 @@ describe("TerminalSessionClient", () => {
     expect(tauri.invoke).toHaveBeenCalledWith("unsubscribe_terminal_events", {
       request: { session_id: "agent-1", consumer_id: "desktop:agent-1" },
     });
+    expect(__terminalSessionClientTesting.clientCount()).toBe(0);
+  });
+
+  it("filters shared feed events through each presentation snapshot barrier", async () => {
+    const appliedA: number[][] = [];
+    const appliedB: number[][] = [];
+    let registrations = 0;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        if (registrations === 1) {
+          return registeredResult("pane-a");
+        }
+        const result = registeredResult("pane-b");
+        result.broker_state = brokerState(1, 2);
+        result.initial_snapshot = snapshot(1, 2);
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(1, 3), initial_snapshot: snapshot() };
+      }
+      if (command === "read_terminal_events") {
+        return eventsBatch(
+          [1, 2, 3].map((sequence) => ({
+            sequence,
+            runtime_generation: 1,
+            type: "output" as const,
+            bytes: [64 + sequence],
+          })),
+          3,
+          3,
+        );
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: 1, acknowledged_sequence: 3 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined,
+      applyEvents: (events) => {
+        appliedA.push(events.map((event) => event.sequence));
+      },
+    });
+    await client.registerPresentation(registration("pane-b"), {
+      applySnapshot: () => undefined,
+      applyEvents: (events) => {
+        appliedB.push(events.map((event) => event.sequence));
+      },
+    });
+    client.queueDrain();
+
+    await vi.waitFor(() => expect(appliedA).toEqual([[1, 2, 3]]));
+    expect(appliedB).toEqual([[3]]);
+  });
+
+  it("serializes unregister behind an in-flight registration and always destroys the last feed", async () => {
+    const registrationGate = deferred<ReturnType<typeof registeredResult>>();
+    const commands: string[] = [];
+    tauri.invoke.mockImplementation(async (command: string) => {
+      commands.push(command);
+      if (command === "register_terminal_presentation") {
+        return registrationGate.promise;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      }
+      if (command === "unregister_terminal_presentation") {
+        return brokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    const registering = client.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+    const unregistering = client.unregisterPresentation("pane-a");
+    registrationGate.resolve(registeredResult("pane-a"));
+    await Promise.all([registering, unregistering]);
+
+    expect(commands.indexOf("unregister_terminal_presentation")).toBeGreaterThan(
+      commands.indexOf("register_terminal_presentation"),
+    );
+    expect(commands).toContain("unsubscribe_terminal_events");
     expect(__terminalSessionClientTesting.clientCount()).toBe(0);
   });
 
@@ -353,6 +455,68 @@ describe("TerminalSessionClient", () => {
       "begin_terminal_owner_resync",
       "ack_terminal_owner_resync",
     ]));
+  });
+
+  it("orders generation replacement snapshots after an in-flight old-generation apply", async () => {
+    const applyGate = deferred<void>();
+    const order: string[] = [];
+    let registrations = 0;
+    let reads = 0;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        return registeredResult("pane-a", registrations === 1 ? 1 : 2);
+      }
+      if (command === "subscribe_terminal_events") {
+        const generation = registrations === 1 ? 1 : 2;
+        return { broker_state: brokerState(generation), initial_snapshot: snapshot(generation) };
+      }
+      if (command === "read_terminal_events") {
+        reads += 1;
+        if (reads === 1) {
+          return eventsBatch(
+            [{ sequence: 1, runtime_generation: 1, type: "output", bytes: [65] }],
+            1,
+            1,
+          );
+        }
+        return { ...eventsBatch([], 0, 0), runtime_generation: 2 };
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: 1, acknowledged_sequence: 1 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-a"), {
+      applySnapshot: (value) => {
+        order.push(`snapshot:${value.runtime_generation}`);
+      },
+      applyEvents: async () => {
+        order.push("events:start");
+        await applyGate.promise;
+        order.push("events:done");
+      },
+    });
+    order.length = 0;
+    client.queueDrain();
+    await vi.waitFor(() => expect(order).toEqual(["events:start"]));
+
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 2,
+      lifecycle: "runtime_replaced",
+    });
+    await settle();
+    expect(registrations).toBe(1);
+
+    applyGate.resolve();
+    await vi.waitFor(() => expect(registrations).toBe(2));
+    expect(order).toEqual(["events:start", "events:done", "snapshot:2"]);
   });
 
   it("ignores regressive lifecycle hints and re-registers once for a newer generation", async () => {

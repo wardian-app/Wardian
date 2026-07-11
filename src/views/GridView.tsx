@@ -94,6 +94,10 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
   return (
     <AgentTerminal
       sessionId={sessionId}
+      presentationId={`legacy-grid:${sessionId}`}
+      visibility="visible"
+      renderState="mounted"
+      requestedInteraction="interactive"
       provider={provider}
       isMaximized={isMaximized}
       theme={theme}
