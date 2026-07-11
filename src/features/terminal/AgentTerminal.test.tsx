@@ -315,6 +315,7 @@ describe("AgentTerminal scrollback", () => {
   });
 
   it("renders two independent broker presentations with one desktop feed consumer", async () => {
+    const onPresentationStateChange = vi.fn();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       if (command === "register_terminal_presentation") {
@@ -338,13 +339,14 @@ describe("AgentTerminal scrollback", () => {
       return null;
     });
 
-    render(
+    const view = render(
       <div>
         <AgentTerminal
           sessionId="modern-agent"
           presentationId="pane-a"
           provider="codex"
           theme="dark"
+          onPresentationStateChange={onPresentationStateChange}
         />
         <AgentTerminal
           sessionId="modern-agent"
@@ -365,6 +367,34 @@ describe("AgentTerminal scrollback", () => {
     ).toHaveLength(1);
     expect(mockTerminal).toHaveBeenCalledTimes(2);
     expect(screen.getAllByTestId("agent-terminal-host")).toHaveLength(2);
+    expect(onPresentationStateChange).toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: "modern-agent" }),
+      expect.objectContaining({ presentation_id: "pane-a" }),
+    );
+
+    const updatedObserver = vi.fn();
+    view.rerender(
+      <div>
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-a"
+          provider="codex"
+          theme="dark"
+          workspacePath="/next-worktree"
+          onPresentationStateChange={updatedObserver}
+        />
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-b"
+          provider="codex"
+          theme="dark"
+        />
+      </div>,
+    );
+    await waitFor(() => expect(updatedObserver).toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: "modern-agent" }),
+      expect.objectContaining({ presentation_id: "pane-a" }),
+    ));
   });
 
   it("compensates an unmount while broker registration is still in flight", async () => {

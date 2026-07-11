@@ -2318,6 +2318,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   workspacePath,
   onTitleChange,
   onTerminalFocus,
+  onPresentationStateChange,
 }: {
   sessionId: string;
   presentationId: string;
@@ -2330,12 +2331,27 @@ export const AgentTerminal = memo(function AgentTerminal({
   workspacePath?: string | null;
   onTitleChange?: (title: string) => void;
   onTerminalFocus?: () => void;
+  onPresentationStateChange?: (
+    brokerState: TerminalBrokerState,
+    presentationState: TerminalPresentationState | null,
+  ) => void;
 }) {
   const terminalKey = presentationId;
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
+  const onPresentationStateChangeRef = useRef(onPresentationStateChange);
+  onPresentationStateChangeRef.current = onPresentationStateChange;
+  const presentationObserverMountedRef = useRef(true);
+  useEffect(() => {
+    presentationObserverMountedRef.current = true;
+    onPresentationStateChangeRef.current = onPresentationStateChange;
+    return () => {
+      presentationObserverMountedRef.current = false;
+      onPresentationStateChangeRef.current = undefined;
+    };
+  }, []);
   const wheelRowRemainderRef = useRef(0);
   const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
   const activationInFlightRef = useRef(false);
@@ -2522,10 +2538,13 @@ export const AgentTerminal = memo(function AgentTerminal({
           applySnapshot: (snapshot) => applyBrokerSnapshot(terminalKey, session, snapshot),
           applyEvents: (events) => applyBrokerEvents(terminalKey, session, events),
           onBrokerState: (state) => {
-            if (session.disposed) {
+            if (!isMounted || session.disposed) {
               return;
             }
             session.brokerState = state;
+            if (presentationObserverMountedRef.current) {
+              onPresentationStateChangeRef.current?.(state, session.presentationState);
+            }
             queueMicrotask(() => {
               if (terminalRef.current) {
                 void fitTerminalToContainer(session, terminalRef.current, {
@@ -2535,11 +2554,14 @@ export const AgentTerminal = memo(function AgentTerminal({
             });
           },
           onRegistrationRecovered: (result) => {
-            if (session.disposed) {
+            if (!isMounted || session.disposed) {
               return;
             }
             session.presentationState = result.presentation;
             session.brokerState = result.broker_state;
+            if (presentationObserverMountedRef.current) {
+              onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
+            }
             const lifecycle = presentationLifecycleRef.current;
             if (
               lifecycle.renderState === "mounted" &&
@@ -2550,6 +2572,7 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
           },
           onLeaseDecision: (decision) => {
+            if (!isMounted || session.disposed) return;
             if (session.brokerState && decision.runtime_generation >= session.brokerState.runtime_generation) {
               session.brokerState = {
                 ...session.brokerState,
@@ -2557,6 +2580,12 @@ export const AgentTerminal = memo(function AgentTerminal({
                 lease_epoch: decision.lease_epoch,
                 owner_presentation_id: decision.owner_presentation_id,
               };
+              if (presentationObserverMountedRef.current) {
+                onPresentationStateChangeRef.current?.(
+                  session.brokerState,
+                  session.presentationState,
+                );
+              }
             }
           },
         };
@@ -2580,6 +2609,9 @@ export const AgentTerminal = memo(function AgentTerminal({
           }
           session.presentationState = result.presentation;
           session.brokerState = result.broker_state;
+          if (presentationObserverMountedRef.current) {
+            onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
+          }
           const latestLifecycle = presentationLifecycleRef.current;
           const lifecycleChangedDuringRegistration =
             latestLifecycle.visibility !== registrationLifecycle.visibility ||
@@ -2599,6 +2631,12 @@ export const AgentTerminal = memo(function AgentTerminal({
             if (reconciled) {
               session.presentationState = reconciled.presentation;
               session.brokerState = reconciled.broker_state;
+              if (presentationObserverMountedRef.current) {
+                onPresentationStateChangeRef.current?.(
+                  reconciled.broker_state,
+                  reconciled.presentation,
+                );
+              }
             }
           }
           const activeLifecycle = presentationLifecycleRef.current;
@@ -2780,6 +2818,9 @@ export const AgentTerminal = memo(function AgentTerminal({
       }
       entry.presentationState = result.presentation;
       entry.brokerState = result.broker_state;
+      if (presentationObserverMountedRef.current) {
+        onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
+      }
       if (
         renderState === "mounted" &&
         result.presentation.requires_resync &&

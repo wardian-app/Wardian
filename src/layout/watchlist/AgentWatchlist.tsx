@@ -84,7 +84,12 @@ interface AgentWatchlistProps {
     shiftKey?: boolean;
     rangeAgentIds?: readonly string[];
   }) => void;
-  onAgentClick: (agentId: string) => void;
+  /** Opens the agent in the current workbench group. */
+  onOpenAgent?: (agentId: string) => void;
+  /** Opens the agent in a new workbench group beside the current one. */
+  onOpenAgentToSide?: (agentId: string) => void;
+  /** @deprecated Use onOpenAgent. Retained for the legacy navigation flag path. */
+  onAgentClick?: (agentId: string) => void;
   onRename: (agentId: string, newName: string) => Promise<void>;
   onReorderAgents: (newOrder: string[]) => void;
   onQuery: (agentId: string) => void;
@@ -127,6 +132,8 @@ export default function AgentWatchlist({
   filter,
   onFilterChange,
   onSelectAgent,
+  onOpenAgent,
+  onOpenAgentToSide,
   onAgentClick,
   onRename,
   onReorderAgents,
@@ -196,7 +203,10 @@ export default function AgentWatchlist({
   const [collapsedTeamsByList, setCollapsedTeamsByList] = useState<Record<string, string[]>>({});
   const wasDragging = useRef(false);
   const lastSelectedIdRef = useRef<string | null>(null);
-  const lastClickRef = useRef<{ id: string; time: number } | null>(null);
+
+  // Navigation is deliberately separate from roster targeting. The deprecated
+  // alias keeps the flag-off shell working while callers move to workbench tabs.
+  const openAgent = onOpenAgent ?? onAgentClick;
 
   // ── Load watchlists is now handled in App.tsx ──────────────────────────
 
@@ -654,7 +664,13 @@ export default function AgentWatchlist({
     const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
     const isInsideMultiSelection = selectedAgentIds.size > 1 && selectedAgentIds.has(agentId);
     if (!isInsideMultiSelection && !selectedAgentIds.has(agentId)) {
-      onSelectionChange(new Set([agentId]));
+      if (onSelectAgent) {
+        onSelectAgent(agentId, {
+          rangeAgentIds: displayedAgents.map((agent) => agent.session_id),
+        });
+      } else {
+        onSelectionChange(new Set([agentId]));
+      }
     }
     setContextMenu({
       visible: true,
@@ -733,19 +749,9 @@ export default function AgentWatchlist({
           e.stopPropagation();
           if (wasDragging.current) { wasDragging.current = false; return; }
 
-          const now = Date.now();
-          const DOUBLE_CLICK_TOLERANCE = 450;
-          const isDoubleClick = lastClickRef.current &&
-                               lastClickRef.current.id === agentId &&
-                               (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
-
-          lastClickRef.current = { id: agentId, time: now };
-
-          if (isDoubleClick && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
-            onAgentClick(agentId);
-            onSelectionChange(new Set([agentId]));
-            return;
-          }
+          // The second click of a double-click belongs to the navigation
+          // gesture. Avoid toggling the roster target immediately before open.
+          if (e.detail > 1 && !(e.ctrlKey || e.metaKey || e.shiftKey)) return;
 
           if (onSelectAgent) {
             onSelectAgent(agentId, {
@@ -783,21 +789,28 @@ export default function AgentWatchlist({
             lastSelectedIdRef.current = agentId;
           } else {
             if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-              if (!isDoubleClick) {
-                onSelectionChange(new Set());
-                lastSelectedIdRef.current = null;
-              } else {
-                onAgentClick(agentId);
-                onSelectionChange(new Set([agentId]));
-                lastSelectedIdRef.current = agentId;
-              }
+              onSelectionChange(new Set());
+              lastSelectedIdRef.current = null;
             } else {
               onSelectionChange(new Set([agentId]));
               lastSelectedIdRef.current = agentId;
             }
           }
         }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          if (wasDragging.current || e.ctrlKey || e.metaKey || e.shiftKey) return;
+          openAgent?.(agentId);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          e.stopPropagation();
+          openAgent?.(agentId);
+        }}
         onContextMenu={(e) => handleContextMenu(e, agentId)}
+        tabIndex={0}
+        aria-label={`Agent ${agent.session_name}`}
         className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? `drag-over-${dropTarget?.type === "agent" ? dropTarget.position : "before"}` : ""} ${isNestedTeamDropTarget ? "bg-[var(--color-wardian-accent)]/10" : ""} ${isBeingDragged ? "opacity-50" : ""} ${options.nested ? "ml-2 border-l border-wardian-border/40" : ""} select-none`}
         style={{ cursor: "grab", gridTemplateColumns: gridTemplate }}
       >
@@ -1137,45 +1150,75 @@ export default function AgentWatchlist({
 
       {/* ── Context Menu ───────────────────────────────────── */}
       {contextMenu.visible && contextMenu.agentId && (
-        <AgentContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          agentId={contextMenu.agentId}
-          agentIds={contextMenu.agentIds}
-          teams={teams}
-          offAgentIds={offAgentIds}
-          watchlists={watchlists}
-          onInitiateRename={(id) => {
-            setEditingAgentId(id);
-            const a = agents.find(ag => ag.session_id === id);
-            if (a) setEditingAgentName(a.session_name);
-          }}
-          onQuery={onQuery}
-          onPause={onPause}
-          onRestart={onRestart}
-          onClear={onClear}
-          onClone={onClone}
-          onAddToList={(listId, agentId) => {
-            onAddToList(listId, agentId);
-            setContextMenu(p => ({ ...p, visible: false }));
-          }}
-          onRemoveFromList={(listId, agentId) => {
-            onRemoveFromList(listId, agentId);
-            setContextMenu(p => ({ ...p, visible: false }));
-          }}
-          onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
-            onAddAgentsToList(listId, ids);
-            setContextMenu(p => ({ ...p, visible: false }));
-          } : undefined}
-          onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
-            onRemoveAgentsFromList(listId, ids);
-            setContextMenu(p => ({ ...p, visible: false }));
-          } : undefined}
-          onDelete={onDelete}
-          onDeleteAgents={onDeleteAgents}
-          onCreateTeam={onCreateTeam}
-          onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
-        />
+        <>
+          <div
+            data-testid="agent-open-context-menu"
+            className="context-menu"
+            style={{ top: contextMenu.y, left: contextMenu.x }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          >
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                openAgent?.(contextMenu.agentId!);
+                setContextMenu((current) => ({ ...current, visible: false }));
+              }}
+            >
+              Open
+            </button>
+            {onOpenAgentToSide && (
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  onOpenAgentToSide(contextMenu.agentId!);
+                  setContextMenu((current) => ({ ...current, visible: false }));
+                }}
+              >
+                Open to Side
+              </button>
+            )}
+          </div>
+          <AgentContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y + (onOpenAgentToSide ? 66 : 36)}
+            agentId={contextMenu.agentId}
+            agentIds={contextMenu.agentIds}
+            teams={teams}
+            offAgentIds={offAgentIds}
+            watchlists={watchlists}
+            onInitiateRename={(id) => {
+              setEditingAgentId(id);
+              const a = agents.find(ag => ag.session_id === id);
+              if (a) setEditingAgentName(a.session_name);
+            }}
+            onQuery={onQuery}
+            onPause={onPause}
+            onRestart={onRestart}
+            onClear={onClear}
+            onClone={onClone}
+            onAddToList={(listId, agentId) => {
+              onAddToList(listId, agentId);
+              setContextMenu(p => ({ ...p, visible: false }));
+            }}
+            onRemoveFromList={(listId, agentId) => {
+              onRemoveFromList(listId, agentId);
+              setContextMenu(p => ({ ...p, visible: false }));
+            }}
+            onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
+              onAddAgentsToList(listId, ids);
+              setContextMenu(p => ({ ...p, visible: false }));
+            } : undefined}
+            onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
+              onRemoveAgentsFromList(listId, ids);
+              setContextMenu(p => ({ ...p, visible: false }));
+            } : undefined}
+            onDelete={onDelete}
+            onDeleteAgents={onDeleteAgents}
+            onCreateTeam={onCreateTeam}
+            onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
+          />
+        </>
       )}
 
       {teamContextMenu.visible && teamContextMenu.teamId && (() => {

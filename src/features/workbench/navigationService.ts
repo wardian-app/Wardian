@@ -23,6 +23,7 @@ export interface WorkbenchNavigationService {
     direction?: "horizontal" | "vertical",
   ): string;
   focus(surface_id: string): void;
+  rebind_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   close(surface_id: string): Promise<CloseDecision>;
   close_group(group_id: string): Promise<CloseDecision>;
   reset_workbench(): Promise<CloseDecision>;
@@ -156,6 +157,23 @@ export function createWorkbenchNavigationService(
     },
 
     focus: (surfaceId) => apply([{ type: "focus_surface", surface_id: surfaceId }]),
+
+    rebind_resource: async (surfaceId, request) => {
+      registry.require(request.surface_type);
+      const snapshotState = store.getState();
+      const snapshot = snapshotState.document;
+      if (!(surfaceId in snapshot.surfaces)) {
+        throw new Error(`surface ${surfaceId} does not exist`);
+      }
+      const replacement = createSurface(request, surfaceId);
+      if (
+        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) === "cancel"
+      ) return "cancel";
+      return closeResult(store.getState().compare_and_apply_commands(
+        snapshotState.transaction_version,
+        [{ type: "replace_surface", surface: replacement }],
+      ));
+    },
 
     close: async (surfaceId) => {
       const snapshotState = store.getState();

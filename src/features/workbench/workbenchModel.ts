@@ -17,6 +17,7 @@ export type WorkbenchCommand =
   | { type: "open_surface"; surface: WorkbenchSurfaceV1; group_id?: string; index?: number }
   | { type: "focus_surface"; surface_id: string }
   | { type: "close_surface"; surface_id: string }
+  | { type: "replace_surface"; surface: WorkbenchSurfaceV1 }
   | { type: "reopen_closed_surface" }
   | {
       type: "split_group";
@@ -1160,6 +1161,20 @@ export function applyWorkbenchCommand(
             state_schema_version: command.state_schema_version,
             state: command.state,
           },
+        },
+      });
+    }
+
+    case "replace_surface": {
+      const surfaceId = command.surface.surface_id;
+      if (!document.surfaces[surfaceId]) {
+        return commandRejected(document, "surface does not exist", "$.command.surface.surface_id");
+      }
+      return acceptedCandidate(document, {
+        ...document,
+        surfaces: {
+          ...document.surfaces,
+          [surfaceId]: command.surface,
         },
       });
     }

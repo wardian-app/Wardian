@@ -42,11 +42,16 @@ export type WorkbenchPanelRendererPolicy = (
   surface: DeepReadonly<WorkbenchSurfaceV1>,
 ) => "always" | "onlyWhenVisible";
 
+export type WorkbenchSurfaceTitle = (
+  surface: DeepReadonly<WorkbenchSurfaceV1>,
+) => string;
+
 export type DockviewLayoutAdapterProps = {
   document: ReadonlyWorkbenchDocumentV1;
   safe_mode?: boolean;
   zoomed_group_id?: string | null;
   render_surface?: WorkbenchSurfaceRenderer;
+  surface_title?: WorkbenchSurfaceTitle;
   renderer_policy?: WorkbenchPanelRendererPolicy;
   on_command?: (command: WorkbenchCommand) => boolean;
   on_open_surface?: (groupId: string) => void;
@@ -479,10 +484,11 @@ function holdProjectionGuard(guard: MutableRefObject<number>): () => void {
 function panelParams(
   surface: DeepReadonly<WorkbenchSurfaceV1>,
   renderSurface?: WorkbenchSurfaceRenderer,
+  titleSurface?: WorkbenchSurfaceTitle,
 ): WorkbenchPanelParams {
   return {
     surface,
-    title: surfaceTitle(surface),
+    title: titleSurface?.(surface) ?? surfaceTitle(surface),
     ...(renderSurface ? { render_surface: renderSurface } : {}),
   };
 }
@@ -491,6 +497,7 @@ function reconcileDockview(
   api: DockviewApi,
   document: ReadonlyWorkbenchDocumentV1,
   renderSurface: WorkbenchSurfaceRenderer | undefined,
+  titleSurface: WorkbenchSurfaceTitle | undefined,
   rendererPolicy: WorkbenchPanelRendererPolicy,
   expectedMoves: Map<string, { group_id: string; index: number; transaction: number }>,
   transaction: number,
@@ -505,7 +512,7 @@ function reconcileDockview(
     if (!dockviewGroup) throw new Error(`Dockview group projection failed: ${groupId}`);
     for (const [index, surfaceId] of modelGroup.surface_ids.entries()) {
       const surface = document.surfaces[surfaceId];
-      const params = panelParams(surface, renderSurface);
+      const params = panelParams(surface, renderSurface, titleSurface);
       const renderer = rendererPolicy(surface);
       let panel = api.getPanel(surfaceId);
       if (!panel) {
@@ -576,6 +583,7 @@ function reconcileDockview(
 function SafeWorkbenchLayout({
   document,
   render_surface,
+  surface_title,
   on_command,
   on_open_surface,
   on_toggle_zoom,
@@ -628,7 +636,7 @@ function SafeWorkbenchLayout({
                   on_close_surface?.(surface.surface_id);
                 }}
               >
-                {surfaceTitle(surface)}
+                {surface_title?.(surface) ?? surfaceTitle(surface)}
               </button>
             );
           })}
@@ -681,6 +689,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     safe_mode = false,
     zoomed_group_id = null,
     render_surface,
+    surface_title,
     renderer_policy = defaultRendererPolicy,
     on_command,
   } = props;
@@ -755,6 +764,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         api,
         document,
         render_surface,
+        surface_title,
         renderer_policy,
         expectedMovesRef.current,
         transaction,
@@ -766,7 +776,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     } finally {
       releaseProjectionGuard();
     }
-  }, [api, document, reconcileNonce, render_surface, renderer_policy, safe_mode, zoomed_group_id]);
+  }, [api, document, reconcileNonce, render_surface, renderer_policy, safe_mode, surface_title, zoomed_group_id]);
 
   useLayoutEffect(() => {
     if (!api || safe_mode) return;

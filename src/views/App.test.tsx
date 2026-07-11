@@ -505,6 +505,80 @@ describe("Workbench persistence boot integration", () => {
     fireEvent.click(gridMode);
     await waitFor(() => expect(gridMode).toHaveAttribute("aria-pressed", "true"));
   });
+
+  it("routes roster Open and Open to Side into Agent Session surfaces", async () => {
+    workbenchFlagState.enabled = true;
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "get_workbench_boot_config") return Promise.resolve({ safe_mode: false });
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("overview-surface", {
+              surface_type: "agents-overview",
+              state: {
+                mode: "grid",
+                focused_agent_id: null,
+                search_query: "",
+                status_filter: [],
+              },
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "opaque-zero",
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    const betaRow = await waitFor(() => {
+      const row = screen.getAllByText("Beta")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Beta roster row not found");
+      return row;
+    });
+
+    fireEvent.doubleClick(betaRow);
+    const sessionSurface = await screen.findByTestId("agent-session-surface");
+    expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute(
+      "data-resource-key",
+      "agent-2",
+    );
+    expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(1);
+
+    fireEvent.doubleClick(betaRow);
+    await waitFor(() => {
+      expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(1);
+    });
+
+    const sessionTab = document.querySelector<HTMLElement>(
+      '[role="tab"][data-surface-type="agent-session"][data-resource-key="agent-2"]',
+    );
+    if (!sessionTab) throw new Error("Agent Session tab not found");
+    sessionTab.focus();
+    fireEvent.keyDown(sessionTab, { key: "Delete" });
+    await waitFor(() => expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument());
+    expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+
+    fireEvent.doubleClick(betaRow);
+    await screen.findByTestId("agent-session-surface");
+
+    fireEvent.contextMenu(betaRow);
+    fireEvent.click(within(screen.getByTestId("agent-open-context-menu"))
+      .getByRole("button", { name: "Open to Side" }));
+    await waitFor(() => {
+      expect(screen.getAllByTestId("workbench-group")).toHaveLength(2);
+      expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(2);
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+  });
 });
 
 afterEach(() => {
@@ -1730,8 +1804,7 @@ describe("Agent Watchlist Sidebar", () => {
       .find((row): row is HTMLElement => Boolean(row));
     if (!betaWatchlistRow) throw new Error("Beta watchlist row not found");
 
-    fireEvent.click(betaWatchlistRow);
-    fireEvent.click(betaWatchlistRow);
+    fireEvent.doubleClick(betaWatchlistRow);
 
     await waitFor(() => {
       expect(screen.getByTestId("terminal-agent-1")).not.toBeVisible();
@@ -1739,7 +1812,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("selects only the owning agent when a terminal receives focus", async () => {
+  it("keeps command targets unchanged when a terminal receives focus", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     render(<App />);
 
@@ -1755,8 +1828,8 @@ describe("Agent Watchlist Sidebar", () => {
 
     fireEvent.focus(betaTerminal);
 
-    expect(alphaCard.className).not.toContain("ring-1");
-    expect(betaCard.className).toContain("ring-1");
+    expect(alphaCard.className).toContain("ring-1");
+    expect(betaCard.className).not.toContain("ring-1");
   });
 
   it("updates team member order in the watchlist when team members are dragged in the main grid", async () => {
@@ -2048,7 +2121,8 @@ describe("Sidebar Navigation", () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     render(<App />);
 
-    fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+    await screen.findByTestId("terminal-agent-1");
+    fireEvent.click(screen.getByTestId("agent-card-header-agent-1"));
     fireEvent.click(screen.getByTitle("Terminal"));
 
     expect(await screen.findByTestId("selected-terminal-workspace")).toHaveTextContent("C:/project");
@@ -2077,7 +2151,8 @@ describe("Sidebar Navigation", () => {
 
     render(<App />);
 
-    fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+    await screen.findByTestId("terminal-agent-1");
+    fireEvent.click(screen.getByTestId("agent-card-header-agent-1"));
 
     expect(await screen.findByTestId("sidebar-tab-git-badge")).toHaveTextContent("2");
   });
@@ -2128,7 +2203,8 @@ describe("Sidebar Navigation", () => {
 
       render(<App />);
 
-      fireEvent.focus(await screen.findByTestId("terminal-agent-1"));
+      await screen.findByTestId("terminal-agent-1");
+      fireEvent.click(screen.getByTestId("agent-card-header-agent-1"));
       expect(await screen.findByTestId("sidebar-tab-git-badge")).toHaveTextContent("1");
       expect(screen.queryByTestId("sidebar-tab-git-progress")).not.toBeInTheDocument();
 

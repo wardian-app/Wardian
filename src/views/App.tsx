@@ -63,6 +63,9 @@ import {
   AgentsOverviewSurface,
   normalizeAgentsOverviewSurfaceState,
 } from "../features/workbench/surfaces/AgentsOverviewSurface";
+import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
+import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
+import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
 
 declare global {
   interface Window {
@@ -222,6 +225,14 @@ function AppBody() {
     initial_view_mode: viewMode,
     shell_projection: WORKBENCH_SHELL_PROJECTION,
   });
+  const workbenchRegistry = useMemo(createCoreWorkbenchSurfaceRegistry, []);
+  const workbenchNavigation = useMemo(
+    () => createWorkbenchNavigationService({
+      registry: workbenchRegistry,
+      store: workbenchPersistence.store,
+    }),
+    [workbenchPersistence.store, workbenchRegistry],
+  );
   const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
@@ -682,10 +693,6 @@ function AppBody() {
     });
   }, [filteredAgents, selectAgent, setSelectedAgentIds]);
 
-  const selectSingleAgent = useCallback((agentId: string) => {
-    setSelectedAgentIds(new Set([agentId]));
-  }, [setSelectedAgentIds]);
-
   const handleMouseDown = (agentId: string) => setDraggedAgentId(agentId);
   const handleMouseEnterCard = (agentId: string) => {
     if (draggedAgentId && draggedAgentId !== agentId) setDragOverAgentId(agentId);
@@ -772,14 +779,14 @@ function AppBody() {
     return () => window.removeEventListener("mouseup", cancelDrag);
   }, [draggedAgentId]);
 
-  const scrollToAgent = (agentId: string) => {
+  const scrollToAgent = useCallback((agentId: string) => {
     if (viewMode === "grid" && legacyOverviewMode === "single") {
       setMaximizedAgentId(agentId);
       return;
     }
     const el = document.getElementById(`agent-card-${agentId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
+  }, [legacyOverviewMode, viewMode]);
 
   const fetchAgentClasses = async () => {
     try {
@@ -950,6 +957,29 @@ function AppBody() {
     setViewMode("workflows");
   }, []);
 
+  const openAgent = useCallback((sessionId: string) => {
+    if (WORKBENCH_FLAGS.workbench_enabled) {
+      workbenchNavigation.open({
+        surface_type: "agent-session",
+        resource_key: sessionId,
+      });
+      return;
+    }
+    setViewMode("grid");
+    window.setTimeout(() => scrollToAgent(sessionId), 0);
+  }, [scrollToAgent, workbenchNavigation]);
+
+  const openAgentToSide = useCallback((sessionId: string) => {
+    if (WORKBENCH_FLAGS.workbench_enabled) {
+      workbenchNavigation.open_to_side({
+        surface_type: "agent-session",
+        resource_key: sessionId,
+      });
+      return;
+    }
+    openAgent(sessionId);
+  }, [openAgent, workbenchNavigation]);
+
   const openAgentFromQueue = useCallback((sessionId: string) => {
     setViewMode("grid");
     setSelectedAgentIds(new Set([sessionId]));
@@ -981,6 +1011,36 @@ function AppBody() {
   }, [workbenchPersistence]);
 
   const renderWorkbenchSurface = (surface: WorkbenchSurfaceV1) => {
+    if (surface.surface_type === "agent-session") {
+      const resourceKey = surface.resource_key ?? "";
+      return (
+        <AgentSessionSurface
+          surface_id={surface.surface_id}
+          resource_key={resourceKey}
+          agent={agents.find((agent) => agent.session_id === resourceKey)}
+          theme={theme}
+          on_title_change={handleTitleChange}
+          on_refresh_agents={() => { void fetchAgents(); }}
+          rebind_candidates={agents}
+          on_rebind_agent={(nextAgentId) => {
+            void workbenchNavigation.rebind_resource(surface.surface_id, {
+              surface_type: "agent-session",
+              resource_key: nextAgentId,
+            });
+          }}
+          on_reset_surface={() => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state: workbenchRegistry.default_state("agent-session"),
+            }]);
+          }}
+          on_close_surface={() => { void workbenchNavigation.close(surface.surface_id); }}
+        />
+      );
+    }
+
     if (surface.surface_type !== "agents-overview") {
       return (
         <section className="wardian-workbench-placeholder">
@@ -1025,7 +1085,6 @@ function AppBody() {
         onRestart={onRestart}
         onClear={onClear}
         onClone={onClone}
-        onTerminalFocus={selectSingleAgent}
         on_state_change={(state) => {
           workbenchPersistence.store.getState().apply_commands([{
             type: "update_surface_state",
@@ -1117,8 +1176,17 @@ function AppBody() {
             <WorkbenchHost
               store={workbenchPersistence.store}
               safe_mode={workbenchPersistence.safe_mode}
+              registry={workbenchRegistry}
+              navigation={workbenchNavigation}
               resource_key={selectedWorkbenchResourceKey}
               render_surface={renderWorkbenchSurface}
+              surface_title={(surface) => {
+                if (surface.surface_type === "agent-session" && surface.resource_key) {
+                  return agents.find((agent) => agent.session_id === surface.resource_key)
+                    ?.session_name ?? `Agent Session: ${surface.resource_key}`;
+                }
+                return workbenchRegistry.presentation(surface).title;
+              }}
             />
           ) : (
           <div
@@ -1243,7 +1311,6 @@ function AppBody() {
                 onMouseUp={handleMouseUp}
                 onMouseDown={handleMouseDown}
                 onCardClick={handleAgentCardClick}
-                onTerminalFocus={selectSingleAgent}
                 onModeChange={(nextMode) => {
                   const legacyMode = nextMode === "single" ? "single" : "grid";
                   setLegacyOverviewMode(legacyMode);
@@ -1321,7 +1388,8 @@ function AppBody() {
           filter={rosterFilter}
           onFilterChange={setRosterFilter}
           onSelectAgent={selectAgent}
-          onAgentClick={scrollToAgent}
+          onOpenAgent={openAgent}
+          onOpenAgentToSide={openAgentToSide}
           onRename={renameAgent}
           onReorderAgents={async (newOrder) => {
             try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }

@@ -162,6 +162,39 @@ describe("workbench navigation service", () => {
     ]);
   });
 
+  it("rebinds a resource atomically without changing surface identity, order, or history", async () => {
+    const registry = createSurfaceRegistry([
+      definition("agent-session", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const surface = makeSurface("agent-pane", {
+      surface_type: "agent-session",
+      resource_key: "missing-agent",
+    });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([surface]) });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+    const beforeVersion = store.getState().transaction_version;
+
+    await expect(navigation.rebind_resource("agent-pane", {
+      surface_type: "agent-session",
+      resource_key: "agent-2",
+    })).resolves.toBe("allow");
+
+    const document = store.getState().document;
+    expect(document.groups["group-1"].surface_ids).toEqual(["agent-pane"]);
+    expect(document.groups["group-1"].active_surface_id).toBe("agent-pane");
+    expect(document.surfaces["agent-pane"]).toMatchObject({
+      surface_id: "agent-pane",
+      surface_type: "agent-session",
+      resource_key: "agent-2",
+      state: { label: "default" },
+    });
+    expect(document.recently_closed).toEqual([]);
+    expect(store.getState().transaction_version).toBe(beforeVersion + 1);
+  });
+
   it("does not mutate a surface, group, or reset when an async guard cancels", async () => {
     const guard = vi.fn(async (entry: WorkbenchSurfaceV1): Promise<"allow" | "cancel"> =>
       entry.surface_id === "surface-2" ? "cancel" : "allow",
@@ -192,6 +225,10 @@ describe("workbench navigation service", () => {
     };
 
     await assertCancellation((navigation) => navigation.close("surface-2"));
+    await assertCancellation((navigation) => navigation.rebind_resource("surface-2", {
+      surface_type: "dirty",
+      state: { label: "replacement" },
+    }));
     await assertCancellation((navigation) => navigation.close_group("group-1"));
     await assertCancellation((navigation) => navigation.reset_workbench());
     expect(guard).toHaveBeenCalled();

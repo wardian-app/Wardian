@@ -26,6 +26,7 @@ import type { WorkbenchStore } from "../../features/workbench/useWorkbenchStore"
 import {
   DockviewLayoutAdapter,
   type WorkbenchSurfaceRenderer,
+  type WorkbenchSurfaceTitle,
 } from "./DockviewLayoutAdapter";
 import "./workbench.css";
 
@@ -36,6 +37,7 @@ export type WorkbenchHostProps = {
   navigation?: WorkbenchNavigationService;
   resource_key?: string;
   render_surface?: WorkbenchSurfaceRenderer;
+  surface_title?: WorkbenchSurfaceTitle;
   on_quick_open?: () => void;
   on_command_palette?: () => void;
   on_focus_left_dock?: () => void;
@@ -97,6 +99,7 @@ export function WorkbenchHost({
   navigation: suppliedNavigation,
   resource_key,
   render_surface,
+  surface_title,
   on_quick_open,
   on_command_palette,
   on_focus_left_dock,
@@ -161,6 +164,7 @@ export function WorkbenchHost({
       </section>
     );
   });
+  const titleSurface = surface_title ?? ((surface) => registry.presentation(surface).title);
 
   return (
     <div
@@ -185,6 +189,7 @@ export function WorkbenchHost({
         safe_mode={safe_mode}
         zoomed_group_id={state.zoomed_group_id}
         render_surface={renderSurface}
+        surface_title={titleSurface}
         renderer_policy={(surface) => registry.get(surface.surface_type)?.render_policy === "keep_alive"
           ? "always"
           : "onlyWhenVisible"}
