@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
 use tokio::sync::mpsc::Sender;
 
 pub trait TerminalInputSink: Send + Sync {
@@ -12,6 +13,7 @@ pub trait TerminalInputSink: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
 }
 
+#[cfg(test)]
 impl TerminalInputSink for Sender<Vec<u8>> {
     fn send_bytes(
         &self,

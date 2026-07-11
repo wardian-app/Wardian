@@ -84,6 +84,7 @@ fn windows_conpty_runtime_diagnostics() -> Option<WindowsConptyRuntimeDiagnostic
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub(crate) async fn submit_prompt_to_agent_with_codex_echo_guard(
     state: &AppState,
     session_id: &str,
