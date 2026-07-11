@@ -404,6 +404,99 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("resyncs a restored hidden owner after its renderer mounts", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        const result = modernRegistrationResult(
+          request?.presentation_id ?? "pane-resync",
+          "pane-resync",
+        );
+        result.presentation.requires_resync = true;
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        return {
+          broker_state: modernBrokerState("pane-resync"),
+          initial_snapshot: modernSnapshot(),
+        };
+      }
+      if (command === "begin_terminal_owner_resync") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-resync",
+          },
+          resync_id: "resync-1",
+          snapshot: modernSnapshot(),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_owner_resync") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-resync",
+          },
+          broker_state: modernBrokerState("pane-resync"),
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("pane-resync", "pane-resync").presentation;
+      }
+      if (command === "resize_terminal_presentation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-resync",
+          },
+          geometry_sequence: 1,
+          geometry: { cols: 80, rows: 24 },
+          snapshot: null,
+        };
+      }
+      if (command === "read_terminal_events") {
+        return modernCaughtUpBatch();
+      }
+      if (command === "ack_terminal_events") {
+        return undefined;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-resync"
+        visibility="visible"
+        renderState="mounted"
+        requestedInteraction="interactive"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("begin_terminal_owner_resync", expect.anything());
+      expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_owner_resync", expect.anything());
+    });
+  });
+
   it("reports mirror viewport geometry without resizing the native PTY", async () => {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;

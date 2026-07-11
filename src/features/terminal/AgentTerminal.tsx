@@ -2510,8 +2510,18 @@ export const AgentTerminal = memo(function AgentTerminal({
             },
             callbacks,
           );
+          if (!isMounted) {
+            return;
+          }
           session.presentationState = result.presentation;
           session.brokerState = result.broker_state;
+          if (
+            renderState === "mounted" &&
+            result.presentation.requires_resync &&
+            result.broker_state.owner_presentation_id === presentationId
+          ) {
+            await session.terminalClient.resyncOwner(presentationId);
+          }
         } catch (error) {
           const message = String(error);
           if (message.includes("TerminalSessionProtocolUnavailable")) {
