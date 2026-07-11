@@ -2400,11 +2400,11 @@ export const AgentTerminal = memo(function AgentTerminal({
 
   const handleFocusCapture = useCallback(() => {
     // Focus should not swap renderers; changing DOM/WebGL backends changes text
-    // rasterization and makes the terminal appear to reflow.
+    // rasterization and makes the terminal appear to reflow. It also remains
+    // lease-passive so keyboard focus traversal cannot steal PTY ownership.
     touchSessionWebglIfActive(terminalKey);
-    requestActivation();
     onTerminalFocus?.();
-  }, [terminalKey, onTerminalFocus, requestActivation]);
+  }, [terminalKey, onTerminalFocus]);
 
   const handleWheel = useCallback((event: {
     deltaMode: number;
