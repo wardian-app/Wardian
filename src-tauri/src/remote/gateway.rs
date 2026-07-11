@@ -1297,17 +1297,21 @@ async fn send_terminal_input_bytes(
     if input.len() > REMOTE_TERMINAL_MAX_INPUT_FRAME_BYTES {
         return Err("terminal_input_too_large".to_string());
     }
-    let tx = state
-        .input_senders
-        .try_read()
-        .map_err(|_| "input_channel_temporarily_locked".to_string())?
-        .get(session_id)
-        .cloned()
-        .ok_or_else(|| "agent_not_found".to_string())?;
-    tokio::time::timeout(REMOTE_TERMINAL_INPUT_SEND_TIMEOUT, tx.send(input))
+    let decision = tokio::time::timeout(
+        REMOTE_TERMINAL_INPUT_SEND_TIMEOUT,
+        state.terminal_sessions.send_legacy_input(session_id, input),
+    )
         .await
         .map_err(|_| "terminal_input_buffer_full".to_string())?
-        .map_err(|_| "terminal_input_closed".to_string())
+        .map_err(|error| error.to_string())?;
+    if decision.status == wardian_core::models::TerminalLeaseDecisionStatus::Accepted {
+        Ok(())
+    } else {
+        Err(decision
+            .reason
+            .map(|reason| format!("terminal_lease_{reason:?}"))
+            .unwrap_or_else(|| "terminal_lease_rejected".to_string()))
+    }
 }
 
 fn status_stream_session_is_active(
@@ -2044,10 +2048,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
         tx.try_send(b"queued".to_vec()).expect("fill channel");
         state
-            .input_senders
-            .write()
-            .expect("input senders")
-            .insert("agent-1".to_string(), tx);
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "agent-1",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .expect("test terminal runtime");
         let drain = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             assert_eq!(rx.recv().await.expect("queued input"), b"queued");

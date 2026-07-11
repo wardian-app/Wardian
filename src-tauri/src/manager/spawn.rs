@@ -584,9 +584,6 @@ pub async fn spawn_agent(
         )
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
-    if let Ok(mut senders) = app_state.input_senders.write() {
-        senders.insert(config.session_id.clone(), tx.clone());
-    }
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 

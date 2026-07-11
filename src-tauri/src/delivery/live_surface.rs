@@ -5,10 +5,10 @@ use wardian_core::control::{
 };
 
 use crate::state::AppState;
-use crate::utils::delivery_transaction::TerminalDeliveryError;
+use crate::utils::delivery_transaction::{BrokerTerminalInputSink, TerminalDeliveryError};
 
 type LiveSurfaceTargetResult = Result<
-    (String, String, tokio::sync::mpsc::Sender<Vec<u8>>),
+    (String, String),
     (Option<LiveSurfaceTarget>, FailedLiveSurfaceAttempt),
 >;
 
@@ -101,42 +101,7 @@ pub async fn submit_live_surface_prompt(
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&request.session_id) {
             match agent.config.lock() {
-                Ok(config) => {
-                    let config = config.clone();
-                    match state.input_senders.try_read() {
-                        Ok(senders) => match senders.get(&request.session_id).cloned() {
-                            Some(tx) => Ok((config.session_name, config.provider, tx)),
-                            None => Err((
-                                Some(LiveSurfaceTarget {
-                                    name: config.session_name,
-                                    provider: config.provider,
-                                }),
-                                FailedLiveSurfaceAttempt {
-                                    runtime_state: missing_sender_runtime_state(
-                                        request.runtime_state,
-                                    ),
-                                    error_code: "no_input_channel",
-                                    message: "no input channel".to_string(),
-                                    delivery_phase: Some("input_channel_missing".to_string()),
-                                    retry_safe: true,
-                                },
-                            )),
-                        },
-                        Err(_) => Err((
-                            Some(LiveSurfaceTarget {
-                                name: config.session_name,
-                                provider: config.provider,
-                            }),
-                            FailedLiveSurfaceAttempt {
-                                runtime_state: request.runtime_state,
-                                error_code: "input_channel_locked",
-                                message: "Input channel temporarily locked".to_string(),
-                                delivery_phase: Some("input_channel_locked".to_string()),
-                                retry_safe: true,
-                            },
-                        )),
-                    }
-                }
+                Ok(config) => Ok((config.session_name.clone(), config.provider.clone())),
                 Err(_) => Err((
                     Some(LiveSurfaceTarget {
                         name: request.session_id.clone(),
@@ -164,7 +129,7 @@ pub async fn submit_live_surface_prompt(
             ))
         }
     };
-    let (name, provider, tx) = match target_result {
+    let (name, provider) = match target_result {
         Ok(target) => target,
         Err((target, failure)) => {
             return Err(record_failed_live_surface_attempt(
@@ -177,11 +142,39 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
+    if state
+        .terminal_sessions
+        .broker_state(&request.session_id)
+        .await
+        .is_err()
+    {
+        return Err(record_failed_live_surface_attempt(
+            state,
+            &request,
+            &interaction_id,
+            Some(LiveSurfaceTarget {
+                name: name.clone(),
+                provider: provider.clone(),
+            }),
+            FailedLiveSurfaceAttempt {
+                runtime_state: missing_sender_runtime_state(request.runtime_state),
+                error_code: "no_input_channel",
+                message: "no input channel".to_string(),
+                delivery_phase: Some("input_channel_missing".to_string()),
+                retry_safe: true,
+            },
+        )
+        .await);
+    }
+    let input = BrokerTerminalInputSink::new(
+        state.terminal_sessions.clone(),
+        request.session_id.clone(),
+    );
 
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
-        match crate::control::submit_approval_action_for_delivery_service(&tx, &provider, action)
+        match crate::control::submit_approval_action_for_delivery_service(&input, &provider, action)
             .await
         {
             Ok(outcome) => outcome,
@@ -235,7 +228,7 @@ pub async fn submit_live_surface_prompt(
         let wait_prompt = request.prompt.clone();
         let payload_sent_detail = request.payload_sent_detail.clone();
         match crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload(
-            &tx,
+            &input,
             &request.prompt,
             &provider,
             || async move {

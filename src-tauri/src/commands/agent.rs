@@ -150,13 +150,9 @@ fn clone_unique_name(
 fn detach_agent_for_kill(
     agents: &mut HashMap<String, ActiveAgent>,
     order: &mut Vec<String>,
-    input_senders: &std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
     session_id: &str,
 ) -> Option<ActiveAgent> {
     let agent = agents.remove(session_id)?;
-    if let Ok(mut senders) = input_senders.write() {
-        senders.remove(session_id);
-    }
     order.retain(|id| id != session_id);
     Some(agent)
 }
@@ -169,10 +165,11 @@ struct DeletedAgentReferenceCleanup {
 
 impl DeletedAgentReferenceCleanup {
     fn run(home: &Path, remaining_agent_ids: &BTreeSet<String>) -> Result<Self, String> {
-        let watchlists_changed = crate::commands::watchlist::retain_known_agent_references_in_home(
-            home,
-            remaining_agent_ids,
-        )?;
+        let watchlists_changed =
+            crate::commands::watchlist::retain_known_agent_references_in_home(
+                home,
+                remaining_agent_ids,
+            )?;
 
         let mut topology = wardian_core::topology::load_topology(home);
         let before_topology = topology.clone();
@@ -951,21 +948,6 @@ fn promote_fresh_provider_session_after_resume(
         }
         if let Ok(mut log_last_modified) = new_active.log_last_modified.lock() {
             *log_last_modified = None;
-        }
-    }
-}
-
-#[cfg(test)]
-fn sync_resumed_input_sender(
-    state: &AppState,
-    session_id: &str,
-    stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-) {
-    if let Ok(mut senders) = state.input_senders.write() {
-        if let Some(tx) = stdin_tx {
-            senders.insert(session_id.to_string(), tx);
-        } else {
-            senders.remove(session_id);
         }
     }
 }
@@ -2486,8 +2468,7 @@ pub async fn kill_agent(
     let (agent, state_snapshot, remaining_agent_ids) = {
         let mut agents = state.agents.lock().await;
         let mut order = state.agent_order.lock().await;
-        let agent =
-            detach_agent_for_kill(&mut agents, &mut order, &state.input_senders, &session_id);
+        let agent = detach_agent_for_kill(&mut agents, &mut order, &session_id);
         let state_snapshot = agent
             .is_some()
             .then(|| manager::state_configs_snapshot(&agents, &order));
@@ -2595,9 +2576,6 @@ pub async fn pause_agent(
             config.is_off = true;
         }
 
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
         let state_snapshot = manager::state_configs_snapshot(&agents, &order);
         (termination, state_snapshot, status_arc)
     };
@@ -2828,11 +2806,7 @@ async fn clear_agent_session_inner(
             return Err(format!("Agent {} not found", session_id));
         };
 
-        let prepared = prepare_agent_for_clear(agent);
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
-        prepared
+        prepare_agent_for_clear(agent)
     };
 
     // 1. Terminate the old agent's process tree outside the global agent lock.
@@ -3393,8 +3367,14 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
-        .await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 async fn clear_agent_after_worktree_mutation(
@@ -3498,8 +3478,14 @@ pub async fn assign_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
-        .await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3572,8 +3558,14 @@ pub async fn disable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
-        .await
+    clear_agent_after_worktree_mutation(
+        session_id,
+        state,
+        app,
+        archive_snapshot,
+        lifecycle_guard,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3594,12 +3586,12 @@ pub async fn reorder_agents(
 mod tests {
     use super::{
         acquire_agent_lifecycle_guard, agent_status_update_payload, apply_agent_update_fields,
-        archive_agent_lifecycle_boundary, archive_agent_lifecycle_boundary_from_snapshot,
-        assign_worktree_config, build_agent_cli_command_for_session_id_with_shells,
-        build_agent_cli_command_with_shells, build_agent_clone_preview,
-        capture_opencode_pause_resume_session, capture_resume_runtime_snapshot,
-        clone_cleanup_created_profile_dirs, clone_collect_eligible_file_tree,
-        clone_copy_agent_profile_files, clone_copy_profile_plan,
+        archive_agent_lifecycle_boundary,
+        archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
+        build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
+        build_agent_clone_preview, capture_opencode_pause_resume_session,
+        capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
+        clone_collect_eligible_file_tree, clone_copy_agent_profile_files, clone_copy_profile_plan,
         clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
@@ -3622,13 +3614,13 @@ mod tests {
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_requested_spawn_session_name, restore_agent_config_in_state,
-        restore_runtime_state_snapshot_after_resume, strip_claude_embedded_stream_flags,
-        sync_resumed_input_sender, take_agent_runtime_for_termination, terminal_cleared_payload,
-        update_agent_fields_in_state, validate_assignable_worktree_for_agent,
-        validate_deletable_agent_worktree, workspace_paths_match, AgentOrderPlacement,
-        AgentWorktreeSummary, CloneProfileCopyPlan, CloneProfileSelection,
-        DeletedAgentReferenceCleanup, DiscoveredGitWorktree, GIT_WORKTREE_DISCOVERY_CONCURRENCY,
+        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
+        strip_claude_embedded_stream_flags, restore_agent_config_in_state,
+        take_agent_runtime_for_termination, terminal_cleared_payload, update_agent_fields_in_state,
+        validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
+        workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
+        CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
+        GIT_WORKTREE_DISCOVERY_CONCURRENCY,
     };
     use crate::providers::GeminiProvider;
     use crate::state::{ActiveAgent, AppState};
@@ -5223,9 +5215,13 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(error.contains("agent worktree"));
 
         let current_workspace = config.folder.clone();
-        let no_op_error =
-            apply_agent_update_fields(&mut config, None, Some(&current_workspace), &[])
-                .expect_err("managed worktree no-op must still use worktree commands");
+        let no_op_error = apply_agent_update_fields(
+            &mut config,
+            None,
+            Some(&current_workspace),
+            &[],
+        )
+        .expect_err("managed worktree no-op must still use worktree commands");
         assert!(no_op_error.contains("agent worktree"));
     }
 
@@ -5313,10 +5309,13 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .iter()
             .any(|path| path.replace('\\', "/").ends_with("/classes/Reviewer")));
 
-        let rollback_snapshot =
-            restore_agent_config_in_state(&state, "agent-1", outcome.previous_config.clone())
-                .await
-                .expect("restore previous config");
+        let rollback_snapshot = restore_agent_config_in_state(
+            &state,
+            "agent-1",
+            outcome.previous_config.clone(),
+        )
+        .await
+        .expect("restore previous config");
         assert_eq!(rollback_snapshot[0].agent_class, "Coder");
         assert_eq!(
             rollback_snapshot[0].folder,
@@ -6357,40 +6356,21 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn sync_resumed_input_sender_inserts_or_removes_sender() {
-        let state = AppState::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-
-        sync_resumed_input_sender(&state, "agent-1", Some(tx));
-        assert!(state.input_senders.read().unwrap().contains_key("agent-1"));
-
-        sync_resumed_input_sender(&state, "agent-1", None);
-        assert!(!state.input_senders.read().unwrap().contains_key("agent-1"));
-    }
-
-    #[test]
-    fn detach_agent_for_kill_removes_live_state_and_input_sender() {
+    fn detach_agent_for_kill_removes_live_state() {
         let mut agents = std::collections::HashMap::new();
         let mut order = vec!["agent-1".to_string(), "agent-2".to_string()];
-        let input_senders = std::sync::RwLock::new(std::collections::HashMap::new());
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
         let agent = make_test_agent();
         agent.config.lock().unwrap().session_id = "agent-1".to_string();
         agents.insert("agent-1".to_string(), agent);
         agents.insert("agent-2".to_string(), make_test_agent());
 
-        let detached = detach_agent_for_kill(&mut agents, &mut order, &input_senders, "agent-1")
+        let detached = detach_agent_for_kill(&mut agents, &mut order, "agent-1")
             .expect("agent should be detached");
 
         assert_eq!(detached.config.lock().unwrap().session_id, "agent-1");
         assert!(!agents.contains_key("agent-1"));
         assert!(agents.contains_key("agent-2"));
         assert_eq!(order, vec!["agent-2".to_string()]);
-        assert!(!input_senders.read().unwrap().contains_key("agent-1"));
     }
 
     #[tokio::test]
@@ -7040,8 +7020,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let remaining_agent_ids =
             std::collections::BTreeSet::from(["kept".to_string(), "other-kept".to_string()]);
 
-        let cleanup =
-            DeletedAgentReferenceCleanup::run(temp.path(), &remaining_agent_ids).expect("cleanup");
+        let cleanup = DeletedAgentReferenceCleanup::run(temp.path(), &remaining_agent_ids)
+            .expect("cleanup");
 
         assert!(cleanup.watchlists_changed);
         assert!(cleanup.topology_changed);

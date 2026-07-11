@@ -307,30 +307,11 @@ pub async fn inject_session_input(
     text: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let senders = match state.input_senders.try_read() {
-        Ok(s) => s,
-        Err(_) => {
-            manager::log_debug(&format!(
-                "[Wardian] [{}] inject_session_input: input_senders write-locked",
-                session_id
-            ));
-            return Err("Input channel temporarily locked".to_string());
-        }
-    };
-    if let Some(tx) = senders.get(&session_id) {
-        match tx.try_send(text.into_bytes()) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] inject_session_input: channel error: {}",
-                    session_id, e
-                ));
-                Err(format!("Failed to inject input: {}", e))
-            }
-        }
-    } else {
-        Err(format!("Agent {} not found or is off", session_id))
-    }
+    state
+        .terminal_sessions
+        .send_privileged_input(&session_id, text.into_bytes())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -369,12 +350,18 @@ pub async fn submit_prompt_to_agent(
 
 #[tauri::command]
 pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
-    let senders = state
-        .input_senders
-        .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    for tx in senders.values() {
-        let _ = tx.try_send(input.clone().into_bytes());
+    let session_ids = state
+        .agents
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for session_id in session_ids {
+        let _ = state
+            .terminal_sessions
+            .send_privileged_input(&session_id, input.clone().into_bytes())
+            .await;
     }
     Ok(())
 }
@@ -915,12 +902,6 @@ mod tests {
             test_agent("agent-1", "codex", watch_state.clone()),
         );
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx.clone());
-
         let submit = tokio::spawn(async move {
             submit_prompt_to_agent_with_codex_echo_guard(
                 &state,
