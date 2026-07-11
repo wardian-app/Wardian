@@ -190,9 +190,9 @@ export function WorkbenchHost({
         zoomed_group_id={state.zoomed_group_id}
         render_surface={renderSurface}
         surface_title={titleSurface}
-        renderer_policy={(surface) => registry.get(surface.surface_type)?.render_policy === "keep_alive"
-          ? "always"
-          : "onlyWhenVisible"}
+        renderer_policy={(surface) => registry.get(surface.surface_type)?.render_policy === "recreate_from_state"
+          ? "onlyWhenVisible"
+          : "always"}
         render_home={(groupId) => (
           <HomeSurface
             group_id={groupId}

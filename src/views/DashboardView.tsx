@@ -2,7 +2,7 @@ import React from "react";
 import { AgentConfig, AgentTelemetry } from "../types";
 import { getAgentStatusLabel, getAgentStatusTextClass } from "../utils/statusUtils";
 
-interface DashboardViewProps {
+export interface DashboardViewProps {
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
   terminalTitles: Record<string, string>;

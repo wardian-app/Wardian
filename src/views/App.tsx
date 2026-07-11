@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { AgentsOverviewMode, CloneMode, WorkbenchShellV1, WorkbenchSurfaceV1 } from "../types";
+import type { AgentsOverviewMode, CloneMode, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -66,6 +66,18 @@ import {
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
 import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
+import {
+  DashboardSurface,
+  GardenSurface,
+  GraphSurface,
+  QueueSurface,
+  normalizeGardenSurfaceState,
+  normalizeGraphSurfaceState,
+} from "../features/workbench/surfaces/coreSurfaceDefinitions";
+import type { WorkbenchSurfaceRenderer } from "../layout/workbench/DockviewLayoutAdapter";
+import { LibrarySurface } from "../features/workbench/surfaces/LibrarySurface";
+import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurface";
+import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
 
 declare global {
   interface Window {
@@ -87,7 +99,9 @@ const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
 const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
 const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
-const CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
+// Flag-off comparison path only. Workbench Graph/Garden use registered suspend
+// lifecycles and release their heavy renderer after the bounded grace period.
+const LEGACY_CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
 const WORKBENCH_PERSISTENCE_ADAPTER = createWorkbenchInvokeAdapter(
   (command, args) => invoke(command, args),
 );
@@ -199,7 +213,7 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
-function cachedCanvasPaneClass(active: boolean) {
+function legacyCachedCanvasPaneClass(active: boolean) {
   return active
     ? "flex-1 flex flex-col min-h-0"
     : "absolute inset-2 flex flex-col min-h-0 invisible pointer-events-none";
@@ -225,7 +239,10 @@ function AppBody() {
     initial_view_mode: viewMode,
     shell_projection: WORKBENCH_SHELL_PROJECTION,
   });
-  const workbenchRegistry = useMemo(createCoreWorkbenchSurfaceRegistry, []);
+  const dirtySurfacePrompt = useDirtySurfacePrompt();
+  const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
+    dirty_surface_prompt: dirtySurfacePrompt.prompt,
+  }), [dirtySurfacePrompt.prompt]);
   const workbenchNavigation = useMemo(
     () => createWorkbenchNavigationService({
       registry: workbenchRegistry,
@@ -233,7 +250,7 @@ function AppBody() {
     }),
     [workbenchPersistence.store, workbenchRegistry],
   );
-  const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
+  const [legacyCachedCanvasViews, setLegacyCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
@@ -352,8 +369,8 @@ function AppBody() {
   }, [libraryNavigationRequest]);
 
   useEffect(() => {
-    if (!CACHED_CANVAS_VIEWS.has(viewMode)) return;
-    setCachedCanvasViews((prev) => {
+    if (!LEGACY_CACHED_CANVAS_VIEWS.has(viewMode)) return;
+    setLegacyCachedCanvasViews((prev) => {
       if (prev.has(viewMode)) return prev;
       const next = new Set(prev);
       next.add(viewMode);
@@ -953,9 +970,13 @@ function AppBody() {
     : undefined;
 
   const openWorkflowsView = useCallback(() => {
+    if (WORKBENCH_FLAGS.workbench_enabled) {
+      workbenchNavigation.open({ surface_type: "workflows" });
+      return;
+    }
     setActiveTab("workflows");
     setViewMode("workflows");
-  }, []);
+  }, [workbenchNavigation]);
 
   const openAgent = useCallback((sessionId: string) => {
     if (WORKBENCH_FLAGS.workbench_enabled) {
@@ -985,8 +1006,8 @@ function AppBody() {
     setSelectedAgentIds(new Set([sessionId]));
     window.setTimeout(() => scrollToAgent(sessionId), 0);
   }, [scrollToAgent, setSelectedAgentIds]);
-  const shouldRenderGraph = viewMode === "graph" || cachedCanvasViews.has("graph");
-  const shouldRenderGarden = viewMode === "garden" || cachedCanvasViews.has("garden");
+  const shouldRenderGraph = viewMode === "graph" || legacyCachedCanvasViews.has("graph");
+  const shouldRenderGarden = viewMode === "garden" || legacyCachedCanvasViews.has("garden");
   const workbenchNotice = WORKBENCH_FLAGS.workbench_enabled
     ? [
         workbenchPersistence.notice,
@@ -1010,7 +1031,7 @@ function AppBody() {
     URL.revokeObjectURL(objectUrl);
   }, [workbenchPersistence]);
 
-  const renderWorkbenchSurface = (surface: WorkbenchSurfaceV1) => {
+  const renderWorkbenchSurface: WorkbenchSurfaceRenderer = (surface, lifecycle) => {
     if (surface.surface_type === "agent-session") {
       const resourceKey = surface.resource_key ?? "";
       return (
@@ -1019,6 +1040,8 @@ function AppBody() {
           resource_key={resourceKey}
           agent={agents.find((agent) => agent.session_id === resourceKey)}
           theme={theme}
+          visibility={lifecycle?.visible === false ? "hidden" : "visible"}
+          render_state={lifecycle?.visible === false ? "suspended" : "mounted"}
           on_title_change={handleTitleChange}
           on_refresh_agents={() => { void fetchAgents(); }}
           rebind_candidates={agents}
@@ -1037,6 +1060,143 @@ function AppBody() {
             }]);
           }}
           on_close_surface={() => { void workbenchNavigation.close(surface.surface_id); }}
+        />
+      );
+    }
+
+    const visibility = lifecycle?.visible === false ? "hidden" : "visible";
+    if (surface.surface_type === "dashboard") {
+      return (
+        <DashboardSurface
+          surface_id={surface.surface_id}
+          state={{}}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          telemetry={telemetry}
+          terminalTitles={terminalTitles}
+          currentThoughts={currentThoughts}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          draggedAgentId={draggedAgentId}
+          dragOverAgentId={dragOverAgentId}
+          onMouseEnterCard={handleMouseEnterCard}
+          onMouseUp={handleMouseUp}
+          onMouseDown={handleMouseDown}
+          onCardClick={handleAgentCardClick}
+          onPause={onPause}
+          onRestart={onRestart}
+          onDelete={onDelete}
+          onQuery={sendCommand}
+          deriveCurrentThought={deriveCurrentThought}
+          getStatusColorClass={getStatusColorClass}
+        />
+      );
+    }
+
+    if (surface.surface_type === "queue") {
+      return (
+        <QueueSurface
+          surface_id={surface.surface_id}
+          state={{}}
+          visibility={visibility}
+          onOpenAgent={openAgent}
+          onSendAgentPrompt={sendCommand}
+        />
+      );
+    }
+
+    if (surface.surface_type === "graph") {
+      return (
+        <GraphSurface
+          surface_id={surface.surface_id}
+          state={normalizeGraphSurfaceState(surface)}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          allAgents={agents}
+          telemetry={telemetry}
+          terminalTitles={terminalTitles}
+          currentThoughts={currentThoughts}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          watchlists={watchlists}
+          activeList={activeList}
+          teams={teams}
+          interactions={agentInteractions}
+          onSelectionChange={setSelectedAgentIds}
+          onOpenAgent={openAgent}
+          on_state_change={(state) => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state,
+            }]);
+          }}
+          onInitiateRename={(id) => {
+            const agent = agents.find((candidate) => candidate.session_id === id);
+            workbenchNavigation.open({ surface_type: "agents-overview" });
+            setSelectedAgentIds(new Set([id]));
+            setEditingAgentId(id);
+            setTempName(agent?.session_name ?? "");
+          }}
+          onQuery={openAgent}
+          onPause={onPause}
+          onRestart={onRestart}
+          onClear={onClear}
+          onClone={onClone}
+          onAddToList={handleAddToList}
+          onRemoveFromList={handleRemoveFromList}
+          onAddAgentsToList={handleAddAgentsToList}
+          onRemoveAgentsFromList={handleRemoveAgentsFromList}
+          onDelete={onDelete}
+          onDeleteAgents={onDeleteAgents}
+          deriveCurrentThought={deriveCurrentThought}
+        />
+      );
+    }
+
+    if (surface.surface_type === "garden") {
+      return (
+        <GardenSurface
+          surface_id={surface.surface_id}
+          state={normalizeGardenSurfaceState(surface)}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          telemetry={telemetry}
+          teams={teams}
+          activeList={activeList}
+          interactions={agentInteractions}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          onSelectionChange={setSelectedAgentIds}
+          onOpenAgent={openAgent}
+          on_state_change={(state) => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state,
+            }]);
+          }}
+        />
+      );
+    }
+
+    if (surface.surface_type === "library") {
+      return (
+        <LibrarySurface
+          surface_id={surface.surface_id}
+          selectedAgentIds={selectedAgentIds}
+          onOpenWorkflowsView={openWorkflowsView}
+        />
+      );
+    }
+
+    if (surface.surface_type === "workflows") {
+      return (
+        <WorkflowsSurface
+          surface_id={surface.surface_id}
+          theme={theme}
         />
       );
     }
@@ -1062,6 +1222,7 @@ function AppBody() {
         selectedAgentIds={selectedAgentIds}
         offAgentIds={offAgentIds}
         theme={theme}
+        visibility={visibility}
         draggedAgentId={draggedAgentId}
         dragOverAgentId={dragOverAgentId}
         editingAgentId={editingAgentId}
@@ -1211,7 +1372,7 @@ function AppBody() {
 
             {shouldRenderGraph && (
               <div
-                className={cachedCanvasPaneClass(viewMode === "graph")}
+                className={legacyCachedCanvasPaneClass(viewMode === "graph")}
                 aria-hidden={viewMode !== "graph"}
               >
                 <GraphView
@@ -1261,7 +1422,7 @@ function AppBody() {
 
             {shouldRenderGarden && (
               <div
-                className={cachedCanvasPaneClass(viewMode === "garden")}
+                className={legacyCachedCanvasPaneClass(viewMode === "garden")}
                 aria-hidden={viewMode !== "garden"}
               >
                 <GardenView
@@ -1352,6 +1513,7 @@ function AppBody() {
           </div>
           )}
           mainOverlays={<>
+            {dirtySurfacePrompt.dialog}
             <CustomCloneModal
             sourceSessionId={customCloneSourceId ?? ""}
             agentClasses={agentClasses}

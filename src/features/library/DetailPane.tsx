@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useConfirm } from '../../components/ConfirmDialog';
 import {
@@ -207,6 +207,7 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
 };
 
 interface DetailPaneProps {
+    surfaceId?: string;
     selectedAgentIds: Set<string>;
     /** Threaded through from LibraryView; App.tsx wiring lands separately —
      * no-op gracefully if not provided. */
@@ -220,13 +221,18 @@ interface DetailPaneProps {
  * changes (via the library watcher) don't silently clobber in-progress
  * edits — see `contentStale` handling below.
  */
-export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpenWorkflowsView }) => {
+export const DetailPane: React.FC<DetailPaneProps> = ({
+    surfaceId = 'legacy-library',
+    selectedAgentIds,
+    onOpenWorkflowsView,
+}) => {
     const index = useLibraryStore((s) => s.index);
     const activeSection = useLibraryStore((s) => s.activeSection);
     const selection = useLibraryStore((s) => s.selection);
     const selectedContent = useLibraryStore((s) => s.selectedContent);
     const contentStale = useLibraryStore((s) => s.contentStale);
-    const markEditorDirty = useLibraryStore((s) => s.markEditorDirty);
+    const markEditorSurfaceDirty = useLibraryStore((s) => s.markEditorSurfaceDirty);
+    const registerEditorCloseActions = useLibraryStore((s) => s.registerEditorCloseActions);
     const select = useLibraryStore((s) => s.select);
     const revertSelection = useLibraryStore((s) => s.revertSelection);
     const resolveStale = useLibraryStore((s) => s.resolveStale);
@@ -240,6 +246,8 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
 
     const [draft, setDraft] = useState('');
     const [baseline, setBaseline] = useState('');
+    const draftRef = useRef(draft);
+    draftRef.current = draft;
     const dirty = draft !== baseline;
     const trackedEntryRef = useRef<string | null>(null);
     // Set right before a discard-confirm decline reverts `selection` back to
@@ -317,8 +325,55 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     }, [selectedContent, selection?.entryRef]);
 
     useEffect(() => {
-        markEditorDirty(dirty);
-    }, [dirty, markEditorDirty]);
+        markEditorSurfaceDirty(surfaceId, dirty);
+    }, [dirty, markEditorSurfaceDirty, surfaceId]);
+
+    const handleSave = useCallback(async (): Promise<boolean> => {
+        // While the conflict bar is showing, a plain save must not silently
+        // overwrite the external disk change — the user has to resolve it
+        // first via "Keep mine" or reload the external content.
+        const selectedSection = selection?.section;
+        if (!currentEntry || !selectedSection || contentStale) return false;
+        const savingEntryRef = selection.entryRef;
+        const savingDraft = draft;
+        try {
+            await saveItem(selectedSection, currentEntry.path, savingDraft);
+            if (trackedEntryRef.current !== savingEntryRef) return false;
+            setBaseline(savingDraft);
+            resolveStale();
+            return draftRef.current === savingDraft;
+        } catch {
+            // saveItem already records the error on the store; keep the
+            // draft so a failed close guard is lossless.
+            return false;
+        }
+    }, [contentStale, currentEntry, draft, resolveStale, saveItem, selection?.section]);
+
+    const handleDiscard = useCallback(async (): Promise<boolean> => {
+        if (contentStale) {
+            await reloadSelectedContent();
+            return !useLibraryStore.getState().contentStale;
+        }
+        setDraft(baseline);
+        return true;
+    }, [baseline, contentStale, reloadSelectedContent]);
+
+    const editorCloseActionsRef = useRef({
+        save: handleSave,
+        discard: handleDiscard,
+    });
+    editorCloseActionsRef.current = {
+        save: handleSave,
+        discard: handleDiscard,
+    };
+
+    // `LibrarySurface` is keep-alive, so this bridge remains available while
+    // hidden. Identity-aware cleanup in the store prevents a stale StrictMode
+    // effect from unregistering the current editor callbacks.
+    useEffect(() => registerEditorCloseActions(surfaceId, {
+        save: () => editorCloseActionsRef.current.save(),
+        discard: () => editorCloseActionsRef.current.discard(),
+    }), [registerEditorCloseActions, surfaceId]);
 
     if (activeSection === 'mcps') {
         return (
@@ -339,22 +394,6 @@ export const DetailPane: React.FC<DetailPaneProps> = ({ selectedAgentIds, onOpen
     }
 
     const section = selection.section;
-
-    const handleSave = async () => {
-        // While the conflict bar is showing, a plain save must not silently
-        // overwrite the external disk change — the user has to resolve it
-        // first via "Keep mine" (clears `contentStale`, see `onKeepMine`
-        // below) or "Reload" (adopts disk content, clearing `dirty`).
-        if (contentStale) return;
-        try {
-            await saveItem(section, currentEntry.path, draft);
-            setBaseline(draft);
-            resolveStale();
-        } catch {
-            // saveItem already records the error on the store; keep the
-            // draft so the user doesn't lose their edits.
-        }
-    };
 
     const handleToggleStar = () => {
         // The store already surfaces the error via its `error` state; this

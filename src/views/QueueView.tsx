@@ -346,7 +346,7 @@ function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: Queue
   );
 }
 
-interface QueueViewProps {
+export interface QueueViewProps {
   onOpenAgent?: (sessionId: string) => void;
   onSendAgentPrompt?: (sessionId: string, prompt: string) => Promise<void> | void;
 }

@@ -40,6 +40,7 @@ describe('useLibraryStore', () => {
       isLoading: false,
       error: null,
       _editorDirty: false,
+      _editorResources: {},
       libraryDetailWidth: 480,
     });
   });
@@ -163,6 +164,31 @@ describe('useLibraryStore', () => {
     expect(invoke).not.toHaveBeenCalled();
     useLibraryStore.getState().markEditorDirty(false);
     expect(useLibraryStore.getState()._editorDirty).toBe(false);
+  });
+
+  it('keeps editor bridges and dirty state isolated by surface identity', async () => {
+    const saveFirst = vi.fn().mockResolvedValue(true);
+    const saveSecond = vi.fn().mockResolvedValue(true);
+    const releaseFirst = useLibraryStore.getState().registerEditorCloseActions('library-1', {
+      save: saveFirst,
+      discard: vi.fn(),
+    });
+    useLibraryStore.getState().registerEditorCloseActions('library-2', {
+      save: saveSecond,
+      discard: vi.fn(),
+    });
+    useLibraryStore.getState().markEditorSurfaceDirty('library-1', true);
+    useLibraryStore.getState().markEditorSurfaceDirty('library-2', true);
+
+    await expect(useLibraryStore.getState().saveEditorDraft('library-1')).resolves.toBe(true);
+    expect(saveFirst).toHaveBeenCalledOnce();
+    expect(saveSecond).not.toHaveBeenCalled();
+    expect(useLibraryStore.getState().isEditorSurfaceDirty('library-1')).toBe(false);
+    expect(useLibraryStore.getState().isEditorSurfaceDirty('library-2')).toBe(true);
+
+    releaseFirst();
+    expect(useLibraryStore.getState()._editorResources['library-1']).toBeUndefined();
+    expect(useLibraryStore.getState()._editorResources['library-2']).toBeDefined();
   });
 
   describe('mutation error handling', () => {

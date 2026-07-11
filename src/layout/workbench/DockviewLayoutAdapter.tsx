@@ -34,8 +34,13 @@ import type { WorkbenchNodeV1, WorkbenchSurfaceV1 } from "../../types";
 import { WorkbenchGroupHeader } from "./WorkbenchGroupHeader";
 import { WorkbenchTab } from "./WorkbenchTab";
 
+export type WorkbenchSurfaceRenderLifecycle = {
+  visible: boolean;
+};
+
 export type WorkbenchSurfaceRenderer = (
   surface: DeepReadonly<WorkbenchSurfaceV1>,
+  lifecycle?: WorkbenchSurfaceRenderLifecycle,
 ) => ReactNode;
 
 export type WorkbenchPanelRendererPolicy = (
@@ -84,7 +89,7 @@ type AdapterRuntime = Pick<
   | "on_close_surface"
   | "on_join_group"
   | "render_home"
->;
+> & { zoomed_group_id: string | null };
 
 const AdapterRuntimeContext = createContext<AdapterRuntime | null>(null);
 const WARDIAN_DOCKVIEW_THEME = {
@@ -351,6 +356,14 @@ function defaultRendererPolicy(
 
 function DockviewSurfacePanel({ params }: IDockviewPanelProps<WorkbenchPanelParams>) {
   const { surface } = params;
+  const runtime = useAdapterRuntime();
+  const group = Object.values(runtime.document.groups)
+    .find((candidate) => candidate.surface_ids.includes(surface.surface_id));
+  const visible = Boolean(
+    group
+    && group.active_surface_id === surface.surface_id
+    && (!runtime.zoomed_group_id || runtime.zoomed_group_id === group.group_id),
+  );
   return (
     <div
       id={`workbench-panel-${surface.surface_id}`}
@@ -362,7 +375,7 @@ function DockviewSurfacePanel({ params }: IDockviewPanelProps<WorkbenchPanelPara
         : { "data-resource-key": surface.resource_key })}
       className="wardian-workbench-surface-panel"
     >
-      {params.render_surface?.(surface) ?? surface.surface_type}
+      {params.render_surface?.(surface, { visible }) ?? surface.surface_type}
     </div>
   );
 }
@@ -671,7 +684,7 @@ function SafeWorkbenchLayout({
               ? {}
               : { "data-resource-key": surface.resource_key })}
           >
-            {active ? render_surface?.(surface) ?? surface.surface_type : null}
+            {active ? render_surface?.(surface, { visible: true }) ?? surface.surface_type : null}
           </div>
         );
       }) : (
@@ -736,6 +749,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     on_close_surface: props.on_close_surface,
     on_join_group: props.on_join_group,
     render_home: props.render_home,
+    zoomed_group_id,
   }), [
     document,
     props.on_close_group,
@@ -745,6 +759,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     props.on_split_group,
     props.on_toggle_zoom,
     props.render_home,
+    zoomed_group_id,
   ]);
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {

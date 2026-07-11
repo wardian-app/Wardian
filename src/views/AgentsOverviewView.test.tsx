@@ -14,6 +14,8 @@ vi.mock('../features/terminal/AgentTerminal', async () => {
     AgentTerminal: React.memo((props: {
       presentationId: string;
       sessionId: string;
+      visibility: "visible" | "hidden";
+      renderState: "mounted" | "suspended";
       onTerminalFocus?: () => void;
     }) => {
       terminalRenderSpy(props);
@@ -175,6 +177,15 @@ describe('AgentsOverviewView maximize behavior', () => {
       presentationId: 'overview-surface:agent:agent-2',
       sessionId: 'agent-2',
     }));
+  });
+
+  it('suspends every terminal presentation while the containing surface is hidden', () => {
+    render(<AgentsOverviewView {...gridProps(null, agents)} surfaceVisibility="hidden" />);
+
+    expect(terminalRenderSpy).toHaveBeenCalledTimes(2);
+    for (const [props] of terminalRenderSpy.mock.calls) {
+      expect(props).toMatchObject({ visibility: "hidden", renderState: "suspended" });
+    }
   });
 
   it('reports the owning agent when its terminal receives focus', () => {

@@ -21,7 +21,7 @@ import { useSchedulesStore } from '../store/useSchedulesStore';
 import { useWorkflowsView } from '../store/useWorkflowsView';
 import type { WorkflowSchedule } from '../types/workflow';
 
-interface WorkflowsViewProps {
+export interface WorkflowsViewProps {
   theme: 'dark' | 'light' | 'system';
 }
 
@@ -47,6 +47,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
   const blueprint = useBuilderStore((state) => state.blueprint);
   const loadBlueprint = useBuilderStore((state) => state.load);
   const resetBuilder = useBuilderStore((state) => state.reset);
+  const initializeBlueprint = useBuilderStore((state) => state.initialize);
   const setBlueprint = useBuilderStore((state) => state.setBlueprint);
   const dirty = useBuilderStore((state) => state.dirty);
   const saveBlueprint = useBuilderStore((state) => state.save);
@@ -95,9 +96,9 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
   useEffect(() => {
     if (!blueprint) {
-      setBlueprint(INITIAL_BLUEPRINT);
+      initializeBlueprint(INITIAL_BLUEPRINT);
     }
-  }, [blueprint, setBlueprint]);
+  }, [blueprint, initializeBlueprint]);
 
   useEffect(() => {
     if (mode === 'monitor') {

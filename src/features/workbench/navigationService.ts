@@ -101,7 +101,7 @@ export function createWorkbenchNavigationService(
 
   return {
     open: (request) => {
-      registry.require(request.surface_type);
+      const definition = registry.require(request.surface_type);
       const state = store.getState();
       const document = state.document;
       const candidates = state.surface_mru
@@ -113,7 +113,9 @@ export function createWorkbenchNavigationService(
         }
       }
       const existingId = registry.resolve_existing(
-        request,
+        definition.open_policy === "singleton"
+          ? { ...request, duplicate: false }
+          : request,
         candidates,
       );
       if (existingId) {
@@ -132,8 +134,18 @@ export function createWorkbenchNavigationService(
     },
 
     open_to_side: (request, direction = "horizontal") => {
-      registry.require(request.surface_type);
+      const definition = registry.require(request.surface_type);
       const document = store.getState().document;
+      if (definition.open_policy === "singleton") {
+        const existingId = registry.resolve_existing(
+          { ...request, duplicate: false },
+          Object.values(document.surfaces),
+        );
+        if (existingId) {
+          apply([{ type: "focus_surface", surface_id: existingId }]);
+          return existingId;
+        }
+      }
       const sourceGroupId = request.group_id ?? document.active_group_id;
       if (!(sourceGroupId in document.groups)) {
         throw new Error(`group ${sourceGroupId} does not exist`);

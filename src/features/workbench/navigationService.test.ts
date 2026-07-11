@@ -72,7 +72,7 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["surface-fixed"].state).toEqual({ label: "hello" });
   });
 
-  it("focuses normal singleton/resource opens while explicit duplicates create presentations", () => {
+  it("keeps singletons unique while explicit resource duplicates create presentations", () => {
     const registry = createSurfaceRegistry();
     registry.register(definition("singleton", { open_policy: "singleton" }));
     registry.register(definition("agent-session", {
@@ -95,14 +95,14 @@ describe("workbench navigation service", () => {
     const navigation = createWorkbenchNavigationService({
       registry,
       store,
-      create_id: deterministicIds(["singleton-duplicate", "agent-duplicate"]),
+      create_id: deterministicIds(["agent-duplicate"]),
     });
 
     expect(navigation.open({ surface_type: "singleton" })).toBe("singleton-1");
     expect(navigation.open({ surface_type: "agent-session", resource_key: "agent-1" }))
       .toBe("agent-recent");
     expect(navigation.open({ surface_type: "singleton", duplicate: true }))
-      .toBe("singleton-duplicate");
+      .toBe("singleton-1");
     expect(navigation.open({
       surface_type: "agent-session",
       resource_key: "agent-1",
@@ -139,7 +139,7 @@ describe("workbench navigation service", () => {
     expect(document.revision).toBe(1);
   });
 
-  it("always duplicates singleton surfaces for Open to Side", () => {
+  it("keeps singleton policy authoritative for Open to Side", () => {
     const registry = createSurfaceRegistry([
       definition("singleton", { open_policy: "singleton" }),
     ]);
@@ -151,15 +151,13 @@ describe("workbench navigation service", () => {
     const navigation = createWorkbenchNavigationService({
       registry,
       store,
-      create_id: deterministicIds(["group-side", "split-side", "singleton-side"]),
+      create_id: deterministicIds([]),
     });
 
     expect(navigation.open_to_side({ surface_type: "singleton" }))
-      .toBe("singleton-side");
-    expect(Object.keys(store.getState().document.surfaces)).toEqual([
-      "singleton-1",
-      "singleton-side",
-    ]);
+      .toBe("singleton-1");
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["singleton-1"]);
+    expect(store.getState().document.root).toEqual({ kind: "group", group_id: "group-1" });
   });
 
   it("rebinds a resource atomically without changing surface identity, order, or history", async () => {

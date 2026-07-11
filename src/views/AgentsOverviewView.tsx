@@ -44,6 +44,7 @@ function pruneRecordToIds<T>(record: Record<string, T>, allowedIds: Set<string>)
 
 export interface AgentsOverviewViewProps {
   surfaceId: string;
+  surfaceVisibility?: "visible" | "hidden";
   mode: AgentsOverviewMode;
   recentAgentIds?: readonly string[];
   filteredAgents: AgentConfig[];
@@ -134,6 +135,7 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
 
 export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   surfaceId,
+  surfaceVisibility = "visible",
   mode,
   recentAgentIds,
   filteredAgents,
@@ -305,7 +307,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       >
       {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
-        const isAgentVisible = visibleAgentIds.has(agentId);
+        const isAgentVisible = surfaceVisibility === "visible" && visibleAgentIds.has(agentId);
         const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);

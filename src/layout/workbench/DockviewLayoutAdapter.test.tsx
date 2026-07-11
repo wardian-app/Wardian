@@ -268,6 +268,53 @@ describe("DockviewLayoutAdapter", () => {
     await waitFor(() => expect(screen.getByTestId("renderer-surface-1")).toBe(renderer));
   });
 
+  it("reports canonical active-tab and zoom visibility to retained renderers", async () => {
+    const first = makeSurface("surface-1", { surface_type: "graph" });
+    const second = makeSurface("surface-2", { surface_type: "garden" });
+    const initial = makeSingleGroupDocument([first, second]);
+    const renderSurface = vi.fn((surface: { surface_id: string }, lifecycle?: { visible: boolean }) => (
+      <div data-testid={`visibility-${surface.surface_id}`}>
+        {lifecycle?.visible ? "visible" : "hidden"}
+      </div>
+    ));
+    const view = render(
+      <DockviewLayoutAdapter
+        document={initial}
+        render_surface={renderSurface}
+        renderer_policy={() => "always"}
+      />,
+    );
+
+    expect(await screen.findByTestId("visibility-surface-1")).toHaveTextContent("hidden");
+    expect(screen.getByTestId("visibility-surface-2")).toHaveTextContent("visible");
+
+    const activated = apply(initial, {
+      type: "set_active_surface",
+      group_id: "group-1",
+      surface_id: "surface-1",
+    });
+    view.rerender(
+      <DockviewLayoutAdapter
+        document={activated}
+        render_surface={renderSurface}
+        renderer_policy={() => "always"}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("visibility-surface-1")).toHaveTextContent("visible"));
+    expect(screen.getByTestId("visibility-surface-2")).toHaveTextContent("hidden");
+
+    view.rerender(
+      <DockviewLayoutAdapter
+        document={activated}
+        zoomed_group_id="other-group"
+        render_surface={renderSurface}
+        renderer_policy={() => "always"}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("visibility-surface-1")).toHaveTextContent("hidden"));
+  });
+
   it("repairs structural topology without remounting keyed panel renderers", async () => {
     const initial = makeMixedDepthThreeDocument();
     const renderSurface = (surface: { surface_id: string }) => (

@@ -45,6 +45,37 @@ describe("WorkbenchHost", () => {
     );
   });
 
+  it("retains suspended surfaces but recreates state-backed surfaces when hidden", async () => {
+    const graph = makeSurface("surface-graph", { surface_type: "graph" });
+    const dashboard = makeSurface("surface-dashboard", { surface_type: "dashboard" });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([graph, dashboard]),
+    });
+
+    render(
+      <WorkbenchHost
+        store={store}
+        render_surface={(surface, lifecycle) => (
+          <div data-testid={`surface-${surface.surface_id}`}>
+            {lifecycle?.visible ? "visible" : "hidden"}
+          </div>
+        )}
+      />,
+    );
+
+    expect(await screen.findByTestId("surface-surface-graph")).toHaveTextContent("hidden");
+    expect(screen.getByTestId("surface-surface-dashboard")).toHaveTextContent("visible");
+
+    store.getState().apply_commands([{
+      type: "set_active_surface",
+      group_id: "group-1",
+      surface_id: "surface-graph",
+    }]);
+
+    await waitFor(() => expect(screen.getByTestId("surface-surface-graph")).toHaveTextContent("visible"));
+    await waitFor(() => expect(screen.queryByTestId("surface-surface-dashboard")).not.toBeInTheDocument());
+  });
+
   it("translates edge drops into one canonical split-and-move transaction", () => {
     const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
     const initial = makeSingleGroupDocument([surface]);

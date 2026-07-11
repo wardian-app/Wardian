@@ -546,8 +546,10 @@ describe("Workbench persistence boot integration", () => {
 
     fireEvent.doubleClick(betaRow);
     const sessionSurface = await screen.findByTestId("agent-session-surface");
+    const openedSessionTab = await screen.findByRole("tab", { name: "Beta" });
+    await waitFor(() => expect(openedSessionTab).toHaveAttribute("aria-selected", "true"));
     expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute(
+    expect(openedSessionTab).toHaveAttribute(
       "data-resource-key",
       "agent-2",
     );
@@ -578,6 +580,49 @@ describe("Workbench persistence boot integration", () => {
       expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(2);
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+  });
+
+  it("routes Queue agent actions to an Agent Session surface", async () => {
+    workbenchFlagState.enabled = true;
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    currentQueueItems = [{
+      id: "queue-agent-2",
+      type: "action_needed",
+      timestamp: Date.now(),
+      read: false,
+      agent_session_id: "agent-2",
+      agent_name: "Beta",
+      summary: "Review the pending change?\n1. Yes\n2. No",
+    }];
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "get_workbench_boot_config") return Promise.resolve({ safe_mode: false });
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("queue-surface", { surface_type: "queue" }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "opaque-zero",
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+    const queueSurface = await screen.findByTestId("queue-surface");
+    fireEvent.click(within(queueSurface).getByRole("button", { name: /open agent terminal/i }));
+
+    const sessionSurface = await screen.findByTestId("agent-session-surface");
+    const sessionTab = await screen.findByRole("tab", { name: "Beta" });
+    await waitFor(() => expect(sessionTab).toHaveAttribute("aria-selected", "true"));
+    expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
+    expect(sessionTab).toHaveAttribute(
+      "data-resource-key",
+      "agent-2",
+    );
   });
 });
 

@@ -77,7 +77,7 @@ function blueprintRefsKey(refs: BlueprintRef[]) {
 }
 
 /** Loads the blueprint catalog (list + parse, mirroring WorkflowsView) and merges run status. */
-export function useGardenWorkflows(): GardenWorkflowInput[] {
+export function useGardenWorkflows(enabled = true): GardenWorkflowInput[] {
   const [workflows, setWorkflows] = useState<GardenWorkflowInput[]>([]);
 
   const load = useCallback(async () => {
@@ -85,8 +85,9 @@ export function useGardenWorkflows(): GardenWorkflowInput[] {
   }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     void load();
-  }, [load]);
+  }, [enabled, load]);
 
   return workflows;
 }

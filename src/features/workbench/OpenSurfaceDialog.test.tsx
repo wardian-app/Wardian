@@ -88,7 +88,7 @@ describe("OpenSurfaceDialog", () => {
       .toContainElement(screen.getByRole("button", { name: "Open Agents Overview to Side" }));
   });
 
-  it("delegates singleton focus and explicit Open to Side to NavigationService", () => {
+  it("keeps singleton focus authoritative for repeated Open to Side", () => {
     const fixture = createNavigationFixture();
     const onClose = vi.fn();
     const view = render(
@@ -127,8 +127,8 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Open Agents Overview to Side" }));
-    expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(2);
-    expect(Object.keys(fixture.store.getState().document.groups)).toHaveLength(2);
+    expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(1);
+    expect(Object.keys(fixture.store.getState().document.groups)).toHaveLength(1);
   });
 
   it("enables Agent Session with a resource and exposes recent reopen", () => {

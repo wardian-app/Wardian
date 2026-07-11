@@ -6,7 +6,8 @@ import { DetailPane } from '../features/library/DetailPane';
 import { SidebarResizeHandle } from '../components/SidebarResizeHandle';
 import { LibrarySectionId } from '../types';
 
-interface LibraryViewProps {
+export interface LibraryViewProps {
+    surfaceId?: string;
     selectedAgentIds: Set<string>;
     /** Threaded through to the workflow detail panel's "Open in Workflows
      * view" link. Optional and no-op when absent — App.tsx wiring lands in
@@ -19,7 +20,11 @@ interface LibraryViewProps {
  * the active section) | DetailPane (selected entry, with the inline editor
  * and per-kind panels).
  */
-export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOpenWorkflowsView }) => {
+export const LibraryView: React.FC<LibraryViewProps> = ({
+    surfaceId = 'legacy-library',
+    selectedAgentIds,
+    onOpenWorkflowsView,
+}) => {
     const index = useLibraryStore((s) => s.index);
     const isLoading = useLibraryStore((s) => s.isLoading);
     const error = useLibraryStore((s) => s.error);
@@ -127,7 +132,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
                         onResize={setLibraryDetailWidth}
                         onReset={() => setLibraryDetailWidth(480)}
                     />
-                    <DetailPane selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={onOpenWorkflowsView} />
+                    <DetailPane
+                        surfaceId={surfaceId}
+                        selectedAgentIds={selectedAgentIds}
+                        onOpenWorkflowsView={onOpenWorkflowsView}
+                    />
                 </div>
             </div>
         </div>

@@ -4,6 +4,7 @@ import type {
   AgentConfig,
   AgentsOverviewMode,
   AgentsOverviewSurfaceState,
+  TerminalVisibility,
 } from "../../../types";
 import {
   AgentsOverviewView,
@@ -23,6 +24,7 @@ export interface AgentsOverviewSurfaceProps
   surface_id: string;
   state: AgentsOverviewSurfaceState;
   agents: AgentConfig[];
+  visibility?: TerminalVisibility;
   on_state_change: (state: AgentsOverviewSurfaceState) => void;
 }
 
@@ -68,6 +70,7 @@ export function AgentsOverviewSurface({
   surface_id,
   state,
   agents,
+  visibility = "visible",
   on_state_change,
   ...viewProps
 }: AgentsOverviewSurfaceProps) {
@@ -160,6 +163,7 @@ export function AgentsOverviewSurface({
           onFocusedAgentChange={updateFocusedAgent}
           onModeChange={updateMode}
           surfaceId={surface_id}
+          surfaceVisibility={visibility}
         />
       </div>
     </section>
