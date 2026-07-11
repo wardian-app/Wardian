@@ -3,7 +3,6 @@ use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::transcript::extract_transcript_message;
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
-use crate::utils::append_bounded_pty_output;
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use crate::utils::PtyUtf8Decoder;
@@ -362,9 +361,7 @@ pub async fn spawn_agent(
             config: std::sync::Arc::new(std::sync::Mutex::new(config)),
             child_process: None,
             background_processes: Vec::new(),
-            pty_master: None,
-            stdin_tx: None,
-            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            runtime_generation: None,
             process_id: None,
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(Some(born_to_save))),
@@ -410,14 +407,13 @@ pub async fn spawn_agent(
 
     let pty_system = NativePtySystem::default();
 
-    let (initial_cols, initial_rows) = {
-        let app_state = app.state::<AppState>();
-        let sizes = app_state.pty_sizes.read().ok();
-        sizes
-            .as_ref()
-            .and_then(|sizes| sizes.get(&config.session_id).copied())
-            .unwrap_or((80, 24))
-    };
+    let initial_geometry = app_state
+        .terminal_sessions
+        .spawn_geometry(&config.session_id)
+        .await
+        .map_err(|error| format!("Failed to read terminal spawn geometry: {error}"))?
+        .unwrap_or(wardian_core::models::TerminalGeometry { cols: 80, rows: 24 });
+    let (initial_cols, initial_rows) = (initial_geometry.cols, initial_geometry.rows);
 
     let pair = pty_system
         .openpty(PtySize {
@@ -427,20 +423,6 @@ pub async fn spawn_agent(
             pixel_height: 0,
         })
         .map_err(|e| format!("Failed to open pty: {}", e))?;
-
-    // Record the size the PTY was actually opened at so `resize_pty` can drop
-    // redundant no-op resizes. ConPTY's `ResizePseudoConsole` is unconditional:
-    // a resize to the identical dimensions still makes inline-viewport TUIs
-    // (notably codex) do a full clear-and-redraw, and codex's redraw emits
-    // `ESC[3J` (purge scrollback) — so a spurious identical resize silently
-    // wipes the terminal's scrollback. Seeding the baseline here lets us skip
-    // those.
-    {
-        let app_state = app.state::<AppState>();
-        if let Ok(mut sizes) = app_state.pty_sizes.write() {
-            sizes.insert(config.session_id.clone(), (initial_cols, initial_rows));
-        };
-    }
 
     let (bin, mut provider_args) = provider.get_executable();
     let claude_hook = if config.provider == "claude" {
@@ -588,10 +570,23 @@ pub async fn spawn_agent(
         .master
         .take_writer()
         .map_err(|e| format!("Failed to get pty writer: {}", e))?;
-    let pty_master = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
+    let pty_master: crate::state::terminal_session::SharedPtyMaster =
+        std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let runtime_generation = app_state
+        .terminal_sessions
+        .start_or_replace_runtime(
+            &config.session_id,
+            crate::state::terminal_session::native_terminal_runtime(tx.clone(), pty_master),
+            initial_geometry,
+        )
+        .await
+        .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
+    if let Ok(mut senders) = app_state.input_senders.write() {
+        senders.insert(config.session_id.clone(), tx.clone());
+    }
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 
@@ -617,8 +612,6 @@ pub async fn spawn_agent(
 
     let sid_out = config.session_id.clone();
     let provider_name_for_pty = config.provider.clone();
-    let output_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let output_buffer_clone = output_buffer.clone();
     let query_count = std::sync::Arc::new(std::sync::Mutex::new(0));
     let query_count_clone = query_count.clone();
     let init_timestamp = std::sync::Arc::new(std::sync::Mutex::new(Some(born_to_save)));
@@ -645,6 +638,8 @@ pub async fn spawn_agent(
     let terminal_theme_for_pty = app_state.terminal_theme();
     let tx_for_terminal_probe = tx.clone();
     let config_lock_clone = config_lock.clone();
+    let terminal_sessions = app_state.terminal_sessions.clone();
+    let reader_runtime_generation = runtime_generation;
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -675,9 +670,12 @@ pub async fn spawn_agent(
                             "  - Authentication/config error in OpenCode\r\n",
                             "Check ~/.wardian/wardian_debug.log for the exact command and config used.\r\n",
                         );
-                        if let Ok(mut h) = output_buffer_clone.lock() {
-                            append_bounded_pty_output(&mut h, msg);
-                        }
+                        let _ = crate::state::terminal_session::forward_terminal_output(
+                            &terminal_sessions,
+                            &sid_for_pty,
+                            reader_runtime_generation,
+                            msg.as_bytes(),
+                        );
                         let _ = pty_emit_app.emit(
                             "agent-pty-output-ready",
                             serde_json::json!({ "session_id": sid_for_pty }),
@@ -686,6 +684,19 @@ pub async fn spawn_agent(
                     break;
                 }
                 Ok(n) => {
+                    if let Err(error) = crate::state::terminal_session::forward_terminal_output(
+                        &terminal_sessions,
+                        &sid_for_pty,
+                        reader_runtime_generation,
+                        &buf[..n],
+                    ) {
+                        log_terminal_trace_note(
+                            &sid_for_pty,
+                            &provider_name_for_pty,
+                            &format!("broker rejected PTY reader output: {error}"),
+                        );
+                        break;
+                    }
                     if provider_name_for_pty == "opencode" && opencode_chunks_logged < 40 {
                         log_debug(&format!(
                             "[Wardian] OpenCode PTY chunk {} for session {}: {}",
@@ -869,15 +880,10 @@ pub async fn spawn_agent(
                             }
                         }
                     }
-                    let output_ready_action = if let Ok(mut h) = output_buffer_clone.lock() {
-                        append_bounded_pty_output(&mut h, &text);
-                        output_ready_emit_gate
-                            .lock()
-                            .map(|mut gate| gate.after_buffer_append(std::time::Instant::now()))
-                            .unwrap_or(OutputReadyEmitAction::Suppress)
-                    } else {
-                        OutputReadyEmitAction::Suppress
-                    };
+                    let output_ready_action = output_ready_emit_gate
+                        .lock()
+                        .map(|mut gate| gate.after_buffer_append(std::time::Instant::now()))
+                        .unwrap_or(OutputReadyEmitAction::Suppress);
                     match output_ready_action {
                         OutputReadyEmitAction::EmitNow => {
                             let _ = pty_emit_app.emit(
@@ -888,22 +894,15 @@ pub async fn spawn_agent(
                         OutputReadyEmitAction::ScheduleAfter(delay) => {
                             let delayed_app = pty_emit_app.clone();
                             let delayed_session_id = sid_for_pty.clone();
-                            let delayed_buffer = output_buffer_clone.clone();
                             let delayed_gate = output_ready_emit_gate.clone();
                             tauri::async_runtime::spawn(async move {
                                 tokio::time::sleep(delay).await;
-                                let should_emit = match delayed_buffer.lock() {
-                                    Ok(buffer) => delayed_gate
-                                        .lock()
-                                        .map(|mut gate| {
-                                            gate.finish_delayed_emit(
-                                                !buffer.is_empty(),
-                                                std::time::Instant::now(),
-                                            )
-                                        })
-                                        .unwrap_or(false),
-                                    Err(_) => false,
-                                };
+                                let should_emit = delayed_gate
+                                    .lock()
+                                    .map(|mut gate| {
+                                        gate.finish_delayed_emit(true, std::time::Instant::now())
+                                    })
+                                    .unwrap_or(false);
                                 if should_emit {
                                     let _ = delayed_app.emit(
                                         "agent-pty-output-ready",
@@ -1571,9 +1570,7 @@ pub async fn spawn_agent(
         config: config_lock,
         child_process: Some(child),
         background_processes,
-        pty_master: Some(pty_master),
-        stdin_tx: Some(tx),
-        output_buffer,
+        runtime_generation: Some(runtime_generation),
         process_id,
         query_count,
         init_timestamp,
@@ -1598,159 +1595,47 @@ pub async fn resize_pty(
     if cols < 10 {
         return Ok(());
     }
-
-    let session_resize_lock = state.pty_resize_lock_for(&session_id).await;
-    let _session_resize_guard = session_resize_lock.lock().await;
-
-    // Drop redundant no-op resizes. ConPTY's `ResizePseudoConsole` is
-    // unconditional, and an identical-dimension resize still forces inline
-    // TUIs like codex into a full clear-and-redraw whose `ESC[3J` purges the
-    // terminal's scrollback. The frontend's fit loop can re-report a size that
-    // already matches (e.g. `reportTerminalSize(..., force: true)` for an
-    // unchanged fit), so guard here at the authoritative PTY boundary. Only
-    // skip when we have a recorded size that matches exactly; an absent record
-    // means the PTY size is unknown, so let the resize through.
-    if state
-        .pty_sizes
-        .read()
-        .ok()
-        .and_then(|sizes| sizes.get(&session_id).copied())
-        == Some((cols, rows))
+    let geometry = wardian_core::models::TerminalGeometry { cols, rows };
+    match state
+        .terminal_sessions
+        .resize_legacy(&session_id, geometry)
+        .await
     {
-        return Ok(());
-    }
-
-    let native_resize_lock = state.pty_native_resize_lock.clone();
-    let master_arc = {
-        let agents = state.agents.lock().await;
-        if let Some(agent) = agents.get(&session_id) {
-            #[cfg(feature = "terminal-trace")]
-            {
-                let provider = agent
-                    .config
-                    .lock()
-                    .map(|config| config.provider.clone())
-                    .unwrap_or_else(|poisoned| poisoned.into_inner().provider.clone());
-                log_terminal_trace_note(
-                    &session_id,
-                    &provider,
-                    &format!("resize cols={} rows={}", cols, rows),
-                );
-            }
-            match agent.pty_master.clone() {
-                Some(master) => master,
-                None => {
-                    drop(agents);
-                    // No live PTY yet: the agent is a startup "Restoring"
-                    // placeholder or is off. Record the requested size so
-                    // spawn_agent opens the PTY at it; dropping the report here
-                    // left restored TUIs laid out for the 80x24 default inside
-                    // a larger terminal grid, because nothing re-reports after
-                    // the placeholder is replaced.
-                    if let Ok(mut sizes) = state.pty_sizes.write() {
-                        sizes.insert(session_id, (cols, rows));
-                    }
-                    return Ok(());
-                }
-            }
-        } else {
-            return Err(format!("Agent {} not found", session_id));
+        Ok(result)
+            if result.decision.status
+                == wardian_core::models::TerminalLeaseDecisionStatus::Accepted =>
+        {
+            Ok(())
         }
-    };
-    tokio::task::spawn_blocking(move || {
-        let _native_resize_guard = native_resize_lock.blocking_lock();
-        let master = match master_arc.lock() {
-            Ok(master) => master,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-    })
-    .await
-    .map_err(|e| format!("Failed to join PTY resize task: {}", e))?
-    .map_err(|e| format!("Failed to resize PTY: {}", e))?;
-
-    if let Ok(mut sizes) = state.pty_sizes.write() {
-        sizes.insert(session_id, (cols, rows));
+        Ok(result) => Err(format!(
+            "Terminal resize lease rejected: {}",
+            result
+                .decision
+                .reason
+                .map(|reason| format!("{reason:?}"))
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+        Err(crate::state::terminal_session::TerminalBrokerError::SessionNotFound) => {
+            let agents = state.agents.lock().await;
+            if !agents.contains_key(&session_id) {
+                return Err(format!("Agent {} not found", session_id));
+            }
+            drop(agents);
+            state
+                .terminal_sessions
+                .remember_deferred_geometry(&session_id, "legacy-resize-adapter", geometry)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Error;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use wardian_core::models::{CodexProviderConfig, ProviderConfig};
-
-    struct ResizeProbeMaster {
-        calls: std::sync::Arc<AtomicUsize>,
-        first_resize_entered: Option<std::sync::mpsc::Sender<()>>,
-        sleep: std::time::Duration,
-        in_flight: Option<std::sync::Arc<AtomicUsize>>,
-        overlap_detected: Option<std::sync::Arc<AtomicBool>>,
-    }
-
-    impl portable_pty::MasterPty for ResizeProbeMaster {
-        fn resize(&self, _size: portable_pty::PtySize) -> Result<(), Error> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                if let Some(sender) = &self.first_resize_entered {
-                    let _ = sender.send(());
-                }
-            }
-
-            if let Some(in_flight) = &self.in_flight {
-                if in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
-                    if let Some(overlap_detected) = &self.overlap_detected {
-                        overlap_detected.store(true, Ordering::SeqCst);
-                    }
-                }
-                std::thread::sleep(self.sleep);
-                in_flight.fetch_sub(1, Ordering::SeqCst);
-            } else {
-                std::thread::sleep(self.sleep);
-            }
-
-            Ok(())
-        }
-
-        fn get_size(&self) -> Result<portable_pty::PtySize, Error> {
-            Ok(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-        }
-
-        fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error> {
-            Ok(Box::new(std::io::empty()))
-        }
-
-        fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error> {
-            Ok(Box::new(std::io::sink()))
-        }
-
-        #[cfg(unix)]
-        fn process_group_leader(&self) -> Option<i32> {
-            None
-        }
-
-        #[cfg(unix)]
-        fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
-            None
-        }
-
-        #[cfg(unix)]
-        fn tty_name(&self) -> Option<std::path::PathBuf> {
-            None
-        }
-    }
 
     #[test]
     fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
@@ -1786,9 +1671,7 @@ mod tests {
             config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
             child_process: None,
             background_processes: Vec::new(),
-            pty_master: None,
-            stdin_tx: None,
-            output_buffer: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            runtime_generation: None,
             process_id: None,
             query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
             init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1806,34 +1689,8 @@ mod tests {
         }
     }
 
-    fn agent_with_resize_probe(
-        session_id: &str,
-        calls: std::sync::Arc<AtomicUsize>,
-        first_resize_entered: Option<std::sync::mpsc::Sender<()>>,
-        in_flight: Option<std::sync::Arc<AtomicUsize>>,
-        overlap_detected: Option<std::sync::Arc<AtomicBool>>,
-    ) -> crate::state::ActiveAgent {
-        let mut agent = agent_without_pty();
-        agent.config = std::sync::Arc::new(std::sync::Mutex::new(AgentConfig {
-            session_id: session_id.to_string(),
-            ..Default::default()
-        }));
-        agent.pty_master = Some(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
-            ResizeProbeMaster {
-                calls,
-                first_resize_entered,
-                sleep: std::time::Duration::from_millis(75),
-                in_flight,
-                overlap_detected,
-            },
-        ))));
-        agent
-    }
-
     // A resize that arrives while the agent is still a "Restoring" placeholder
-    // (or off) has no PTY to apply to, but spawn_agent seeds new PTYs from
-    // pty_sizes. Dropping the report left restored TUIs laid out for the 80x24
-    // default inside a larger terminal grid.
+    // is retained by the broker and seeds the native runtime when spawn begins.
     #[tokio::test]
     async fn resize_without_pty_records_size_for_spawn() {
         let state = AppState::new();
@@ -1847,8 +1704,15 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(
-            state.pty_sizes.read().unwrap().get("restoring-agent"),
-            Some(&(124, 30))
+            state
+                .terminal_sessions
+                .spawn_geometry("restoring-agent")
+                .await
+                .expect("spawn geometry"),
+            Some(wardian_core::models::TerminalGeometry {
+                cols: 124,
+                rows: 30
+            })
         );
     }
 
@@ -1857,113 +1721,14 @@ mod tests {
         let state = AppState::new();
         let result = resize_pty("missing".to_string(), 124, 30, &state).await;
         assert!(result.is_err());
-        assert!(state.pty_sizes.read().unwrap().is_empty());
-    }
-
-    // A resize to the exact size already recorded is a no-op: it must not reach
-    // the PTY (ConPTY's unconditional `ResizePseudoConsole` would make codex
-    // purge its scrollback). The dedup short-circuits before the agent lookup,
-    // so even a missing agent returns Ok when the size already matches.
-    #[tokio::test]
-    async fn resize_to_recorded_size_is_skipped() {
-        let state = AppState::new();
-        state
-            .pty_sizes
-            .write()
-            .unwrap()
-            .insert("agent".to_string(), (124, 30));
-
-        // No agent registered: without the dedup this would error "not found".
-        let result = resize_pty("agent".to_string(), 124, 30, &state).await;
-        assert!(result.is_ok());
-
-        // A genuinely different size is not skipped and still reaches the
-        // (missing) agent lookup, surfacing the not-found error.
-        let changed = resize_pty("agent".to_string(), 125, 30, &state).await;
-        assert!(changed.is_err());
-    }
-
-    #[tokio::test]
-    async fn concurrent_duplicate_resize_rechecks_recorded_size_after_in_flight_resize() {
-        let state = std::sync::Arc::new(AppState::new());
-        let calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        state.agents.lock().await.insert(
-            "agent".to_string(),
-            agent_with_resize_probe("agent", calls.clone(), Some(entered_tx), None, None),
+        assert_eq!(
+            state
+                .terminal_sessions
+                .spawn_geometry("missing")
+                .await
+                .expect("missing geometry"),
+            None
         );
-
-        let first_state = state.clone();
-        let first = tokio::spawn(async move {
-            resize_pty("agent".to_string(), 120, 40, &first_state)
-                .await
-                .expect("first resize");
-        });
-        tokio::task::spawn_blocking(move || {
-            entered_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("first resize should enter master");
-        })
-        .await
-        .expect("first resize signal wait");
-
-        resize_pty("agent".to_string(), 120, 40, &state)
-            .await
-            .expect("duplicate resize should be skipped after first completes");
-        first.await.expect("first resize task");
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn concurrent_resizes_across_sessions_do_not_overlap_native_resize_calls() {
-        let state = std::sync::Arc::new(AppState::new());
-        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
-        let overlap_detected = std::sync::Arc::new(AtomicBool::new(false));
-        let calls_a = std::sync::Arc::new(AtomicUsize::new(0));
-        let calls_b = std::sync::Arc::new(AtomicUsize::new(0));
-        {
-            let mut agents = state.agents.lock().await;
-            agents.insert(
-                "agent-a".to_string(),
-                agent_with_resize_probe(
-                    "agent-a",
-                    calls_a.clone(),
-                    None,
-                    Some(in_flight.clone()),
-                    Some(overlap_detected.clone()),
-                ),
-            );
-            agents.insert(
-                "agent-b".to_string(),
-                agent_with_resize_probe(
-                    "agent-b",
-                    calls_b.clone(),
-                    None,
-                    Some(in_flight.clone()),
-                    Some(overlap_detected.clone()),
-                ),
-            );
-        }
-
-        let first_state = state.clone();
-        let second_state = state.clone();
-        let first = tokio::spawn(async move {
-            resize_pty("agent-a".to_string(), 120, 40, &first_state)
-                .await
-                .expect("agent-a resize");
-        });
-        let second = tokio::spawn(async move {
-            resize_pty("agent-b".to_string(), 121, 41, &second_state)
-                .await
-                .expect("agent-b resize");
-        });
-        first.await.expect("agent-a task");
-        second.await.expect("agent-b task");
-
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
-        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
-        assert!(!overlap_detected.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -9,6 +9,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { AgentTerminal, __terminalTesting, shouldExposeTerminalDebug } from "./AgentTerminal";
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
+import { resetTerminalSessionClientsForTesting } from "./terminalSessionClient";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -34,6 +35,61 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function modernBrokerState(ownerPresentationId: string | null = null) {
+  return {
+    session_id: "modern-agent",
+    runtime_generation: 1,
+    lease_epoch: ownerPresentationId ? 1 : 0,
+    stream_sequence: 0,
+    interaction_sequence: 0,
+    geometry: { cols: 80, rows: 24 },
+    owner_presentation_id: ownerPresentationId,
+    pending_activation: null,
+    runtime_state: "live" as const,
+  };
+}
+
+function modernSnapshot() {
+  return {
+    snapshot_id: "modern-snapshot",
+    session_id: "modern-agent",
+    runtime_generation: 1,
+    sequence_barrier: 0,
+    geometry: { cols: 80, rows: 24 },
+    terminal_state_base64: "",
+    visible_grid: "",
+    scrollback: [],
+  };
+}
+
+function modernRegistrationResult(presentationId: string, ownerPresentationId: string | null = null) {
+  return {
+    presentation: {
+      presentation_id: presentationId,
+      client_kind: "desktop" as const,
+      desired_geometry: { cols: 80, rows: 24 },
+      visibility: "visible" as const,
+      render_state: "mounted" as const,
+      interaction_capability: "interactive" as const,
+      interaction_sequence: 1,
+      requires_resync: false,
+    },
+    broker_state: modernBrokerState(ownerPresentationId),
+    initial_snapshot: modernSnapshot(),
+  };
+}
+
+function modernCaughtUpBatch() {
+  return {
+    status: "caught_up" as const,
+    runtime_generation: 1,
+    events: [],
+    next_sequence: 0,
+    latest_sequence: 0,
+    recovery_snapshot: null,
+  };
 }
 
 describe("AgentTerminal scrollback", () => {
@@ -208,15 +264,184 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     rectSpy.mockRestore();
     cleanup();
+    await resetTerminalSessionClientsForTesting();
   });
 
   it("only exposes terminal debug hooks in dev or with an explicit debug flag", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(false);
     expect(shouldExposeTerminalDebug({ DEV: true, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(true);
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
+  });
+
+  it("renders two independent broker presentations with one desktop feed consumer", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(request?.presentation_id ?? "missing");
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(request?.presentation_id ?? "missing").presentation;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      if (command === "terminal_link_target_exists") {
+        return true;
+      }
+      return null;
+    });
+
+    render(
+      <div>
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-a"
+          provider="codex"
+          theme="dark"
+        />
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-b"
+          provider="codex"
+          theme="dark"
+        />
+      </div>,
+    );
+
+    await waitFor(() => {
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === "register_terminal_presentation"),
+      ).toHaveLength(2);
+    });
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "subscribe_terminal_events"),
+    ).toHaveLength(1);
+    expect(mockTerminal).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByTestId("agent-terminal-host")).toHaveLength(2);
+  });
+
+  it("mounts passively, then activates through the two-phase handshake on focus", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(request?.presentation_id ?? "pane-focus");
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("pane-focus").presentation;
+      }
+      if (command === "begin_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: null,
+          },
+          activation_id: "activation-1",
+          snapshot: modernSnapshot(),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-focus",
+          },
+          broker_state: modernBrokerState("pane-focus"),
+          snapshot: modernSnapshot(),
+        };
+      }
+      if (command === "read_terminal_events") {
+        return modernCaughtUpBatch();
+      }
+      if (command === "ack_terminal_events") {
+        return undefined;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-focus"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+    expect(mockInvoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+
+    fireEvent.focus(screen.getByTestId("agent-terminal-host"));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+      expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_activation", expect.anything());
+    });
+  });
+
+  it("reports mirror viewport geometry without resizing the native PTY", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(request?.presentation_id ?? "pane-mirror", "pane-owner");
+      }
+      if (command === "subscribe_terminal_events") {
+        return {
+          broker_state: modernBrokerState("pane-owner"),
+          initial_snapshot: modernSnapshot(),
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("pane-mirror", "pane-owner").presentation;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState("pane-owner");
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-mirror"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "report_terminal_presentation_viewport",
+      expect.anything(),
+    ));
+    expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
   });
 
   it("installs conservative terminal shortcuts on the renderer", async () => {

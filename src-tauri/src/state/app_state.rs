@@ -34,12 +34,6 @@ pub struct AppState {
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    // Per-session PTY resize gates. They keep same-agent resize dedup checks
-    // and native resizes ordered without blocking unrelated agent state work.
-    pub pty_resize_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    // Process-wide native PTY resize gate. This prevents parallel ConPTY
-    // ResizePseudoConsole calls across different terminal sessions.
-    pub pty_native_resize_lock: Arc<Mutex<()>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     pub mailbox: Mutex<MailboxState>,
     // Separate, lightweight map for stdin senders — completely independent from the
@@ -67,10 +61,6 @@ pub struct AppState {
     pub conversation_archive: ConversationArchiveState,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
-    // Last frontend-reported PTY size per session. Used to open a freshly-spawned
-    // PTY at the user's actual terminal dimensions instead of the 80x24 default,
-    // which otherwise causes deformed/duplicated TUI output across clear/resume.
-    pub pty_sizes: RwLock<HashMap<String, (u16, u16)>>,
     // Last frontend-reported effective theme. The frontend resolves "system"
     // before updating this so native PTY fallbacks can answer light/dark probes.
     pub terminal_theme: RwLock<String>,
@@ -126,17 +116,8 @@ impl AppState {
             .clone()
     }
 
-    pub async fn pty_resize_lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.pty_resize_locks.lock().await;
-        locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
     pub async fn remove_agent_delivery_state(&self, target_session_id: &str) {
         self.delivery_locks.lock().await.remove(target_session_id);
-        self.pty_resize_locks.lock().await.remove(target_session_id);
         if let Ok(mut sequences) = self.status_observation_sequences.lock() {
             sequences.remove(target_session_id);
         }
@@ -191,8 +172,6 @@ impl Default for AppState {
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
-            pty_resize_locks: Mutex::new(HashMap::new()),
-            pty_native_resize_lock: Arc::new(Mutex::new(())),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             mailbox: Mutex::new(MailboxState::default()),
             input_senders: RwLock::new(HashMap::new()),
@@ -210,7 +189,6 @@ impl Default for AppState {
             interactions: InteractionState::default(),
             conversation_archive: ConversationArchiveState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
-            pty_sizes: RwLock::new(HashMap::new()),
             terminal_theme: RwLock::new("dark".to_string()),
             terminal_attach: Arc::new(TerminalAttachState::default()),
             terminal_sessions: Arc::new(TerminalSessionBroker::default()),

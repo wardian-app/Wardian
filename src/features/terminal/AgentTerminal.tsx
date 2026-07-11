@@ -23,7 +23,26 @@ import {
 } from "./terminalLinks";
 import { effectiveTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
-import type { AgentConfig } from "../../types";
+import type {
+  AgentConfig,
+  TerminalBrokerEvent,
+  TerminalBrokerState,
+  TerminalPresentationState,
+  TerminalRenderState,
+  TerminalRequestedInteraction,
+  TerminalSnapshot,
+  TerminalVisibility,
+} from "../../types";
+import {
+  terminalSessionClientFor,
+  type TerminalPresentationCallbacks,
+  type TerminalSessionClient,
+} from "./terminalSessionClient";
+import {
+  calculateTerminalMirrorFit,
+  terminalRendererBudget,
+} from "./terminalRendererBudget";
+import { terminalCompatibilityAdapter } from "./terminalCompatibilityAdapter";
 import {
   DARK_TERM_THEME,
   LIGHT_TERM_THEME,
@@ -74,6 +93,16 @@ type TerminalRendererEntry = {
 };
 
 type TerminalSessionEntry = {
+  sessionId: string;
+  presentationId: string;
+  terminalClient: TerminalSessionClient;
+  brokerState: TerminalBrokerState | null;
+  presentationState: TerminalPresentationState | null;
+  geometrySequence: number;
+  applyingCanonicalGeometry: boolean;
+  brokerDecoder: TextDecoder;
+  legacyMode: boolean;
+  onRendererEvicted?: () => void;
   lastReportedSize: { cols: number; rows: number } | null;
   fitCount: number;
   resizeCount: number;
@@ -155,10 +184,7 @@ async function resolveTerminalProvider(sessionId: string, provider?: string) {
 }
 
 function readAgentPty(sessionId: string, options?: { max_bytes?: number; peek?: boolean }) {
-  return invoke<string | null>(
-    "read_agent_pty",
-    options ? { sessionId, options } : { sessionId },
-  );
+  return terminalCompatibilityAdapter.read(sessionId, options);
 }
 
 function setSessionProvider(entry: TerminalSessionEntry, provider?: string) {
@@ -440,11 +466,18 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
   });
 }
 
-function queueAgentInput(sessionId: string, input: string) {
+function queueAgentInput(terminalKey: string, input: string) {
   if (!input) {
     return;
   }
-  invoke("send_input_to_agent", { sessionId, input }).catch(() => {});
+  const entry = terminalSessionMap.get(terminalKey);
+  if (!entry) {
+    return;
+  }
+  const request = entry.legacyMode
+    ? terminalCompatibilityAdapter.sendText(entry.sessionId, input)
+    : entry.terminalClient.sendText(entry.presentationId, input);
+  void request.catch(() => undefined);
 }
 
 function terminalPixelSizeReply(entry: TerminalSessionEntry) {
@@ -946,6 +979,7 @@ function disposeTerminalSession(sessionId: string) {
   }
   entry.parserSerializeAddon.dispose();
   entry.parser.dispose();
+  terminalRendererBudget.releasePresentation(sessionId);
   terminalSessionMap.delete(sessionId);
 }
 
@@ -956,6 +990,8 @@ function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
   renderer.serializeAddon.dispose();
   disposeWebglAddonAndReleaseContext(renderer);
   renderer.term.dispose();
+  terminalRendererBudget.release("xterm", sessionId);
+  terminalRendererBudget.release("webgl", sessionId);
 }
 
 // @xterm/addon-webgl removes its canvas on dispose but never calls
@@ -1014,6 +1050,7 @@ function touchWebglPool(sessionId: string) {
   if (webglPool.delete(sessionId)) {
     webglPool.add(sessionId);
   }
+  terminalRendererBudget.touch("webgl", sessionId);
 }
 
 // Freeze the demoted terminal's last WebGL frame into a 2D canvas overlay so
@@ -1063,6 +1100,7 @@ function removeSnapshotOverlay(renderer: TerminalRendererEntry) {
 
 function demoteSessionToDom(sessionId: string) {
   webglPool.delete(sessionId);
+  terminalRendererBudget.release("webgl", sessionId);
   const renderer = terminalSessionMap.get(sessionId)?.renderer;
   if (renderer?.webglAddon) {
     captureSnapshotOverlay(renderer);
@@ -1092,6 +1130,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     return;
   }
   evictLruWebglIfNeeded(sessionId);
+  terminalRendererBudget.acquire("webgl", sessionId, () => demoteSessionToDom(sessionId));
   try {
     // preserveDrawingBuffer keeps the last composited frame readable so
     // demotion can snapshot it (drawImage on a non-preserved WebGL canvas
@@ -1100,6 +1139,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     webglAddon.onContextLoss(() => {
       webglAddon.dispose();
       webglPool.delete(sessionId);
+      terminalRendererBudget.release("webgl", sessionId);
       if (renderer.webglAddon === webglAddon) {
         renderer.webglAddon = null;
       }
@@ -1111,6 +1151,7 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     removeSnapshotOverlay(renderer);
     renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
   } catch (error) {
+    terminalRendererBudget.release("webgl", sessionId);
     renderer.webglAddon = null;
     console.warn("WebGL terminal renderer unavailable; using DOM renderer.", error);
   }
@@ -1162,37 +1203,8 @@ function scheduleRendererDisposal(sessionId: string) {
     current.renderer = null;
   }, RENDERER_DISPOSE_GRACE_MS);
 }
-function clearTerminalSession(sessionId: string) {
-  const entry = terminalSessionMap.get(sessionId);
-  if (!entry || entry.disposed) {
-    return;
-  }
-
-  entry.recentWritePreviews = [];
-  entry.recentNormalizedWritePreviews = [];
-  entry.rawOutputLog = [];
-  entry.rawOutputLogChars = 0;
-  entry.drainQueued = false;
-  entry.initialPtyBackfillComplete = false;
-  entry.initialPtyBackfillInFlight = false;
-  entry.generation += 1;
-  entry.latestTitle = null;
-  entry.lastReportedSize = null;
-  entry.fitCount = 0;
-  entry.resizeCount = 0;
-  entry.lastMeasuredHostSize = null;
-  resetTerminalOutputBuffers(entry);
-
-  // The backend emits agent-terminal-cleared before the new PTY is spawned,
-  // so we can't usefully resize here. Flag a force-resize that drainPty will
-  // run on the next agent-pty-output-ready, by which point the new PTY exists.
-  entry.pendingForceResize = true;
-
-  entry.titleHandlerRef.current?.("");
-}
 
 async function reportTerminalSize(
-  sessionId: string,
   entry: TerminalSessionEntry,
   cols: number,
   rows: number,
@@ -1208,7 +1220,24 @@ async function reportTerminalSize(
   }
 
   try {
-    await invoke("resize_agent_terminal", { sessionId, cols, rows });
+    if (entry.legacyMode) {
+      await terminalCompatibilityAdapter.resize(entry.sessionId, cols, rows);
+      entry.lastReportedSize = { cols, rows };
+      return;
+    }
+    await entry.terminalClient.reportViewport(entry.presentationId, cols, rows);
+    if (
+      entry.brokerState?.owner_presentation_id === entry.presentationId &&
+      !entry.applyingCanonicalGeometry
+    ) {
+      entry.geometrySequence += 1;
+      await entry.terminalClient.resize(
+        entry.presentationId,
+        entry.geometrySequence,
+        cols,
+        rows,
+      );
+    }
     entry.lastReportedSize = { cols, rows };
   } catch {
     // Leave lastReportedSize untouched so the next fit can retry. Poisoning the
@@ -1252,6 +1281,13 @@ function proposeTerminalDimensions(
   return proposed ? { cols: proposed.cols, rows: proposed.rows } : null;
 }
 
+function geometryForRenderer(renderer: TerminalRendererEntry) {
+  return {
+    cols: Math.max(MIN_TERMINAL_COLS, renderer.term.cols),
+    rows: Math.max(MIN_TERMINAL_ROWS, renderer.term.rows),
+  };
+}
+
 function renderedTerminalRowHeight(renderer: TerminalRendererEntry) {
   const rowElements = renderer.term.element?.querySelectorAll<HTMLElement>(".xterm-rows > div");
   const first = rowElements?.[0];
@@ -1289,7 +1325,6 @@ function proposeTerminalRows(
 }
 
 async function fitTerminalToContainer(
-  sessionId: string,
   entry: TerminalSessionEntry,
   container: HTMLDivElement,
   options?: { force?: boolean; reportUnchanged?: boolean },
@@ -1323,10 +1358,42 @@ async function fitTerminalToContainer(
     }
     const nextCols = Math.max(MIN_TERMINAL_COLS, proposedDimensions.cols);
     const nextRows = Math.max(MIN_TERMINAL_ROWS, proposedDimensions.rows);
+    const isOwner = entry.brokerState?.owner_presentation_id === entry.presentationId;
+    if (!isOwner && entry.brokerState) {
+      const canonical = entry.brokerState.geometry;
+      applyCanonicalGeometry(entry, canonical.cols, canonical.rows);
+      const cell = (
+        renderer.term as unknown as {
+          _core?: {
+            _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } };
+          };
+        }
+      )._core?._renderService?.dimensions?.css?.cell;
+      const fit = calculateTerminalMirrorFit({
+        cols: canonical.cols,
+        rows: canonical.rows,
+        cellWidth: cell?.width ?? Math.max(1, width / canonical.cols),
+        cellHeight: cell?.height ?? Math.max(1, height / canonical.rows),
+        viewportWidth: width,
+        viewportHeight: height,
+      });
+      renderer.host.style.transformOrigin = "top left";
+      renderer.host.style.transform = `translate(${fit.offset_x}px, ${fit.offset_y}px) scale(${fit.scale})`;
+      renderer.host.style.width = `${Math.max(1, fit.content_width / fit.scale)}px`;
+      renderer.host.style.height = `${Math.max(1, fit.content_height / fit.scale)}px`;
+      container.style.overflowX = fit.pan_x ? "auto" : "hidden";
+      container.style.overflowY = fit.pan_y ? "auto" : "hidden";
+      void reportTerminalSize(entry, nextCols, nextRows, { force });
+      return;
+    }
+    renderer.host.style.transform = "";
+    renderer.host.style.width = "100%";
+    renderer.host.style.height = "100%";
+    container.style.overflow = "hidden";
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
     } else if (options?.reportUnchanged !== false) {
-      void reportTerminalSize(sessionId, entry, nextCols, nextRows, { force: true });
+      void reportTerminalSize(entry, nextCols, nextRows, { force: true });
     }
   } catch {
     // Ignore fit errors during transient layout churn.
@@ -1347,6 +1414,87 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
     entry.renderer.term.reset();
     entry.renderer.term.scrollToBottom();
     entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+  }
+}
+
+function decodeTerminalSnapshot(snapshot: TerminalSnapshot) {
+  if (snapshot.terminal_state_base64) {
+    try {
+      const binary = atob(snapshot.terminal_state_base64);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    } catch {
+      // A size-capped snapshot may omit or truncate the formatted state. The
+      // bounded plain-text projection is the recovery fallback.
+    }
+  }
+  return [...snapshot.scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
+}
+
+function applyCanonicalGeometry(entry: TerminalSessionEntry, cols: number, rows: number) {
+  if (cols < 1 || rows < 1) {
+    return;
+  }
+  entry.applyingCanonicalGeometry = true;
+  try {
+    resizeParser(entry, cols, rows);
+    if (entry.renderer && (entry.renderer.term.cols !== cols || entry.renderer.term.rows !== rows)) {
+      entry.renderer.term.resize(cols, rows);
+    }
+  } finally {
+    entry.applyingCanonicalGeometry = false;
+  }
+}
+
+async function applyBrokerSnapshot(
+  terminalKey: string,
+  entry: TerminalSessionEntry,
+  snapshot: TerminalSnapshot,
+) {
+  if (entry.disposed || snapshot.session_id !== entry.sessionId) {
+    return;
+  }
+  entry.generation = snapshot.runtime_generation;
+  entry.brokerDecoder = new TextDecoder();
+  applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
+  resetTerminalOutputBuffers(entry);
+  const state = decodeTerminalSnapshot(snapshot);
+  if (state) {
+    await writeTerminalControl(entry.parser, state);
+    if (entry.renderer && !entry.disposed) {
+      await writeTerminalControl(entry.renderer.term, state);
+      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    }
+  }
+  terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
+}
+
+async function applyBrokerEvents(
+  terminalKey: string,
+  entry: TerminalSessionEntry,
+  events: readonly TerminalBrokerEvent[],
+) {
+  if (entry.disposed) {
+    return;
+  }
+  const output: string[] = [];
+  for (const event of events) {
+    if (event.runtime_generation !== entry.generation) {
+      continue;
+    }
+    if (event.type === "output") {
+      const text = entry.brokerDecoder.decode(new Uint8Array(event.bytes), { stream: true });
+      if (text) {
+        output.push(text);
+      }
+    } else if (event.type === "geometry") {
+      applyCanonicalGeometry(entry, event.geometry.cols, event.geometry.rows);
+    } else if (event.type === "lifecycle" && event.lifecycle === "runtime_replaced") {
+      entry.brokerDecoder = new TextDecoder();
+    }
+  }
+  if (output.length > 0) {
+    await writeTerminalOutputBatch(terminalKey, entry, output);
   }
 }
 
@@ -1531,7 +1679,7 @@ function scrollRendererToBottomAfterWrite(
 }
 
 async function replayCodexTerminalPreviewWithCurrentTheme(
-  sessionId: string,
+  terminalKey: string,
   entry: TerminalSessionEntry,
 ) {
   const generation = entry.generation;
@@ -1575,7 +1723,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       return;
     }
 
-    const preview = await readAgentPty(sessionId, {
+    const preview = await readAgentPty(entry.sessionId, {
       max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
       peek: true,
     });
@@ -1583,11 +1731,11 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       !preview ||
       entry.disposed ||
       entry.generation !== generation ||
-      terminalSessionMap.get(sessionId) !== entry
+      terminalSessionMap.get(terminalKey) !== entry
     ) {
       return;
     }
-    await writeTerminalOutputBatch(sessionId, entry, [preview], {
+    await writeTerminalOutputBatch(terminalKey, entry, [preview], {
       resetBeforeWrite: true,
       recordOutput: false,
     });
@@ -1615,7 +1763,7 @@ async function drainInitialPtyBackfill(sessionId: string) {
 
   try {
     while (!entry.disposed) {
-      const data = await readAgentPty(sessionId);
+      const data = await readAgentPty(entry.sessionId);
       if (!data) {
         break;
       }
@@ -1667,7 +1815,6 @@ async function drainPty(sessionId: string) {
     if (entry.pendingForceResize && entry.renderer) {
       entry.pendingForceResize = false;
       await reportTerminalSize(
-        sessionId,
         entry,
         entry.renderer.term.cols,
         entry.renderer.term.rows,
@@ -1679,7 +1826,7 @@ async function drainPty(sessionId: string) {
       const initialGeneration = entry.generation;
       entry.drainQueued = false;
       entry.initialPtyBackfillInFlight = true;
-      const preview = await readAgentPty(sessionId, {
+      const preview = await readAgentPty(entry.sessionId, {
         max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
         peek: true,
       });
@@ -1708,7 +1855,7 @@ async function drainPty(sessionId: string) {
       const drainGeneration = entry.generation;
       const rawChunks: string[] = [];
       while (!entry.disposed) {
-        const data = await readAgentPty(sessionId);
+        const data = await readAgentPty(entry.sessionId);
         if (!data) {
           break;
         }
@@ -1740,10 +1887,17 @@ async function drainPty(sessionId: string) {
   }
 }
 
-async function getOrCreateTerminalSession(sessionId: string, provider?: string) {
-  const existing = terminalSessionMap.get(sessionId);
+async function getOrCreateTerminalSession(
+  terminalKey: string,
+  sessionId: string,
+  presentationId: string,
+  provider?: string,
+) {
+  const existing = terminalSessionMap.get(terminalKey);
   const resolvedProvider = await resolveTerminalProvider(sessionId, provider ?? existing?.provider);
   if (existing) {
+    existing.terminalClient = terminalSessionClientFor(sessionId);
+    existing.presentationId = presentationId;
     setSessionProvider(existing, resolvedProvider);
     return existing;
   }
@@ -1758,6 +1912,15 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
   parser.loadAddon(parserSerializeAddon);
 
   const entry: TerminalSessionEntry = {
+    sessionId,
+    presentationId,
+    terminalClient: terminalSessionClientFor(sessionId),
+    brokerState: null,
+    presentationState: null,
+    geometrySequence: 0,
+    applyingCanonicalGeometry: false,
+    brokerDecoder: new TextDecoder(),
+    legacyMode: false,
     lastReportedSize: null,
     fitCount: 0,
     resizeCount: 0,
@@ -1787,39 +1950,56 @@ async function getOrCreateTerminalSession(sessionId: string, provider?: string) 
     pendingForceResize: false,
   };
 
-  terminalSessionMap.set(sessionId, entry);
-
-  void listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
-    if (event.payload?.session_id !== sessionId) {
-      return;
-    }
-    clearTerminalSession(sessionId);
-  }).then((unlisten) => {
-    if (entry.disposed) {
-      unlisten();
-      return;
-    }
-    entry.terminalClearedUnlisten = unlisten;
-  }).catch((error) => {
-    console.warn("agent-terminal-cleared listen error:", error);
-  });
-
-  void listen<{ session_id?: string }>("agent-pty-output-ready", (event) => {
-    if (event.payload?.session_id !== sessionId) {
-      return;
-    }
-    void drainPty(sessionId);
-  }).then((unlisten) => {
-    if (entry.disposed) {
-      unlisten();
-      return;
-    }
-    entry.outputReadyUnlisten = unlisten;
-  }).catch((error) => {
-    console.warn("agent-pty-output-ready listen error:", error);
-  });
+  terminalSessionMap.set(terminalKey, entry);
 
   return entry;
+}
+
+function resetLegacyTerminalSession(entry: TerminalSessionEntry) {
+  entry.recentWritePreviews = [];
+  entry.recentNormalizedWritePreviews = [];
+  entry.rawOutputLog = [];
+  entry.rawOutputLogChars = 0;
+  entry.drainQueued = false;
+  entry.initialPtyBackfillComplete = false;
+  entry.initialPtyBackfillInFlight = false;
+  entry.generation += 1;
+  entry.latestTitle = null;
+  entry.lastReportedSize = null;
+  entry.fitCount = 0;
+  entry.resizeCount = 0;
+  entry.lastMeasuredHostSize = null;
+  entry.pendingForceResize = true;
+  resetTerminalOutputBuffers(entry);
+  entry.titleHandlerRef.current?.("");
+}
+
+function installLegacyTerminalListeners(terminalKey: string, entry: TerminalSessionEntry) {
+  if (entry.outputReadyUnlisten || entry.terminalClearedUnlisten) {
+    return;
+  }
+  void listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
+    if (event.payload?.session_id === entry.sessionId) {
+      resetLegacyTerminalSession(entry);
+    }
+  }).then((unlisten) => {
+    if (entry.disposed) {
+      unlisten();
+    } else {
+      entry.terminalClearedUnlisten = unlisten;
+    }
+  });
+  void listen<{ session_id?: string }>("agent-pty-output-ready", (event) => {
+    if (event.payload?.session_id === entry.sessionId) {
+      void drainPty(terminalKey);
+    }
+  }).then((unlisten) => {
+    if (entry.disposed) {
+      unlisten();
+    } else {
+      entry.outputReadyUnlisten = unlisten;
+    }
+  });
 }
 
 function clearRendererTimers(renderer: TerminalRendererEntry) {
@@ -1882,7 +2062,7 @@ function applyTerminalAppearance(
   requestAnimationFrame(() => refit({ force: true }));
 }
 
-function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
+function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
     theme: entry.currentTheme,
@@ -1946,7 +2126,7 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
   host.addEventListener(
     "wheel",
     (event) => {
-      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, sessionId)) {
+      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, terminalKey)) {
         syncParserViewportToRenderer(entry);
       }
     },
@@ -1981,10 +2161,10 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
     if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
     }
-    invoke("send_input_to_agent", {
-      sessionId,
-      input,
-    }).catch(() => {});
+    const request = entry.legacyMode
+      ? terminalCompatibilityAdapter.sendText(entry.sessionId, input)
+      : entry.terminalClient.sendText(entry.presentationId, input);
+    void request.catch(() => undefined);
   });
 
   term.onBinary((data) => {
@@ -1993,7 +2173,10 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
       return;
     }
     const input = Array.from(filtered, (char) => char.charCodeAt(0));
-    invoke("send_binary_input_to_agent", { sessionId, input }).catch(() => {});
+    const request = entry.legacyMode
+      ? terminalCompatibilityAdapter.sendBinary(entry.sessionId, input)
+      : entry.terminalClient.sendBinary(entry.presentationId, input);
+    void request.catch(() => undefined);
   });
 
   term.onTitleChange((title) => {
@@ -2003,20 +2186,20 @@ function createRenderer(sessionId: string, entry: TerminalSessionEntry) {
 
   if (shouldExposeTerminalDebug()) {
     term.onScroll((position) => {
-      recordScrollTrace(sessionId, position);
+      recordScrollTrace(terminalKey, position);
     });
   }
 
   term.onResize((size) => {
     entry.resizeCount += 1;
     resizeParser(entry, size.cols, size.rows);
-    void reportTerminalSize(sessionId, entry, size.cols, size.rows);
+    void reportTerminalSize(entry, size.cols, size.rows);
     if (renderer.resizeTimeout) {
       clearTimeout(renderer.resizeTimeout);
       renderer.resizeTimeout = null;
     }
     renderer.resizeTimeout = setTimeout(() => {
-      void reportTerminalSize(sessionId, entry, size.cols, size.rows);
+      void reportTerminalSize(entry, size.cols, size.rows);
     }, 120);
   });
 
@@ -2054,12 +2237,41 @@ function attachRendererHost(
 }
 
 function mountRenderer(
-  sessionId: string,
+  terminalKey: string,
   session: TerminalSessionEntry,
   container: HTMLDivElement,
 ) {
   cancelRendererDisposal(session);
-  const renderer = session.renderer ?? createRenderer(sessionId, session);
+  if (!session.renderer) {
+    terminalRendererBudget.acquire("xterm", terminalKey, () => {
+      const current = terminalSessionMap.get(terminalKey);
+      if (!current?.renderer) {
+        return;
+      }
+      const renderer = current.renderer;
+      current.renderer = null;
+      disposeRenderer(renderer, terminalKey);
+      const presentation = current.presentationState;
+      if (presentation) {
+        current.presentationState = {
+          ...presentation,
+          render_state: "suspended",
+          requires_resync: true,
+        };
+        void current.terminalClient.updatePresentation(current.presentationId, {
+          desired_geometry: presentation.desired_geometry,
+          visibility: presentation.visibility,
+          render_state: "suspended",
+          requested_interaction: presentation.interaction_capability,
+          observed_lease_epoch: current.brokerState?.lease_epoch ?? 0,
+        }).catch(() => undefined);
+      }
+      current.onRendererEvicted?.();
+    });
+  } else {
+    terminalRendererBudget.touch("xterm", terminalKey);
+  }
+  const renderer = session.renderer ?? createRenderer(terminalKey, session);
   session.renderer = renderer;
   attachRendererHost(session, container);
 
@@ -2093,6 +2305,10 @@ function mountRenderer(
 
 export const AgentTerminal = memo(function AgentTerminal({
   sessionId,
+  presentationId = sessionId,
+  visibility = "visible",
+  renderState = "mounted",
+  requestedInteraction = "interactive",
   provider,
   isMaximized,
   theme,
@@ -2101,6 +2317,10 @@ export const AgentTerminal = memo(function AgentTerminal({
   onTerminalFocus,
 }: {
   sessionId: string;
+  presentationId?: string;
+  visibility?: TerminalVisibility;
+  renderState?: TerminalRenderState;
+  requestedInteraction?: TerminalRequestedInteraction;
   provider?: string;
   isMaximized?: boolean;
   theme: "dark" | "light" | "system";
@@ -2108,14 +2328,18 @@ export const AgentTerminal = memo(function AgentTerminal({
   onTitleChange?: (title: string) => void;
   onTerminalFocus?: () => void;
 }) {
+  const terminalKey = presentationId;
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const onTitleChangeRef = useRef(onTitleChange);
   const wheelRowRemainderRef = useRef(0);
   const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
+  const activationInFlightRef = useRef(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
+  const [rendererEvicted, setRendererEvicted] = useState(false);
+  const [rendererEpoch, setRendererEpoch] = useState(0);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
 
@@ -2146,23 +2370,41 @@ export const AgentTerminal = memo(function AgentTerminal({
 
   const performFit = useCallback((options?: { force?: boolean }) => {
     const container = terminalRef.current;
-    const entry = terminalSessionMap.get(sessionId);
+    const entry = terminalSessionMap.get(terminalKey);
     if (!entry || !xtermRef.current || !fitAddonRef.current || !container) {
       return;
     }
-    void fitTerminalToContainer(sessionId, entry, container, options);
-  }, [sessionId]);
+    void fitTerminalToContainer(entry, container, options);
+  }, [terminalKey]);
 
   const focusTerminal = useCallback(() => {
     xtermRef.current?.focus();
   }, []);
 
+  const requestActivation = useCallback(() => {
+    const entry = terminalSessionMap.get(terminalKey);
+    if (
+      !entry ||
+      entry.legacyMode ||
+      requestedInteraction !== "interactive" ||
+      entry.brokerState?.owner_presentation_id === presentationId ||
+      activationInFlightRef.current
+    ) {
+      return;
+    }
+    activationInFlightRef.current = true;
+    void entry.terminalClient.activate(presentationId).finally(() => {
+      activationInFlightRef.current = false;
+    });
+  }, [presentationId, requestedInteraction, terminalKey]);
+
   const handleFocusCapture = useCallback(() => {
     // Focus should not swap renderers; changing DOM/WebGL backends changes text
     // rasterization and makes the terminal appear to reflow.
-    touchSessionWebglIfActive(sessionId);
+    touchSessionWebglIfActive(terminalKey);
+    requestActivation();
     onTerminalFocus?.();
-  }, [sessionId, onTerminalFocus]);
+  }, [terminalKey, onTerminalFocus, requestActivation]);
 
   const handleWheel = useCallback((event: {
     deltaMode: number;
@@ -2170,15 +2412,15 @@ export const AgentTerminal = memo(function AgentTerminal({
     preventDefault: () => void;
     stopPropagation: () => void;
   }) => {
-    const entry = terminalSessionMap.get(sessionId);
+    const entry = terminalSessionMap.get(terminalKey);
     const term = entry?.renderer?.term;
     if (!entry || !term) {
       return;
     }
-    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, sessionId)) {
+    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, terminalKey)) {
       syncParserViewportToRenderer(entry);
     }
-  }, [sessionId]);
+  }, [terminalKey]);
 
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
@@ -2193,12 +2435,18 @@ export const AgentTerminal = memo(function AgentTerminal({
 
     const attach = async () => {
       try {
-        const session = await getOrCreateTerminalSession(sessionId, provider);
+        const session = await getOrCreateTerminalSession(
+          terminalKey,
+          sessionId,
+          presentationId,
+          provider,
+        );
         if (!isMounted || !terminalRef.current) {
           return;
         }
 
         entry = session;
+        session.onRendererEvicted = () => setRendererEvicted(true);
         setSessionProvider(session, provider);
         session.titleHandlerRef.current = onTitleChangeRef.current;
         session.terminalLinkContextRef.current = {
@@ -2209,7 +2457,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         session.currentTheme = sessionTermTheme;
         lastThemeSignalRef.current = sessionTermTheme;
 
-        const renderer = mountRenderer(sessionId, session, terminalRef.current);
+        const renderer = mountRenderer(terminalKey, session, terminalRef.current);
         if (!renderer) {
           return;
         }
@@ -2219,6 +2467,62 @@ export const AgentTerminal = memo(function AgentTerminal({
 
         xtermRef.current = renderer.term;
         fitAddonRef.current = renderer.fitAddon;
+        setRendererEvicted(false);
+
+        const callbacks: TerminalPresentationCallbacks = {
+          applySnapshot: (snapshot) => applyBrokerSnapshot(terminalKey, session, snapshot),
+          applyEvents: (events) => applyBrokerEvents(terminalKey, session, events),
+          onBrokerState: (state) => {
+            if (session.disposed) {
+              return;
+            }
+            session.brokerState = state;
+            queueMicrotask(() => {
+              if (terminalRef.current) {
+                void fitTerminalToContainer(session, terminalRef.current, {
+                  force: true,
+                });
+              }
+            });
+          },
+          onLeaseDecision: (decision) => {
+            if (session.brokerState && decision.runtime_generation >= session.brokerState.runtime_generation) {
+              session.brokerState = {
+                ...session.brokerState,
+                runtime_generation: decision.runtime_generation,
+                lease_epoch: decision.lease_epoch,
+                owner_presentation_id: decision.owner_presentation_id,
+              };
+            }
+          },
+        };
+        try {
+          const result = await session.terminalClient.registerPresentation(
+            {
+              presentation_id: presentationId,
+              session_id: sessionId,
+              client_kind: "desktop",
+              desired_geometry: geometryForRenderer(renderer),
+              visibility,
+              render_state: renderState,
+              requested_interaction: requestedInteraction,
+              observed_lease_epoch: session.brokerState?.lease_epoch ?? 0,
+            },
+            callbacks,
+          );
+          session.presentationState = result.presentation;
+          session.brokerState = result.broker_state;
+        } catch (error) {
+          const message = String(error);
+          if (message.includes("TerminalSessionProtocolUnavailable")) {
+            session.legacyMode = true;
+            await session.terminalClient.destroy();
+            installLegacyTerminalListeners(terminalKey, session);
+            void drainPty(terminalKey);
+          } else if (!message.includes("SessionNotFound")) {
+            throw error;
+          }
+        }
 
         const initialRect = terminalRef.current.getBoundingClientRect();
         session.lastMeasuredHostSize = {
@@ -2230,13 +2534,12 @@ export const AgentTerminal = memo(function AgentTerminal({
           if (!isMounted || !terminalRef.current) {
             return;
           }
-          void fitTerminalToContainer(sessionId, session, terminalRef.current, options);
+          void fitTerminalToContainer(session, terminalRef.current, options);
         };
 
-        void drainPty(sessionId);
         checkSizing({ force: true, reportUnchanged: false });
         if (typeof IntersectionObserver === "undefined") {
-          activateWebglRenderer(renderer, sessionId);
+          activateWebglRenderer(renderer, terminalKey);
         } else {
           // Scope WebGL contexts to terminals actually on screen: a card
           // scrolled out of view (or in a hidden view) releases its context
@@ -2257,7 +2560,7 @@ export const AgentTerminal = memo(function AgentTerminal({
                 }
                 renderer.webglAttempted = true;
                 const hadWebgl = Boolean(renderer.webglAddon);
-                promoteSessionToWebgl(sessionId);
+                promoteSessionToWebgl(terminalKey);
                 // Loading the WebGL addon rebuilds xterm's render layers and
                 // re-measures the cell grid. The mount fits above can run before
                 // that (against pre-WebGL metrics), so re-fit once the GPU
@@ -2272,7 +2575,7 @@ export const AgentTerminal = memo(function AgentTerminal({
                 visibilityDemoteTimer = setTimeout(() => {
                   visibilityDemoteTimer = null;
                   if (isMounted) {
-                    demoteSessionToDom(sessionId);
+                    demoteSessionToDom(terminalKey);
                   }
                 }, VISIBILITY_DEMOTE_GRACE_MS);
               }
@@ -2326,7 +2629,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         visibilityDemoteTimer = null;
       }
       if (entry && !entry.disposed && entry.renderer) {
-        scheduleRendererDisposal(sessionId);
+        scheduleRendererDisposal(terminalKey);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
@@ -2334,13 +2637,58 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry?.terminalLinkContextRef.current.onOpenError === setLinkOpenError) {
         entry.terminalLinkContextRef.current.onOpenError = undefined;
       }
+      if (entry?.onRendererEvicted) {
+        entry.onRendererEvicted = undefined;
+      }
       xtermRef.current = null;
       fitAddonRef.current = null;
+      if (entry && !entry.legacyMode) {
+        void entry.terminalClient.unregisterPresentation(presentationId).catch(() => undefined);
+      }
     };
-  }, [performFit, provider, sessionId, workspacePath]);
+  }, [
+    performFit,
+    presentationId,
+    provider,
+    rendererEpoch,
+    sessionId,
+    terminalKey,
+    workspacePath,
+  ]);
 
   useEffect(() => {
-    const entry = terminalSessionMap.get(sessionId);
+    const entry = terminalSessionMap.get(terminalKey);
+    if (!entry?.brokerState || !entry.presentationState || entry.legacyMode) {
+      return;
+    }
+    let cancelled = false;
+    void entry.terminalClient.updatePresentation(presentationId, {
+      desired_geometry: entry.presentationState.desired_geometry,
+      visibility,
+      render_state: renderState,
+      requested_interaction: requestedInteraction,
+      observed_lease_epoch: entry.brokerState.lease_epoch,
+    }).then(async (result) => {
+      if (cancelled || !result) {
+        return;
+      }
+      entry.presentationState = result.presentation;
+      entry.brokerState = result.broker_state;
+      if (
+        renderState === "mounted" &&
+        result.presentation.requires_resync &&
+        result.broker_state.owner_presentation_id === presentationId
+      ) {
+        await entry.terminalClient.resyncOwner(presentationId);
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [presentationId, renderState, requestedInteraction, terminalKey, visibility]);
+
+  useEffect(() => {
+    const entry = terminalSessionMap.get(terminalKey);
     const activeTermTheme = terminalThemeForProvider(effectiveTheme, entry?.provider ?? provider);
     const term = xtermRef.current;
     if (term) {
@@ -2381,15 +2729,15 @@ export const AgentTerminal = memo(function AgentTerminal({
       const prefersLight = activeTermTheme === LIGHT_TERM_THEME;
       // TUIs that probe terminal colors infer their visible mode from ?997 and
       // subsequent OSC color replies, so send mode first and colors second.
-      queueAgentInput(sessionId, `[?997;${prefersLight ? 2 : 1}n`);
-      queueAgentInput(sessionId, `]11;rgb:${background}\\`);
-      queueAgentInput(sessionId, `]10;rgb:${foreground}\\`);
-      queueAgentInput(sessionId, `]4;0;rgb:${background}\\`);
+      queueAgentInput(terminalKey, `[?997;${prefersLight ? 2 : 1}n`);
+      queueAgentInput(terminalKey, `]11;rgb:${background}\\`);
+      queueAgentInput(terminalKey, `]10;rgb:${foreground}\\`);
+      queueAgentInput(terminalKey, `]4;0;rgb:${background}\\`);
     }
     if (isCodexThemeChange) {
-      void replayCodexTerminalPreviewWithCurrentTheme(sessionId, entry);
+      void replayCodexTerminalPreviewWithCurrentTheme(terminalKey, entry);
     }
-  }, [effectiveTheme, provider, sessionId, termTheme]);
+  }, [effectiveTheme, provider, termTheme, terminalKey]);
 
   useEffect(() => {
     let isMounted = true;
@@ -2398,15 +2746,15 @@ export const AgentTerminal = memo(function AgentTerminal({
       isMounted = false;
       clearTimeout(timer);
     };
-  }, [sessionId, isMaximized, performFit]);
+  }, [terminalKey, isMaximized, performFit]);
 
   useEffect(() => {
     // A maximized terminal is the one the user is looking at; guarantee it a
     // WebGL context regardless of pool recency.
     if (isMaximized) {
-      promoteSessionToWebgl(sessionId);
+      promoteSessionToWebgl(terminalKey);
     }
-  }, [sessionId, isMaximized]);
+  }, [terminalKey, isMaximized]);
 
   useEffect(() => {
     const term = xtermRef.current;
@@ -2432,13 +2780,39 @@ export const AgentTerminal = memo(function AgentTerminal({
           {linkOpenError}
         </div>
       )}
+      {rendererEvicted && !initError && (
+        <button
+          type="button"
+          className="absolute inset-0 z-30 flex items-center justify-center bg-surface text-sm text-muted"
+          onClick={() => {
+            setRendererEvicted(false);
+            setRendererEpoch((value) => value + 1);
+          }}
+        >
+          Activate terminal renderer
+        </button>
+      )}
       <div
         ref={terminalRef}
         data-testid="agent-terminal-host"
-        tabIndex={-1}
+        tabIndex={0}
         onFocusCapture={handleFocusCapture}
         onWheel={handleWheel}
-        onClick={focusTerminal}
+        onClick={() => {
+          requestActivation();
+          focusTerminal();
+        }}
+        onKeyDownCapture={(event) => {
+          const entry = terminalSessionMap.get(terminalKey);
+          if (
+            entry?.brokerState?.owner_presentation_id !== presentationId &&
+            (event.key === "Enter" || event.key === " ")
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            requestActivation();
+          }
+        }}
         className={`w-full h-full overflow-hidden ${
           provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
         }`}

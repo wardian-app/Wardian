@@ -7,12 +7,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock};
 use wardian_core::models::*;
 
 pub const TERMINAL_SESSION_ACTOR_CAPACITY: usize = 256;
 pub const MAX_DESKTOP_PRESENTATIONS_PER_SESSION: usize = 64;
 pub const MAX_REMOTE_PRESENTATIONS_PER_SESSION: usize = 3;
+pub const MAX_DEFERRED_TERMINAL_SESSIONS: usize = 256;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_WAKE_COALESCE: Duration = Duration::from_millis(16);
 const ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -24,6 +25,7 @@ type BrokerReply<T> = oneshot::Sender<Result<T, TerminalBrokerError>>;
 pub enum TerminalBrokerError {
     SessionNotFound,
     RuntimeTerminated,
+    RuntimeUnavailable,
     ActorClosed,
     InvalidIdentity,
     InvalidRequest(&'static str),
@@ -472,9 +474,22 @@ pub struct TerminalSessionHandle {
 
 pub struct TerminalSessionBroker {
     sessions: RwLock<HashMap<String, TerminalSessionHandle>>,
+    deferred_geometries: AsyncMutex<DeferredGeometryState>,
     wake_tx: broadcast::Sender<TerminalEventsReady>,
     lifecycle_tx: broadcast::Sender<TerminalSessionLifecycleNotification>,
     timer: Arc<dyn TerminalTimer>,
+}
+
+#[derive(Default)]
+struct DeferredGeometryState {
+    sessions: HashMap<String, HashMap<String, DeferredPresentationGeometry>>,
+    next_sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredPresentationGeometry {
+    geometry: TerminalGeometry,
+    sequence: u64,
 }
 
 impl Default for TerminalSessionBroker {
@@ -492,6 +507,7 @@ impl TerminalSessionBroker {
         let (lifecycle_tx, _) = broadcast::channel(64);
         Self {
             sessions: RwLock::new(HashMap::new()),
+            deferred_geometries: AsyncMutex::new(DeferredGeometryState::default()),
             wake_tx,
             lifecycle_tx,
             timer,
@@ -540,13 +556,6 @@ impl TerminalSessionBroker {
         } else {
             TerminalSessionLifecycleEvent::RuntimeStarted
         };
-        let _ = self
-            .lifecycle_tx
-            .send(TerminalSessionLifecycleNotification {
-                session_id: session_id.to_string(),
-                runtime_generation,
-                lifecycle,
-            });
         if let Some(old_handle) = replaced {
             self.shutdown_handle(
                 session_id,
@@ -555,7 +564,116 @@ impl TerminalSessionBroker {
             )
             .await;
         }
+        let _ = self
+            .lifecycle_tx
+            .send(TerminalSessionLifecycleNotification {
+                session_id: session_id.to_string(),
+                runtime_generation,
+                lifecycle,
+            });
+        self.deferred_geometries
+            .lock()
+            .await
+            .sessions
+            .remove(session_id);
         Ok(runtime_generation)
+    }
+
+    /// Remembers presentation geometry while no native runtime exists yet.
+    ///
+    /// This is broker-owned pre-runtime state rather than a second PTY-size
+    /// authority. Once a runtime starts, its actor's canonical geometry wins
+    /// and this deferred value is discarded.
+    pub async fn remember_deferred_geometry(
+        &self,
+        session_id: &str,
+        presentation_id: &str,
+        geometry: TerminalGeometry,
+    ) -> Result<TerminalGeometry, TerminalBrokerError> {
+        validate_id(session_id, "session_id")?;
+        validate_id(presentation_id, "presentation_id")?;
+        let geometry = clamp_geometry(geometry, TerminalClientKind::Desktop);
+        let mut deferred = self.deferred_geometries.lock().await;
+        if !deferred.sessions.contains_key(session_id)
+            && deferred.sessions.len() >= MAX_DEFERRED_TERMINAL_SESSIONS
+        {
+            return Err(TerminalBrokerError::InvalidRequest(
+                "deferred_session_limit",
+            ));
+        }
+        let is_new = deferred
+            .sessions
+            .get(session_id)
+            .is_none_or(|presentations| !presentations.contains_key(presentation_id));
+        if is_new
+            && deferred
+                .sessions
+                .get(session_id)
+                .is_some_and(|presentations| {
+                    presentations.len() >= MAX_DESKTOP_PRESENTATIONS_PER_SESSION
+                })
+        {
+            return Err(TerminalBrokerError::PresentationLimit {
+                client_kind: TerminalClientKind::Desktop,
+                limit: MAX_DESKTOP_PRESENTATIONS_PER_SESSION,
+            });
+        }
+        deferred.next_sequence = deferred.next_sequence.saturating_add(1);
+        let sequence = deferred.next_sequence;
+        deferred
+            .sessions
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(
+                presentation_id.to_string(),
+                DeferredPresentationGeometry { geometry, sequence },
+            );
+        Ok(geometry)
+    }
+
+    /// Returns the live actor's canonical geometry, or the latest pre-runtime
+    /// viewport report when the session has not started yet.
+    pub async fn spawn_geometry(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TerminalGeometry>, TerminalBrokerError> {
+        validate_id(session_id, "session_id")?;
+        match self.broker_state(session_id).await {
+            Ok(state) => Ok(Some(state.geometry)),
+            Err(TerminalBrokerError::SessionNotFound)
+            | Err(TerminalBrokerError::RuntimeTerminated)
+            | Err(TerminalBrokerError::ActorClosed) => Ok(self
+                .deferred_geometries
+                .lock()
+                .await
+                .sessions
+                .get(session_id)
+                .and_then(|presentations| {
+                    presentations
+                        .values()
+                        .max_by_key(|presentation| presentation.sequence)
+                        .map(|presentation| presentation.geometry)
+                })),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn forget_deferred_geometry(&self, session_id: &str) {
+        self.deferred_geometries
+            .lock()
+            .await
+            .sessions
+            .remove(session_id);
+    }
+
+    pub async fn forget_deferred_presentation(&self, session_id: &str, presentation_id: &str) {
+        let mut deferred = self.deferred_geometries.lock().await;
+        if let Some(presentations) = deferred.sessions.get_mut(session_id) {
+            presentations.remove(presentation_id);
+            if presentations.is_empty() {
+                deferred.sessions.remove(session_id);
+            }
+        }
     }
 
     pub fn process_output_blocking(
@@ -727,6 +845,61 @@ impl TerminalSessionBroker {
         .await
     }
 
+    /// One-release adapter for legacy desktop and not-yet-migrated remote
+    /// callers. It is still serialized by the actor and cannot bypass a
+    /// committed/pending presentation lease.
+    pub async fn send_legacy_input(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+    ) -> Result<TerminalLeaseDecision, TerminalBrokerError> {
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::CompatibilityInput { bytes, reply }
+        })
+        .await
+    }
+
+    pub async fn send_privileged_input(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), TerminalBrokerError> {
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::PrivilegedInput { bytes, reply }
+        })
+        .await
+    }
+
+    pub async fn read_legacy_output(
+        &self,
+        session_id: &str,
+        max_bytes: Option<usize>,
+        peek: bool,
+    ) -> Result<Option<String>, TerminalBrokerError> {
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::ReadCompatibilityOutput {
+                max_bytes,
+                peek,
+                reply,
+            }
+        })
+        .await
+    }
+
+    /// One-release native resize adapter. The broker remains the only native
+    /// writer and rejects compatibility calls once presentation ownership is
+    /// active or pending.
+    pub async fn resize_legacy(
+        &self,
+        session_id: &str,
+        geometry: TerminalGeometry,
+    ) -> Result<TerminalGeometryCommitResult, TerminalBrokerError> {
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::CompatibilityResize { geometry, reply }
+        })
+        .await
+    }
+
     pub async fn subscribe(
         &self,
         request: TerminalEventSubscriptionRequest,
@@ -837,6 +1010,37 @@ impl TerminalSessionBroker {
             TerminalSessionLifecycleEvent::RuntimeTerminated,
         )
         .await;
+        Ok(())
+    }
+
+    /// Terminates one exact runtime generation and removes its broker entry.
+    /// A concurrent replacement cannot be removed by an older kill request.
+    pub async fn terminate_and_remove_runtime(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+    ) -> Result<(), TerminalBrokerError> {
+        let handle = {
+            let mut sessions = self.sessions.write().await;
+            let handle = sessions
+                .get(session_id)
+                .cloned()
+                .ok_or(TerminalBrokerError::SessionNotFound)?;
+            ensure_generation(&handle, runtime_generation)?;
+            sessions.remove(session_id);
+            handle
+        };
+        self.shutdown_handle(
+            session_id,
+            handle,
+            TerminalSessionLifecycleEvent::RuntimeTerminated,
+        )
+        .await;
+        self.deferred_geometries
+            .lock()
+            .await
+            .sessions
+            .remove(session_id);
         Ok(())
     }
 
@@ -1141,6 +1345,23 @@ enum TerminalSessionMessage {
         request: TerminalGeometryRequest,
         reply: BrokerReply<TerminalGeometryCommitResult>,
     },
+    CompatibilityInput {
+        bytes: Vec<u8>,
+        reply: BrokerReply<TerminalLeaseDecision>,
+    },
+    CompatibilityResize {
+        geometry: TerminalGeometry,
+        reply: BrokerReply<TerminalGeometryCommitResult>,
+    },
+    PrivilegedInput {
+        bytes: Vec<u8>,
+        reply: BrokerReply<()>,
+    },
+    ReadCompatibilityOutput {
+        max_bytes: Option<usize>,
+        peek: bool,
+        reply: BrokerReply<Option<String>>,
+    },
     Subscribe {
         request: TerminalEventSubscriptionRequest,
         reply: BrokerReply<TerminalEventSubscriptionResult>,
@@ -1219,7 +1440,7 @@ struct TerminalSessionActor {
     lease_epoch_shared: Arc<AtomicU64>,
     latest_sequence_shared: Arc<AtomicU64>,
     terminated: Arc<AtomicBool>,
-    runtime: TerminalRuntimeHandles,
+    runtime: Option<TerminalRuntimeHandles>,
     runtime_state: TerminalRuntimeState,
     parser: vt100::Parser,
     replay: ReplayRing,
@@ -1236,6 +1457,8 @@ struct TerminalSessionActor {
     resync_sequence: u64,
     snapshot_sequence: u64,
     geometry: TerminalGeometry,
+    compatibility_geometry_sequence: u64,
+    compatibility_read_sequence: u64,
     wake_pending: bool,
     activation_timer: Option<AbortOnDropTask>,
     wake_timer: Option<AbortOnDropTask>,
@@ -1267,7 +1490,7 @@ impl TerminalSessionActor {
             lease_epoch_shared: lease_epoch,
             latest_sequence_shared: latest_sequence,
             terminated,
-            runtime,
+            runtime: Some(runtime),
             runtime_state: TerminalRuntimeState::Live,
             parser: vt100::Parser::new(geometry.rows, geometry.cols, 1_000),
             replay: ReplayRing::new(),
@@ -1284,6 +1507,8 @@ impl TerminalSessionActor {
             resync_sequence: 0,
             snapshot_sequence: 0,
             geometry,
+            compatibility_geometry_sequence: 0,
+            compatibility_read_sequence: 0,
             wake_pending: false,
             activation_timer: None,
             wake_timer: None,
@@ -1406,6 +1631,26 @@ impl TerminalSessionActor {
                 let result = self.resize(request).await;
                 let _ = reply.send(result);
             }
+            TerminalSessionMessage::CompatibilityInput { bytes, reply } => {
+                let result = self.send_compatibility_input(bytes).await;
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::CompatibilityResize { geometry, reply } => {
+                let result = self.resize_compatibility(geometry).await;
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::PrivilegedInput { bytes, reply } => {
+                let result = self.send_privileged_input(bytes).await;
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::ReadCompatibilityOutput {
+                max_bytes,
+                peek,
+                reply,
+            } => {
+                let result = self.read_compatibility_output(max_bytes, peek);
+                let _ = reply.send(result);
+            }
             TerminalSessionMessage::Subscribe { request, reply } => {
                 let result = self.subscribe(request);
                 let _ = reply.send(result);
@@ -1484,8 +1729,8 @@ impl TerminalSessionActor {
         bytes: Vec<u8>,
     ) -> Result<(), TerminalBrokerError> {
         self.ensure_generation(runtime_generation)?;
-        if self.runtime_state == TerminalRuntimeState::Terminated {
-            return Err(TerminalBrokerError::RuntimeTerminated);
+        if self.runtime_state != TerminalRuntimeState::Live || self.runtime.is_none() {
+            return Err(TerminalBrokerError::RuntimeUnavailable);
         }
         if bytes.is_empty() {
             return Ok(());
@@ -1971,6 +2216,8 @@ impl TerminalSessionActor {
         }
         if !request.bytes.is_empty() {
             self.runtime
+                .as_ref()
+                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
                 .input_tx
                 .send(request.bytes)
                 .await
@@ -2014,6 +2261,105 @@ impl TerminalSessionActor {
         Ok(TerminalGeometryCommitResult {
             decision: self.accepted_decision(),
             geometry_sequence: request.geometry_sequence,
+            geometry: self.geometry,
+            snapshot: Some(snapshot),
+        })
+    }
+
+    fn compatibility_rejection(&self) -> Option<TerminalLeaseRejectionReason> {
+        if self.runtime_state != TerminalRuntimeState::Live {
+            return Some(TerminalLeaseRejectionReason::RuntimeUnavailable);
+        }
+        if self.pending_activation.is_some() {
+            return Some(TerminalLeaseRejectionReason::PendingActivation);
+        }
+        if self.owner_presentation_id.is_some() {
+            return Some(TerminalLeaseRejectionReason::NotOwner);
+        }
+        None
+    }
+
+    async fn send_compatibility_input(
+        &mut self,
+        bytes: Vec<u8>,
+    ) -> Result<TerminalLeaseDecision, TerminalBrokerError> {
+        if let Some(reason) = self.compatibility_rejection() {
+            return Ok(self.rejected_decision(reason));
+        }
+        if !bytes.is_empty() {
+            self.runtime
+                .as_ref()
+                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
+                .input_tx
+                .send(bytes)
+                .await
+                .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+        }
+        Ok(self.accepted_decision())
+    }
+
+    async fn send_privileged_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
+        if self.runtime_state != TerminalRuntimeState::Live {
+            return Err(TerminalBrokerError::RuntimeUnavailable);
+        }
+        if !bytes.is_empty() {
+            self.runtime
+                .as_ref()
+                .ok_or(TerminalBrokerError::RuntimeUnavailable)?
+                .input_tx
+                .send(bytes)
+                .await
+                .map_err(|_| TerminalBrokerError::RuntimeIo("input_channel_closed".to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn read_compatibility_output(
+        &mut self,
+        max_bytes: Option<usize>,
+        peek: bool,
+    ) -> Result<Option<String>, TerminalBrokerError> {
+        let available_from = self.replay.available_from_sequence(self.stream_sequence);
+        if self.compatibility_read_sequence.saturating_add(1) < available_from {
+            self.compatibility_read_sequence = available_from.saturating_sub(1);
+        }
+        let (mut bytes, next_sequence) = self
+            .replay
+            .raw_output_after(self.compatibility_read_sequence);
+        if !peek {
+            self.compatibility_read_sequence = next_sequence;
+        }
+        if let Some(limit) = max_bytes {
+            if bytes.len() > limit {
+                bytes = bytes.split_off(bytes.len().saturating_sub(limit));
+                while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+                    bytes.remove(0);
+                }
+            }
+        }
+        if bytes.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+        }
+    }
+
+    async fn resize_compatibility(
+        &mut self,
+        geometry: TerminalGeometry,
+    ) -> Result<TerminalGeometryCommitResult, TerminalBrokerError> {
+        self.compatibility_geometry_sequence =
+            self.compatibility_geometry_sequence.saturating_add(1);
+        let geometry_sequence = self.compatibility_geometry_sequence;
+        if let Some(reason) = self.compatibility_rejection() {
+            return Ok(self.rejected_resize(reason, geometry_sequence));
+        }
+        let geometry = clamp_geometry(geometry, TerminalClientKind::Desktop);
+        self.commit_geometry(geometry, geometry_sequence).await?;
+        let snapshot = self.snapshot();
+        Ok(TerminalGeometryCommitResult {
+            decision: self.accepted_decision(),
+            geometry_sequence,
             geometry: self.geometry,
             snapshot: Some(snapshot),
         })
@@ -2151,6 +2497,7 @@ impl TerminalSessionActor {
         self.ensure_generation(runtime_generation)?;
         if self.runtime_state == TerminalRuntimeState::Live {
             self.runtime_state = TerminalRuntimeState::Paused;
+            self.runtime.take();
             self.pending_owner_resync = None;
             self.emit_event(TerminalBrokerEventKind::Lifecycle {
                 lifecycle: TerminalSessionLifecycleEvent::RuntimePaused,
@@ -2235,7 +2582,12 @@ impl TerminalSessionActor {
         if geometry == self.geometry {
             return Ok(());
         }
-        let resize = self.runtime.resize.clone();
+        let resize = self
+            .runtime
+            .as_ref()
+            .ok_or(TerminalBrokerError::RuntimeUnavailable)?
+            .resize
+            .clone();
         tokio::task::spawn_blocking(move || resize(geometry))
             .await
             .map_err(|error| TerminalBrokerError::RuntimeIo(error.to_string()))?

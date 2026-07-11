@@ -72,6 +72,22 @@ impl ReplayRing {
         }
         selected
     }
+
+    pub(super) fn raw_output_after(&self, after_sequence: u64) -> (Vec<u8>, u64) {
+        let mut bytes = Vec::new();
+        let mut next_sequence = after_sequence;
+        for event in self
+            .events
+            .iter()
+            .filter(|event| event.sequence > after_sequence)
+        {
+            next_sequence = event.sequence;
+            if let TerminalBrokerEventKind::Output { bytes: output } = &event.event {
+                bytes.extend_from_slice(output);
+            }
+        }
+        (bytes, next_sequence)
+    }
 }
 
 fn raw_bytes(event: &TerminalBrokerEvent) -> usize {

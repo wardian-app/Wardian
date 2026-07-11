@@ -2098,6 +2098,233 @@ async fn late_ack_cannot_rollback_an_earlier_ack_held_before_send() {
     assert!(committed.broker_state.pending_activation.is_none());
 }
 
+#[tokio::test]
+async fn terminal_session_spawn_geometry_uses_broker_deferred_then_canonical_state() {
+    let broker = TerminalSessionBroker::default();
+    broker
+        .remember_deferred_geometry("deferred", "presentation", geometry(132, 41))
+        .await
+        .expect("deferred geometry");
+    assert_eq!(
+        broker
+            .spawn_geometry("deferred")
+            .await
+            .expect("deferred lookup"),
+        Some(geometry(132, 41))
+    );
+
+    let (runtime, _, _) = runtime();
+    broker
+        .start_or_replace_runtime("live", runtime, geometry(111, 37))
+        .await
+        .expect("live runtime");
+    assert_eq!(
+        broker
+            .spawn_geometry("live")
+            .await
+            .expect("canonical lookup"),
+        Some(geometry(111, 37))
+    );
+    assert_eq!(
+        broker
+            .spawn_geometry("unknown")
+            .await
+            .expect("empty lookup"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_kill_removes_runtime_while_pause_and_replace_keep_generation_rules() {
+    let broker = TerminalSessionBroker::default();
+    let (first_runtime, _, _) = runtime();
+    let first = broker
+        .start_or_replace_runtime("lifecycle", first_runtime, geometry(80, 24))
+        .await
+        .expect("first runtime");
+    let paused = broker
+        .pause_runtime("lifecycle", first)
+        .await
+        .expect("pause");
+    assert_eq!(paused.runtime_state, TerminalRuntimeState::Paused);
+
+    let (second_runtime, _, _) = runtime();
+    let second = broker
+        .start_or_replace_runtime("lifecycle", second_runtime, geometry(100, 30))
+        .await
+        .expect("resume replacement");
+    assert_eq!(second, first + 1);
+    broker
+        .terminate_and_remove_runtime("lifecycle", second)
+        .await
+        .expect("kill removes runtime");
+    assert_eq!(
+        broker.broker_state("lifecycle").await,
+        Err(TerminalBrokerError::SessionNotFound)
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_privileged_input_is_serialized_and_survives_desktop_ownership() {
+    let broker = TerminalSessionBroker::default();
+    let (runtime, mut input_rx, _) = runtime();
+    let generation = broker
+        .start_or_replace_runtime("privileged", runtime, geometry(80, 24))
+        .await
+        .expect("runtime");
+    broker
+        .register_presentation(
+            TerminalPresentationRegistration {
+                presentation_id: "desktop-owner".to_string(),
+                session_id: "privileged".to_string(),
+                client_kind: TerminalClientKind::Desktop,
+                desired_geometry: Some(geometry(100, 30)),
+                visibility: TerminalVisibility::Visible,
+                render_state: TerminalRenderState::Mounted,
+                requested_interaction: TerminalRequestedInteraction::Interactive,
+                observed_lease_epoch: 0,
+            },
+            TerminalClientIdentity::trusted_desktop(),
+        )
+        .await
+        .expect("register owner");
+    let begin = broker
+        .begin_activation(TerminalActivationBeginRequest {
+            session_id: "privileged".to_string(),
+            presentation_id: "desktop-owner".to_string(),
+            runtime_generation: generation,
+            observed_lease_epoch: 0,
+        })
+        .await
+        .expect("begin");
+    broker
+        .ack_activation(TerminalActivationAckRequest {
+            session_id: "privileged".to_string(),
+            presentation_id: "desktop-owner".to_string(),
+            runtime_generation: generation,
+            lease_epoch: begin.decision.lease_epoch,
+            activation_id: begin.activation_id.expect("activation id"),
+        })
+        .await
+        .expect("ack");
+
+    broker
+        .send_privileged_input("privileged", b"system-control".to_vec())
+        .await
+        .expect("privileged input");
+    assert_eq!(
+        input_rx.recv().await.as_deref(),
+        Some(b"system-control".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_pause_drops_runtime_handles_and_closes_input_channel() {
+    let broker = TerminalSessionBroker::default();
+    let (runtime, mut input_rx, _) = runtime();
+    let generation = broker
+        .start_or_replace_runtime("paused-handles", runtime, geometry(80, 24))
+        .await
+        .expect("runtime");
+
+    broker
+        .pause_runtime("paused-handles", generation)
+        .await
+        .expect("pause");
+
+    assert_eq!(
+        input_rx.recv().await,
+        None,
+        "pause must drop the actor's sole sender"
+    );
+    assert_eq!(
+        broker
+            .send_privileged_input("paused-handles", b"blocked".to_vec())
+            .await,
+        Err(TerminalBrokerError::RuntimeUnavailable)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_session_legacy_read_cursor_is_generation_scoped() {
+    let broker = Arc::new(TerminalSessionBroker::default());
+    let (first_runtime, _, _) = runtime();
+    let first_generation = broker
+        .start_or_replace_runtime("reused", first_runtime, geometry(80, 24))
+        .await
+        .expect("first runtime");
+    process_output_for_session(broker.clone(), "reused", first_generation, b"first")
+        .expect("first output");
+    assert_eq!(
+        broker
+            .read_legacy_output("reused", None, false)
+            .await
+            .expect("first read")
+            .as_deref(),
+        Some("first")
+    );
+    assert_eq!(
+        broker
+            .read_legacy_output("reused", None, false)
+            .await
+            .expect("drained read"),
+        None
+    );
+
+    let (second_runtime, _, _) = runtime();
+    let second_generation = broker
+        .start_or_replace_runtime("reused", second_runtime, geometry(100, 30))
+        .await
+        .expect("replacement runtime");
+    process_output_for_session(broker.clone(), "reused", second_generation, b"second")
+        .expect("second output");
+    assert_eq!(
+        broker
+            .read_legacy_output("reused", None, false)
+            .await
+            .expect("replacement read")
+            .as_deref(),
+        Some("second")
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_replacement_lifecycle_notifications_never_regress_generation() {
+    let broker = TerminalSessionBroker::default();
+    let mut lifecycle = broker.subscribe_lifecycle();
+    let (first_runtime, _, _) = runtime();
+    let first = broker
+        .start_or_replace_runtime("ordered-lifecycle", first_runtime, geometry(80, 24))
+        .await
+        .expect("first runtime");
+    assert_eq!(
+        lifecycle.recv().await.expect("started").runtime_generation,
+        first
+    );
+    let (second_runtime, _, _) = runtime();
+    let second = broker
+        .start_or_replace_runtime("ordered-lifecycle", second_runtime, geometry(100, 30))
+        .await
+        .expect("second runtime");
+    let replaced_old = lifecycle.recv().await.expect("old replacement");
+    let replaced_new = lifecycle.recv().await.expect("new replacement");
+    assert!(replaced_old.runtime_generation <= replaced_new.runtime_generation);
+    assert_eq!(replaced_new.runtime_generation, second);
+}
+
+fn process_output_for_session(
+    broker: Arc<TerminalSessionBroker>,
+    session_id: &'static str,
+    runtime_generation: u64,
+    bytes: &'static [u8],
+) -> Result<(), TerminalBrokerError> {
+    std::thread::spawn(move || {
+        broker.process_output_blocking(session_id, runtime_generation, bytes.to_vec())
+    })
+    .join()
+    .expect("reader thread")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn superseding_activations_keep_only_the_current_timeout_signal() {
     let timer = Arc::new(ManualTimer::default());
