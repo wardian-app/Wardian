@@ -10,6 +10,7 @@ import { AgentTerminal, __terminalTesting, shouldExposeTerminalDebug } from "./A
 import { defaultTerminalFontFamily, useSettingsStore } from "../../store/useSettingsStore";
 import { useQueueStore } from "../../store/useQueueStore";
 import { resetTerminalSessionClientsForTesting } from "./terminalSessionClient";
+import { terminalRendererBudget } from "./terminalRendererBudget";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -268,6 +269,7 @@ describe("AgentTerminal scrollback", () => {
     rectSpy.mockRestore();
     cleanup();
     await resetTerminalSessionClientsForTesting();
+    terminalRendererBudget.clear();
   });
 
   it("only exposes terminal debug hooks in dev or with an explicit debug flag", () => {
@@ -510,6 +512,133 @@ describe("AgentTerminal scrollback", () => {
       expect(mockInvoke).toHaveBeenCalledWith("begin_terminal_owner_resync", expect.anything());
       expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_owner_resync", expect.anything());
     });
+  });
+
+  it("restores a budget-evicted owner without unregistering its presentation", async () => {
+    terminalRendererBudget.clear();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (
+        args as {
+          request?: { presentation_id?: string; render_state?: "mounted" | "suspended" };
+        } | undefined
+      )?.request;
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(
+          request?.presentation_id ?? "pane-evicted",
+          "pane-evicted",
+        );
+      }
+      if (command === "subscribe_terminal_events") {
+        return {
+          broker_state: modernBrokerState("pane-evicted"),
+          initial_snapshot: modernSnapshot(),
+        };
+      }
+      if (command === "update_terminal_presentation") {
+        const presentation = modernRegistrationResult("pane-evicted", "pane-evicted").presentation;
+        return {
+          presentation: {
+            ...presentation,
+            render_state: request?.render_state ?? "mounted",
+            requires_resync: request?.render_state === "mounted",
+          },
+          broker_state: modernBrokerState("pane-evicted"),
+        };
+      }
+      if (command === "request_terminal_snapshot") {
+        return modernSnapshot();
+      }
+      if (command === "begin_terminal_owner_resync") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-evicted",
+          },
+          resync_id: "resync-evicted",
+          snapshot: modernSnapshot(),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_owner_resync") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-evicted",
+          },
+          broker_state: modernBrokerState("pane-evicted"),
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("pane-evicted", "pane-evicted").presentation;
+      }
+      if (command === "resize_terminal_presentation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-evicted",
+          },
+          geometry_sequence: 1,
+          geometry: { cols: 80, rows: 24 },
+          snapshot: null,
+        };
+      }
+      if (command === "read_terminal_events") {
+        return modernCaughtUpBatch();
+      }
+      if (command === "ack_terminal_events") {
+        return undefined;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-evicted"
+        visibility="visible"
+        renderState="mounted"
+        requestedInteraction="interactive"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+
+    for (let index = 0; index < 24; index += 1) {
+      terminalRendererBudget.acquire("xterm", `other-${index}`, () => undefined);
+    }
+    fireEvent.click(await screen.findByRole("button", { name: "Activate terminal renderer" }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
+      expect(mockInvoke).toHaveBeenCalledWith("begin_terminal_owner_resync", expect.anything());
+      expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_owner_resync", expect.anything());
+    });
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "register_terminal_presentation"),
+    ).toHaveLength(1);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "unregister_terminal_presentation",
+      expect.anything(),
+    );
   });
 
   it("reports mirror viewport geometry without resizing the native PTY", async () => {

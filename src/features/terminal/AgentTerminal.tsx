@@ -2339,7 +2339,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const [rendererEvicted, setRendererEvicted] = useState(false);
-  const [rendererEpoch, setRendererEpoch] = useState(0);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
 
@@ -2376,6 +2375,50 @@ export const AgentTerminal = memo(function AgentTerminal({
     }
     void fitTerminalToContainer(entry, container, options);
   }, [terminalKey]);
+
+  const restoreEvictedRenderer = useCallback(async () => {
+    const entry = terminalSessionMap.get(terminalKey);
+    const container = terminalRef.current;
+    if (!entry || !container || entry.renderer) {
+      setRendererEvicted(false);
+      return;
+    }
+    const renderer = mountRenderer(terminalKey, entry, container);
+    renderer.term.options.theme = terminalThemeForProvider(
+      effectiveTheme,
+      entry.provider ?? provider,
+    );
+    xtermRef.current = renderer.term;
+    fitAddonRef.current = renderer.fitAddon;
+    setRendererEvicted(false);
+    promoteSessionToWebgl(terminalKey);
+
+    if (entry.legacyMode) {
+      void drainPty(terminalKey);
+      await fitTerminalToContainer(entry, container, { force: true });
+      return;
+    }
+
+    await entry.terminalClient.requestPresentationSnapshot(presentationId);
+    const result = await entry.terminalClient.updatePresentation(presentationId, {
+      desired_geometry: entry.presentationState?.desired_geometry ?? geometryForRenderer(renderer),
+      visibility,
+      render_state: "mounted",
+      requested_interaction: requestedInteraction,
+      observed_lease_epoch: entry.brokerState?.lease_epoch ?? 0,
+    });
+    if (result) {
+      entry.presentationState = result.presentation;
+      entry.brokerState = result.broker_state;
+      if (
+        result.presentation.requires_resync &&
+        result.broker_state.owner_presentation_id === presentationId
+      ) {
+        await entry.terminalClient.resyncOwner(presentationId);
+      }
+    }
+    await fitTerminalToContainer(entry, container, { force: true });
+  }, [effectiveTheme, presentationId, provider, requestedInteraction, terminalKey, visibility]);
 
   const focusTerminal = useCallback(() => {
     xtermRef.current?.focus();
@@ -2568,15 +2611,19 @@ export const AgentTerminal = memo(function AgentTerminal({
                   clearTimeout(visibilityDemoteTimer);
                   visibilityDemoteTimer = null;
                 }
-                renderer.webglAttempted = true;
-                const hadWebgl = Boolean(renderer.webglAddon);
+                const activeRenderer = session.renderer;
+                if (!activeRenderer) {
+                  return;
+                }
+                activeRenderer.webglAttempted = true;
+                const hadWebgl = Boolean(activeRenderer.webglAddon);
                 promoteSessionToWebgl(terminalKey);
                 // Loading the WebGL addon rebuilds xterm's render layers and
                 // re-measures the cell grid. The mount fits above can run before
                 // that (against pre-WebGL metrics), so re-fit once the GPU
                 // renderer is live — otherwise the terminal keeps stale columns
                 // and renders narrow until the user manually resizes the window.
-                if (!hadWebgl && renderer.webglAddon) {
+                if (!hadWebgl && activeRenderer.webglAddon) {
                   requestAnimationFrame(() => checkSizing({ force: true }));
                 }
               } else if (!visibilityDemoteTimer) {
@@ -2612,11 +2659,15 @@ export const AgentTerminal = memo(function AgentTerminal({
             return;
           }
 
-          if (renderer.fitTimeout) {
-            clearTimeout(renderer.fitTimeout);
+          const activeRenderer = session.renderer;
+          if (!activeRenderer) {
+            return;
           }
-          renderer.fitTimeout = setTimeout(() => {
-            renderer.fitTimeout = null;
+          if (activeRenderer.fitTimeout) {
+            clearTimeout(activeRenderer.fitTimeout);
+          }
+          activeRenderer.fitTimeout = setTimeout(() => {
+            activeRenderer.fitTimeout = null;
             checkSizing();
             requestAnimationFrame(() => performFit());
           }, RESIZE_FIT_DEBOUNCE_MS);
@@ -2660,7 +2711,6 @@ export const AgentTerminal = memo(function AgentTerminal({
     performFit,
     presentationId,
     provider,
-    rendererEpoch,
     sessionId,
     terminalKey,
     workspacePath,
@@ -2795,8 +2845,10 @@ export const AgentTerminal = memo(function AgentTerminal({
           type="button"
           className="absolute inset-0 z-30 flex items-center justify-center bg-surface text-sm text-muted"
           onClick={() => {
-            setRendererEvicted(false);
-            setRendererEpoch((value) => value + 1);
+            void restoreEvictedRenderer().catch((error) => {
+              console.error("Terminal renderer restore failed:", error);
+              setInitError(String(error));
+            });
           }}
         >
           Activate terminal renderer
