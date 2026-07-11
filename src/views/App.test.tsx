@@ -698,7 +698,7 @@ describe("Workbench persistence boot integration", () => {
         return Promise.resolve({
           source: "primary",
           document: makeSingleGroupDocument([
-            makeSurface("queue-surface", { surface_type: "queue" }),
+            makeSurface("queue-surface", { surface_type: "queue", state: {} }),
           ]),
           notice: null,
           durable_revision: 0,
