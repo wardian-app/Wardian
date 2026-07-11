@@ -128,6 +128,12 @@ describe("core view surface definitions", () => {
         <HeavyProbe />
       </SuspendedSurfaceRenderer>,
     );
+    expect(screen.getByTestId("heavy-renderer").parentElement).toHaveClass(
+      "flex",
+      "flex-col",
+      "h-full",
+      "min-h-0",
+    );
     expect(screen.getByTestId("heavy-renderer")).toBeInTheDocument();
     expect(onMount).toHaveBeenCalledTimes(1);
 

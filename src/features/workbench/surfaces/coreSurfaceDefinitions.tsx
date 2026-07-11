@@ -77,7 +77,7 @@ export function SuspendedSurfaceRenderer({
 
   return (
     <div
-      className="h-full min-h-0 min-w-0"
+      className="flex h-full min-h-0 min-w-0 flex-col"
       data-heavy-renderer-state={rendererMounted ? "mounted" : "released"}
     >
       {typeof children === "function"
