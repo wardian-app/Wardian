@@ -608,12 +608,12 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 - Modify: `src/store/useLibraryStore.ts`
 - Modify: `src/store/useBuilderStore.ts`
 
-- [ ] **Step 1: Register exact policies:** Dashboard/Queue singleton + recreate; Graph/Garden singleton + suspend; Library/Workflows singleton + keep alive/dirty guard. Add state version/size/open commands/badges for each.
-- [ ] **Step 2: Route Queue/Graph/Garden agent actions** through `NavigationService` to Agent Session. Selection remains a separate roster action.
-- [ ] **Step 3: Replace App's `cachedCanvasViews`** with registry lifecycle. Use fake timers to prove Graph/Garden destroy heavy renderers after 30 hidden seconds and restore registered/shared state.
-- [ ] **Step 4: Add Library/Workflows Save/Discard/Cancel guards.** A failed save or cancel aborts close group/reset atomically. Keep their existing domain stores as resource owners.
-- [ ] **Step 5: Run** the focused surface/view/store tests. `rg -n "setViewMode|ViewMode"` on migrated components must return no matches.
-- [ ] **Step 6: Commit** `feat(workbench): migrate core Wardian surfaces`.
+- [x] **Step 1: Register exact policies:** Dashboard/Queue singleton + recreate; Graph/Garden singleton + suspend; Library/Workflows singleton + keep alive/dirty guard. Add state version/size/open commands/badges for each.
+- [x] **Step 2: Route Queue/Graph/Garden agent actions** through `NavigationService` to Agent Session. Selection remains a separate roster action.
+- [x] **Step 3: Replace App's `cachedCanvasViews`** with registry lifecycle. Use fake timers to prove Graph/Garden destroy heavy renderers after 30 hidden seconds and restore registered/shared state.
+- [x] **Step 4: Add Library/Workflows Save/Discard/Cancel guards.** A failed save or cancel aborts close group/reset atomically. Keep their existing domain stores as resource owners.
+- [x] **Step 5: Run** the focused surface/view/store tests. `rg -n "setViewMode|ViewMode"` on migrated components must return no matches.
+- [x] **Step 6: Commit** `feat(workbench): migrate core Wardian surfaces`.
 
 ### Task 14: Route auxiliary objects and complete the feature-flagged surface migration
 
