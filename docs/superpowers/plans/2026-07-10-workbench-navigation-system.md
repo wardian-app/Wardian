@@ -699,11 +699,11 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 }>;
 ```
 
-- [ ] **Step 1: Write a failing navigation suite** for open all, singleton focus, Agent Session Open to Side, split/move/join/close, zoom, reopen, keyboard group/tab traversal, left-rail non-navigation, auxiliary object routing, roster select versus open, and all-or-nothing close guards.
-- [ ] **Step 2: Write Overview tests** using real container sizes for Auto/Grid/Single, scrolling explicit Grid, persisted Single, debounce/hysteresis, selected-target independence, and focused-agent fallback. Expose `data-overview-mode="grid|single"` only as semantic state.
-- [ ] **Step 3: Write recovery tests** for exact mock restore, shell sizes, unknown inert surface, missing-agent placeholder actions, backup notice, future-schema read-only behavior, Reset Surface, and guarded Reset Workbench.
-- [ ] **Step 4: Add `test:e2e:workbench`** and run it with `VITE_WARDIAN_WORKBENCH=1`, then run the full browser suite in the same flagged configuration. **Expected:** PASS; no browser test makes filesystem or PTY claims.
-- [ ] **Step 5: Commit** `test(workbench): cover tabs splits overview and recovery`.
+- [x] **Step 1: Write a failing navigation suite** for open all, singleton focus, Agent Session Open to Side, split/move/join/close, zoom, reopen, keyboard group/tab traversal, left-rail non-navigation, auxiliary object routing, roster select versus open, and all-or-nothing close guards.
+- [x] **Step 2: Write Overview tests** using real container sizes for Auto/Grid/Single, scrolling explicit Grid, persisted Single, debounce/hysteresis, selected-target independence, and focused-agent fallback. Expose `data-overview-mode="grid|single"` only as semantic state.
+- [x] **Step 3: Write recovery tests** for exact mock restore, shell sizes, unknown inert surface, missing-agent placeholder actions, backup notice, future-schema read-only behavior, Reset Surface, and guarded Reset Workbench.
+- [x] **Step 4: Add `test:e2e:workbench`** and run it with `VITE_WARDIAN_WORKBENCH=1`, then run the full browser suite in the same flagged configuration. **Expected:** PASS; no browser test makes filesystem or PTY claims.
+- [x] **Step 5: Commit** `test(workbench): cover tabs splits overview and recovery`.
 
 ### Task 17: Add native persistence, desktop/remote lease, and runtime-lifecycle proof
 
