@@ -420,47 +420,15 @@ pub async fn read_agent_pty(
     options: Option<ReadAgentPtyOptions>,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    static LEGACY_READ_CURSORS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let watch_state = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(&session_id)
-            .map(|agent| agent.watch_state.clone())
-            .ok_or_else(|| format!("Agent {} not found", session_id))?
-    };
-    let cursor = LEGACY_READ_CURSORS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&session_id)
-        .cloned();
-    let snapshot = {
-        let watch = watch_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match watch.raw_snapshot_since(
-            cursor.as_deref(),
-            options.as_ref().and_then(|o| o.max_bytes),
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) if error.code() == "cursor_expired" => watch
-                .raw_snapshot_since(None, options.as_ref().and_then(|o| o.max_bytes))
-                .map_err(|retry| retry.code().to_string())?,
-            Err(error) => return Err(error.code().to_string()),
-        }
-    };
-    if !options.as_ref().is_some_and(|value| value.peek) {
-        LEGACY_READ_CURSORS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session_id, snapshot.cursor.clone());
-    }
-    if snapshot.text.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(snapshot.text))
-    }
+    state
+        .terminal_sessions
+        .read_legacy_output(
+            &session_id,
+            options.as_ref().and_then(|value| value.max_bytes),
+            options.as_ref().is_some_and(|value| value.peek),
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
