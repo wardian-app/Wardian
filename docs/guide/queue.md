@@ -8,7 +8,7 @@ Use it when you need to review finished work, catch failed workflow runs, respon
 
 ## When to Use It
 
-- Review agent completions after working in [Grid](./grid.md), [Command Panel](./command-panel.md), or the [Wardian CLI](./cli.md).
+- Review agent completions after working in [Agents Overview](./agents-overview.md), an agent-session tab, [Command Panel](./command-panel.md), or the [Wardian CLI](./cli.md).
 - Triage workflow completions and failures from the [Workflow View](./workflows.md).
 - Keep unread outcomes visible while you inspect files, source control, or follow-up terminals.
 
@@ -24,7 +24,7 @@ Workflow failures are filterable separately from successful workflow completions
 
 ## Reading Queue Items
 
-Open **Queue** from the top workspace tabs. Unread items appear at the top and increment the Queue tab badge.
+Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Home state, then choose **Queue**. Unread items appear at the top and increment the Queue tab badge. Queue is a singleton surface, so opening it again focuses the existing tab.
 
 Each item shows:
 
@@ -47,7 +47,7 @@ These preferences persist under the active Wardian home.
 ## Triage Actions
 
 - Click an item to mark it read.
-- Use **Open** on an agent card to focus the related agent terminal when the session still exists.
+- Use **Open** on an agent card to open or focus the related agent-session surface when the session still exists.
 - Use the response buttons on an **Action needed** card when Wardian recognizes provider choices such as `1. Yes` or `2. No`.
 - Use **Open** when the action request needs context, editing, or a response format Wardian cannot infer safely.
 - Use **Mark all read** when the full queue has been reviewed.
@@ -83,10 +83,10 @@ Desktop alerts use Wardian's native desktop notification plugin when available, 
 
 ## Practical Workflow
 
-1. Let agents or workflows run from the Grid, Command Panel, CLI, or Workflow view.
+1. Let agents or workflows run from Agents Overview, agent-session tabs, Command Panel, CLI, or the Workflows surface.
 2. Watch the Queue badge for new completions.
 3. Open Queue, review summaries, and expand details when the summary was truncated.
-4. Open the source agent terminal or choose a visible response button when an Action needed card appears.
+4. Open the source agent terminal in a tab or choose a visible response button when an Action needed card appears. To keep both contexts visible, leave Queue active and choose **Open to Side** for the agent in the right roster.
 5. Mark reviewed items read and clear them when they are no longer needed.
 
 ## Important Limits
@@ -101,7 +101,8 @@ Desktop alerts use Wardian's native desktop notification plugin when available, 
 ## Related Links
 
 - [Getting Started](./getting-started.md)
-- [Grid](./grid.md)
+- [Workbench](./workbench.md)
+- [Agents Overview](./agents-overview.md)
 - [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)
 - [Workflows](../workflows/index.md)

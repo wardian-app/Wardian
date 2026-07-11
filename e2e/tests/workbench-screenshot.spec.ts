@@ -98,6 +98,8 @@ test("renders a capture-ready tabs-and-splits workbench", async ({ page }, testI
   await expect(page.getByTestId("sidebar-icon-rail")).toBeVisible();
   await expect(page.getByTestId("agent-watchlist")).toBeVisible();
   await expect(page.locator('[data-testid="agent-card"]:visible')).toHaveCount(3);
+  await expect(page.getByText("Saving workbench changes…", { exact: true })).toBeHidden();
+  await page.waitForTimeout(500);
 
   const path = process.env.WARDIAN_WORKBENCH_SCREENSHOT
     ?? testInfo.outputPath("tabs-and-splits.png");

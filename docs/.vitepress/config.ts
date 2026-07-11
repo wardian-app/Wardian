@@ -49,12 +49,14 @@ export default defineConfig({
             { text: "Provider Readiness", link: "/guide/provider-readiness" },
             { text: "First-Run Troubleshooting", link: "/guide/first-run-troubleshooting" },
             { text: "UI Overview", link: "/guide/ui-overview" },
+            { text: "Workbench", link: "/guide/workbench" },
           ],
         },
         {
           text: "Run and Monitor Agents",
           items: [
-            { text: "Grid", link: "/guide/grid" },
+            { text: "Agents Overview", link: "/guide/agents-overview" },
+            { text: "Grid Compatibility", link: "/guide/grid" },
             { text: "Dashboard", link: "/guide/dashboard" },
             { text: "Watchlists", link: "/guide/watchlists" },
             { text: "Queue", link: "/guide/queue" },

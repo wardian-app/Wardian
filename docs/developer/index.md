@@ -6,7 +6,9 @@ Use this index when implementing or debugging Wardian internals.
 
 - [Architecture Overview](./architecture.md)
 - [State Management](./state-management.md)
+- [Workbench Surfaces](./workbench-surfaces.md)
 - [PTY Lifecycle](./pty-lifecycle.md)
+- [Terminal Presentation Broker](./terminal-presentation-broker.md)
 - [Provider Runtime Notes](./provider-runtimes.md)
 
 ## Runtime Contracts

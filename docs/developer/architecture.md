@@ -12,9 +12,11 @@ invariants:
   library files own reusable prompts, skills, classes, and workflow blueprints;
   watchlist/team records own roster organization until a broader project-scope
   model exists.
-- **Views are lenses, not state silos.** Grid, Dashboard, Graph, Garden,
-  Library, Workflows, Explorer, Queue, and the CLI should resolve and
-  mutate canonical Wardian records through shared commands or file contracts.
+- **Surfaces are lenses, not state silos.** Agents Overview, Dashboard, Graph,
+  Garden, Library, Workflows, Queue, and future workbench contributions resolve
+  and mutate canonical Wardian records through shared commands or file
+  contracts. A surface owns bounded presentation state, not a private copy of
+  domain or runtime truth.
 - **Artifacts stay inspectable where practical.** User-shapable prompts,
   classes, skills, workflows, evidence, and memory-ready context should remain
   discoverable on disk or through stable CLI/backend queries.
@@ -31,6 +33,10 @@ invariants:
 - **Source of Truth**: The Rust backend is the definitive authority on all agent sessions, PTY states, and telemetry.
 - **Shared Core**: `crates/wardian-core` owns shared paths, SQLite migrations, agent DTOs, and identity lookup so the Tauri app and CLI use the same durable state contract.
 - **PTY Management**: Uses `portable-pty` for cross-platform PTY handles. On Windows, it leverages `win32job` to ensure child processes are strictly terminated when the agent session ends.
+- **Terminal Session Broker**: One Rust actor per PTY runtime owns canonical
+  terminal geometry, ordered output, bounded snapshots/replay, and the single
+  interactive presentation lease shared by desktop and remote clients. See
+  [Terminal Presentation Broker](./terminal-presentation-broker.md).
 - **Provider Adapters**: Agent CLIs are integrated behind a Rust provider layer so session spawn, headless execution, and telemetry enrichment can support Gemini, Antigravity, Claude, Codex, and OpenCode without rewriting the rest of the backend.
   See [Provider Runtime Notes](./provider-runtimes.md) for the provider-specific working-root, skill, and session rules that sit behind this abstraction.
 - **Habitat Projection**: For providers that cannot natively discover Wardian instructions and skills from external include roots, the backend materializes a neutral per-session `habitat` directory. That habitat links the real workspace, projects a scoped `AGENTS.md`, and exposes provider-native skill layouts without mutating the user repository. OpenCode is an explicit exception: it stays in the real workspace and receives class/skill scope through injected runtime config instead of a projected workspace.
@@ -57,9 +63,15 @@ invariants:
 ### 3. The UI Layer (React Frontend)
 
 - **Passive Observation**: The UI primarily observes and edits the state; it does not manage process lifecycles.
+- **Workbench Model**: `WorkbenchDocumentV1` is the canonical central-layout
+  model. A typed registry defines surface lifecycle and state contracts, while
+  `NavigationService` is the mutation boundary. Dockview is a replaceable
+  rendering adapter and never owns durable state. See
+  [Workbench Surfaces](./workbench-surfaces.md).
 - **Visual Builder**: A specialized canvas for designing complex multi-agent workflows, featuring the [Integrated Variable Assistant](./visual-builder.md).
-- **Dynamic Grid**: A responsive grid system for monitoring multiple terminal TUIs simultaneously.
-- **Queue View**: A triage surface for unread agent completions and workflow outcomes.
+- **Agents Overview**: A responsive workbench surface for monitoring multiple
+  terminal presentations in Auto, Grid, or Single mode.
+- **Queue Surface**: A triage surface for unread agent completions and workflow outcomes.
 
 ## 📡 Communication (IPC)
 
@@ -67,8 +79,15 @@ Wardian uses a bidirectional event system, detailed in [IPC and Event Governance
 
 - **Events (Push)**: Rust pushes telemetry (`agent-metrics`), structured logs (`agent-json-event`), and PTY readiness notifications (`agent-pty-output-ready`) to the UI.
 - **Commands (Pull)**: The UI invokes Rust functions for high-level actions (`spawn_agent`, `workflow_run`).
-- **Terminal Input**: The UI invokes `send_input_to_agent` and `send_binary_input_to_agent` directly so PTY control replies and raw mouse bytes take the shortest path back to the agent process.
-- **Terminal Host Lifecycle**: The frontend keeps one live xterm instance per session and reattaches its DOM host across pane remounts instead of disposing and reconstructing the emulator.
+- **Terminal Input**: Presentation-aware commands carry session, presentation,
+  runtime generation, and lease epoch. Only the broker's active owner may send
+  terminal keystrokes, binary input, or geometry. Structured prompt delivery
+  remains a separate audited control path.
+- **Terminal Presentation Lifecycle**: Each visible representation owns an
+  independent xterm. One desktop session client fans the broker's canonical
+  snapshot/event stream to local presentations; renderer eviction restores
+  from a bounded snapshot instead of moving one module-global terminal between
+  DOM hosts.
 
 ## Wardian CLI
 

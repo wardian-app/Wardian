@@ -83,7 +83,21 @@ PTY behavior cannot be validated by browser-only UI tests.
 When debugging or testing PTY issues, treat browser smoke results as insufficient evidence. Use the native runtime harness for any claim about terminal or provider behavior.
 
 ## 📐 Terminal Resizing
-Terminal resizing is handled asynchronously in `manager::resize_pty`. When the UI grid layout changes, it invokes a Tauri command that updates the PTY dimensions (`rows` and `cols`) via the `pty_master` handle, ensuring the agent's TUI renders correctly.
+
+Terminal resizing is presentation-aware. Each visible terminal reports its
+desired viewport without touching the PTY. Only the broker's active lease owner
+may submit an epoch-bearing resize with a monotonically increasing geometry
+sequence. The broker serializes native PTY resize, parser resize, canonical
+geometry update, and the geometry stream event as one commit; stale, mirror, or
+reordered requests are rejected nonfatally.
+
+Desktop geometry is clamped to 20..500 columns and 8..200 rows. Remote geometry
+uses 20..240 columns and 8..80 rows. Mirrors scale, pan, or letterbox the
+canonical owner grid locally instead of applying smallest-client-wins geometry.
+This keeps desktop rendering stable when a phone or narrow split is attached.
+
+See [Terminal Presentation Broker](./terminal-presentation-broker.md) for the
+generation, lease, snapshot, and ownership-transfer protocol.
 
 ## 🖥️ Frontend Terminal Runtime
 
@@ -93,7 +107,9 @@ Wardian's frontend terminal stack is built on `xterm.js` and is intentionally tr
 
 - Wardian uses xterm's WebGL renderer for mounted terminal views when available. WebGL is preferred because xterm's `customGlyphs` support for block and box-drawing characters does not apply to the DOM renderer, and provider TUIs such as Claude Code rely on those glyphs for mascot/status rendering.
 - If WebGL is unavailable or loses its context, Wardian falls back to xterm's built-in DOM renderer rather than failing terminal initialization.
-- Renderer instances are not the durable source of truth. Wardian reuses a live renderer across ordinary pane moves, but the parser state remains canonical if a renderer must be recreated.
+- Renderer instances are not the source of runtime truth. Each presentation has
+  an independent renderer, while the Rust broker parser, snapshots, and ordered
+  event stream remain canonical if it must be recreated.
 - Provider integrations must not depend on renderer-specific behavior.
 
 ### Capability Handling
@@ -111,26 +127,35 @@ That layer is responsible for responding to standard terminal queries such as:
 
 Provider-specific terminal adapters should only exist when a provider genuinely requires non-standard behavior. Capability replies should otherwise be implemented once in the shared terminal layer.
 
-### In-App Replay Model
+### Broker Snapshot and Replay Model
 
-Wardian preserves terminal state across UI remounts inside the running app process.
+Wardian preserves terminal state across presentation remounts and independent
+desktop/remote renderers while the PTY runtime is live.
 
 That means:
 
-- switching views
-- maximizing or restoring panes
+- switching tabs
+- zooming or restoring groups
 - remounting the terminal component
 
 should not discard the active terminal buffer.
 
-This is intentionally scoped to the current app process only. Full restart persistence is still out of scope.
+Terminal contents are runtime state and are never written into the workbench
+document. A process restart can restore the tab but not a terminated PTY's
+screen contents.
 
 The session model is split into two layers:
 
-- a detached parser terminal that continuously receives PTY output and owns the canonical in-app screen state
-- a mounted view terminal that can be disposed and recreated without losing that state
+- a Rust broker parser that continuously receives PTY output and owns canonical
+  in-process screen, geometry, bounded snapshot, and replay state;
+- independent mounted presentation terminals that consume one ordered stream
+  and can be disposed and reconstructed from a snapshot/barrier.
 
-When a terminal view remounts and the existing renderer is still valid, Wardian reattaches that renderer. If a renderer must be recreated, Wardian restores it from the parser terminal's serialized state instead of replaying raw PTY chunks into a fresh xterm view.
+When a presentation remounts and its renderer remains within the process-wide
+budget, Wardian can reuse it. If it was suspended or evicted, the presentation
+applies a fresh bounded broker snapshot, discards events at or below the
+snapshot barrier, and then replays consecutive later events. It must resync
+again on a cursor gap or generation change.
 
 ### Redraw and Scrollback Normalization
 

@@ -134,7 +134,7 @@ Open the **Agent Configuration** rail item and fill in the spawn form:
 4. Set the workspace to `<absolute-workspace-path>`.
 5. Click **Initialize**.
 
-The new agent appears in the right roster and in the Grid.
+The new agent appears in the right roster and in Agents Overview. If Agents Overview is not open, press `Ctrl+P` / `Cmd+P` and choose **Agents Overview**, or use **Open** on the agent in the roster to create an agent-session tab.
 
 ![Wardian Grid showing active agents with status and terminal cards](../assets/screenshots/grid/active-agent-state.png)
 
@@ -149,17 +149,17 @@ If the terminal stays blank, exits immediately, or the agent remains stuck in Pr
 
 ## 7. Send the First Instruction
 
-Click inside the agent terminal and send a small, low-risk instruction:
+Click inside the agent terminal to explicitly activate that presentation, then send a small, low-risk instruction:
 
 ```text
 Summarize this workspace in five bullets. Do not edit files.
 ```
 
-Use a read-only prompt for the first run. After you trust the provider, you can ask it to inspect files, make changes, run commands, or coordinate with other Wardian agents.
+Use a read-only prompt for the first run. After you trust the provider, you can ask it to inspect files, make changes, run commands, or coordinate with other Wardian agents. If the terminal shows **Mirror** or **Read only**, click inside it before typing. If it shows **Activate terminal renderer**, select that action first.
 
 ## 8. Review the Result in Queue
 
-When an active agent finishes and returns to Idle, Wardian adds a completion item to **Queue**. Open **Queue** from the top workspace tabs and review the result.
+When an active agent finishes and returns to Idle, Wardian adds a completion item to **Queue**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Queue**. To keep the agent beside Queue, leave Queue active and choose **Open to Side** for that agent in the right roster.
 
 ![Wardian Queue showing a completed first agent task with a summary](../assets/screenshots/queue/completed-result.png)
 
@@ -207,7 +207,9 @@ Related docs:
 
 ## Next Steps
 
-- Learn the main windows in [UI Overview](./ui-overview.md).
+- Learn tabs, splits, restore, and terminal ownership in [Workbench](./workbench.md).
+- Monitor several agents with [Agents Overview](./agents-overview.md).
+- Learn the persistent shell in [UI Overview](./ui-overview.md).
 - Recover from first-run launch, provider, terminal, Queue, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
 - Manage reusable prompts, skills, classes, and workflow blueprints in [Library](./library.md).
 - Use [Class Management](./class-management.md) for class concepts; edit class instructions and class-level skills from the Library's Classes section.

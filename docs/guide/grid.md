@@ -1,62 +1,49 @@
 # Grid
 
-The Grid is Wardian's primary live workspace for interacting with active agent cards.
+Grid is a display mode inside the [Agents Overview](./agents-overview.md) Workbench surface. It is no longer a global page or a title-bar destination.
 
-Use it when you need to watch multiple agents at once, type directly into a specific agent, scan normalized agent activity, or keep terminal state visible while agents run.
+This compatibility guide preserves the familiar Grid workflows and points older instructions to their current location.
 
-![Wardian Grid view showing the left control rail, active agent cards, and right agent roster](../assets/screenshots/grid/app-shell.png)
+![Agents Overview in Grid mode showing active agent cards](../assets/screenshots/grid/app-shell.png)
 
-## When to Use It
+## Open Grid Mode
 
-- Watch active terminals side by side.
-- Scan chat transcripts and activity blocks side by side.
-- Type directly into one provider session.
-- Reorder agent cards to match the work you are supervising.
-- Jump from the roster to the matching terminal.
+1. Press `Ctrl+P` / `Cmd+P`, or select a pane's **+** button.
+2. Open **Agents Overview**.
+3. Select **Grid** in the surface header.
 
-## Basic Workflow
+Use **Auto** when Wardian should switch between a multi-card grid and a focused single card based on available space. Use **Single** when one focused agent should fill the surface.
 
-1. Start with [Getting Started](./getting-started.md) if you have not spawned an agent yet.
-2. Click **Grid** in the top workspace tabs.
-3. Select one or more agents in the roster when you want sidebar tools to target them.
-4. Click inside an agent terminal to type directly to that session.
-5. Drag agent cards to reorder the workspace when you need a different visual priority.
-6. Double-click an agent in the roster to bring that agent into view.
+## What Grid Mode Keeps
 
-## Display Modes
+- Live terminal cards side by side.
+- Normalized Chat cards with per-agent prompt drafts.
+- Drag-to-reorder card headers.
+- Manual row and column resizing.
+- Per-card **Terminal** / **Chat** switches.
+- **Maximize** to focus one agent in Single mode.
+- **Reset Grid Layout** in the background context menu.
 
-Grid cards can render either:
+The default card display comes from **Settings > Grid > Grid card display**. Per-agent overrides remain temporary to the Overview surface.
 
-- **Terminal**: the provider terminal/TUI, including raw keyboard control, approvals, and raw output.
-- **Chat**: normalized user, assistant, status, tool, approval, and terminal-output events for faster scanning, plus a compact prompt composer for standard text input.
+## What Changed
 
-Change the default globally in **Settings > Grid > Grid card display**. Each card also has a small **Terminal** / **Chat** mode switch in its header for temporary per-agent overrides. Switching from Terminal to Chat focuses that card's composer, and unsent Chat text stays with the agent while you switch modes.
+- To open another app area, open a Workbench surface instead of switching a global view.
+- The right roster separates targeting from navigation. Selecting an agent targets auxiliary tools; **Open** or **Open to Side** opens its session.
+- Closing the Agents Overview tab closes only the presentation. It does not stop any agent.
+- Workbench **Zoom pane** expands one pane. Card **Maximize** changes Agents Overview to Single mode. Neither action maximizes the native application window.
 
-Chat mode sends ordinary text through the same provider submit path used by Wardian's command tools. Use **Enter** to send and **Shift+Enter** for a newline in the composer. When Wardian recognizes an action-required prompt with approval choices, Chat mode renders those choices as buttons that submit the matching response. Switch back to Terminal mode when you need raw TUI controls, provider-specific keybindings, or detailed terminal behavior.
+## Terminal and Chat Behavior
 
-Chat mode renders common GitHub-flavored Markdown in agent messages, including tables, task lists, nested lists, blockquotes, strikethrough, autolinks, and fenced code blocks. Tool activity is summarized for scanning: empty successful tool results are folded into their command rows, while failures, changed files, command output, approvals, and errors remain visible.
+Terminal mode uses the provider's real PTY, including raw keys, approvals, TUIs, scrollback, and clickable supported links. Click inside a terminal to explicitly activate that presentation before typing. A mirrored presentation stays read-only until activated.
 
-In Terminal mode, Wardian follows conservative terminal shortcut handling. On macOS, **Cmd+A** selects the visible terminal buffer. Windows and Linux control-key combinations, including **Ctrl+A** and **Ctrl+Shift+A**, continue through to the shell or provider TUI by default.
+Chat mode shows normalized user, assistant, status, tool, approval, and terminal-output events. Use `Enter` to send and `Shift+Enter` for a newline. Switch back to Terminal when you need provider-specific keys or a raw approval screen.
 
-Terminal output can also expose clickable HTTP/HTTPS URLs and workspace file paths, including links that wrap across terminal rows. URL links open in the system browser, while file path links use the external editor behavior configured in Settings.
-
-![Terminal output showing clickable URL and workspace file path links with underlines aligned below the detected text](../assets/screenshots/terminal/clickable-links.png)
-
-![Grid chat mode showing normalized agent messages, action-needed output, and prompt composers](../assets/screenshots/grid-chat/chat-composer.png)
-
-![Grid chat mode showing a grouped work log with concrete shell commands instead of generic status rows](../assets/screenshots/grid-chat/tool-call-work-log.png)
-
-## Important Limits
-
-- Grid only shows agents that have active or restorable Wardian sessions.
-- Chat mode depends on provider transcript/watch data. If a provider does not expose structured activity, Wardian falls back to retained terminal output where possible.
-- Action-required prompts can be answered from the chat composer or clickable approval choices when the provider accepts text input. Terminal mode remains the fallback for provider-specific approval screens.
-- Terminal state is preserved across common remounts, but provider TUIs can still repaint after resize or reconnect events.
-- Use [Command Panel](./command-panel.md) for repeatable fan-out messages instead of typing the same text into each terminal.
+Wardian preserves terminal state across tab changes, pane moves, Overview layout changes, and remote handoff. If a renderer was reclaimed, select **Activate terminal renderer** to restore it from retained state.
 
 ## Related Links
 
-- [Dashboard](./dashboard.md)
+- [Agents Overview](./agents-overview.md)
+- [Workbench](./workbench.md)
 - [Watchlists](./watchlists.md)
 - [Command Panel](./command-panel.md)
-- [Queue](./queue.md)

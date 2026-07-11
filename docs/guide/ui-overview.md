@@ -1,81 +1,84 @@
 # User Interface Overview
 
-Wardian features a dense local-first interface for watching, directing, and reorganizing the agents you run locally. The current shell keeps live terminals, reusable context, workflow state, Queue evidence, and the agent roster visible while Wardian moves toward the HabitatLayout model of Sites, Cohorts, and movable work surfaces.
+Wardian uses a persistent app shell around a tab-based [Workbench](./workbench.md). The shell keeps auxiliary tools and the agent roster available while the center can hold one surface, several tabs, or multiple split panes.
 
-## 🧱 The Layout Architecture
+![Wardian workspace showing the left control rail, agent surfaces, and right agent roster](../assets/screenshots/grid/app-shell.png)
 
-![Wardian Grid view showing the left control rail, active agent cards, and right agent roster](../assets/screenshots/grid/app-shell.png)
+## Title Bar
 
-### 1. Unified Top Bar
+The title bar is intentionally quiet: its center is drag space, not navigation or a command toolbar. Dashboard, Queue, Library, Workflows, Graph, Garden, Agents Overview, and agent sessions open as pane-local tabs. Use `Ctrl+P` / `Cmd+P` for Quick Open and `Ctrl+Shift+P` / `Cmd+Shift+P` for the command palette.
 
-The fixed header at the top of the application acts as the global navigation and system telemetry hub.
+The title bar retains the left sidebar toggle, optional telemetry, right roster toggle, and native window controls.
 
-- **Left**: Workspace branding and sidebar toggle controls.
-- **Center (View Switcher)**: Quickly toggle between primary workspace modes:
-  - **GRID**: The primary terminal workspace for live agent interaction.
-  - **DASHBOARD**: A summary view of system health and active agent status.
-  - **LIBRARY**: Management center for prompts, skills, classes, workflow blueprints, and future MCP definitions.
-  - **WORKFLOWS**: Visual canvas for building automated agent sequences.
-  - **QUEUE / GRAPH / GARDEN**: Specialized views for completion triage, communication topology, and spatial agent organization.
-- **Right (Telemetry)**: Real-time monitoring of aggregate **CPU**, **Memory**, and **Active Agent** count.
+## Workbench
 
-![Wardian Dashboard view showing compact agent status rows and quick controls](../assets/screenshots/dashboard/system-summary.png)
+The center workspace is composed of tabbed panes. Each pane can contain several surfaces and can be split right or down. Drag tabs to reorder them, move them between panes, or drop them at an edge to create a split.
 
-The **Graph** mode maps agents as status-colored nodes with topology edges for manual connections and team-seeded communication links. It also offers read-only relationship lenses for same team, same project (same repository, following worktrees back to their source), and same folder (same physical checkout). Open the inspector or context menu from any node to use the same agent actions available in the roster.
+Use the **+** button in a pane or its empty **Home** state to open a surface there. In Quick Open, `Ctrl+Enter` / `Cmd+Enter` opens the selected surface to the side; the picker has no separate visible Open to Side button. The pane **…** menu contains split, merge, zoom/restore, and pane-close actions. Right-click a tab for tab-specific move, split, and close actions, or use the close button shown on the active or hovered tab.
 
-The **Garden** mode is a spatial canvas for organizing agents and workflows as draggable units (living orbs / pods) you arrange freely. Agent units display live status color; workflow units cluster in a shelf and show run state. Unit positions persist locally across restart. Only actively-processing units animate with a gentle pulse — the default is calm. Full agent session inspection still happens by opening the agent in Grid (Garden routes there), not inside Garden.
+Wardian persists the layout and restores it after restart. Recently closed surfaces can be reopened. Recoverable placeholders keep unavailable surface or agent references visible instead of silently deleting them; **Reset Workbench** deliberately returns to the default layout.
 
-### 2. Left Sidebar (Control & Context)
+See [Workbench](./workbench.md) for the complete tab, split, restore, safe-mode, and keyboard behavior.
 
-The Left Sidebar provides the "Context" for your work. It consists of:
+## Left Rail: Auxiliary Control
 
-- **Navigation Rail**: Vertical icon strip to switch between sidebar tabs:
-  - **Explorer**: Browse the physical files of the selected agent or the Wardian home.
-  - **Source Control**: Stage, diff, commit, sync, and manage worktree mode for the selected agent workspace.
-  - **Agent Configuration**: Quick settings for spawning and tuning agents.
-  - **Classes**: Blueprint editor for reusable agent roles and class-level skills.
-  - **Command**: Broadcast text and run starred quick prompts against selected agents.
-  - **Settings**: System-wide preferences, theme engine, and the default runtime shell used by agents and shell-based workflows.
-- **Content Pane**: Displays the detailed menu or tree for the active rail icon.
+The left icon rail opens collapsible auxiliary panes:
 
-### 3. Right Sidebar (The Roster)
+- **Explorer** browses the selected agent workspace or Wardian home.
+- **Source Control** stages, diffs, commits, syncs, and manages worktrees for the selected agent.
+- **Agent Configuration** spawns and configures agents.
+- **Command** sends broadcasts and starred prompts to selected agents.
+- **Workflows** provides workflow-related auxiliary controls and can explicitly open the Workflows surface.
+- **Terminal** opens the standalone user terminal.
+- **Settings** opens application preferences.
 
-The **Agent Watchlist** is your persistent high-fidelity roster for monitoring all active agent instances.
+The rail never performs global surface navigation. Changing rail tools leaves the active Workbench tab and split layout intact.
 
-- **Status Indicators**: Instant visual feedback on agent states (Idle, Processing, Action Needed, Error).
-- **Thought Stream**: A real-time glimpse into the agent's internal monologue and current task progress.
-- **Watchlists**: Organize agents into logical groups (e.g., "Dev Team", "Security Audit") for easier oversight.
+## Right Roster: Monitor and Target
 
-### Agent Cloning
+The Agent Watchlist is the persistent roster for status, selection, teams, watchlists, and lifecycle actions.
 
-Use the single-agent roster context menu to create Fresh, Profile, or Custom clones. Clicking **Clone** directly starts a Fresh Clone immediately. The **Fresh Clone** submenu option keeps visible setup and starts a clean provider session. **Profile Clone** also keeps agent-local profile files and instance skills. **Custom Clone** opens a modal where you can change the clone name, provider engine, agent class, workspace path, and choose which eligible agent-local files and instance skills to keep.
+Roster selection sets the target for auxiliary tools such as Explorer, Source Control, and Command. It is separate from Workbench navigation:
 
-## 🖱️ Interaction Patterns
+- **Open** focuses or opens that agent session in the active pane.
+- **Open to Side** opens it in a neighboring pane.
+- Selecting a row only changes the current tool target; it does not replace the active surface.
 
-### "Physical-First" Navigation
+See [Watchlists](./watchlists.md) for grouping and targeting behavior.
 
-Wardian mirrors your local file system. Most items in the **Library** or **Explorer** correspond to physical files on your disk (`<wardian-home>/`), ensuring your work is transparent and portable.
+## Agents Overview
 
-### Contextual Awareness
+[Agents Overview](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Grid is a mode inside this surface, not a global app page.
 
-The interface is reactive. Selecting an agent in the **Roster** (Right Sidebar) will automatically re-root the **Explorer** (Left Sidebar) to that agent's specific working directory.
+Agent cards can show the real provider terminal or a normalized Chat view. Closing the Overview surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
 
-### Terminal Continuity
+## Terminal Continuity
 
-Wardian preserves terminal state across grid remounts so interactive TUIs, including Codex, keep their visible screen and scrollback more faithfully when panes are resized, reordered, or reattached. The terminal layer also forwards xterm's raw binary mouse-report input to the PTY so alternate-screen TUIs can handle wheel-driven in-app scrolling the same way they do in native terminals.
+Wardian brokers terminal output, input ownership, and canonical geometry across Overview cards, agent-session tabs, and remote presentations. A presentation becomes interactive only after explicit terminal activation. Focus traversal alone does not steal the input lease or resize the shared PTY.
 
-### Keyboard Shortcuts
+If several presentations show the same terminal, the active one is labeled **Owner** and the others are **Mirror** / **Read only**. Wardian can reclaim old renderers while retaining terminal state; select **Activate terminal renderer** to reconstruct one when needed.
 
-- **Ctrl + Tab**: Cycle through main View Modes.
-- **Ctrl + Shift + Tab**: Cycle through main View Modes in reverse.
-- **Ctrl + B**: Toggle the Left Sidebar visibility.
+## Common Keyboard Shortcuts
+
+`Ctrl` below means `Cmd` on macOS.
+
+- `Ctrl+P`: Quick Open.
+- `Ctrl+Shift+P`: command palette.
+- `Ctrl+Shift+O`: Open Surface.
+- `Ctrl+W`: close the active surface presentation.
+- `Ctrl+Shift+T`: reopen the most recently closed surface.
+- `Ctrl+[` / `Ctrl+]`: previous or next tab.
+- `F6` / `Shift+F6`: next or previous pane.
+- `Ctrl+0`: focus the Workbench.
+- `Ctrl+B`: toggle the left sidebar.
+
+Workbench shortcuts yield to text inputs and terminal-owned key combinations. See the [Workbench keyboard reference](./workbench.md#keyboard-reference) for splits, moves, docks, and zoom.
 
 ## Related Guides
 
-- [Grid](./grid.md)
-- [Dashboard](./dashboard.md)
-- [Graph](./graph.md)
+- [Workbench](./workbench.md)
+- [Agents Overview](./agents-overview.md)
 - [Watchlists](./watchlists.md)
+- [Dashboard](./dashboard.md)
+- [Queue](./queue.md)
 - [Command Panel](./command-panel.md)
-- [Source Control](./source-control.md)
-- [Settings](./settings.md)

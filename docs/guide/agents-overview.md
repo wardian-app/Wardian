@@ -1,0 +1,57 @@
+# Agents Overview
+
+Agents Overview is the Workbench surface for monitoring several agent sessions at once. It replaces the old assumption that Grid is Wardian's global page: Grid is now one display mode inside this surface.
+
+Use Agents Overview when you want live terminals or normalized chat activity arranged together, then switch to a focused presentation when one agent needs more space.
+
+## Open Agents Overview
+
+Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Home state, then choose **Agents Overview**. Wardian keeps a single Agents Overview surface and focuses it when you open it again.
+
+The right roster controls which agents auxiliary tools target. It does not filter Agents Overview automatically. Use **Filter agents** in the surface to narrow the visible cards by agent name, class, provider, or workspace.
+
+## Choose a Layout Mode
+
+The surface header provides three modes:
+
+- **Auto** chooses Grid or Single from the available size and the number and minimum size of visible cards. It is the best default when you resize the application or a Workbench split frequently.
+- **Grid** keeps multiple visible cards and enables direct grid sizing and ordering controls. The layout can scroll when the available area is smaller than the cards' usable floor.
+- **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it, and **Minimize** to return to Auto.
+
+Auto derives its layout from the current surface dimensions. It does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
+
+## Terminal and Chat Cards
+
+Each card can show either:
+
+- **Terminal** for the provider's real PTY, approvals, raw keybindings, and interactive TUI.
+- **Chat** for normalized messages, tool activity, approval choices, and a compact prompt composer.
+
+Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Grid > Grid card display**. Unsent Chat text stays with that agent when you switch modes.
+
+In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until activated. If a card shows **Activate terminal renderer**, select it to restore a renderer reclaimed from an older presentation.
+
+## Arrange and Focus Agents
+
+- Drag card headers to reorder agents in Grid mode.
+- Drag row and column gutters to adjust manual Grid sizing.
+- Use **Maximize** on a card to enter Single mode for that agent.
+- Use **Minimize** to return to Auto.
+- Right-click the background and choose **Reset Grid Layout** to discard the manual Grid arrangement without resetting the whole Workbench.
+- Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents Overview tab does not.
+
+Overview layouts have minimum usable terminal and chat sizes. When every requested card cannot fit, the surface favors usable cards and scrolling over shrinking terminals until they become unreadable.
+
+## Important Boundaries
+
+- Closing Agents Overview closes only that Workbench presentation. Agents keep running.
+- Closing an individual agent-session tab also leaves the runtime alive. Use Delete, Pause, Restart, or Clear only when you intend to alter the agent lifecycle.
+- Roster selection and Overview focus are separate. Roster selection targets tools; Overview focus chooses the agent shown in Single mode.
+- Grid is not a global navigation destination. It is an Overview mode retained for multi-agent compatibility and control.
+
+## Related Guides
+
+- [Workbench](./workbench.md)
+- [Grid compatibility guide](./grid.md)
+- [Watchlists](./watchlists.md)
+- [Dashboard](./dashboard.md)

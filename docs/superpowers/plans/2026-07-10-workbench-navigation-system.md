@@ -798,13 +798,13 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - Modify: `scripts/capture-doc-screenshots.mjs`
 - Modify: `scripts/capture-readme-demo-real.mjs`
 
-- [ ] **Step 1: Document the user model:** quiet titlebar, pane-local tabs with `+` and `…`, transient Quick Open and command palettes, Home, pane context menus, splits/move/join/zoom/reopen, auxiliary rail boundary, roster targeting versus Open/Open to Side, Overview modes, restore/placeholders/reset, explicit terminal activation, and presentation close versus agent kill.
-- [ ] **Step 2: Keep `grid.md` as a compatibility entry** explaining Grid is now an Agents Overview mode, not a global page.
-- [ ] **Step 3: Document developer contracts:** registry/open/render/runtime/close policies, size/version limits, persistence migrations, adapter boundary/safe mode, broker generation/epoch/snapshot/sequence/geometry, renderer budgets, and test-layer boundaries.
-- [ ] **Step 4: Update capture automation** to semantic workbench helpers and remove every fixed titlebar click.
-- [ ] **Step 5: Capture a real seeded 1920x1080 screenshot** to `e2e/screenshots/workbench-navigation/<timestamp>/tabs-and-splits.png`. It must show two groups, pane-local tabs, Agents Overview with agents, another surface, unchanged left rail, and right roster. Copy the curated image into the docs asset path; never use a generated mockup.
-- [ ] **Step 6: Run** `npm run docs:screenshots`, `npm run docs:check-llms`, and `npm run docs:build`. **Expected:** PASS.
-- [ ] **Step 7: Commit** `docs(workbench): document surface navigation and terminal activation`.
+- [x] **Step 1: Document the user model:** quiet titlebar, pane-local tabs with `+` and `…`, transient Quick Open and command palettes, Home, pane context menus, splits/move/join/zoom/reopen, auxiliary rail boundary, roster targeting versus Open/Open to Side, Overview modes, restore/placeholders/reset, explicit terminal activation, and presentation close versus agent kill.
+- [x] **Step 2: Keep `grid.md` as a compatibility entry** explaining Grid is now an Agents Overview mode, not a global page.
+- [x] **Step 3: Document developer contracts:** registry/open/render/runtime/close policies, size/version limits, persistence migrations, adapter boundary/safe mode, broker generation/epoch/snapshot/sequence/geometry, renderer budgets, and test-layer boundaries.
+- [x] **Step 4: Update capture automation** to semantic workbench helpers and remove every fixed titlebar click.
+- [x] **Step 5: Capture a real seeded 1920x1080 screenshot** to `e2e/screenshots/workbench-navigation/<timestamp>/tabs-and-splits.png`. It must show two groups, pane-local tabs, Agents Overview with agents, another surface, unchanged left rail, and right roster. Copy the curated image into the docs asset path; never use a generated mockup.
+- [x] **Step 6: Run** `npm run docs:screenshots`, `npm run docs:check-llms`, and `npm run docs:build`. **Expected:** PASS.
+- [x] **Step 7: Commit** `docs(workbench): document surface navigation and terminal activation`.
 
 ### Task 21: Add CI gates, run full verification, open the PR, and watch it green
 
