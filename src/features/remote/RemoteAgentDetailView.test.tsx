@@ -61,7 +61,7 @@ function registered(options: { owner?: boolean; requiresResync?: boolean; state?
       geometry: { cols: 80, rows: 24 },
       terminal_state_base64: btoa(options.state ?? "ready"),
       visible_grid: options.state ?? "ready",
-      scrollback: [],
+      scrollback: [] as string[],
     },
   };
 }
@@ -129,6 +129,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     const fitResults = vi.mocked(FitAddon).mock.results;
     const fit = (fitResults[fitResults.length - 1]?.value as { fit: ReturnType<typeof vi.fn> }).fit;
     const fitCallsBeforeActivation = fit.mock.calls.length;
+    expect(terminalInstance.write).toHaveBeenCalledWith("ready", expect.any(Function));
     expect(terminalInstance.options.disableStdin).toBe(true);
 
     await userEvent.click(screen.getByRole("button", { name: "Take terminal control" }));
@@ -237,6 +238,34 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     expect(socket.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: "input", runtime_generation: 1, lease_epoch: 3, data: "\u001b[1;1R",
     });
+  });
+
+  it("renders the bounded text fallback when formatted snapshot state is omitted", async () => {
+    const socket = new DetailSocket();
+    let handlers: Parameters<typeof remoteClient.openTerminalStream>[3] | undefined;
+    vi.spyOn(remoteClient, "openTerminalStream").mockImplementation(async (_session, _cols, _rows, nextHandlers) => {
+      handlers = nextHandlers;
+      nextHandlers.onSocket?.(socket as unknown as WebSocket);
+      return socket as unknown as WebSocket;
+    });
+
+    render(<RemoteAgentDetailView agent={agent} />);
+    await waitFor(() => expect(handlers).toBeDefined());
+    const message = registered();
+    message.initial_snapshot.terminal_state_base64 = "";
+    message.initial_snapshot.scrollback = ["older line", "newer line"];
+    message.initial_snapshot.visible_grid = "visible row";
+
+    await act(async () => {
+      await handlers?.onMessage(message);
+    });
+
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminal = terminalResults[terminalResults.length - 1]?.value as Terminal;
+    expect(terminal.write).toHaveBeenCalledWith(
+      "older line\r\nnewer line\r\nvisible row",
+      expect.any(Function),
+    );
   });
 
   it("keeps mirror xterm geometry canonical while portrait and landscape viewports only report proposals", async () => {

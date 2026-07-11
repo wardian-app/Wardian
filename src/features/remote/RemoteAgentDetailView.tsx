@@ -840,7 +840,7 @@ function TerminalPane({
       liveDecoder = new TextDecoder();
       terminal.reset?.();
       terminal.resize?.(snapshot.geometry.cols, snapshot.geometry.rows);
-      const plan = planRemoteTerminalOutput(base64ToTerminalString(snapshot.terminal_state_base64));
+      const plan = planRemoteTerminalOutput(decodeRemoteTerminalSnapshot(snapshot));
       await writeRemoteTerminal(
         terminal,
         normalizeRemoteTerminalOutput(
@@ -1022,6 +1022,20 @@ function TerminalPane({
 
 function base64ToTerminalString(value: string) {
   return new TextDecoder().decode(base64ToTerminalBytes(value));
+}
+
+function decodeRemoteTerminalSnapshot(snapshot: TerminalSnapshot) {
+  if (snapshot.terminal_state_base64) {
+    try {
+      return base64ToTerminalString(snapshot.terminal_state_base64);
+    } catch {
+      // The broker omits oversized formatted state atomically. A malformed
+      // payload follows the same bounded plain-text recovery path.
+    }
+  }
+  return [...(snapshot.scrollback ?? []), snapshot.visible_grid]
+    .filter(Boolean)
+    .join("\r\n");
 }
 
 function base64ToTerminalBytes(value: string) {
