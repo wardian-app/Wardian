@@ -193,6 +193,48 @@ describe("workbench navigation service", () => {
     expect(store.getState().transaction_version).toBe(beforeVersion + 1);
   });
 
+  it("resets known and unknown surface state only after an explicit guarded action", async () => {
+    const registry = createSurfaceRegistry([definition("known", {
+      close_policy: "confirm_if_dirty",
+      can_close: () => "allow",
+      state_schema_version: 3,
+      default_state: () => ({ label: "fresh" }),
+    })]);
+    const known = makeSurface("known-1", {
+      surface_type: "known",
+      state_schema_version: 1,
+      state: { label: "invalid persisted value" },
+    });
+    const unknown = makeSurface("unknown-1", {
+      surface_type: "extension.missing",
+      state_schema_version: 9,
+      state: { opaque: ["preserve", 42] },
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([known, unknown]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    expect(store.getState().document.surfaces["known-1"].state)
+      .toEqual({ label: "invalid persisted value" });
+    expect(store.getState().document.surfaces["unknown-1"].state)
+      .toEqual({ opaque: ["preserve", 42] });
+
+    await expect(navigation.reset_surface("known-1")).resolves.toBe("allow");
+    expect(store.getState().document.surfaces["known-1"]).toMatchObject({
+      surface_type: "known",
+      state_schema_version: 3,
+      state: { label: "fresh" },
+    });
+
+    await expect(navigation.reset_surface("unknown-1")).resolves.toBe("allow");
+    expect(store.getState().document.surfaces["unknown-1"]).toMatchObject({
+      surface_type: "extension.missing",
+      state_schema_version: 9,
+      state: {},
+    });
+  });
+
   it("does not mutate a surface, group, or reset when an async guard cancels", async () => {
     const guard = vi.fn(async (entry: WorkbenchSurfaceV1): Promise<"allow" | "cancel"> =>
       entry.surface_id === "surface-2" ? "cancel" : "allow",
@@ -227,6 +269,7 @@ describe("workbench navigation service", () => {
       surface_type: "dirty",
       state: { label: "replacement" },
     }));
+    await assertCancellation((navigation) => navigation.reset_surface("surface-2"));
     await assertCancellation((navigation) => navigation.close_group("group-1"));
     await assertCancellation((navigation) => navigation.reset_workbench());
     expect(guard).toHaveBeenCalled();

@@ -136,6 +136,7 @@
   border-radius: 0.1875rem;
   background: transparent;
   color: currentColor;
+  cursor: pointer;
   opacity: 0;
   padding: 0;
   pointer-events: none;
@@ -243,6 +244,126 @@
 .wardian-workbench-home p,
 .wardian-open-surface-dialog small {
   color: var(--color-wardian-text-muted);
+}
+
+.wardian-surface-recovery {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  place-content: center;
+  overflow: auto;
+  padding: 2rem;
+  background: var(--color-wardian-bg);
+  color: var(--color-wardian-text);
+}
+
+.wardian-surface-recovery__card {
+  width: min(34rem, 100%);
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 0.625rem;
+  padding: 1.25rem;
+  background: var(--color-wardian-card);
+  box-shadow: var(--shadow-wardian-card);
+}
+
+.wardian-surface-recovery__eyebrow {
+  margin: 0 0 0.25rem;
+  color: var(--color-wardian-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wardian-surface-recovery__card h2,
+.wardian-surface-recovery__error,
+.wardian-surface-recovery__feedback {
+  margin: 0;
+}
+
+.wardian-surface-recovery__error {
+  margin-top: 0.5rem;
+  color: var(--color-wardian-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.wardian-surface-recovery__identity {
+  display: grid;
+  gap: 0.375rem;
+  margin: 1rem 0;
+  font-size: 0.75rem;
+}
+
+.wardian-surface-recovery__identity div {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.wardian-surface-recovery__identity dt {
+  color: var(--color-wardian-text-muted);
+}
+
+.wardian-surface-recovery__identity dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wardian-surface-recovery__rebind,
+.wardian-surface-recovery__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wardian-surface-recovery__rebind {
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.wardian-surface-recovery__rebind select,
+.wardian-surface-recovery button {
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 0.25rem;
+  background: var(--color-wardian-card);
+  color: var(--color-wardian-text);
+  font: inherit;
+}
+
+.wardian-surface-recovery__rebind select {
+  min-width: 10rem;
+  padding: 0.375rem 0.5rem;
+}
+
+.wardian-surface-recovery button {
+  padding: 0.4375rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.wardian-surface-recovery button:hover:not(:disabled),
+.wardian-surface-recovery button:focus-visible {
+  background: var(--color-wardian-card-bg-muted);
+}
+
+.wardian-surface-recovery button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.wardian-surface-recovery button.is-danger {
+  color: var(--color-wardian-error);
+}
+
+.wardian-surface-recovery__feedback {
+  margin-top: 0.75rem;
+  color: var(--color-wardian-text-muted);
+  font-size: 0.75rem;
 }
 
 .wardian-workbench-separator-control {

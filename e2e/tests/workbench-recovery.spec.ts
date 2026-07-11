@@ -106,8 +106,10 @@ test.describe("Workbench recovery", () => {
     const unknownPanel = page.getByTestId("surface-panel")
       .and(page.locator('[data-surface-id="surface-plugin"]'));
     await expect(unknownPanel).toBeVisible();
-    await expect(unknownPanel.getByRole("heading", { name: "unknown-plugin" })).toBeVisible();
-    await expect(unknownPanel.getByRole("button")).toHaveCount(0);
+    await expect(unknownPanel.getByRole("heading", { name: "Surface unavailable" })).toBeVisible();
+    await expect(unknownPanel).toContainText("unknown-plugin");
+    await expect(unknownPanel).toContainText("surface-plugin");
+    await expect(unknownPanel).toContainText("not installed or registered");
 
     await expect.poll(() => page.evaluate(() => ({
       left: document.documentElement.style.getPropertyValue("--sidebar-content-width"),
@@ -122,6 +124,71 @@ test.describe("Workbench recovery", () => {
     expect(snapshot.load_result.document).toEqual(restored);
     expect(await ipc.calls("load_workbench_state")).toHaveLength(1);
     expect(await ipc.calls("save_workbench_state")).toHaveLength(0);
+
+    await unknownPanel.getByRole("button", { name: "Retry" }).click();
+    await expect(unknownPanel).toContainText("Recovery check completed");
+    expect(await ipc.calls("save_workbench_state")).toHaveLength(0);
+    expect((await ipc.snapshot()).load_result.document?.surfaces[unknown.surface_id]?.state)
+      .toEqual({ opaque: ["preserve", 42] });
+
+    await unknownPanel.getByRole("button", { name: "Reset Surface" }).click();
+    await expect.poll(async () => {
+      const calls = await ipc.calls("save_workbench_state");
+      return calls.some((call) => {
+        const request = call.args as { document?: typeof restored } | undefined;
+        return request?.document?.surfaces[unknown.surface_id]?.state
+          && Object.keys(request.document.surfaces[unknown.surface_id].state as object).length === 0;
+      });
+    }).toBe(true);
+    await expect(unknownPanel.getByRole("heading", { name: "Surface unavailable" })).toBeVisible();
+
+    await unknownPanel.getByRole("button", { name: "Close" }).click();
+    await expect(unknownTab).toHaveCount(0);
+    await expect.poll(async () => {
+      const calls = await ipc.calls("save_workbench_state");
+      const last = calls.at(-1)?.args as { document?: typeof restored } | undefined;
+      return last?.document?.surfaces[unknown.surface_id] === undefined;
+    }).toBe(true);
+  });
+
+  test("surfaces invalid registered state instead of silently normalizing it", async ({ page }) => {
+    const invalidGraph = makeWorkbenchSurface("invalid-graph", "graph", {
+      state: { enabled_reasons: "not-an-array" },
+    });
+    const restored = makeWorkbenchDocument({
+      revision: 4,
+      surfaces: [invalidGraph],
+    });
+    const ipc = await installWorkbenchIpcMock(page, {
+      load_result: {
+        source: "primary",
+        document: restored,
+        notice: null,
+        durable_revision: restored.revision,
+        durable_token: "invalid-graph-token-4",
+      },
+    });
+
+    await page.goto("/");
+    const panel = surfacePanel(page, "graph");
+    await expect(panel.getByRole("heading", { name: "Surface unavailable" })).toBeVisible();
+    await expect(panel).toContainText("graph state is malformed");
+    await expect(panel).toContainText("invalid-graph");
+    expect(await ipc.calls("save_workbench_state")).toHaveLength(0);
+    expect((await ipc.snapshot()).load_result.document?.surfaces[invalidGraph.surface_id]?.state)
+      .toEqual({ enabled_reasons: "not-an-array" });
+
+    await panel.getByRole("button", { name: "Reset Surface" }).click();
+    await expect(page.getByTestId("graph-surface")).toBeVisible();
+    await expect.poll(async () => {
+      const calls = await ipc.calls("save_workbench_state");
+      return calls.some((call) => {
+        const request = call.args as { document?: typeof restored } | undefined;
+        return Array.isArray(request?.document?.surfaces[invalidGraph.surface_id]?.state
+          && (request.document.surfaces[invalidGraph.surface_id].state as { enabled_reasons?: unknown })
+            .enabled_reasons);
+      });
+    }).toBe(true);
   });
 
   test("shows a nonblocking backup recovery notice", async ({ page }) => {

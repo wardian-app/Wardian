@@ -354,10 +354,28 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
       });
     }
     const snapshot = canonicalSurface(surface, rawDefinition.max_state_bytes);
-    const title = rawDefinition.title(snapshot);
+    const restored = this.restoreKnown(
+      rawDefinition,
+      snapshot.state,
+      snapshot.state_schema_version,
+    );
+    if (!restored.ok) {
+      return deepFreeze({
+        title: rawDefinition.type,
+        icon: rawDefinition.icon,
+        commands: rawDefinition.commands.map((command) => ({ ...command })),
+        badges: [{ badge_id: "recovery", label: "Recovery needed" }],
+      });
+    }
+    const presentationSurface = deepFreeze({
+      ...snapshot,
+      state_schema_version: rawDefinition.state_schema_version,
+      state: restored.state,
+    });
+    const title = rawDefinition.title(presentationSurface);
     if (typeof title !== "string") throw new Error("title callback must return a string");
     const badges = canonicalizeState(
-      rawDefinition.badges?.(snapshot) ?? [],
+      rawDefinition.badges?.(presentationSurface) ?? [],
       MAX_WORKBENCH_SURFACE_STATE_BYTES,
     );
     if (

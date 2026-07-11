@@ -43,13 +43,20 @@ describe("core workbench surface registry", () => {
       ok: false,
       error: "unsupported workflows state version 2",
     });
+    expect(registry.resolve_surface(makeSurface("broken-overview", {
+      surface_type: "agents-overview",
+      state: { mode: "surprise" },
+    })).restore_result).toEqual({
+      ok: false,
+      error: "agents-overview state is malformed",
+    });
   });
 
   it("injects dirty decisions and exposes dirty presentation badges", async () => {
     const prompt = vi.fn<DirtySurfacePrompt>(() => "cancel");
     const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
-    const library = makeSurface("library-1", { surface_type: "library" });
-    const workflows = makeSurface("workflows-1", { surface_type: "workflows" });
+    const library = makeSurface("library-1", { surface_type: "library", state: {} });
+    const workflows = makeSurface("workflows-1", { surface_type: "workflows", state: {} });
 
     expect(registry.presentation(library).badges).toEqual([]);
     useLibraryStore.setState({

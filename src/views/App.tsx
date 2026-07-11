@@ -56,6 +56,7 @@ import {
 } from "../features/workbench/surfaces/AgentsOverviewSurface";
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
+import { SurfaceRecoveryPlaceholder } from "../features/workbench/SurfaceRecoveryPlaceholder";
 import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
 import {
   DashboardSurface,
@@ -224,6 +225,7 @@ function AppBody() {
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
   }), [dirtySurfacePrompt.prompt]);
+  const [, setSurfaceRecoveryAttempt] = useState(0);
   const workbenchNavigation = useMemo(
     () => createWorkbenchNavigationService({
       registry: workbenchRegistry,
@@ -965,6 +967,43 @@ function AppBody() {
   }, [workbenchPersistence.store]);
 
   const renderWorkbenchSurface: WorkbenchSurfaceRenderer = (surface, lifecycle) => {
+    const resolvedSurface = workbenchRegistry.resolve_surface(surface);
+    const restoreResult = resolvedSurface.restore_result;
+    if (resolvedSurface.missing_surface_type || !restoreResult.ok) {
+      const error = resolvedSurface.missing_surface_type
+        ? `Surface type “${resolvedSurface.missing_surface_type}” is not installed or registered. Its persisted state has been kept intact.`
+        : `Wardian could not restore this persisted state: ${restoreResult.ok ? "Unknown restore failure" : restoreResult.error}`;
+      const canRebind = surface.surface_type === "agent-session";
+      return (
+        <SurfaceRecoveryPlaceholder
+          surface={surface}
+          error={error}
+          on_retry={async () => {
+            if (canRebind) await fetchAgents();
+            setSurfaceRecoveryAttempt((attempt) => attempt + 1);
+          }}
+          on_reset={async () => { await workbenchNavigation.reset_surface(surface.surface_id); }}
+          on_close={async () => { await workbenchNavigation.close(surface.surface_id); }}
+          rebind_options={canRebind ? agents.map((agent) => ({
+            resource_key: agent.session_id,
+            label: agent.session_name,
+          })) : []}
+          {...(canRebind ? {
+            on_rebind: async (resourceKey: string) => {
+              await workbenchNavigation.rebind_resource(
+                surface.surface_id,
+                { surface_type: "agent-session", resource_key: resourceKey },
+              );
+            },
+          } : {})}
+        />
+      );
+    }
+    const restoredSurface = {
+      ...surface,
+      state: restoreResult.ok ? restoreResult.state : surface.state,
+    };
+
     if (surface.surface_type === "agent-session") {
       const resourceKey = surface.resource_key ?? "";
       return (
@@ -1042,7 +1081,7 @@ function AppBody() {
       return (
         <GraphSurface
           surface_id={surface.surface_id}
-          state={normalizeGraphSurfaceState(surface)}
+          state={normalizeGraphSurfaceState(restoredSurface)}
           visibility={visibility}
           filteredAgents={filteredAgents}
           allAgents={agents}
@@ -1092,7 +1131,7 @@ function AppBody() {
       return (
         <GardenSurface
           surface_id={surface.surface_id}
-          state={normalizeGardenSurfaceState(surface)}
+          state={normalizeGardenSurfaceState(restoredSurface)}
           visibility={visibility}
           filteredAgents={filteredAgents}
           telemetry={telemetry}
@@ -1146,7 +1185,7 @@ function AppBody() {
     return (
       <AgentsOverviewSurface
         surface_id={surface.surface_id}
-        state={normalizeAgentsOverviewSurfaceState(surface.state)}
+        state={normalizeAgentsOverviewSurfaceState(restoredSurface.state)}
         agents={roster.filteredAgents}
         recentAgentIds={recentAgentIds}
         telemetry={telemetry}

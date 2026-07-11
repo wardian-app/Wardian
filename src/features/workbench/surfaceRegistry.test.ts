@@ -114,6 +114,32 @@ describe("surface registry", () => {
     expect(missing.state_schema_version).toBe(41);
   });
 
+  it("does not invoke presentation callbacks with invalid persisted state", () => {
+    const title = vi.fn(() => "Validated title");
+    const badges = vi.fn(() => [{ badge_id: "ready", label: "Ready" }]);
+    const registry = createSurfaceRegistry([
+      definition("validated", {
+        title,
+        badges,
+        restore_state: (value) => value && typeof value === "object"
+          && (value as { valid?: unknown }).valid === true
+          ? { ok: true, state: value as TestState }
+          : { ok: false, error: "invalid persisted state" },
+      }),
+    ]);
+    const invalid = surface("invalid-1", "validated");
+    invalid.state = { valid: false };
+
+    expect(registry.presentation(invalid)).toEqual({
+      title: "validated",
+      icon: "icon-validated",
+      commands: [],
+      badges: [{ badge_id: "recovery", label: "Recovery needed" }],
+    });
+    expect(title).not.toHaveBeenCalled();
+    expect(badges).not.toHaveBeenCalled();
+  });
+
   it("resolves singleton, resource-focused, custom, and multiple-open policies", () => {
     const registry = createSurfaceRegistry();
     registry.register(definition("singleton", { open_policy: "singleton" }));
@@ -315,6 +341,8 @@ describe("surface registry", () => {
       "request",
       "serialize",
       "candidate",
+      "serialize",
+      "restore",
       "serialize",
       "restore",
       "serialize",

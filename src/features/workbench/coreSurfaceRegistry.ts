@@ -101,6 +101,39 @@ export type CoreWorkbenchSurfaceRegistryOptions = {
 
 const failClosedDirtyPrompt: DirtySurfacePrompt = () => "cancel";
 
+const DEFAULT_AGENTS_OVERVIEW_STATE: AgentsOverviewSurfaceState = {
+  mode: "auto",
+  focused_agent_id: null,
+  search_query: "",
+  status_filter: [],
+};
+
+function restoreAgentsOverviewState(value: unknown, version: number) {
+  if (version !== 1) {
+    return { ok: false as const, error: `unsupported agents-overview state version ${version}` };
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false as const, error: "agents-overview state must be an object" };
+  }
+  const state = value as Record<string, unknown>;
+  if (
+    !["auto", "grid", "single"].includes(state.mode as string)
+    || (state.focused_agent_id !== null && typeof state.focused_agent_id !== "string")
+    || typeof state.search_query !== "string"
+    || !Array.isArray(state.status_filter)
+    || state.status_filter.some((status) => typeof status !== "string")
+  ) return { ok: false as const, error: "agents-overview state is malformed" };
+  return {
+    ok: true as const,
+    state: {
+      mode: state.mode as AgentsOverviewSurfaceState["mode"],
+      focused_agent_id: state.focused_agent_id as string | null,
+      search_query: state.search_query,
+      status_filter: state.status_filter as string[],
+    },
+  };
+}
+
 function restoreEmptySurfaceState(type: "library" | "workflows", value: unknown, version: number) {
   if (version !== 1) return { ok: false as const, error: `unsupported ${type} state version ${version}` };
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length > 0) {
@@ -118,12 +151,8 @@ function coreSurfaceDefinitions(
       title: "Agents Overview",
       render_policy: "keep_alive",
       open_policy: "singleton",
-      default_state: (): AgentsOverviewSurfaceState => ({
-        mode: "auto",
-        focused_agent_id: null,
-        search_query: "",
-        status_filter: [],
-      }),
+      default_state: (): AgentsOverviewSurfaceState => ({ ...DEFAULT_AGENTS_OVERVIEW_STATE }),
+      restore_state: restoreAgentsOverviewState,
     }),
     ...CORE_VIEW_SURFACE_DEFINITIONS,
     surfaceDefinition({
