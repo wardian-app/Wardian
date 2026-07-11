@@ -771,6 +771,16 @@ async function main() {
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
+    await page.keyboard.press("Control+Shift+P");
+    await page.getByRole("dialog", { name: "Command Palette" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(300);
+    await capture(page, "workbench-navigation/command-palette.png");
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "Command Palette" }).waitFor({
+      state: "hidden",
+      timeout: 10_000,
+    });
+
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
 
