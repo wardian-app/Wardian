@@ -519,14 +519,14 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 
 **Protocol:** v2 open is `{ protocol_version: 2, ticket, cols, rows }`. The authenticated socket supplies session/presentation identity; client messages carry generation/epoch as applicable: report viewport, begin/ack activation, input, binary, resize, request snapshot/events, set presentation state, and detach.
 
-- [ ] **Step 1: Write failing gateway tests** for server-derived authenticated capability, v2 passive registration, explicit activation, desired-geometry-only mirror reports, desktop→remote→desktop transfer, nonfatal stale/non-owner responses, and lag-to-snapshot recovery.
-- [ ] **Step 2: Pin no-regression contracts:** three remote connections per agent, 64 KiB decoded input cap, two-second input timeout, 20..240 by 8..80 geometry, ticket/session expiry, device identity, rate limits, warm detach/generation cleanup, and socket backpressure. Invalid framing/oversized input remains fatal; lease disagreement does not.
-- [ ] **Step 3: Run** `cargo test -p Wardian remote::terminal_stream -- --test-threads=1`. **Expected:** FAIL before extraction.
-- [ ] **Step 4: Extract the oversized gateway terminal path** and route it exclusively through `TerminalSessionBroker`. Each socket subscribes one feed consumer, drains shared-ring cursor batches after wake-ups, acknowledges applied sequences, converts Gap/GenerationChanged into snapshot recovery, and unsubscribes on detach; it never owns a private raw-output queue.
-- [ ] **Step 5: Add a one-release v1 wire adapter.** Missing `protocol_version` preserves attach-means-owner behavior through a server-side activation, but owns no parser/geometry state. Remove `TerminalAttachState` after all tests move.
-- [ ] **Step 6: Update the remote React client** to display owner/mirror state, report viewport without resizing, explicitly activate, acknowledge snapshots, and keep the socket open on stale lease responses.
-- [ ] **Step 7: Run** focused Rust/React tests and the existing remote PWA browser suite. **Expected:** PASS.
-- [ ] **Step 8: Commit** `feat(remote): migrate terminal streaming to broker v2`.
+- [x] **Step 1: Write failing gateway tests** for server-derived authenticated capability, v2 passive registration, explicit activation, desired-geometry-only mirror reports, desktop→remote→desktop transfer, nonfatal stale/non-owner responses, and lag-to-snapshot recovery.
+- [x] **Step 2: Pin no-regression contracts:** three remote connections per agent, 64 KiB decoded input cap, two-second input timeout, 20..240 by 8..80 geometry, ticket/session expiry, device identity, rate limits, warm detach/generation cleanup, and socket backpressure. Invalid framing/oversized input remains fatal; lease disagreement does not.
+- [x] **Step 3: Run** `cargo test -p Wardian remote::terminal_stream -- --test-threads=1`. **Expected:** FAIL before extraction.
+- [x] **Step 4: Extract the oversized gateway terminal path** and route it exclusively through `TerminalSessionBroker`. Each socket subscribes one feed consumer, drains shared-ring cursor batches after wake-ups, acknowledges applied sequences, converts Gap/GenerationChanged into snapshot recovery, and unsubscribes on detach; it never owns a private raw-output queue.
+- [x] **Step 5: Add a one-release v1 wire adapter.** Missing `protocol_version` preserves attach-means-owner behavior through a server-side activation, but owns no parser/geometry state. Remove `TerminalAttachState` after all tests move.
+- [x] **Step 6: Update the remote React client** to display owner/mirror state, report viewport without resizing, explicitly activate, acknowledge snapshots, and keep the socket open on stale lease responses.
+- [x] **Step 7: Run** focused Rust/React tests and the existing remote PWA browser suite. **Expected:** PASS.
+- [x] **Step 8: Commit** `feat(remote): migrate terminal streaming to broker v2`.
 
 ## Phase 3 — Migrate Wardian's surfaces and cut over navigation
 
