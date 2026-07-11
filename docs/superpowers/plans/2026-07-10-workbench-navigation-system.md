@@ -545,11 +545,11 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 
 **Interfaces:** `AgentResourceContext` owns one subscription/load path for agents, telemetry, titles, thoughts, status, and lifecycle methods. `RosterContext` owns the active watchlist/filter and global `selected_agent_ids`; it exposes `filtered_agents` without conflating targets with surface focus.
 
-- [ ] **Step 1: Write characterization tests** around existing load/listen/lifecycle behavior and roster plain/Ctrl-Cmd/Shift/empty selection semantics.
-- [ ] **Step 2: Extract controllers one state family at a time.** Delete each old `App` owner as its context lands; never mirror it in two stores.
-- [ ] **Step 3: Compose `AppShell`** from titlebar, left auxiliary region, central legacy/workbench branch, right roster, bottom terminal, and settings. `App.tsx` becomes startup/providers/composition.
-- [ ] **Step 4: Run** focused agent/roster/App tests. **Expected:** old flag-off UI remains behaviorally unchanged and multiple surfaces do not duplicate backend subscriptions.
-- [ ] **Step 5: Commit** `refactor(app): extract workbench resource controllers`.
+- [x] **Step 1: Write characterization tests** around existing load/listen/lifecycle behavior and roster plain/Ctrl-Cmd/Shift/empty selection semantics.
+- [x] **Step 2: Extract controllers one state family at a time.** Delete each old `App` owner as its context lands; never mirror it in two stores.
+- [x] **Step 3: Compose `AppShell`** from titlebar, left auxiliary region, central legacy/workbench branch, right roster, bottom terminal, and settings. `App.tsx` becomes startup/providers/composition.
+- [x] **Step 4: Run** focused agent/roster/App tests. **Expected:** old flag-off UI remains behaviorally unchanged and multiple surfaces do not duplicate backend subscriptions.
+- [x] **Step 5: Commit** `refactor(app): extract workbench resource controllers`.
 
 ### Task 11: Evolve Grid into container-aware Agents Overview
 
