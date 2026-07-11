@@ -13,6 +13,7 @@ import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
+import type { AgentInteractions } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument } from "../features/workbench/workbenchTestUtils";
 
@@ -439,6 +440,25 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.queryByTestId("workbench-host")).not.toBeInTheDocument();
     expect(screen.getByText("Grid")).toBeInTheDocument();
     expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
+  });
+
+  it("composes stable shell regions around one shared agent subscription path", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+
+    render(<App />);
+    const shell = await screen.findByTestId("app-shell");
+
+    expect(shell.querySelector("main")).not.toBeNull();
+    expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
+    for (const eventName of [
+      "agent-json-event",
+      "agents-updated",
+      "agent-metrics",
+      "app-metrics",
+      "agent-status-updated",
+    ]) {
+      expect(mockListen.mock.calls.filter(([name]) => name === eventName)).toHaveLength(1);
+    }
   });
 
   it("shows nonblocking recovery and backend safe-mode state behind the flag", async () => {
@@ -1077,6 +1097,58 @@ describe("Agent Watchlist Sidebar", () => {
         interactions: expect.objectContaining({ "agent-1": expect.any(String) }),
       }),
     );
+  });
+
+  it("serializes pre-load interaction updates with the persisted snapshot", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const emitAgentMetrics = captureAgentMetricsListener();
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    let resolveInteractions: ((value: AgentInteractions) => void) | undefined;
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_agent_interactions") {
+        return new Promise((resolve) => { resolveInteractions = resolve; });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+    await screen.findByText("All Agents");
+
+    act(() => emitAgentMetrics([{
+      session_id: "agent-1",
+      current_status: "Idle",
+      cpu_usage: 0,
+      memory_mb: 0,
+      uptime_seconds: 0,
+      query_count: 0,
+      init_timestamp: null,
+      log_path: null,
+    }]));
+    act(() => emitAgentMetrics([{
+      session_id: "agent-1",
+      current_status: "Processing...",
+      cpu_usage: 0,
+      memory_mb: 0,
+      uptime_seconds: 1,
+      query_count: 1,
+      init_timestamp: null,
+      log_path: null,
+    }]));
+
+    await act(async () => {
+      resolveInteractions?.({ "agent-2": "2026-07-09T12:00:00.000Z" });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      const saves = mockInvoke.mock.calls.filter(([command]) => command === "save_agent_interactions");
+      expect(saves[saves.length - 1]?.[1]).toEqual({
+        interactions: {
+          "agent-1": expect.any(String),
+          "agent-2": "2026-07-09T12:00:00.000Z",
+        },
+      });
+    });
   });
 
   it("adds an agent completion to the queue when buffered output is followed by Idle", async () => {

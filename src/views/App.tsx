@@ -2,13 +2,12 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
+import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
 import type { CloneMode, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
-import { normalizeAgentConfigs } from "../features/agents/configUtils";
-import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
+import { deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
 import {
   getAgentsForList,
   addAgentsToList,
@@ -52,6 +51,14 @@ import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflict
 import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
 import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
 import { WorkbenchHost } from "../layout/workbench/WorkbenchHost";
+import { AppShell } from "../layout/AppShell";
+import { AgentResourceContext } from "../features/agents/AgentResourceContext";
+import {
+  useAgentResourceController,
+  type AgentStatusTransition,
+} from "../features/agents/useAgentResourceController";
+import { RosterProvider } from "../features/agents/RosterContext";
+import { useRosterController } from "../features/agents/useRosterController";
 
 declare global {
   interface Window {
@@ -201,12 +208,7 @@ function App() {
 
 function AppBody() {
   const confirm = useConfirm();
-  const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const agentsRef = React.useRef(agents);
-  const agentStatusRef = React.useRef<Record<string, string>>({});
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
-  const fetchAgentsRequestRef = React.useRef(0);
-  useEffect(() => { agentsRef.current = agents; }, [agents]);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const workbenchPersistence = useWorkbenchPersistence({
     enabled: WORKBENCH_FLAGS.workbench_enabled,
@@ -266,12 +268,16 @@ function AppBody() {
     };
   }, []);
 
-  const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+  const maybeFlushAgentQueueCompletion = useCallback((
+    sessionId: string,
+    currentStatus: string,
+    previousStatus: string | undefined,
+    agent: AgentConfig | undefined,
+  ) => {
     const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
     if (currentStatus === "Idle" && wasActive) {
       if (pendingQueueFlushRef.current.has(sessionId)) return;
       pendingQueueFlushRef.current.add(sessionId);
-      const agent = agentsRef.current.find((a) => a.session_id === sessionId);
       const agentName = agent?.session_name ?? sessionId;
       const finishFlush = (summary?: string | null) => {
         try {
@@ -291,9 +297,13 @@ function AppBody() {
     }
   }, [flushAgentCompletion]);
 
-  const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+  const maybeAddActionNeededQueueItem = useCallback((
+    sessionId: string,
+    currentStatus: string,
+    previousStatus: string | undefined,
+    agent: AgentConfig | undefined,
+  ) => {
     if (currentStatus !== "Action Needed" || previousStatus === "Action Needed") return;
-    const agent = agentsRef.current.find((a) => a.session_id === sessionId);
     addActionNeeded(
       sessionId,
       agent?.session_name ?? sessionId,
@@ -336,13 +346,6 @@ function AppBody() {
     });
   }, [viewMode]);
 
-  const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
-  const [appTelemetry, setAppTelemetry] = useState<AppTelemetry>({ cpu_usage: 0, memory_mb: 0 });
-  const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
-  const handleTitleChange = useCallback((agentId: string, title: string) => {
-    setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
-  }, []);
-  const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
   const [broadcastMessage, setBroadcastMessage] = useState("");
 
   const [activeTab, setActiveTab] = useState<SidebarTab>("agent-config");
@@ -350,12 +353,9 @@ function AppBody() {
   const setLeftCollapsed = useLayoutStore((state) => state.setLeftSidebarCollapsed);
   const rightCollapsed = useLayoutStore((state) => state.rightSidebarCollapsed);
   const setRightCollapsed = useLayoutStore((state) => state.setRightSidebarCollapsed);
-  const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
-  const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
   const {
     theme,
     autoPatchGemini,
@@ -370,10 +370,73 @@ function AppBody() {
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [teams, setTeams] = useState<AgentTeam[]>([]);
-  const [activeListId, setActiveListId] = useState<string>("all");
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
+  const agentInteractionsRef = useRef<AgentInteractions>({});
+  const interactionSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const hasAutoPatched = useRef(false);
+
+  const handleAgentStatusTransition = useCallback((transition: AgentStatusTransition) => {
+    maybeFlushAgentQueueCompletion(
+      transition.session_id,
+      transition.current_status,
+      transition.previous_status,
+      transition.agent,
+    );
+    maybeAddActionNeededQueueItem(
+      transition.session_id,
+      transition.current_status,
+      transition.previous_status,
+      transition.agent,
+    );
+  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
+
+  const queueAgentInteractionSnapshot = useCallback((snapshot: AgentInteractions) => {
+    interactionSaveChainRef.current = interactionSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => invoke("save_agent_interactions", { interactions: snapshot }))
+      .catch(() => undefined);
+  }, []);
+
+  const handleAgentInteractions = useCallback((updates: Readonly<Record<string, string>>) => {
+    const updated = { ...agentInteractionsRef.current, ...updates };
+    agentInteractionsRef.current = updated;
+    setAgentInteractions(updated);
+    queueAgentInteractionSnapshot(updated);
+  }, [queueAgentInteractionSnapshot]);
+
+  const agentResources = useAgentResourceController({
+    on_agent_json_event: appendAgentEvent,
+    on_agent_status_transition: handleAgentStatusTransition,
+    on_agent_interactions: handleAgentInteractions,
+  });
+  const {
+    agents,
+    telemetry,
+    app_telemetry: appTelemetry,
+    terminal_titles: terminalTitles,
+    current_thoughts: currentThoughts,
+    off_agent_ids: offAgentIds,
+    refresh_agents: fetchAgents,
+    set_terminal_title: handleTitleChange,
+  } = agentResources;
+  const roster = useRosterController({ agents, watchlists, teams });
+  const {
+    activeWatchlistId: activeListId,
+    setActiveWatchlistId: setActiveListId,
+    activeWatchlist: activeList,
+    filter: rosterFilter,
+    setFilter: setRosterFilter,
+    selectedAgentIds,
+    setSelectedAgentIds,
+    selectAgent,
+    clearSelection,
+  } = roster;
+  const filteredAgents = useMemo(
+    () => getAgentsForList(agents, activeList, teams),
+    [activeList, agents, teams],
+  );
+  const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
 
   useEffect(() => {
     if (!app_settings_loaded) {
@@ -437,11 +500,19 @@ function AppBody() {
 
       try {
         const interactions = await invoke<AgentInteractions>("load_agent_interactions");
-        if (interactions) setAgentInteractions(interactions);
+        if (interactions) {
+          const preLoadUpdates = agentInteractionsRef.current;
+          const merged = { ...interactions, ...preLoadUpdates };
+          agentInteractionsRef.current = merged;
+          setAgentInteractions(merged);
+          if (Object.keys(preLoadUpdates).length > 0) {
+            queueAgentInteractionSnapshot(merged);
+          }
+        }
       } catch { /* first run */ }
     })();
 
-  }, [loadWatchlistState]);
+  }, [loadWatchlistState, queueAgentInteractionSnapshot]);
 
   useEffect(() => {
     if (app_settings_loaded && autoPatchGemini && !hasAutoPatched.current) {
@@ -542,12 +613,6 @@ function AppBody() {
     await persistWatchlistState(reorderTeamMember({ version: 2, watchlists, teams }, teamId, draggedAgentId, targetAgentId, position));
   };
 
-  const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
-  const filteredAgents = useMemo(
-    () => getAgentsForList(agents, activeList, teams),
-    [agents, activeList, teams],
-  );
-
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
     const applyTheme = () => {
@@ -584,58 +649,31 @@ function AppBody() {
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
 
-  const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
 
   const handleAgentCardClick = useCallback((e: React.MouseEvent, agentId: string) => {
-      if (e.shiftKey && lastSelectedIdRef.current) {
-        const currentIndex = filteredAgents.findIndex((a: AgentConfig) => a.session_id === agentId);
-        const lastIndex = filteredAgents.findIndex((a: AgentConfig) => a.session_id === lastSelectedIdRef.current);
-        if (currentIndex !== -1 && lastIndex !== -1) {
-          const start = Math.min(currentIndex, lastIndex);
-          const end = Math.max(currentIndex, lastIndex);
-          const rangeIds = filteredAgents.slice(start, end + 1).map((a: AgentConfig) => a.session_id);
-          const next = (e.ctrlKey || e.metaKey) ? new Set([...selectedAgentIds, ...rangeIds]) : new Set(rangeIds);
-          setSelectedAgentIds(next);
-          return;
-        }
-      }
-      if (e.ctrlKey || e.metaKey) {
-        setSelectedAgentIds(prev => {
-          const next = new Set(prev);
-          if (next.has(agentId)) next.delete(agentId);
-          else next.add(agentId);
-          return next;
-        });
-        lastSelectedIdRef.current = agentId;
-      } else {
-        const now = Date.now();
-        const DOUBLE_CLICK_TOLERANCE = 450;
-        const isDoubleClick = lastClickRef.current && lastClickRef.current.id === agentId && (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
-        lastClickRef.current = { id: agentId, time: now };
-        if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-          if (!isDoubleClick) {
-            setSelectedAgentIds(new Set());
-            lastSelectedIdRef.current = null;
-          } else {
-            lastSelectedIdRef.current = agentId;
-          }
-        } else {
-          setSelectedAgentIds(new Set([agentId]));
-          lastSelectedIdRef.current = agentId;
-        }
-      }
-  }, [filteredAgents, selectedAgentIds]);
+    const now = Date.now();
+    const isDoubleClick = Boolean(
+      lastClickRef.current
+      && lastClickRef.current.id === agentId
+      && now - lastClickRef.current.time < 450,
+    );
+    lastClickRef.current = { id: agentId, time: now };
+    if (isDoubleClick && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
+      setSelectedAgentIds(new Set([agentId]));
+      return;
+    }
+    selectAgent(agentId, {
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      shiftKey: e.shiftKey,
+      rangeAgentIds: filteredAgents.map((agent) => agent.session_id),
+    });
+  }, [filteredAgents, selectAgent, setSelectedAgentIds]);
 
   const selectSingleAgent = useCallback((agentId: string) => {
-    setSelectedAgentIds((prev) => {
-      if (prev.size === 1 && prev.has(agentId)) {
-        return prev;
-      }
-      return new Set([agentId]);
-    });
-    lastSelectedIdRef.current = agentId;
-  }, []);
+    setSelectedAgentIds(new Set([agentId]));
+  }, [setSelectedAgentIds]);
 
   const handleMouseDown = (agentId: string) => setDraggedAgentId(agentId);
   const handleMouseEnterCard = (agentId: string) => {
@@ -654,12 +692,8 @@ function AppBody() {
 
     const nextAgents = [...remainingAgents];
     nextAgents.splice(targetIndex + (position === "after" ? 1 : 0), 0, draggedAgent);
-    setAgents(nextAgents);
-    try {
-      await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
-    } catch (err) {
-      console.error("Failed to reorder:", err);
-    }
+    try { await agentResources.reorder_agents(nextAgents.map((agent) => agent.session_id)); }
+    catch (err) { console.error("Failed to reorder:", err); }
   };
 
   const handleMouseUp = async () => {
@@ -706,8 +740,7 @@ function AppBody() {
             const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, entries: newOrder.map(agentId => ({ type: "agent" as const, agentId })) } : l);
             await persistWatchlists(updatedWatchlists);
           } else {
-            setAgents(newDisplayList);
-            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (err) { console.error("Failed to reorder:", err); }
+            try { await agentResources.reorder_agents(newOrder); } catch (err) { console.error("Failed to reorder:", err); }
           }
         }
         wasDraggingRef.current = true;
@@ -737,45 +770,6 @@ function AppBody() {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  const fetchAgents = async (spawnedAgent?: AgentConfig) => {
-    const requestId = ++fetchAgentsRequestRef.current;
-    try {
-      const list = await invoke<AgentConfig[]>("list_agents");
-      if (requestId !== fetchAgentsRequestRef.current) return;
-      const normalized = normalizeAgentConfigs(list);
-      const spawnedAgentId = spawnedAgent?.session_id;
-      const newAgentPosition = useSettingsStore.getState().watchlistNewAgentPosition;
-      const shouldPlaceNewAgent = Boolean(spawnedAgentId);
-      const nextAgents = shouldPlaceNewAgent
-        ? newAgentPosition === "bottom"
-          ? [
-              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
-              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
-            ]
-          : [
-              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
-              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
-            ]
-        : normalized;
-      setAgents(nextAgents);
-      const newOffIds = new Set<string>();
-      for (const agent of nextAgents) if (agent.is_off) newOffIds.add(agent.session_id);
-      setOffAgentIds(newOffIds);
-      const orderChanged = nextAgents.some((agent, index) => agent.session_id !== normalized[index]?.session_id);
-      if (shouldPlaceNewAgent && orderChanged && nextAgents.some((agent) => agent.session_id === spawnedAgentId)) {
-        try {
-          await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
-        } catch (error) {
-          console.error("Failed to place spawned agent in configured watchlist position:", error);
-        }
-      }
-    } catch (e) {
-      if (requestId === fetchAgentsRequestRef.current) {
-        console.error("Failed to fetch agents:", e);
-      }
-    }
-  };
-
   const fetchAgentClasses = async () => {
     try {
       const list = await invoke<AgentClassDefinition[]>("list_agent_classes");
@@ -784,21 +778,9 @@ function AppBody() {
   };
 
   useEffect(() => {
-    fetchAgents();
     fetchAgentClasses();
     loadQueueItems();
     loadQueuePreferences();
-    const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
-      const { session_id, data } = event.payload;
-      appendAgentEvent(session_id, data as Record<string, unknown>);
-      const effect = classifyJsonEvent(data as Record<string, unknown>);
-      if (effect.type === "progress") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: effect.thought }));
-      } else if (effect.type === "clear_thought") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      }
-    });
-    const unlistenUpdate = listen("agents-updated", () => fetchAgents());
     const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
     // Class definitions (create/delete/reset) are now managed exclusively
     // from the Library's ClassDetail panel, which reports changes through
@@ -812,98 +794,16 @@ function AppBody() {
       fetchAgentClasses();
     });
     return () => {
-      unlistenJson.then(fn => fn());
-      unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
       unlistenLibrary.then(fn => fn());
     };
-  }, [appendAgentEvent, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
-
-  useEffect(() => {
-    const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
-      const mapping: Record<string, AgentTelemetry> = {};
-      for (const m of event.payload) mapping[m.session_id] = m;
-      for (const [sessionId, metric] of Object.entries(mapping)) {
-        const previousStatus = agentStatusRef.current[sessionId];
-        if (previousStatus !== undefined) {
-          maybeFlushAgentQueueCompletion(sessionId, metric.current_status, previousStatus);
-          maybeAddActionNeededQueueItem(sessionId, metric.current_status, previousStatus);
-        }
-        agentStatusRef.current[sessionId] = metric.current_status;
-      }
-      setTelemetry(prev => {
-        const next = { ...prev };
-        const interactionUpdates: Record<string, string> = {};
-        for (const [sessionId, metric] of Object.entries(mapping)) {
-          const previousMetric = prev[sessionId];
-          const previousQueryCount = previousMetric?.query_count ?? 0;
-          const currentQueryCount = metric.query_count ?? 0;
-          const isTranscriptHydration =
-            previousMetric &&
-            previousQueryCount === 0 &&
-            currentQueryCount > 0 &&
-            metric.current_status === "Idle" &&
-            Boolean(metric.log_path);
-
-          if (previousMetric && currentQueryCount > previousQueryCount && !isTranscriptHydration) {
-            interactionUpdates[sessionId] = new Date().toISOString();
-          }
-          next[sessionId] = metric;
-        }
-        if (Object.keys(interactionUpdates).length > 0) {
-          setAgentInteractions(prevInteractions => {
-            const updated = { ...prevInteractions, ...interactionUpdates };
-            invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
-            return updated;
-          });
-        }
-        return next;
-      });
-    });
-    const unlistenAppMetrics = listen<AppTelemetry>('app-metrics', (event) => {
-      setAppTelemetry(event.payload);
-    });
-    const unlistenStatus = listen<AgentStatusUpdate>("agent-status-updated", (event) => {
-      const { session_id, current_status } = event.payload;
-      if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      }
-      const previousStatus = agentStatusRef.current[session_id];
-      maybeFlushAgentQueueCompletion(session_id, current_status, previousStatus);
-      maybeAddActionNeededQueueItem(session_id, current_status, previousStatus);
-      agentStatusRef.current[session_id] = current_status;
-      setTelemetry(prev => {
-        return {
-          ...prev,
-          [session_id]: {
-            session_id,
-            cpu_usage: prev[session_id]?.cpu_usage ?? 0,
-            memory_mb: prev[session_id]?.memory_mb ?? 0,
-            uptime_seconds: prev[session_id]?.uptime_seconds ?? 0,
-            query_count: prev[session_id]?.query_count ?? 0,
-            init_timestamp: prev[session_id]?.init_timestamp ?? null,
-            current_status,
-            log_path: prev[session_id]?.log_path ?? null,
-          },
-        };
-      });
-    });
-    return () => {
-      unlistenMetrics.then(fn => fn());
-      unlistenAppMetrics.then(fn => fn());
-      unlistenStatus.then(fn => fn());
-    };
-  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
+  }, [loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
       await submitInputToAgent(sessionId, cmd);
       const timestamp = new Date().toISOString();
-      setAgentInteractions(prev => {
-        const updated = { ...prev, [sessionId]: timestamp };
-        invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
-        return updated;
-      });
+      handleAgentInteractions({ [sessionId]: timestamp });
     } catch (e) {
       console.error(e);
     }
@@ -920,8 +820,7 @@ function AppBody() {
       return;
     }
     try {
-      await invoke("rename_agent", { sessionId, newName });
-      setAgents(prev => prev.map(a => a.session_id === sessionId ? { ...a, session_name: newName } : a));
+      await agentResources.rename_agent(sessionId, newName);
       setEditingAgentId(null);
     } catch (e: unknown) { 
       console.error(e);
@@ -947,9 +846,7 @@ function AppBody() {
 
   const onPause = async (id: string) => {
     try {
-      await invoke('pause_agent', { sessionId: id });
-      setOffAgentIds(prev => new Set(prev).add(id));
-      fetchAgents();
+      await agentResources.pause_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -957,13 +854,7 @@ function AppBody() {
 
   const onRestart = async (id: string) => {
     try {
-      await invoke('resume_agent', { sessionId: id });
-      setOffAgentIds(prev => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      fetchAgents();
+      await agentResources.resume_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -971,15 +862,7 @@ function AppBody() {
 
   const onClear = async (id: string) => {
     try {
-      await invoke('clear_agent_session', { sessionId: id });
-      setCurrentThoughts(prev => ({ ...prev, [id]: "" }));
-      setTerminalTitles(prev => ({ ...prev, [id]: "" }));
-      setOffAgentIds(prev => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      fetchAgents();
+      await agentResources.clear_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -992,14 +875,8 @@ function AppBody() {
     }
 
     try {
-      await invoke<AgentConfig>("clone_agent", {
-        req: {
-          source_session_id: id,
-          mode,
-        },
-      });
+      await agentResources.clone_agent(id, mode);
       await loadWatchlistState();
-      fetchAgents();
     } catch (e) {
       console.error(e);
       alert(`Failed to clone agent: ${e}`);
@@ -1009,22 +886,17 @@ function AppBody() {
   const onDelete = async (id: string) => {
     if (await confirm('Delete this agent?')) {
       try {
-        await invoke('kill_agent', { sessionId: id });
+        const deletedIds = await agentResources.delete_agents([id]);
+        if (deletedIds.length === 0) return;
         await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
           { version: 2, watchlists, teams },
-          [id],
+          [...deletedIds],
         ));
-        setOffAgentIds(prev => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
         setSelectedAgentIds(prev => {
           const next = new Set(prev);
-          next.delete(id);
+          for (const deletedId of deletedIds) next.delete(deletedId);
           return next;
         });
-        fetchAgents();
       } catch (e) {
         console.error(e);
       }
@@ -1040,35 +912,19 @@ function AppBody() {
 
     if (!(await confirm(message))) return;
 
-    const deletedIds = new Set<string>();
-
-    for (const id of ids) {
-      try {
-        await invoke('kill_agent', { sessionId: id });
-        deletedIds.add(id);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    if (deletedIds.size === 0) return;
+    const deletedIds = await agentResources.delete_agents(ids);
+    if (deletedIds.length === 0) return;
 
     await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
       { version: 2, watchlists, teams },
       [...deletedIds],
     ));
 
-    setOffAgentIds(prev => {
-      const next = new Set(prev);
-      for (const id of deletedIds) next.delete(id);
-      return next;
-    });
     setSelectedAgentIds(prev => {
       const next = new Set(prev);
       for (const id of deletedIds) next.delete(id);
       return next;
     });
-    fetchAgents();
   };
 
   const selectedUserTerminalWorkspace = selectedAgentIds.size === 1
@@ -1086,9 +942,8 @@ function AppBody() {
   const openAgentFromQueue = useCallback((sessionId: string) => {
     setViewMode("grid");
     setSelectedAgentIds(new Set([sessionId]));
-    lastSelectedIdRef.current = sessionId;
     window.setTimeout(() => scrollToAgent(sessionId), 0);
-  }, [scrollToAgent]);
+  }, [scrollToAgent, setSelectedAgentIds]);
   const shouldRenderGraph = viewMode === "graph" || cachedCanvasViews.has("graph");
   const shouldRenderGarden = viewMode === "garden" || cachedCanvasViews.has("garden");
   const workbenchNotice = WORKBENCH_FLAGS.workbench_enabled
@@ -1115,15 +970,10 @@ function AppBody() {
   }, [workbenchPersistence]);
 
   return (
-    <div
-      data-testid="app-shell"
-      className="flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
-      style={{
-        width: `var(${NATIVE_WINDOW_WIDTH_VAR}, 100vw)`,
-        height: `var(${NATIVE_WINDOW_HEIGHT_VAR}, 100dvh)`,
-      }}
-    >
-      <CustomTitleBar
+    <AgentResourceContext.Provider value={agentResources}>
+      <RosterProvider value={roster}>
+        <AppShell
+          titlebar={<CustomTitleBar
         viewMode={viewMode}
         setViewMode={setViewMode}
         leftCollapsed={leftCollapsed}
@@ -1137,9 +987,9 @@ function AppBody() {
         agents={agents}
         offAgentIds={offAgentIds}
         titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
-      />
+          />}
 
-      {workbenchNotice && (
+          status={workbenchNotice ? (
         <div
           role="status"
           aria-live="polite"
@@ -1153,9 +1003,9 @@ function AppBody() {
         >
           {workbenchNotice}
         </div>
-      )}
+          ) : null}
 
-      {WORKBENCH_FLAGS.workbench_enabled
+          conflictDialog={WORKBENCH_FLAGS.workbench_enabled
         && (workbenchPersistence.conflict === "revision_conflict"
           || workbenchPersistence.conflict === "future_schema") && (
         <WorkbenchConflictDialog
@@ -1165,10 +1015,9 @@ function AppBody() {
           on_replace_disk={() => { void workbenchPersistence.replace_disk(); }}
           on_export_local={exportLocalWorkbench}
         />
-      )}
+          )}
 
-      <div className="flex flex-1 overflow-hidden">
-        <SidebarIconRail
+          leftRail={<SidebarIconRail
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           setCollapsed={setLeftCollapsed}
@@ -1178,8 +1027,8 @@ function AppBody() {
           sourceControlBusy={sourceControlStatus.loading}
           onToggleUserTerminal={toggleUserTerminal}
           onToggleSettings={toggleSettings}
-        />
-        <SidebarContentPane
+          />}
+          leftPane={<SidebarContentPane
           activeTab={activeTab}
           leftCollapsed={leftCollapsed}
           selectedAgentIds={selectedAgentIds}
@@ -1193,10 +1042,9 @@ function AppBody() {
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
           onOpenWorkflowsView={openWorkflowsView}
-        />
+          />}
 
-        <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
-          {WORKBENCH_FLAGS.workbench_enabled ? (
+          mainContent={WORKBENCH_FLAGS.workbench_enabled ? (
             <WorkbenchHost
               store={workbenchPersistence.store}
               safe_mode={workbenchPersistence.safe_mode}
@@ -1205,7 +1053,7 @@ function AppBody() {
           ) : (
           <div
             className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2 flex flex-col"
-            onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
+            onClick={clearSelection}
           >
             {viewMode === "workflows" && (
               <div className="flex-1 min-h-0 bg-wardian-bg">
@@ -1244,21 +1092,18 @@ function AppBody() {
                   onOpenAgentInGrid={(id) => {
                     setViewMode("grid");
                     setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
                     window.setTimeout(() => scrollToAgent(id), 0);
                   }}
                   onInitiateRename={(id) => {
                     const agent = agents.find((candidate) => candidate.session_id === id);
                     setViewMode("grid");
                     setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
                     setEditingAgentId(id);
                     setTempName(agent?.session_name ?? "");
                   }}
                   onQuery={(id) => {
                     setViewMode("grid");
                     setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
                     window.setTimeout(() => scrollToAgent(id), 0);
                   }}
                   onPause={onPause}
@@ -1293,7 +1138,6 @@ function AppBody() {
                   onOpenAgentInGrid={(id) => {
                     setViewMode("grid");
                     setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
                     window.setTimeout(() => scrollToAgent(id), 0);
                   }}
                 />
@@ -1362,7 +1206,8 @@ function AppBody() {
             )}
           </div>
           )}
-          <CustomCloneModal
+          mainOverlays={<>
+            <CustomCloneModal
             sourceSessionId={customCloneSourceId ?? ""}
             agentClasses={agentClasses}
             isOpen={Boolean(customCloneSourceId)}
@@ -1370,10 +1215,10 @@ function AppBody() {
             onCloned={async () => {
               setCustomCloneSourceId(null);
               await loadWatchlistState();
-              fetchAgents();
+              await fetchAgents();
             }}
-          />
-          {userTerminalOpen && (
+            />
+            {userTerminalOpen && (
             <UserTerminalPanel
               theme={theme}
               height={userTerminalHeight}
@@ -1381,13 +1226,13 @@ function AppBody() {
               onHeightChange={setUserTerminalHeight}
               onHide={() => setUserTerminalOpen(false)}
             />
-          )}
-          {settingsOpen && (
+            )}
+            {settingsOpen && (
             <SettingsModal isOpen={true} onClose={() => setSettingsOpen(false)} />
-          )}
-        </main>
+            )}
+          </>}
 
-        <AgentWatchlist
+          roster={<AgentWatchlist
           agents={agents}
           telemetry={telemetry}
           terminalTitles={terminalTitles}
@@ -1395,12 +1240,13 @@ function AppBody() {
           selectedAgentIds={selectedAgentIds}
           offAgentIds={offAgentIds}
           onSelectionChange={setSelectedAgentIds}
+          filter={rosterFilter}
+          onFilterChange={setRosterFilter}
+          onSelectAgent={selectAgent}
           onAgentClick={scrollToAgent}
           onRename={renameAgent}
           onReorderAgents={async (newOrder) => {
-            const newAgents = [...agents].sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
-            setAgents(newAgents);
-            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (e) { console.error(e); }
+            try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }
           }}
           onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
           onPause={onPause}
@@ -1429,9 +1275,10 @@ function AppBody() {
           prefs={watchlistPrefs}
           onPrefsChange={persistWatchlistPrefs}
           interactions={agentInteractions}
+          />}
         />
-      </div>
-    </div>
+      </RosterProvider>
+    </AgentResourceContext.Provider>
   );
 }
 

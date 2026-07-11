@@ -76,6 +76,14 @@ interface AgentWatchlistProps {
   selectedAgentIds: Set<string>;
   offAgentIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
+  filter?: string;
+  onFilterChange?: (filter: string) => void;
+  onSelectAgent?: (agentId: string, modifiers: {
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    rangeAgentIds?: readonly string[];
+  }) => void;
   onAgentClick: (agentId: string) => void;
   onRename: (agentId: string, newName: string) => Promise<void>;
   onReorderAgents: (newOrder: string[]) => void;
@@ -116,6 +124,9 @@ export default function AgentWatchlist({
   selectedAgentIds,
   offAgentIds,
   onSelectionChange,
+  filter,
+  onFilterChange,
+  onSelectAgent,
   onAgentClick,
   onRename,
   onReorderAgents,
@@ -152,6 +163,7 @@ export default function AgentWatchlist({
 
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
+  const effectiveSearchTerm = filter ?? searchTerm;
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [draggedTeamId, setDraggedTeamId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
@@ -220,16 +232,16 @@ export default function AgentWatchlist({
   const baseDisplayItems = getDisplayItemsForList(agents, activeList, teams);
   const filteredDisplayItems = baseDisplayItems
     .map((item): WatchlistDisplayItem | null => {
-      if (!searchTerm.trim()) return item;
-      const term = searchTerm.toLowerCase();
+      if (!effectiveSearchTerm.trim()) return item;
+      const term = effectiveSearchTerm.toLowerCase();
       if (item.type === "team") {
-        const matchingAgents = filterAgents(item.agents, searchTerm);
+        const matchingAgents = filterAgents(item.agents, effectiveSearchTerm);
         if (item.team.name.toLowerCase().includes(term) || matchingAgents.length > 0) {
           return { ...item, agents: matchingAgents.length > 0 ? matchingAgents : item.agents };
         }
         return null;
       }
-      return filterAgents([item.agent], searchTerm).length > 0 ? item : null;
+      return filterAgents([item.agent], effectiveSearchTerm).length > 0 ? item : null;
     })
     .filter((item): item is WatchlistDisplayItem => Boolean(item));
   const unsortedDisplayedAgents = flattenDisplayItems(filteredDisplayItems);
@@ -729,6 +741,22 @@ export default function AgentWatchlist({
 
           lastClickRef.current = { id: agentId, time: now };
 
+          if (isDoubleClick && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
+            onAgentClick(agentId);
+            onSelectionChange(new Set([agentId]));
+            return;
+          }
+
+          if (onSelectAgent) {
+            onSelectAgent(agentId, {
+              ctrlKey: e.ctrlKey,
+              metaKey: e.metaKey,
+              shiftKey: e.shiftKey,
+              rangeAgentIds: displayedAgents.map((agent) => agent.session_id),
+            });
+            return;
+          }
+
           if (e.shiftKey && lastSelectedIdRef.current) {
             const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
             const lastIndex = displayedAgents.findIndex(a => a.session_id === lastSelectedIdRef.current);
@@ -935,8 +963,12 @@ export default function AgentWatchlist({
           <input
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-lg px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="Search agents..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.currentTarget.value)}
+            value={effectiveSearchTerm}
+            onChange={(e) => {
+              const nextFilter = e.currentTarget.value;
+              if (onFilterChange) onFilterChange(nextFilter);
+              else setSearchTerm(nextFilter);
+            }}
           />
         </div>
 
