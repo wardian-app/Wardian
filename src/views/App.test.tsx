@@ -176,6 +176,10 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
       case "save_queue_preferences":
         currentQueuePreferences = args?.preferences;
         return null;
+      case "workflow_list_blueprints":
+      case "workflow_list_runs":
+      case "schedule_list":
+        return [];
       case "pause_agent":
         if (args?.sessionId) {
           currentAgents = currentAgents.map(a => 
@@ -438,6 +442,20 @@ describe("Workbench persistence boot integration", () => {
     expect(localStorage.getItem("wardian-layout")).toBe("legacy-layout-bytes");
     expect(screen.queryByTestId("workbench-persistence-notice")).not.toBeInTheDocument();
     expect(screen.queryByTestId("workbench-host")).not.toBeInTheDocument();
+    expect(screen.getByTestId("titlebar-center")).toHaveAttribute("data-navigation-mode", "legacy");
+    expect(within(screen.getByTestId("titlebar-center")).getByRole("button", { name: "Grid" }))
+      .toBeInTheDocument();
+    expect(within(screen.getByTestId("titlebar-center")).getByRole("button", { name: "Workflows" }))
+      .toBeInTheDocument();
+    const legacyCycle = new KeyboardEvent("keydown", {
+      key: "Tab",
+      ctrlKey: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(legacyCycle);
+    expect(legacyCycle.defaultPrevented).toBe(true);
+    await waitFor(() => expect(within(screen.getByTestId("titlebar-center"))
+      .getByRole("button", { name: "Dashboard" })).toHaveClass("active"));
     expect(screen.getAllByText("Grid").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
   });
@@ -497,6 +515,21 @@ describe("Workbench persistence boot integration", () => {
     expect(notice).toHaveAttribute("role", "status");
     expect(screen.getByTestId("app-shell")).toBeInTheDocument();
     expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
+    const titlebarCenter = screen.getByTestId("titlebar-center");
+    expect(titlebarCenter).toHaveAttribute("data-navigation-mode", "workbench");
+    expect(within(titlebarCenter).getByRole("button", { name: "Quick Open" }))
+      .toBeInTheDocument();
+    expect(within(titlebarCenter).getByRole("button", { name: "Commands" }))
+      .toBeInTheDocument();
+    expect(within(titlebarCenter).queryByRole("button", { name: "Grid" }))
+      .not.toBeInTheDocument();
+    const flaggedLegacyCycle = new KeyboardEvent("keydown", {
+      key: "Tab",
+      ctrlKey: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(flaggedLegacyCycle);
+    expect(flaggedLegacyCycle.defaultPrevented).toBe(false);
     expect(document.querySelector('[data-safe-mode="true"]')).not.toBeNull();
     expect(screen.getAllByTestId("workbench-group")).toHaveLength(1);
     expect(screen.getAllByText("Grid").length).toBeGreaterThanOrEqual(1);
@@ -504,6 +537,37 @@ describe("Workbench persistence boot integration", () => {
     const gridMode = within(overviewSurface).getByRole("button", { name: "Grid" });
     fireEvent.click(gridMode);
     await waitFor(() => expect(gridMode).toHaveAttribute("aria-pressed", "true"));
+
+    const overviewTab = screen.getByRole("tab", { name: "Agents Overview" });
+    fireEvent.click(screen.getByTestId("sidebar-tab-workflows"));
+    expect(overviewTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("workflows-surface")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Monitor" }));
+    expect(await screen.findByTestId("workflows-surface")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Workflows" }))
+      .toHaveAttribute("aria-selected", "true"));
+
+    act(() => {
+      useLibraryStore.getState().openLibraryAt("skills");
+    });
+    expect(await screen.findByTestId("library-surface")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Library" }))
+      .toHaveAttribute("aria-selected", "true"));
+
+    fireEvent.click(within(titlebarCenter).getByRole("button", { name: "Quick Open" }));
+    expect(await screen.findByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+    for (const surfaceType of [
+      "agents-overview",
+      "dashboard",
+      "queue",
+      "graph",
+      "garden",
+      "library",
+      "workflows",
+    ]) {
+      expect(document.querySelector(`[role="option"][data-surface-type="${surfaceType}"]`))
+        .not.toBeNull();
+    }
   });
 
   it("routes roster Open and Open to Side into Agent Session surfaces", async () => {

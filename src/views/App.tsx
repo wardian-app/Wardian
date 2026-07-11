@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { AgentsOverviewMode, CloneMode, WorkbenchShellV1 } from "../types";
+import type { AgentsOverviewMode, CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -344,6 +344,7 @@ function AppBody() {
   }, [addActionNeeded]);
 
   useEffect(() => {
+    if (WORKBENCH_FLAGS.workbench_enabled) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key === "Tab") {
         e.preventDefault();
@@ -365,8 +366,12 @@ function AppBody() {
   useEffect(() => {
     if (seenLibraryNavigationRequestRef.current === libraryNavigationRequest) return;
     seenLibraryNavigationRequestRef.current = libraryNavigationRequest;
-    setViewMode("library");
-  }, [libraryNavigationRequest]);
+    if (WORKBENCH_FLAGS.workbench_enabled) {
+      workbenchNavigation.open({ surface_type: "library" });
+    } else {
+      setViewMode("library");
+    }
+  }, [libraryNavigationRequest, workbenchNavigation]);
 
   useEffect(() => {
     if (!LEGACY_CACHED_CANVAS_VIEWS.has(viewMode)) return;
@@ -969,14 +974,23 @@ function AppBody() {
     ? Array.from(selectedAgentIds)[0]
     : undefined;
 
-  const openWorkflowsView = useCallback(() => {
+  const openAuxiliarySurface = useCallback((request: OpenSurfaceRequest) => {
     if (WORKBENCH_FLAGS.workbench_enabled) {
-      workbenchNavigation.open({ surface_type: "workflows" });
+      workbenchNavigation.open(request);
       return;
     }
-    setActiveTab("workflows");
-    setViewMode("workflows");
+    const legacyMode = request.surface_type === "agents-overview"
+      ? "grid"
+      : request.surface_type;
+    if (["grid", "dashboard", "queue", "graph", "garden", "library", "workflows"].includes(legacyMode)) {
+      setViewMode(legacyMode as ViewMode);
+      if (legacyMode === "workflows") setActiveTab("workflows");
+    }
   }, [workbenchNavigation]);
+
+  const openWorkflowsView = useCallback(() => {
+    openAuxiliarySurface({ surface_type: "workflows" });
+  }, [openAuxiliarySurface]);
 
   const openAgent = useCallback((sessionId: string) => {
     if (WORKBENCH_FLAGS.workbench_enabled) {
@@ -1030,6 +1044,10 @@ function AppBody() {
     anchor.click();
     URL.revokeObjectURL(objectUrl);
   }, [workbenchPersistence]);
+
+  const openWorkbenchLauncher = useCallback(() => {
+    workbenchPersistence.store.getState().set_launcher_open(true);
+  }, [workbenchPersistence.store]);
 
   const renderWorkbenchSurface: WorkbenchSurfaceRenderer = (surface, lifecycle) => {
     if (surface.surface_type === "agent-session") {
@@ -1263,6 +1281,9 @@ function AppBody() {
       <RosterProvider value={roster}>
         <AppShell
           titlebar={<CustomTitleBar
+        workbenchEnabled={WORKBENCH_FLAGS.workbench_enabled}
+        onQuickOpen={openWorkbenchLauncher}
+        onCommandPalette={openWorkbenchLauncher}
         viewMode={viewMode}
         setViewMode={setViewMode}
         leftCollapsed={leftCollapsed}
@@ -1330,7 +1351,7 @@ function AppBody() {
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
-          onOpenWorkflowsView={openWorkflowsView}
+          onOpenSurface={openAuxiliarySurface}
           />}
 
           mainContent={WORKBENCH_FLAGS.workbench_enabled ? (
@@ -1339,6 +1360,8 @@ function AppBody() {
               safe_mode={workbenchPersistence.safe_mode}
               registry={workbenchRegistry}
               navigation={workbenchNavigation}
+              on_quick_open={openWorkbenchLauncher}
+              on_command_palette={openWorkbenchLauncher}
               resource_key={selectedWorkbenchResourceKey}
               render_surface={renderWorkbenchSurface}
               surface_title={(surface) => {

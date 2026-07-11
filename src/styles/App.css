@@ -156,6 +156,25 @@
   background: rgba(255, 255, 255, 0.03);
 }
 
+.titlebar-command {
+  height: 100%;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--color-wardian-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-command:hover,
+.titlebar-command:focus-visible {
+  background: var(--color-wardian-card-bg-muted);
+  color: var(--color-wardian-text);
+  outline: none;
+}
+
 .titlebar-tab.active {
   color: var(--color-wardian-text);
   background: var(--color-wardian-bg);

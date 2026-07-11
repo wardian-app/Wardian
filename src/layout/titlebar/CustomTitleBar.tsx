@@ -13,6 +13,9 @@ const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("
 const DEFAULT_LEFT_RAIL_WIDTH = 48;
 
 interface CustomTitleBarProps {
+  workbenchEnabled: boolean;
+  onQuickOpen: () => void;
+  onCommandPalette: () => void;
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
   leftCollapsed: boolean;
@@ -57,11 +60,26 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
         offAgentIds={props.offAgentIds}
         titlebarTelemetryVisible={props.titlebarTelemetryVisible}
       />
-      <div className="titlebar-center-container">
-        <WorkspaceTabs
-          viewMode={props.viewMode}
-          setViewMode={props.setViewMode}
-        />
+      <div
+        className="titlebar-center-container"
+        data-testid="titlebar-center"
+        data-navigation-mode={props.workbenchEnabled ? "workbench" : "legacy"}
+      >
+        {props.workbenchEnabled ? (
+          <div className="titlebar-zone titlebar-center" aria-label="Workbench commands" role="group">
+            <button type="button" className="titlebar-command" onClick={props.onQuickOpen}>
+              Quick Open
+            </button>
+            <button type="button" className="titlebar-command" onClick={props.onCommandPalette}>
+              Commands
+            </button>
+          </div>
+        ) : (
+          <WorkspaceTabs
+            viewMode={props.viewMode}
+            setViewMode={props.setViewMode}
+          />
+        )}
       </div>
       <RightWindowControls
         rightCollapsed={props.rightCollapsed}
