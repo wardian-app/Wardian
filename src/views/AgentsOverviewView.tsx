@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import type { AgentConfig, AgentTelemetry, CloneMode } from "../types";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { AgentConfig, AgentTelemetry, AgentsOverviewMode, CloneMode } from "../types";
 import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
 import type { Watchlist } from "../layout/watchlist/types";
@@ -7,11 +7,25 @@ import { AgentContextMenu } from "../components/AgentContextMenu";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useGridResize } from "../features/grid/useGridResize";
+import { useAgentsOverviewLayout } from "../features/grid/useAgentsOverviewLayout";
+import {
+  CHAT_CARD_FLOOR,
+  TERMINAL_CARD_FLOOR,
+} from "../features/grid/agentsOverviewLayout";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
-const MIN_TERMINAL_CARD_WIDTH = 520;
-const MIN_CHAT_CARD_WIDTH = 360;
 type GridCardMode = "terminal" | "chat";
+
+export function agentsOverviewGridTemplateColumns(
+  mode: AgentsOverviewMode,
+  tracks: readonly number[],
+  minimumTrackWidth: number,
+): string {
+  if (tracks.length <= 1) return "1fr";
+  return tracks.map((track) => mode === "grid"
+    ? `minmax(${minimumTrackWidth}px, ${track}fr)`
+    : `minmax(0, ${track}fr)`).join(" ");
+}
 
 function pruneRecordToIds<T>(record: Record<string, T>, allowedIds: Set<string>): Record<string, T> {
   let changed = false;
@@ -28,15 +42,19 @@ function pruneRecordToIds<T>(record: Record<string, T>, allowedIds: Set<string>)
   return changed ? next : record;
 }
 
-interface GridViewProps {
+export interface AgentsOverviewViewProps {
+  surfaceId: string;
+  mode: AgentsOverviewMode;
+  recentAgentIds?: readonly string[];
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
   terminalTitles: Record<string, string>;
   selectedAgentIds: Set<string>;
-  maximizedAgentId: string | null;
+  focusedAgentId: string | null;
   theme: "dark" | "light" | "system";
   onCardClick: (e: React.MouseEvent, id: string) => void;
-  onMaximize: (id: string | null) => void;
+  onModeChange: (mode: AgentsOverviewMode) => void;
+  onFocusedAgentChange: (id: string | null) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   setEditingAgentId: (id: string | null) => void;
@@ -65,6 +83,7 @@ interface GridViewProps {
 }
 
 interface AgentTerminalSlotProps {
+  presentationId: string;
   sessionId: string;
   provider?: string;
   isMaximized: boolean;
@@ -77,6 +96,7 @@ interface AgentTerminalSlotProps {
 }
 
 const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
+  presentationId,
   sessionId,
   provider,
   isMaximized,
@@ -98,7 +118,7 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
   return (
     <AgentTerminal
       sessionId={sessionId}
-      presentationId={`legacy-grid:${sessionId}`}
+      presentationId={presentationId}
       visibility={visibility}
       renderState={renderState}
       requestedInteraction="interactive"
@@ -112,15 +132,19 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
   );
 });
 
-export const GridView: React.FC<GridViewProps> = ({
+export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
+  surfaceId,
+  mode,
+  recentAgentIds,
   filteredAgents,
   telemetry,
   terminalTitles,
   selectedAgentIds,
-  maximizedAgentId,
+  focusedAgentId,
   theme,
   onCardClick,
-  onMaximize,
+  onModeChange,
+  onFocusedAgentChange,
   onDelete,
   onRename,
   setEditingAgentId,
@@ -147,11 +171,10 @@ export const GridView: React.FC<GridViewProps> = ({
   onClone,
   onTerminalFocus,
 }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const { layout, resetLayout, gridStacked } = useLayoutStore();
+  const gridRef = useRef<HTMLDivElement>(null);
+  const { layout: manualLayout, resetGridLayout, gridStacked } = useLayoutStore();
   const gridCardDisplayMode = useSettingsStore((state) => state.gridCardDisplayMode);
-  const { isResizing, startResize, guidePos, resizeType } = useGridResize(containerRef);
-  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  const { isResizing, startResize, guidePos, resizeType } = useGridResize(gridRef);
   const [cardModeOverrides, setCardModeOverrides] = useState<Record<string, GridCardMode>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
   const [composerFocusAgentId, setComposerFocusAgentId] = useState<string | null>(null);
@@ -162,16 +185,10 @@ export const GridView: React.FC<GridViewProps> = ({
 
   const handleBackgroundContextMenu = (e: React.MouseEvent) => {
     // Only trigger if we click the grid background itself (gaps/padding)
-    if (e.target !== containerRef.current) return;
+    if (e.target !== gridRef.current) return;
     e.preventDefault();
     setBgContextMenu({ x: e.clientX, y: e.clientY, visible: true });
   };
-
-  useEffect(() => {
-    const handleResize = () => setWindowWidth(window.innerWidth);
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
 
   const [contextMenu, setContextMenu] = useState<{ visible: boolean; x: number; y: number; agentId: string | null }>({
     visible: false, x: 0, y: 0, agentId: null
@@ -189,27 +206,39 @@ export const GridView: React.FC<GridViewProps> = ({
   const renderableAgents = filteredAgents.filter(
     (agent: AgentConfig) => !offAgentIds.has(agent.session_id.toString()),
   );
-  const maximizedAgents = maximizedAgentId
-    ? renderableAgents.filter((agent: AgentConfig) => agent.session_id.toString() === maximizedAgentId)
-    : [];
-  const hasVisibleMaximizedAgent = maximizedAgents.length > 0;
-  const visibleAgents = hasVisibleMaximizedAgent ? maximizedAgents : renderableAgents;
-
-  const isMaximized = hasVisibleMaximizedAgent;
-  const isMobile = windowWidth < 1000;
-  // While a stack-exit drag is in flight, render the multi-column preview even though gridStacked is still true.
-  const renderStacked = (gridStacked || isMobile) && resizeType !== 'stack-exit';
-  const visibleColumnTracks = visibleAgents.length <= 1
+  const cardModeForAgent = (agentId: string): GridCardMode => cardModeOverrides[agentId] ?? gridCardDisplayMode;
+  const layoutAgents = useMemo(() => renderableAgents.map((agent) => ({
+    id: agent.session_id.toString(),
+    cardMode: cardModeForAgent(agent.session_id.toString()),
+  })), [cardModeOverrides, gridCardDisplayMode, renderableAgents]);
+  const { containerRef, layout: overviewLayout } = useAgentsOverviewLayout({
+    mode,
+    agents: layoutAgents,
+    focusedAgentId,
+    recentAgentIds,
+  });
+  const visibleAgentIds = new Set(overviewLayout.visibleAgentIds);
+  const visibleAgents = renderableAgents.filter((agent) => visibleAgentIds.has(agent.session_id.toString()));
+  const isMaximized = overviewLayout.presentationMode === "single";
+  // User-forced stacking remains an explicit Grid affordance; Auto is always container-derived.
+  const renderStacked = mode === "grid" && gridStacked && resizeType !== 'stack-exit';
+  const renderedColumnCount = renderStacked ? 1 : Math.max(1, overviewLayout.columns);
+  const visibleColumnTracks = renderedColumnCount <= 1
     ? [1]
-    : layout.column_tracks.slice(0, visibleAgents.length);
-  const renderedColumnCount = renderStacked ? 1 : visibleColumnTracks.length;
+    : mode === "grid" && manualLayout.column_tracks.length >= renderedColumnCount
+      ? manualLayout.column_tracks.slice(0, renderedColumnCount)
+      : Array.from({ length: renderedColumnCount }, () => 1);
   const visibleRowCount = renderedColumnCount > 0
     ? Math.ceil(visibleAgents.length / renderedColumnCount)
     : 0;
-  const cardModeForAgent = (agentId: string): GridCardMode => cardModeOverrides[agentId] ?? gridCardDisplayMode;
-  const visibleCardModes = visibleAgents.map((agent) => cardModeForAgent(agent.session_id.toString()));
   const visibleAgentIdKey = visibleAgents.map((agent) => agent.session_id.toString()).join('\0');
   const renderableAgentIdKey = renderableAgents.map((agent) => agent.session_id.toString()).join('\0');
+
+  useEffect(() => {
+    if (overviewLayout.focusedAgentId !== focusedAgentId) {
+      onFocusedAgentChange(overviewLayout.focusedAgentId);
+    }
+  }, [focusedAgentId, onFocusedAgentChange, overviewLayout.focusedAgentId]);
 
   useEffect(() => {
     const visibleIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
@@ -235,52 +264,49 @@ export const GridView: React.FC<GridViewProps> = ({
     setComposerFocusAgentId((current) => current === agentId ? null : current);
   };
 
-  const minCardWidth = visibleCardModes.some((mode) => mode === 'terminal')
-    ? MIN_TERMINAL_CARD_WIDTH
-    : MIN_CHAT_CARD_WIDTH;
-  const idealGridMinWidth = (renderedColumnCount * minCardWidth) + (Math.max(0, renderedColumnCount - 1) * 8);
-  const gridMinWidth = visibleAgents.length > 0
-    ? renderedColumnCount > 1
-      ? '100%'
-      : `${idealGridMinWidth}px`
-    : undefined;
+  const gridMinWidth = overviewLayout.requiresScroll
+    ? `${overviewLayout.contentWidth}px`
+    : '100%';
+  const minimumGridTrackWidth = layoutAgents.some(({ cardMode }) => cardMode === "terminal")
+    ? TERMINAL_CARD_FLOOR.width
+    : CHAT_CARD_FLOOR.width;
   const gridTemplateColumns = (isMaximized || renderStacked)
     ? '1fr'
-    : renderedColumnCount <= 1
-      ? '1fr'
-      : visibleColumnTracks.map(t => `minmax(0, ${t}fr)`).join(' ');
+    : agentsOverviewGridTemplateColumns(mode, visibleColumnTracks, minimumGridTrackWidth);
 
   const gridStyle: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns,
-    gridAutoRows: isMaximized ? '100%' : `${layout.row_height}px`,
+    gridAutoRows: isMaximized ? '100%' : `${overviewLayout.cardHeight}px`,
     gap: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
     background: 'transparent',
     padding: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
-    height: isMaximized ? '100%' : 'auto',
+    height: isMaximized ? '100%' : overviewLayout.requiresScroll ? `${overviewLayout.contentHeight}px` : '100%',
     minWidth: gridMinWidth,
   };
 
   const bgMenuItems: ContextMenuItem[] = [
     {
       label: "Reset Grid Layout",
-      onClick: resetLayout,
+      onClick: resetGridLayout,
       icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
     }
   ];
 
   return (
-    <div
-      ref={containerRef}
-      data-testid="agent-grid"
-      style={gridStyle}
-      onContextMenu={handleBackgroundContextMenu}
-      className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
-    >
+    <div ref={containerRef} className="h-full min-h-0 min-w-0 overflow-auto" data-testid="agents-overview-container">
+      <div
+        ref={gridRef}
+        data-testid="agent-grid"
+        data-presentation-mode={overviewLayout.presentationMode}
+        style={gridStyle}
+        onContextMenu={handleBackgroundContextMenu}
+        className={`relative ${isResizing ? 'cursor-col-resize' : ''}`}
+      >
       {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
-        const isAgentVisible = !hasVisibleMaximizedAgent || maximizedAgentId === agentId;
-        const isAgentMaximized = maximizedAgentId === agentId;
+        const isAgentVisible = visibleAgentIds.has(agentId);
+        const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
         
@@ -372,14 +398,14 @@ export const GridView: React.FC<GridViewProps> = ({
                  {isAgentMaximized ? (
                    <button 
                      aria-label={`Minimize ${agent.session_name}`}
-                     onClick={(e) => { e.stopPropagation(); onMaximize(null); }}
+                     onClick={(e) => { e.stopPropagation(); onModeChange("auto"); }}
                      className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary h-6 px-2 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                    >
                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                      Minimize
                    </button>
                  ) : (
-                   <button aria-label={`Maximize ${agent.session_name}`} onClick={(e) => { e.stopPropagation(); onMaximize(agentId); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] h-6 w-6 p-1 flex items-center justify-center">
+                   <button aria-label={`Maximize ${agent.session_name}`} onClick={(e) => { e.stopPropagation(); onFocusedAgentChange(agentId); onModeChange("single"); }} className="text-bright-neutral hover:text-primary transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)] h-6 w-6 p-1 flex items-center justify-center">
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                    </button>
                  )}
@@ -413,6 +439,7 @@ export const GridView: React.FC<GridViewProps> = ({
                   />
                 ) : (
                   <AgentTerminalSlot
+                    presentationId={`${surfaceId}:agent:${agentId}`}
                     sessionId={agentId}
                     provider={agent.provider}
                     isMaximized={isAgentMaximized}
@@ -443,8 +470,8 @@ export const GridView: React.FC<GridViewProps> = ({
                   data-resize-handle="stack-exit"
                   className="absolute right-0 z-30 group/gutter flex justify-center"
                   style={{
-                    top: `calc(${idx} * ${layout.row_height}px)`,
-                    height: `${layout.row_height}px`,
+                    top: `calc(${idx} * ${manualLayout.row_height}px)`,
+                    height: `${manualLayout.row_height}px`,
                     width: '12px',
                     cursor: 'col-resize',
                   }}
@@ -459,7 +486,7 @@ export const GridView: React.FC<GridViewProps> = ({
       )}
 
       {/* Global Track Resize Overlays (Gutters) */}
-      {!isMaximized && !isMobile && (
+      {!isMaximized && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
           {!gridStacked && visibleColumnTracks.slice(0, -1).map((_weight, i) => {
@@ -491,8 +518,8 @@ export const GridView: React.FC<GridViewProps> = ({
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
               style={{ 
                 top: renderStacked
-                  ? `calc(${(i + 1) * layout.row_height}px - 6px)`
-                  : `calc(var(--density-grid-gap) + ${(i + 1) * layout.row_height}px + ${i} * var(--density-grid-gap) - 3px)`,
+                  ? `calc(${(i + 1) * manualLayout.row_height}px - 6px)`
+                  : `calc(var(--density-grid-gap) + ${(i + 1) * overviewLayout.cardHeight}px + ${i} * var(--density-grid-gap) - 3px)`,
                 height: '12px',
                 cursor: 'row-resize'
               }}
@@ -551,6 +578,7 @@ export const GridView: React.FC<GridViewProps> = ({
           style={resizeType === 'h' ? { left: guidePos, height: '100%', top: 0, bottom: 0, position: 'absolute' } : { top: guidePos, width: '100%', left: 0, right: 0, position: 'absolute' }}
         />
       )}
+      </div>
     </div>
   );
 };

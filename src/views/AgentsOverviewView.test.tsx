@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
-import { GridView } from './GridView';
+import { AgentsOverviewView, agentsOverviewGridTemplateColumns } from './AgentsOverviewView';
 import type { AgentConfig, AgentTelemetry } from '../types';
 import { useLayoutStore } from '../store/useLayoutStore';
 import { useSettingsStore } from '../store/useSettingsStore';
@@ -12,6 +12,7 @@ vi.mock('../features/terminal/AgentTerminal', async () => {
   const React = await vi.importActual<typeof import('react')>('react');
   return {
     AgentTerminal: React.memo((props: {
+      presentationId: string;
       sessionId: string;
       onTerminalFocus?: () => void;
     }) => {
@@ -102,15 +103,17 @@ function gridProps(
     offAgentIds?: Set<string>;
     onDelete?: (agentId: string) => void;
   } = {},
-): React.ComponentProps<typeof GridView> {
+): React.ComponentProps<typeof AgentsOverviewView> {
   return {
+    surfaceId: 'overview-surface',
+    mode: maximizedAgentId ? 'single' : 'grid',
     filteredAgents,
     telemetry,
     terminalTitles: {},
     currentThoughts: {},
     selectedAgentIds: options.selectedAgentIds ?? new Set(),
     offAgentIds: options.offAgentIds ?? new Set(),
-    maximizedAgentId,
+    focusedAgentId: maximizedAgentId,
     draggedAgentId: null,
     dragOverAgentId: null,
     editingAgentId: null,
@@ -120,7 +123,8 @@ function gridProps(
     onMouseUp: () => {},
     onMouseDown: () => {},
     onCardClick: () => {},
-    onMaximize: () => {},
+    onModeChange: () => {},
+    onFocusedAgentChange: () => {},
     onDelete: options.onDelete ?? (() => {}),
     onRename: () => {},
     setEditingAgentId: () => {},
@@ -149,16 +153,30 @@ function renderGrid(
     onDelete?: (agentId: string) => void;
   } = {},
 ) {
-  return render(<GridView {...gridProps(maximizedAgentId, filteredAgents, onTerminalFocus, options)} />);
+  return render(<AgentsOverviewView {...gridProps(maximizedAgentId, filteredAgents, onTerminalFocus, options)} />);
 }
 
 beforeEach(() => {
   localStorage.clear();
+  act(() => useLayoutStore.getState().resetGridLayout());
   useSettingsStore.setState({ gridCardDisplayMode: 'terminal' });
   terminalRenderSpy.mockClear();
 });
 
-describe('GridView maximize behavior', () => {
+describe('AgentsOverviewView maximize behavior', () => {
+  it('derives stable terminal presentation IDs from the surface and agent IDs', () => {
+    renderGrid(null, agents);
+
+    expect(terminalRenderSpy).toHaveBeenCalledWith(expect.objectContaining({
+      presentationId: 'overview-surface:agent:agent-1',
+      sessionId: 'agent-1',
+    }));
+    expect(terminalRenderSpy).toHaveBeenCalledWith(expect.objectContaining({
+      presentationId: 'overview-surface:agent:agent-2',
+      sessionId: 'agent-2',
+    }));
+  });
+
   it('reports the owning agent when its terminal receives focus', () => {
     const onTerminalFocus = vi.fn();
     renderGrid(null, agents, onTerminalFocus);
@@ -192,9 +210,9 @@ describe('GridView maximize behavior', () => {
     });
 
     try {
-      const { container } = renderGrid(null);
+      renderGrid(null);
 
-      const root = container.firstElementChild as HTMLElement;
+      const root = screen.getByTestId('agent-grid');
       expect(root.style.gridTemplateColumns).toBe('1fr');
       expect(root.style.gridAutoRows).not.toBe('100%');
       expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
@@ -226,9 +244,9 @@ describe('GridView maximize behavior', () => {
 
   it('falls back to the filtered grid when the maximized agent is no longer visible', () => {
     const visibleSubset = agents.filter((agent) => agent.session_id !== 'agent-1');
-    const { container } = renderGrid('agent-1', visibleSubset);
+    renderGrid('agent-1', visibleSubset);
 
-    const root = container.firstElementChild;
+    const root = screen.getByTestId('agent-grid');
     // New grid implementation uses grid display
     expect((root as HTMLElement).style.display).toBe('grid');
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
@@ -244,13 +262,13 @@ describe('GridView maximize behavior', () => {
     expect(screen.queryByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 
-  it('falls back to the active grid when the maximized agent is off', () => {
-    const { container } = renderGrid('agent-1', agents, vi.fn(), {
+  it('falls back to the remaining active agent in Single mode when focus is off', () => {
+    renderGrid('agent-1', agents, vi.fn(), {
       offAgentIds: new Set(['agent-1']),
     });
-    const root = container.firstElementChild as HTMLElement;
+    const root = screen.getByTestId('agent-grid');
 
-    expect(root.style.gridAutoRows).not.toBe('100%');
+    expect(root.style.gridAutoRows).toBe('100%');
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
@@ -267,12 +285,14 @@ describe('GridView maximize behavior', () => {
 
   it('keeps terminal panes memoized when only card header state changes', () => {
     const stableProps = {
+      surfaceId: 'overview-surface',
+      mode: 'grid' as const,
       filteredAgents: agents,
       telemetry,
       terminalTitles: {},
       selectedAgentIds: new Set<string>(),
       offAgentIds: new Set<string>(),
-      maximizedAgentId: null,
+      focusedAgentId: null,
       draggedAgentId: null,
       dragOverAgentId: null,
       editingAgentId: null,
@@ -282,7 +302,8 @@ describe('GridView maximize behavior', () => {
       onMouseUp: vi.fn(),
       onMouseDown: vi.fn(),
       onCardClick: vi.fn(),
-      onMaximize: vi.fn(),
+      onModeChange: vi.fn(),
+      onFocusedAgentChange: vi.fn(),
       onDelete: vi.fn(),
       onRename: vi.fn(),
       setEditingAgentId: vi.fn(),
@@ -300,12 +321,12 @@ describe('GridView maximize behavior', () => {
       onClear: vi.fn(),
       onTerminalFocus: vi.fn(),
     };
-    const { rerender } = render(<GridView {...stableProps} />);
+    const { rerender } = render(<AgentsOverviewView {...stableProps} />);
     expect(terminalRenderSpy).toHaveBeenCalledTimes(2);
 
     terminalRenderSpy.mockClear();
     rerender(
-      <GridView
+      <AgentsOverviewView
         {...stableProps}
         currentThoughts={{ 'agent-1': 'Indexing files' }}
       />,
@@ -368,12 +389,12 @@ describe('GridView maximize behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
     expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
 
-    rerender(<GridView {...gridProps('agent-2', agents)} />);
+    rerender(<AgentsOverviewView {...gridProps('agent-2', agents)} />);
 
     expect(screen.getByTestId('chat-agent-1')).not.toBeVisible();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
 
-    rerender(<GridView {...gridProps(null, agents)} />);
+    rerender(<AgentsOverviewView {...gridProps(null, agents)} />);
 
     expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
     expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
@@ -401,8 +422,8 @@ describe('GridView maximize behavior', () => {
   it('uses terminal card width when a chat-default card is switched to terminal', () => {
     useSettingsStore.getState().setGridCardDisplayMode('chat');
 
-    const { container } = renderGrid(null, [agents[0]]);
-    const root = container.firstElementChild as HTMLElement;
+    renderGrid(null, [agents[0]]);
+    const root = screen.getByTestId('agent-grid');
     expect(root.style.minWidth).toBe('360px');
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' }));
@@ -421,30 +442,36 @@ describe('GridView maximize behavior', () => {
   it('gives a single visible agent the full grid width instead of a stale narrow track', () => {
     act(() => useLayoutStore.getState().setColumnTracks([0.2, 0.8]));
 
-    const { container } = renderGrid(null, [agents[0]]);
+    renderGrid(null, [agents[0]]);
 
-    const root = container.firstElementChild as HTMLElement;
+    const root = screen.getByTestId('agent-grid');
     expect(root.style.gridTemplateColumns).toBe('1fr');
   });
 
   it('keeps the grid wide enough for terminal input rows when the app shell is narrow', () => {
-    const { container } = renderGrid(null, [agents[0]]);
+    renderGrid(null, [agents[0]]);
 
-    const root = container.firstElementChild as HTMLElement;
+    const root = screen.getByTestId('agent-grid');
     expect(root.style.minWidth).toBe('520px');
+  });
+
+  it('clamps explicit Grid tracks to card floors when manual weights are uneven', () => {
+    expect(agentsOverviewGridTemplateColumns('grid', [0.2, 0.8], 520)).toBe(
+      'minmax(520px, 0.2fr) minmax(520px, 0.8fr)',
+    );
   });
 
   it('uses a narrower minimum width for chat cards', () => {
     useSettingsStore.getState().setGridCardDisplayMode('chat');
 
-    const { container } = renderGrid(null, [agents[0]]);
+    renderGrid(null, [agents[0]]);
 
-    const root = container.firstElementChild as HTMLElement;
+    const root = screen.getByTestId('agent-grid');
     expect(root.style.minWidth).toBe('360px');
   });
 });
 
-describe('GridView density', () => {
+describe('AgentsOverviewView density', () => {
   it('renders compact single-row card headers with visible agent class', () => {
     renderGrid(null);
 
@@ -476,7 +503,7 @@ describe('GridView density', () => {
   });
 });
 
-describe('GridView stacked mode', () => {
+describe('AgentsOverviewView stacked mode', () => {
   beforeEach(() => {
     localStorage.clear();
     act(() => useLayoutStore.getState().resetLayout());
@@ -484,15 +511,15 @@ describe('GridView stacked mode', () => {
 
   it('renders single column when gridStacked is true', () => {
     act(() => useLayoutStore.getState().setGridStacked(true));
-    const { container } = renderGrid(null, agents);
-    const grid = container.firstElementChild as HTMLElement;
+    renderGrid(null, agents);
+    const grid = screen.getByTestId('agent-grid');
     expect(grid.style.gridTemplateColumns).toBe('1fr');
   });
 
   it('uses a single-column minimum width when gridStacked is true', () => {
     act(() => useLayoutStore.getState().setGridStacked(true));
-    const { container } = renderGrid(null, agents);
-    const grid = container.firstElementChild as HTMLElement;
+    renderGrid(null, agents);
+    const grid = screen.getByTestId('agent-grid');
     expect(grid.style.minWidth).toBe('520px');
   });
 
@@ -500,13 +527,13 @@ describe('GridView stacked mode', () => {
     useSettingsStore.getState().setGridCardDisplayMode('chat');
     act(() => useLayoutStore.getState().setGridStacked(true));
 
-    const { container } = renderGrid(null, agents);
+    renderGrid(null, agents);
 
-    const grid = container.firstElementChild as HTMLElement;
+    const grid = screen.getByTestId('agent-grid');
     expect(grid.style.minWidth).toBe('360px');
   });
 
-  it('keeps the deliberate two-column preview inside a small viewport', () => {
+  it('keeps the container-derived shape canonical during a stack-exit gesture', () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
     act(() => {
@@ -516,14 +543,14 @@ describe('GridView stacked mode', () => {
 
     try {
       const { container } = renderGrid(null, agents);
-      const grid = container.firstElementChild as HTMLElement;
+      const grid = screen.getByTestId('agent-grid');
 
       act(() => {
         fireEvent.mouseDown(container.querySelector('[data-resize-handle="stack-exit"]') as HTMLElement);
       });
 
-      expect(grid.style.gridTemplateColumns).toBe('minmax(0, 0.5fr) minmax(0, 0.5fr)');
-      expect(grid.style.minWidth).toBe('100%');
+      expect(grid.style.gridTemplateColumns).toBe('1fr');
+      expect(grid.style.minWidth).toBe('520px');
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
       act(() => {

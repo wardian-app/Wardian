@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { CloneMode, WorkbenchShellV1 } from "../types";
+import type { AgentsOverviewMode, CloneMode, WorkbenchShellV1, WorkbenchSurfaceV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -34,7 +34,7 @@ import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { DashboardView } from "./DashboardView";
-import { GridView } from "./GridView";
+import { AgentsOverviewView } from "./AgentsOverviewView";
 import { GraphView } from "./GraphView";
 import { GardenView } from "./GardenView";
 import { QueueView } from "./QueueView";
@@ -59,6 +59,10 @@ import {
 } from "../features/agents/useAgentResourceController";
 import { RosterProvider } from "../features/agents/RosterContext";
 import { useRosterController } from "../features/agents/useRosterController";
+import {
+  AgentsOverviewSurface,
+  normalizeAgentsOverviewSurfaceState,
+} from "../features/workbench/surfaces/AgentsOverviewSurface";
 
 declare global {
   interface Window {
@@ -354,6 +358,7 @@ function AppBody() {
   const rightCollapsed = useLayoutStore((state) => state.rightSidebarCollapsed);
   const setRightCollapsed = useLayoutStore((state) => state.setRightSidebarCollapsed);
   const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
+  const [legacyOverviewMode, setLegacyOverviewMode] = useState<AgentsOverviewMode>("grid");
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
   const {
@@ -435,6 +440,12 @@ function AppBody() {
   const filteredAgents = useMemo(
     () => getAgentsForList(agents, activeList, teams),
     [activeList, agents, teams],
+  );
+  const recentAgentIds = useMemo(
+    () => Object.entries(agentInteractions)
+      .sort(([, left], [, right]) => right.localeCompare(left))
+      .map(([agentId]) => agentId),
+    [agentInteractions],
   );
   const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
 
@@ -762,7 +773,7 @@ function AppBody() {
   }, [draggedAgentId]);
 
   const scrollToAgent = (agentId: string) => {
-    if (viewMode === "grid" && maximizedAgentId) {
+    if (viewMode === "grid" && legacyOverviewMode === "single") {
       setMaximizedAgentId(agentId);
       return;
     }
@@ -969,6 +980,64 @@ function AppBody() {
     URL.revokeObjectURL(objectUrl);
   }, [workbenchPersistence]);
 
+  const renderWorkbenchSurface = (surface: WorkbenchSurfaceV1) => {
+    if (surface.surface_type !== "agents-overview") {
+      return (
+        <section className="wardian-workbench-placeholder">
+          <h2>{surface.surface_type}</h2>
+          <p>This registered surface will adopt its Wardian view in the next migration slice.</p>
+        </section>
+      );
+    }
+
+    return (
+      <AgentsOverviewSurface
+        surface_id={surface.surface_id}
+        state={normalizeAgentsOverviewSurfaceState(surface.state)}
+        agents={roster.filteredAgents}
+        recentAgentIds={recentAgentIds}
+        telemetry={telemetry}
+        terminalTitles={terminalTitles}
+        currentThoughts={currentThoughts}
+        selectedAgentIds={selectedAgentIds}
+        offAgentIds={offAgentIds}
+        theme={theme}
+        draggedAgentId={draggedAgentId}
+        dragOverAgentId={dragOverAgentId}
+        editingAgentId={editingAgentId}
+        tempName={tempName}
+        watchlists={watchlists}
+        onCardClick={handleAgentCardClick}
+        onDelete={onDelete}
+        onRename={renameAgent}
+        setEditingAgentId={setEditingAgentId}
+        setTempName={setTempName}
+        handleTitleChange={handleTitleChange}
+        getStatusColorClass={getStatusColorClass}
+        deriveCurrentThought={deriveCurrentThought}
+        onMouseEnterCard={handleMouseEnterCard}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onAddToList={handleAddToList}
+        onRemoveFromList={handleRemoveFromList}
+        onQuery={(agentId) => scrollToAgent(agentId)}
+        onPause={onPause}
+        onRestart={onRestart}
+        onClear={onClear}
+        onClone={onClone}
+        onTerminalFocus={selectSingleAgent}
+        on_state_change={(state) => {
+          workbenchPersistence.store.getState().apply_commands([{
+            type: "update_surface_state",
+            surface_id: surface.surface_id,
+            state_schema_version: 1,
+            state,
+          }]);
+        }}
+      />
+    );
+  };
+
   return (
     <AgentResourceContext.Provider value={agentResources}>
       <RosterProvider value={roster}>
@@ -1049,6 +1118,7 @@ function AppBody() {
               store={workbenchPersistence.store}
               safe_mode={workbenchPersistence.safe_mode}
               resource_key={selectedWorkbenchResourceKey}
+              render_surface={renderWorkbenchSurface}
             />
           ) : (
           <div
@@ -1145,14 +1215,17 @@ function AppBody() {
             )}
 
             {viewMode === "grid" && (
-              <GridView 
+              <AgentsOverviewView
+                surfaceId="legacy-agents-overview"
+                mode={legacyOverviewMode}
+                recentAgentIds={recentAgentIds}
                 filteredAgents={filteredAgents}
                 telemetry={telemetry}
                 terminalTitles={terminalTitles}
                 currentThoughts={currentThoughts}
                 selectedAgentIds={selectedAgentIds}
                 offAgentIds={offAgentIds}
-                maximizedAgentId={maximizedAgentId}
+                focusedAgentId={maximizedAgentId}
                 draggedAgentId={draggedAgentId}
                 dragOverAgentId={dragOverAgentId}
                 editingAgentId={editingAgentId}
@@ -1171,7 +1244,12 @@ function AppBody() {
                 onMouseDown={handleMouseDown}
                 onCardClick={handleAgentCardClick}
                 onTerminalFocus={selectSingleAgent}
-                onMaximize={setMaximizedAgentId}
+                onModeChange={(nextMode) => {
+                  const legacyMode = nextMode === "single" ? "single" : "grid";
+                  setLegacyOverviewMode(legacyMode);
+                  if (legacyMode !== "single") setMaximizedAgentId(null);
+                }}
+                onFocusedAgentChange={setMaximizedAgentId}
                 onDelete={onDelete}
                 onRename={renameAgent}
                 setEditingAgentId={setEditingAgentId}

@@ -1,4 +1,5 @@
 import type {
+  AgentsOverviewSurfaceState,
   OpenSurfaceRequest,
   SurfaceDefinition,
   SurfaceRenderPolicy,
@@ -71,7 +72,12 @@ const CORE_SURFACE_DEFINITIONS: readonly SurfaceDefinition[] = [
     title: "Agents Overview",
     render_policy: "keep_alive",
     open_policy: "singleton",
-    default_state: () => ({ focused_agent_id: null, presentation_mode: "auto" }),
+    default_state: (): AgentsOverviewSurfaceState => ({
+      mode: "auto",
+      focused_agent_id: null,
+      search_query: "",
+      status_filter: [],
+    }),
   }),
   surfaceDefinition({ type: "dashboard", title: "Dashboard", render_policy: "recreate_from_state", open_policy: "singleton" }),
   surfaceDefinition({ type: "queue", title: "Queue", render_policy: "recreate_from_state", open_policy: "singleton" }),

@@ -690,7 +690,12 @@ describe("readLegacyWorkbenchMigration", () => {
         surface_id: "initial-agents-overview",
         surface_type: "agents-overview",
         state_schema_version: 1,
-        state: { focused_agent_id: null, presentation_mode: "auto" },
+        state: {
+          mode: "auto",
+          focused_agent_id: null,
+          search_query: "",
+          status_filter: [],
+        },
       },
     });
   });

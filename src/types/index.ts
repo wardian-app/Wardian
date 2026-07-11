@@ -295,6 +295,15 @@ export interface GridLayout {
     row_height: number;      // Fixed height for all rows in pixels
 }
 
+export type AgentsOverviewMode = "auto" | "grid" | "single";
+
+export type AgentsOverviewSurfaceState = {
+    mode: AgentsOverviewMode;
+    focused_agent_id: string | null;
+    search_query: string;
+    status_filter: string[];
+};
+
 export interface TopologyEdgeDto {
   a: string;
   b: string;

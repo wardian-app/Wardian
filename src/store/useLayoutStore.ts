@@ -45,6 +45,7 @@ interface LayoutState {
   toggleUserTerminal: () => void;
   setGridStacked: (v: boolean) => void;
   setPreviousColumnTracks: (tracks: number[] | null) => void;
+  resetGridLayout: () => void;
   resetLayout: () => void;
 }
 
@@ -70,6 +71,11 @@ export const useLayoutStore = create<LayoutState>()(
       toggleUserTerminal: () => set((state) => ({ userTerminalOpen: !state.userTerminalOpen })),
       setGridStacked: (gridStacked) => set({ gridStacked }),
       setPreviousColumnTracks: (previousColumnTracks) => set({ previousColumnTracks }),
+      resetGridLayout: () => set({
+        layout: DEFAULT_LAYOUT,
+        gridStacked: false,
+        previousColumnTracks: null,
+      }),
       resetLayout: () => set({
         layout: DEFAULT_LAYOUT,
         leftSidebarCollapsed: false,

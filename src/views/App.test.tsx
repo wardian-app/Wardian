@@ -15,7 +15,7 @@ import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 import type { AgentInteractions } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
-import { makeSingleGroupDocument } from "../features/workbench/workbenchTestUtils";
+import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
 
 const workbenchFlagState = vi.hoisted(() => ({ enabled: false }));
 vi.mock("../config/workbenchFlags", () => ({
@@ -438,7 +438,7 @@ describe("Workbench persistence boot integration", () => {
     expect(localStorage.getItem("wardian-layout")).toBe("legacy-layout-bytes");
     expect(screen.queryByTestId("workbench-persistence-notice")).not.toBeInTheDocument();
     expect(screen.queryByTestId("workbench-host")).not.toBeInTheDocument();
-    expect(screen.getByText("Grid")).toBeInTheDocument();
+    expect(screen.getAllByText("Grid").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("sidebar-icon-rail")).toBeInTheDocument();
   });
 
@@ -470,7 +470,17 @@ describe("Workbench persistence boot integration", () => {
       if (command === "load_workbench_state") {
         return Promise.resolve({
           source: "backup",
-          document: makeSingleGroupDocument(),
+          document: makeSingleGroupDocument([
+            makeSurface("overview-surface", {
+              surface_type: "agents-overview",
+              state: {
+                mode: "auto",
+                focused_agent_id: null,
+                search_query: "",
+                status_filter: [],
+              },
+            }),
+          ]),
           notice: "Recovered the workbench from backup.",
           durable_revision: 0,
           durable_token: "opaque-zero",
@@ -489,7 +499,11 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
     expect(document.querySelector('[data-safe-mode="true"]')).not.toBeNull();
     expect(screen.getAllByTestId("workbench-group")).toHaveLength(1);
-    expect(screen.getByText("Grid")).toBeInTheDocument();
+    expect(screen.getAllByText("Grid").length).toBeGreaterThanOrEqual(1);
+    const overviewSurface = await screen.findByTestId("agents-overview-surface");
+    const gridMode = within(overviewSurface).getByRole("button", { name: "Grid" });
+    fireEvent.click(gridMode);
+    await waitFor(() => expect(gridMode).toHaveAttribute("aria-pressed", "true"));
   });
 });
 

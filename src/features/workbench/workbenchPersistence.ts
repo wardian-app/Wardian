@@ -803,7 +803,12 @@ function initialSurface(viewMode: LegacyWorkbenchViewMode | undefined): Workbenc
     surface_type: surfaceType,
     state_schema_version: 1,
     state: surfaceType === "agents-overview"
-      ? { focused_agent_id: null, presentation_mode: "auto" }
+      ? {
+          mode: "auto",
+          focused_agent_id: null,
+          search_query: "",
+          status_filter: [],
+        }
       : {},
   };
 }
