@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
 import fs from "node:fs";
 
 type BlueprintNode = {
@@ -223,12 +224,12 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(1);
+  const titlebar = page.getByTestId("titlebar-center");
+  await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Blueprints" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Runs" })).toHaveCount(0);
 
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.evaluate(async () => {
     const { useSettingsStore } = await import("/src/store/useSettingsStore.ts");
     useSettingsStore.setState({ default_provider: "codex" });
@@ -269,8 +270,7 @@ test("workflow builder renders persisted loop workflow nodes on a visible canvas
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
 
   await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
@@ -310,8 +310,7 @@ test("workflow run dialog scrolls parameter-heavy forms within the viewport", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
   await page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ }).click();
   const dialog = page.getByTestId("run-launch-dialog");

@@ -9,6 +9,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
 
 test.describe("Workflow Builder UI", () => {
   test.describe.configure({ mode: "serial" });
@@ -34,14 +35,14 @@ test.describe("Workflow Builder UI", () => {
   });
 
   test("switching to Workflows view renders the edit canvas", async () => {
-    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await openSurface(page, "workflows");
     await expect(page.getByTestId("workflows-view")).toBeVisible();
     await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
     await expect(page.locator(".react-flow")).toBeVisible();
   });
 
   test("workflow edit mode opens the node library", async () => {
-    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await openSurface(page, "workflows");
     await page.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
     await expect(page.getByTestId("node-library")).toBeVisible();
     await page.getByTestId("node-library").getByRole("button", { name: "Close" }).click();
@@ -49,12 +50,12 @@ test.describe("Workflow Builder UI", () => {
   });
 
   test("add-node button is visible in edit mode", async () => {
-    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await openSurface(page, "workflows");
     await expect(page.getByTestId("workflows-view").getByRole("button", { name: "Add node" })).toBeVisible();
   });
 
   test("run button is disabled for an unsaved empty workflow", async () => {
-    await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+    await openSurface(page, "workflows");
     await expect(page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ })).toBeDisabled();
   });
 });

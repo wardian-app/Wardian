@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
 
 const blueprint = {
   schema: 2,
@@ -141,8 +142,7 @@ test("parameterized run dialog sends entry input to workflow_run", async ({ page
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.evaluate(async () => {
     const { useSettingsStore } = await import("/src/store/useSettingsStore.ts");
     useSettingsStore.setState({ default_provider: "codex" });

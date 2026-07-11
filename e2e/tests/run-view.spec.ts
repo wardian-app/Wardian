@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
 
 type RunEvent = { seq: number; ts: string; kind: string; [key: string]: unknown };
 
@@ -123,7 +124,7 @@ async function openRunView(page: Page) {
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
-  await page.locator(".titlebar-center").getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.evaluate(async () => {
     const { useWorkflowsView } = await import("/src/store/useWorkflowsView.ts");
     const { useRunStore } = await import("/src/features/workflows/run/useRunStore.ts");

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 async function installGardenTestIpcMock(page: Page) {
   // Mock agents so that the Garden view has units to drag.
@@ -102,6 +103,7 @@ test.describe("Garden View", () => {
   test.describe.configure({ mode: "serial" });
 
   let page: Page;
+  let gardenStorageValue: string | null = null;
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
@@ -115,17 +117,16 @@ test.describe("Garden View", () => {
   });
 
   test("renders a canvas when Garden tab is clicked", async () => {
-    await page.getByRole("button", { name: "Garden", exact: true }).click();
-    const canvas = page.locator(".garden-canvas canvas");
+    await openSurface(page, "garden");
+    const canvas = surfacePanel(page, "garden").locator(".garden-canvas canvas");
     await expect(canvas).toBeVisible();
   });
 
   test("dragging a unit persists its position to localStorage", async () => {
-    // Ensure we're on the Garden tab
-    await page.getByRole("button", { name: "Garden", exact: true }).click();
+    await openSurface(page, "garden");
 
     // Wait for the canvas to be visible
-    const canvas = page.locator(".garden-canvas canvas");
+    const canvas = surfacePanel(page, "garden").locator(".garden-canvas canvas");
     await expect(canvas).toBeVisible({ timeout: 10_000 });
 
     // Get the bounding box of the canvas
@@ -152,21 +153,20 @@ test.describe("Garden View", () => {
     expect(stored).toBeTruthy();
     expect(stored).toContain("positions");
 
-    // Store the value for the next test
-    (page as any).__gardenStorageValue = stored;
+    // Store the value for the next test.
+    gardenStorageValue = stored;
   });
 
   test("dragged position persists across page reload", async () => {
     // Get the previously stored value
-    const storedBefore = (page as any).__gardenStorageValue;
+    const storedBefore = gardenStorageValue;
     expect(storedBefore).toBeTruthy();
 
     // Reload the page
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-    // Navigate back to Garden tab
-    await page.getByRole("button", { name: "Garden", exact: true }).click();
+    await openSurface(page, "garden");
 
     // Read localStorage again
     const storedAfter = await page.evaluate(() => localStorage.getItem("wardian-garden"));
@@ -176,17 +176,21 @@ test.describe("Garden View", () => {
   });
 
   test("right-click offers Reset layout and clears persisted positions", async () => {
-    await page.getByRole("button", { name: "Garden", exact: true }).click();
-    const canvas = page.locator(".garden-canvas canvas");
+    await openSurface(page, "garden");
+    const garden = surfacePanel(page, "garden");
+    const canvas = garden.locator(".garden-canvas canvas");
     await expect(canvas).toBeVisible();
 
     const box = await canvas.boundingBox();
     if (!box) throw new Error("no canvas bounding box");
 
-    // Real right-click on an empty area opens the background (reset-only) menu.
-    await page.mouse.move(box.x + box.width - 80, box.y + 60);
+    // Open near the canvas' left edge so the fixed-width portal cannot extend
+    // beneath the persistent roster and lose pointer hit-testing.
+    await page.mouse.move(box.x + 120, box.y + 60);
     await page.mouse.down({ button: "right" });
     await page.mouse.up({ button: "right" });
+    // The context menu is rendered in a document-level portal so it can escape
+    // the clipped canvas/workbench panel.
     await expect(page.locator('[data-testid="garden-context-menu"]')).toBeVisible();
 
     await page.locator('[data-testid="garden-reset-layout"]').click();

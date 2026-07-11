@@ -13,6 +13,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 async function installCustomCloneIpcMock(page: Page) {
   await page.addInitScript(() => {
@@ -176,8 +177,10 @@ test.describe("Agent Spawn Form", () => {
   });
 
   test("grid is empty before any agent is spawned", async () => {
-    await page.getByRole("button", { name: "Grid" }).click();
-    const cards = page.locator('[data-testid="agent-card"]');
+    await openSurface(page, "agents-overview");
+    const overview = surfacePanel(page, "agents-overview");
+    await overview.getByRole("button", { name: "Grid", exact: true }).click();
+    const cards = overview.locator('[data-testid="agent-card"]');
     await expect(cards).toHaveCount(0);
   });
 

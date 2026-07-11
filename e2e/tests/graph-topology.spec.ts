@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -113,9 +114,8 @@ async function openGraphView(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  // Click the Graph tab in the titlebar
-  await page.getByRole("button", { name: "Graph", exact: true }).click();
-  await expect(page.locator('[data-testid="graph-view"]')).toBeVisible({ timeout: 10_000 });
+  await openSurface(page, "graph");
+  await expect(surfacePanel(page, "graph").locator('[data-testid="graph-view"]')).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe("Graph Topology", () => {
