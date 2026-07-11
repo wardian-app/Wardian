@@ -567,12 +567,12 @@ Every input/resize request includes `session_id`, `presentation_id`, `runtime_ge
 
 **State/constants:** `AgentsOverviewSurfaceState { mode: auto|grid|single, focused_agent_id, search_query, status_filter }`; terminal floor 520x280, chat floor 360x280, chrome 52, debounce 120 ms, improvement threshold 10%.
 
-- [ ] **Step 1: Write failing pure-layout tests** for candidate scoring/ties, hard-floor Auto→Single, explicit Grid scroll/no Single, explicit Single persistence, 120 ms debounce, 10% hysteresis, mixed chat/terminal floors, focused-agent fallback, stable ordering, and zero-agent state.
-- [ ] **Step 2: Replace `window.innerWidth` logic** with the surface container `ResizeObserver`. Auto counts the current roster/watchlist-filtered population; selected targets do not alter population.
-- [ ] **Step 3: Replace maximize with Single.** Single changes only this surface's presentation. Group zoom, target selection, tabs, and runtimes remain unchanged.
-- [ ] **Step 4: Derive stable terminal presentation IDs** as `${surface_id}:agent:${agent_id}`. Hidden cards remain registered/suspended and mode changes never activate ownership.
-- [ ] **Step 5: Run** focused Grid/Overview tests and `npm run lint`. **Expected:** PASS with no window breakpoint.
-- [ ] **Step 6: Commit** `feat(workbench): add responsive Agents Overview modes`.
+- [x] **Step 1: Write failing pure-layout tests** for candidate scoring/ties, hard-floor Auto→Single, explicit Grid scroll/no Single, explicit Single persistence, 120 ms debounce, 10% hysteresis, mixed chat/terminal floors, focused-agent fallback, stable ordering, and zero-agent state.
+- [x] **Step 2: Replace `window.innerWidth` logic** with the surface container `ResizeObserver`. Auto counts the current roster/watchlist-filtered population; selected targets do not alter population.
+- [x] **Step 3: Replace maximize with Single.** Single changes only this surface's presentation. Group zoom, target selection, tabs, and runtimes remain unchanged.
+- [x] **Step 4: Derive stable terminal presentation IDs** as `${surface_id}:agent:${agent_id}`. Hidden cards remain registered/suspended and mode changes never activate ownership.
+- [x] **Step 5: Run** focused Grid/Overview tests and `npm run lint`. **Expected:** PASS with no window breakpoint.
+- [x] **Step 6: Commit** `feat(workbench): add responsive Agents Overview modes`.
 
 ### Task 12: Add Agent Session surfaces and roster Open/Open to Side routing
 
