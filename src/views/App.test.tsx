@@ -1634,8 +1634,8 @@ describe("Agent Watchlist Sidebar", () => {
     fireEvent.click(within(alphaCard as HTMLElement).getByRole("button", { name: "Maximize Alpha" }));
 
     await waitFor(() => {
-      expect(screen.getByTestId("terminal-agent-1")).toBeInTheDocument();
-      expect(screen.queryByTestId("terminal-agent-2")).not.toBeInTheDocument();
+      expect(screen.getByTestId("terminal-agent-1")).toBeVisible();
+      expect(screen.getByTestId("terminal-agent-2")).not.toBeVisible();
     });
 
     const betaWatchlistRow = screen
@@ -1648,8 +1648,8 @@ describe("Agent Watchlist Sidebar", () => {
     fireEvent.click(betaWatchlistRow);
 
     await waitFor(() => {
-      expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
-      expect(screen.getByTestId("terminal-agent-2")).toBeInTheDocument();
+      expect(screen.getByTestId("terminal-agent-1")).not.toBeVisible();
+      expect(screen.getByTestId("terminal-agent-2")).toBeVisible();
     });
   });
 

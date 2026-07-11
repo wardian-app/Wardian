@@ -1891,9 +1891,13 @@ async function getOrCreateTerminalSession(
   sessionId: string,
   presentationId: string,
   provider?: string,
+  isCancelled?: () => boolean,
 ) {
   const existing = terminalSessionMap.get(terminalKey);
   const resolvedProvider = await resolveTerminalProvider(sessionId, provider ?? existing?.provider);
+  if (isCancelled?.()) {
+    return null;
+  }
   if (existing) {
     existing.terminalClient = terminalSessionClientFor(sessionId);
     existing.presentationId = presentationId;
@@ -2335,6 +2339,8 @@ export const AgentTerminal = memo(function AgentTerminal({
   const wheelRowRemainderRef = useRef(0);
   const lastThemeSignalRef = useRef<WardianTerminalTheme | null>(null);
   const activationInFlightRef = useRef(false);
+  const presentationLifecycleRef = useRef({ visibility, renderState, requestedInteraction });
+  presentationLifecycleRef.current = { visibility, renderState, requestedInteraction };
   const [initError, setInitError] = useState<string | null>(null);
   const [linkOpenError, setLinkOpenError] = useState<string | null>(null);
   const [rendererEvicted, setRendererEvicted] = useState(false);
@@ -2482,8 +2488,9 @@ export const AgentTerminal = memo(function AgentTerminal({
           sessionId,
           presentationId,
           provider,
+          () => !isMounted,
         );
-        if (!isMounted || !terminalRef.current) {
+        if (!session || !isMounted || !terminalRef.current) {
           return;
         }
 
@@ -2527,6 +2534,21 @@ export const AgentTerminal = memo(function AgentTerminal({
               }
             });
           },
+          onRegistrationRecovered: (result) => {
+            if (session.disposed) {
+              return;
+            }
+            session.presentationState = result.presentation;
+            session.brokerState = result.broker_state;
+            const lifecycle = presentationLifecycleRef.current;
+            if (
+              lifecycle.renderState === "mounted" &&
+              result.presentation.requires_resync &&
+              result.broker_state.owner_presentation_id === presentationId
+            ) {
+              void session.terminalClient.resyncOwner(presentationId).catch(() => undefined);
+            }
+          },
           onLeaseDecision: (decision) => {
             if (session.brokerState && decision.runtime_generation >= session.brokerState.runtime_generation) {
               session.brokerState = {
@@ -2539,15 +2561,16 @@ export const AgentTerminal = memo(function AgentTerminal({
           },
         };
         try {
+          const registrationLifecycle = presentationLifecycleRef.current;
           const result = await session.terminalClient.registerPresentation(
             {
               presentation_id: presentationId,
               session_id: sessionId,
               client_kind: "desktop",
               desired_geometry: geometryForRenderer(renderer),
-              visibility,
-              render_state: renderState,
-              requested_interaction: requestedInteraction,
+              visibility: registrationLifecycle.visibility,
+              render_state: registrationLifecycle.renderState,
+              requested_interaction: registrationLifecycle.requestedInteraction,
               observed_lease_epoch: session.brokerState?.lease_epoch ?? 0,
             },
             callbacks,
@@ -2557,10 +2580,32 @@ export const AgentTerminal = memo(function AgentTerminal({
           }
           session.presentationState = result.presentation;
           session.brokerState = result.broker_state;
+          const latestLifecycle = presentationLifecycleRef.current;
+          const lifecycleChangedDuringRegistration =
+            latestLifecycle.visibility !== registrationLifecycle.visibility ||
+            latestLifecycle.renderState !== registrationLifecycle.renderState ||
+            latestLifecycle.requestedInteraction !== registrationLifecycle.requestedInteraction;
+          if (lifecycleChangedDuringRegistration) {
+            const reconciled = await session.terminalClient.updatePresentation(presentationId, {
+              desired_geometry: result.presentation.desired_geometry,
+              visibility: latestLifecycle.visibility,
+              render_state: latestLifecycle.renderState,
+              requested_interaction: latestLifecycle.requestedInteraction,
+              observed_lease_epoch: result.broker_state.lease_epoch,
+            });
+            if (!isMounted) {
+              return;
+            }
+            if (reconciled) {
+              session.presentationState = reconciled.presentation;
+              session.brokerState = reconciled.broker_state;
+            }
+          }
+          const activeLifecycle = presentationLifecycleRef.current;
           if (
-            renderState === "mounted" &&
-            result.presentation.requires_resync &&
-            result.broker_state.owner_presentation_id === presentationId
+            activeLifecycle.renderState === "mounted" &&
+            session.presentationState.requires_resync &&
+            session.brokerState.owner_presentation_id === presentationId
           ) {
             await session.terminalClient.resyncOwner(presentationId);
           }
@@ -2717,16 +2762,18 @@ export const AgentTerminal = memo(function AgentTerminal({
 
   useEffect(() => {
     const entry = terminalSessionMap.get(terminalKey);
-    if (!entry?.brokerState || !entry.presentationState || entry.legacyMode) {
+    if (!entry || entry.legacyMode) {
       return;
     }
     let cancelled = false;
     void entry.terminalClient.updatePresentation(presentationId, {
-      desired_geometry: entry.presentationState.desired_geometry,
+      desired_geometry:
+        entry.presentationState?.desired_geometry ??
+        (entry.renderer ? geometryForRenderer(entry.renderer) : null),
       visibility,
       render_state: renderState,
       requested_interaction: requestedInteraction,
-      observed_lease_epoch: entry.brokerState.lease_epoch,
+      observed_lease_epoch: entry.brokerState?.lease_epoch ?? 0,
     }).then(async (result) => {
       if (cancelled || !result) {
         return;

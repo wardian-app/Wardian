@@ -70,6 +70,8 @@ interface AgentTerminalSlotProps {
   isMaximized: boolean;
   theme: "dark" | "light" | "system";
   workspacePath?: string;
+  visibility: "visible" | "hidden";
+  renderState: "mounted" | "suspended";
   onTerminalFocus?: (agentId: string) => void;
   onTitleChange: (agentId: string, title: string) => void;
 }
@@ -80,6 +82,8 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
   isMaximized,
   theme,
   workspacePath,
+  visibility,
+  renderState,
   onTerminalFocus,
   onTitleChange,
 }: AgentTerminalSlotProps) {
@@ -95,8 +99,8 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
     <AgentTerminal
       sessionId={sessionId}
       presentationId={`legacy-grid:${sessionId}`}
-      visibility="visible"
-      renderState="mounted"
+      visibility={visibility}
+      renderState={renderState}
       requestedInteraction="interactive"
       provider={provider}
       isMaximized={isMaximized}
@@ -273,8 +277,9 @@ export const GridView: React.FC<GridViewProps> = ({
       onContextMenu={handleBackgroundContextMenu}
       className={`w-full relative ${isResizing ? 'cursor-col-resize' : ''}`}
     >
-      {visibleAgents.map((agent: AgentConfig, _idx: number) => {
+      {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
+        const isAgentVisible = !hasVisibleMaximizedAgent || maximizedAgentId === agentId;
         const isAgentMaximized = maximizedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
@@ -317,6 +322,7 @@ export const GridView: React.FC<GridViewProps> = ({
             id={`agent-card-${agentId}`}
             data-testid="agent-card"
             key={agentId}
+            style={isAgentVisible ? undefined : { display: "none" }}
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
@@ -412,6 +418,8 @@ export const GridView: React.FC<GridViewProps> = ({
                     isMaximized={isAgentMaximized}
                     theme={theme}
                     workspacePath={visibleWorkspacePath}
+                    visibility={isAgentVisible ? "visible" : "hidden"}
+                    renderState={isAgentVisible ? "mounted" : "suspended"}
                     onTerminalFocus={onTerminalFocus}
                     onTitleChange={handleTitleChange}
                   />

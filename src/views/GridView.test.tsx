@@ -370,7 +370,7 @@ describe('GridView maximize behavior', () => {
 
     rerender(<GridView {...gridProps('agent-2', agents)} />);
 
-    expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-agent-1')).not.toBeVisible();
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
 
     rerender(<GridView {...gridProps(null, agents)} />);

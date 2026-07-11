@@ -579,7 +579,7 @@ pub async fn spawn_agent(
         .terminal_sessions
         .start_or_replace_runtime(
             &config.session_id,
-            crate::state::terminal_session::native_terminal_runtime(tx.clone(), pty_master),
+            crate::state::terminal_session::native_terminal_runtime(tx, pty_master),
             initial_geometry,
         )
         .await
@@ -633,7 +633,6 @@ pub async fn spawn_agent(
     let pty_emit_app = app.clone();
     let terminal_attach = app.state::<AppState>().terminal_attach.clone();
     let terminal_theme_for_pty = app_state.terminal_theme();
-    let tx_for_terminal_probe = tx.clone();
     let config_lock_clone = config_lock.clone();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
@@ -709,7 +708,11 @@ pub async fn spawn_agent(
                         &buf[0..n],
                         &terminal_theme_for_pty,
                     ) {
-                        let _ = tx_for_terminal_probe.blocking_send(response);
+                        let _ = terminal_sessions.send_privileged_input_blocking(
+                            &sid_for_pty,
+                            reader_runtime_generation,
+                            response,
+                        );
                     }
                     terminal_attach.process_output(&sid_for_pty, &buf[0..n]);
                     if let Ok(mut watch_state) = watch_state_clone.lock() {

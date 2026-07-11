@@ -569,6 +569,77 @@ describe("TerminalSessionClient", () => {
     expect(client.brokerState?.runtime_generation).toBe(2);
   });
 
+  it("retains lifecycle updates and reports recovered state after a SessionNotFound retry", async () => {
+    let registrations = 0;
+    const registrationRequests: TerminalPresentationRegistration[] = [];
+    const recovered = vi.fn();
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        const request = (args as { request: TerminalPresentationRegistration }).request;
+        registrationRequests.push(request);
+        if (registrations === 1) {
+          throw new Error("SessionNotFound");
+        }
+        const result = registeredResult("pane-deferred", 1);
+        return {
+          ...result,
+          presentation: {
+            ...result.presentation,
+            visibility: request.visibility,
+            render_state: request.render_state,
+            interaction_capability: request.requested_interaction,
+          },
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(1), initial_snapshot: snapshot(1) };
+      }
+      if (command === "read_terminal_events") {
+        return eventsBatch([], 0, 0);
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await expect(client.registerPresentation(registration("pane-deferred"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+      onRegistrationRecovered: recovered,
+    })).rejects.toThrow("SessionNotFound");
+    await expect(client.updatePresentation("pane-deferred", {
+      desired_geometry: geometry(100, 30),
+      visibility: "hidden",
+      render_state: "suspended",
+      requested_interaction: "read_only",
+      observed_lease_epoch: 0,
+    })).resolves.toBeNull();
+
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 1,
+      lifecycle: "runtime_replaced",
+    });
+    await vi.waitFor(() => expect(registrations).toBe(2));
+
+    expect(registrationRequests[1]).toEqual(expect.objectContaining({
+      visibility: "hidden",
+      render_state: "suspended",
+      requested_interaction: "read_only",
+      desired_geometry: geometry(100, 30),
+    }));
+    expect(recovered).toHaveBeenCalledWith(expect.objectContaining({
+      presentation: expect.objectContaining({
+        visibility: "hidden",
+        render_state: "suspended",
+        interaction_capability: "read_only",
+      }),
+    }));
+  });
+
   it("returns stale input and resize lease decisions without rejecting the presentation", async () => {
     const rejectedDecision = {
       status: "rejected" as const,
@@ -615,6 +686,69 @@ describe("TerminalSessionClient", () => {
       lease_epoch: 2,
       owner_presentation_id: "pane-owner",
     });
+  });
+
+  it("serializes accepted resize snapshots into the presentation barrier", async () => {
+    const snapshots: number[] = [];
+    const applied: number[][] = [];
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        return registeredResult("pane-a");
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(1, 3), initial_snapshot: snapshot() };
+      }
+      if (command === "resize_terminal_presentation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-a",
+          },
+          geometry_sequence: 1,
+          geometry: geometry(100, 30),
+          snapshot: snapshot(1, 2),
+        };
+      }
+      if (command === "read_terminal_events") {
+        return eventsBatch(
+          [1, 2, 3].map((sequence) => ({
+            sequence,
+            runtime_generation: 1,
+            type: "output" as const,
+            bytes: [64 + sequence],
+          })),
+          3,
+          3,
+        );
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: 1, acknowledged_sequence: 3 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-a"), {
+      applySnapshot: (value) => {
+        snapshots.push(value.sequence_barrier);
+      },
+      applyEvents: (events) => {
+        applied.push(events.map((event) => event.sequence));
+      },
+    });
+    snapshots.length = 0;
+
+    await client.resize("pane-a", 1, 100, 30);
+    client.queueDrain();
+
+    await vi.waitFor(() => expect(applied).toEqual([[3]]));
+    expect(snapshots).toEqual([2]);
   });
 
   it("contains a feed read failure and retries on the next wake-up", async () => {

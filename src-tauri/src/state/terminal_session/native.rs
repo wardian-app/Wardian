@@ -255,6 +255,46 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_session_probe_input_cannot_cross_runtime_replacement() {
+        let broker = Arc::new(TerminalSessionBroker::default());
+        let (first_tx, _first_rx) = mpsc::channel(1);
+        let first_generation = broker
+            .start_or_replace_runtime(
+                "probe-session",
+                TerminalRuntimeHandles::new(first_tx, |_| Ok(())),
+                geometry(80, 24),
+            )
+            .await
+            .expect("first runtime");
+        let (second_tx, mut second_rx) = mpsc::channel(1);
+        broker
+            .start_or_replace_runtime(
+                "probe-session",
+                TerminalRuntimeHandles::new(second_tx, |_| Ok(())),
+                geometry(80, 24),
+            )
+            .await
+            .expect("replacement runtime");
+
+        let stale_broker = broker.clone();
+        let stale = tokio::task::spawn_blocking(move || {
+            stale_broker.send_privileged_input_blocking(
+                "probe-session",
+                first_generation,
+                b"stale-probe".to_vec(),
+            )
+        })
+        .await
+        .expect("probe task");
+
+        assert!(matches!(
+            stale,
+            Err(TerminalBrokerError::StaleRuntimeGeneration { .. })
+        ));
+        assert!(second_rx.try_recv().is_err());
+    }
+
     #[test]
     fn terminal_session_native_resize_gate_serializes_cross_session_calls() {
         let in_flight = Arc::new(AtomicUsize::new(0));

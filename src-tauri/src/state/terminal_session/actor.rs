@@ -701,6 +701,30 @@ impl TerminalSessionBroker {
             .map_err(|_| TerminalBrokerError::RuntimeTerminated)?
     }
 
+    pub fn send_privileged_input_blocking(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), TerminalBrokerError> {
+        let handle = self.session_handle_blocking(session_id)?;
+        ensure_generation(&handle, runtime_generation)?;
+        if handle.terminated.load(Ordering::SeqCst) {
+            return Err(TerminalBrokerError::RuntimeTerminated);
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .tx
+            .blocking_send(TerminalSessionMessage::PrivilegedInput {
+                bytes,
+                reply: reply_tx,
+            })
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| TerminalBrokerError::RuntimeTerminated)?
+    }
+
     pub async fn register_presentation(
         &self,
         request: TerminalPresentationRegistration,

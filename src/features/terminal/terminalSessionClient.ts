@@ -28,6 +28,7 @@ export type TerminalPresentationCallbacks = {
   applySnapshot: (snapshot: TerminalSnapshot) => void | Promise<void>;
   applyEvents: (events: readonly TerminalBrokerEvent[]) => void | Promise<void>;
   onBrokerState?: (state: TerminalBrokerState) => void;
+  onRegistrationRecovered?: (result: TerminalPresentationRegistrationResult) => void;
   onLeaseDecision?: (decision: TerminalLeaseDecision) => void;
   onLifecycle?: (notification: TerminalSessionLifecycleNotification) => void;
 };
@@ -149,35 +150,37 @@ export class TerminalSessionClient {
       "presentation_id" | "session_id" | "client_kind"
     >,
   ) {
-    const binding = this.#presentations.get(presentationId);
-    if (!binding) {
-      throw new Error(`Terminal presentation not registered: ${presentationId}`);
-    }
-    binding.registration = {
-      ...binding.registration,
-      ...update,
-    };
-    if (!this.#brokerState) {
-      return null;
-    }
-    const result = await invoke<TerminalPresentationUpdateResult>(
-      "update_terminal_presentation",
-      {
-        request: {
-          presentation_id: presentationId,
-          session_id: this.sessionId,
-          runtime_generation: this.#brokerState.runtime_generation,
-          desired_geometry: update.desired_geometry,
-          visibility: update.visibility,
-          render_state: update.render_state,
-          requested_interaction: update.requested_interaction,
-          observed_lease_epoch: update.observed_lease_epoch,
+    return this.#serialize(async () => {
+      const binding = this.#presentations.get(presentationId);
+      if (!binding) {
+        throw new Error(`Terminal presentation not registered: ${presentationId}`);
+      }
+      binding.registration = {
+        ...binding.registration,
+        ...update,
+      };
+      if (!this.#brokerState) {
+        return null;
+      }
+      const result = await invoke<TerminalPresentationUpdateResult>(
+        "update_terminal_presentation",
+        {
+          request: {
+            presentation_id: presentationId,
+            session_id: this.sessionId,
+            runtime_generation: this.#brokerState.runtime_generation,
+            desired_geometry: update.desired_geometry,
+            visibility: update.visibility,
+            render_state: update.render_state,
+            requested_interaction: update.requested_interaction,
+            observed_lease_epoch: update.observed_lease_epoch,
+          },
         },
-      },
-    );
-    binding.state = result.presentation;
-    this.#setBrokerState(result.broker_state);
-    return result;
+      );
+      binding.state = result.presentation;
+      this.#setBrokerState(result.broker_state);
+      return result;
+    });
   }
 
   async unregisterPresentation(presentationId: string) {
@@ -331,20 +334,23 @@ export class TerminalSessionClient {
     cols: number,
     rows: number,
   ) {
-    const state = this.#requiredBrokerState();
-    const result = await invoke<TerminalGeometryCommitResult>("resize_terminal_presentation", {
-      request: {
-        ...terminalLease(this.sessionId, presentationId, state),
-        geometry_sequence: geometrySequence,
-        cols,
-        rows,
-      },
+    return this.#serialize(async () => {
+      const binding = this.#requiredPresentation(presentationId);
+      const state = this.#requiredBrokerState();
+      const result = await invoke<TerminalGeometryCommitResult>("resize_terminal_presentation", {
+        request: {
+          ...terminalLease(this.sessionId, presentationId, state),
+          geometry_sequence: geometrySequence,
+          cols,
+          rows,
+        },
+      });
+      this.#notifyDecision(result.decision);
+      if (result.snapshot) {
+        await this.#applySnapshot(binding, result.snapshot);
+      }
+      return result;
     });
-    this.#notifyDecision(result.decision);
-    if (result.snapshot) {
-      await this.#requiredPresentation(presentationId).callbacks.applySnapshot(result.snapshot);
-    }
-    return result;
   }
 
   async reportViewport(presentationId: string, cols: number, rows: number) {
@@ -489,6 +495,7 @@ export class TerminalSessionClient {
         binding.state = result.presentation;
         this.#setBrokerState(result.broker_state);
         await this.#applySnapshot(binding, result.initial_snapshot);
+        binding.callbacks.onRegistrationRecovered?.(result);
       } catch {
         // A later lifecycle notification or explicit remount retries again.
       }
