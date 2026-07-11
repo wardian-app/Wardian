@@ -817,16 +817,16 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - [x] **Step 2: Verify CI contracts** require frontend/backend, docs, screenshot gate, browser workbench, targeted native workbench, and cutover check. Run focused config tests and commit `ci(workbench): gate navigation and terminal continuity`.
 - [x] **Step 3: Run the complete local gate:** `npm run lint`, `npm run test`, `npm run build`, `npm run docs:check-llms`, `npm run docs:build`, `npm run test:e2e`, `npm run check:workbench-cutover`, `npm run perf:workbench:check`, native setup/build, targeted workbench native, full native E2E, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace -- --test-threads=1`, and `cargo check --workspace`. **Expected:** every command exits 0; no infrastructure skips for required focused native tests.
 - [x] **Step 4: Run safety checks:** `git diff --check origin/main...HEAD`, intended `git status --short`, changed-file secrets scan, and verify no `.env`, credentials, production-home data, temp homes, or native driver artifacts are tracked.
-- [ ] **Step 5: Push the branch** and verify the committed screenshot returns HTTP 200 at an immutable GitHub raw URL using the screenshot commit SHA.
-- [ ] **Step 6: Build the PR body from `.github/PULL_REQUEST_TEMPLATE.md`.** Link/fix #513-#523 as actually completed, explain why the discarded Site/Cohort model was removed, list exact verification, and embed:
+- [x] **Step 5: Push the branch** and verify the committed screenshot returns HTTP 200 at an immutable GitHub raw URL using the screenshot commit SHA.
+- [x] **Step 6: Build the PR body from `.github/PULL_REQUEST_TEMPLATE.md`.** Link/fix #513-#523 as actually completed, explain why the discarded Site/Cohort model was removed, list exact verification, and embed:
 
   ```markdown
   ![Wardian workbench with pane-local tabs, split surfaces, Agents Overview, auxiliary rail, and agent roster](https://raw.githubusercontent.com/wardian-app/Wardian/<screenshot-commit-sha>/docs/assets/screenshots/workbench-navigation/tabs-and-splits.png)
   ```
 
-- [ ] **Step 7: Run** `PR_BODY=<body> npm run check:frontend-screenshot -- origin/main HEAD`. **Expected:** `Frontend screenshot evidence found in the PR body.`
+- [x] **Step 7: Run** `PR_BODY=<body> npm run check:frontend-screenshot -- origin/main HEAD`. **Expected:** `Frontend screenshot evidence found in the PR body.`
 - [ ] **Step 8: Create** PR title `feat(workbench): replace fixed navigation with restorable surface tabs`, then run `gh pr checks <number> --repo wardian-app/Wardian --watch --fail-fast`. Fix failures in scoped atomic commits and re-run until all required checks pass.
-- [ ] **Step 9: Create the timed cleanup issue** `Remove workbench safe mode and terminal compatibility adapters before Wardian 0.6.0`, requiring one stable 0.5.x workbench release and recovery-report review before removing safe mode, raw desktop command adapters, and remote v1.
+- [x] **Step 9: Create the timed cleanup issue** `Remove workbench safe mode and terminal compatibility adapters before Wardian 0.6.0`, requiring one stable 0.5.x workbench release and recovery-report review before removing safe mode, raw desktop command adapters, and remote v1.
 
 ## Completion Definition
 
