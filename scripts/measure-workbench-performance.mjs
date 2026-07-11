@@ -4,347 +4,760 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
 import { performance } from "node:perf_hooks";
-import { chromium } from "@playwright/test";
-import { build, createServer } from "vite";
+import { gzipSync } from "node:zlib";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const baselinePath = path.join(repoRoot, "docs", "research", "workbench-navigation", "dockview-baseline.json");
-const harnessPath = path.join(repoRoot, "src", "layout", "workbench", "proof", "DockviewEvaluationHarness.tsx");
-const viteConfigPath = path.join(repoRoot, "vite.config.ts");
-const PROMOTION_THRESHOLDS = Object.freeze({
-  bundle_delta_raw_bytes: { limit: 160000, unit: "bytes" },
-  bundle_delta_gzip_bytes: { limit: 20000, unit: "bytes" },
-  startup_ms: { limit: 650, unit: "ms" },
-  heavy_renderers_ready_ms: { limit: 700, unit: "ms" },
-  tab_switch_p95_ms: { limit: 60, unit: "ms" },
-  model_command_p95_ms: { limit: 5, unit: "ms" },
-  react_commit_p95_ms: { limit: 16.7, unit: "ms" },
-  pointer_drag_p95_ms: { limit: 350, unit: "ms" },
-  terminal_output_500_lines_ms: { limit: 35, unit: "ms" },
+const fixturePath = path.join(repoRoot, "scripts", "fixtures", "workbench-performance-v1.json");
+const baselinePath = path.join(
+  repoRoot,
+  "docs",
+  "research",
+  "workbench-navigation",
+  "workbench-performance-baseline.json",
+);
+const refusal = "Refusing to benchmark without an explicit isolated WARDIAN_HOME.";
+const gates = Object.freeze({
+  restore_p95_ms: { limit: 1500, unit: "ms" },
+  tab_switch_p95_ms: { limit: 100, unit: "ms" },
+  group_focus_p95_ms: { limit: 75, unit: "ms" },
+  terminal_output_commit_p95_ms: { limit: 50, unit: "ms" },
+  stream_gap_count: { limit: 0, unit: "gaps" },
+  overview_settle_p95_ms: { limit: 300, unit: "ms" },
+  heavy_surface_resume_p95_ms: { limit: 500, unit: "ms" },
+  react_commit_max_ms: { limit: 50, unit: "ms" },
+  bundle_delta_gzip_bytes: { limit: 250 * 1024, unit: "bytes" },
+  xterm_renderer_peak: { limit: 24, unit: "renderers" },
+  webgl_context_peak: { limit: 12, unit: "contexts" },
 });
 
-function resolveIsolatedWardianHome(rawValue) {
-  if (typeof rawValue !== "string" || rawValue.trim() === "") {
-    throw new Error("WARDIAN_HOME is required and must name an isolated temporary directory");
+function samePath(left, right) {
+  const normalizedLeft = path.normalize(left);
+  const normalizedRight = path.normalize(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function inside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function canonicalize(candidate) {
+  const missing = [];
+  let ancestor = path.resolve(candidate);
+  while (!fsSync.existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (samePath(parent, ancestor)) throw new Error(refusal);
+    missing.unshift(path.basename(ancestor));
+    ancestor = parent;
   }
+  return path.resolve(fsSync.realpathSync.native(ancestor), ...missing);
+}
+
+function isolatedWardianHome(rawValue) {
+  if (typeof rawValue !== "string" || rawValue.trim() === "") throw new Error(refusal);
   const trimmed = rawValue.trim();
-  if (!path.isAbsolute(trimmed)) {
-    throw new Error("WARDIAN_HOME must be an absolute path; relative paths are rejected");
+  if (!path.isAbsolute(trimmed)) throw new Error(refusal);
+  const resolved = canonicalize(trimmed);
+  const profile = canonicalize(os.homedir());
+  const production = canonicalize(path.join(os.homedir(), ".wardian"));
+  const workspace = canonicalize(repoRoot);
+  if (samePath(resolved, profile) || samePath(resolved, production) || samePath(resolved, workspace)) {
+    throw new Error(refusal);
   }
-  const normalized = path.normalize(trimmed);
-  const profileRoot = canonicalizePath(path.resolve(os.homedir()));
-  const productionHome = canonicalizePath(path.resolve(os.homedir(), ".wardian"));
-  const workspaceRoot = canonicalizePath(repoRoot);
-  if (samePath(normalized, path.resolve(os.homedir()))) {
-    throw new Error("WARDIAN_HOME must not resolve to the user profile root");
-  }
-  if (samePath(normalized, path.resolve(os.homedir(), ".wardian"))) {
-    throw new Error("WARDIAN_HOME must not resolve to the production Wardian home");
-  }
-  const resolved = canonicalizePath(normalized);
-  if (samePath(resolved, profileRoot)) {
-    throw new Error("WARDIAN_HOME must not resolve to the user profile root");
-  }
-  if (samePath(resolved, productionHome)) {
-    throw new Error("WARDIAN_HOME must not resolve to the production Wardian home");
-  }
-  if (samePath(resolved, workspaceRoot)) {
-    throw new Error("WARDIAN_HOME must not resolve to the Wardian workspace root");
-  }
-  const tempRoot = canonicalizePath(path.resolve(os.tmpdir()));
-  const relativeToTemp = path.relative(tempRoot, resolved);
-  const insideTemp = relativeToTemp !== ""
-    && !relativeToTemp.startsWith(`..${path.sep}`)
-    && relativeToTemp !== ".."
-    && !path.isAbsolute(relativeToTemp);
-  if (!insideTemp || !path.basename(resolved).startsWith("wardian-workbench-proof-")) {
-    throw new Error(
-      "WARDIAN_HOME must be an isolated directory under the OS temp root named wardian-workbench-proof-*",
-    );
-  }
+  const workspacePerfRoot = canonicalize(path.join(repoRoot, ".tmp", "workbench-performance"));
+  const tempRoot = canonicalize(os.tmpdir());
+  const allowed = inside(workspacePerfRoot, resolved)
+    || (inside(tempRoot, resolved) && path.basename(resolved).startsWith("wardian-workbench-performance-"));
+  if (!allowed) throw new Error(refusal);
   return resolved;
 }
 
-function canonicalizePath(candidate) {
-  const absolute = path.normalize(candidate);
-  if (!path.isAbsolute(absolute)) {
-    throw new Error(`Cannot canonicalize a non-absolute path: ${candidate}`);
+function assertInsideHome(home, candidate) {
+  if (!inside(home, candidate)) throw new Error(`Refusing filesystem mutation outside ${home}: ${candidate}`);
+}
+
+function round(value) {
+  return Number(value.toFixed(2));
+}
+
+function summarize(values, label) {
+  if (!Array.isArray(values) || values.length === 0) throw new Error(`${label} requires observed samples`);
+  if (values.some((value) => !Number.isFinite(value) || value < 0)) {
+    throw new Error(`${label} contains a non-finite or negative observation`);
   }
-  const missingSegments = [];
-  let existingAncestor = absolute;
-  while (!fsSync.existsSync(existingAncestor)) {
-    const parent = path.dirname(existingAncestor);
-    if (samePath(parent, existingAncestor)) {
-      throw new Error(`No existing ancestor was found for path: ${candidate}`);
+  const samples = values.map(round).sort((left, right) => left - right);
+  const at = (ratio) => samples[Math.min(samples.length - 1, Math.ceil(samples.length * ratio) - 1)];
+  return { samples, median: at(0.5), p95: at(0.95), max: samples.at(-1) };
+}
+
+function fixtureErrors(fixture) {
+  const errors = [];
+  const document = fixture?.workbench;
+  const surfaces = Object.values(document?.surfaces ?? {});
+  const presentations = fixture?.terminal_presentations ?? [];
+  const required = ["agents-overview", "graph", "garden", "queue", "library", "workflows"];
+  const singletonTypes = new Set([
+    "agents-overview", "dashboard", "queue", "graph", "garden", "library", "workflows",
+  ]);
+  if (fixture?.schema_version !== 1) errors.push("fixture schema_version must be 1");
+  if (Object.keys(document?.groups ?? {}).length !== 4) errors.push("fixture must contain four groups");
+  if (surfaces.length !== 20) errors.push("fixture must contain 20 tabs");
+  if ((fixture?.agents ?? []).length !== 20) errors.push("fixture must contain 20 agents");
+  const heavyGrace = fixture?.benchmark?.heavy_surface_hidden_grace_ms;
+  if (!Number.isSafeInteger(heavyGrace) || heavyGrace < 1 || heavyGrace > 300_000) {
+    errors.push("fixture heavy_surface_hidden_grace_ms must be an integer from 1 through 300000");
+  }
+  for (const type of required) {
+    if (!surfaces.some((surface) => surface.surface_type === type)) errors.push(`fixture lacks ${type}`);
+  }
+  for (const type of singletonTypes) {
+    if (surfaces.filter((surface) => surface.surface_type === type).length > 1) {
+      errors.push(`fixture duplicates singleton surface ${type}`);
     }
-    missingSegments.unshift(path.basename(existingAncestor));
-    existingAncestor = parent;
   }
-  const canonicalAncestor = fsSync.realpathSync.native(existingAncestor);
-  return path.resolve(canonicalAncestor, ...missingSegments);
-}
-
-function samePath(left, right) {
-  return process.platform === "win32"
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
-}
-
-function assertInside(parent, candidate) {
-  const relative = path.relative(parent, candidate);
-  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`Refusing filesystem mutation outside isolated WARDIAN_HOME: ${candidate}`);
+  if (presentations.filter((entry) => entry.mode === "owner").length !== 1) {
+    errors.push("fixture must contain one terminal owner");
   }
+  if (presentations.filter((entry) => entry.mode === "mirror").length !== 3) {
+    errors.push("fixture must contain three terminal mirrors");
+  }
+  if (new Set(presentations.map((entry) => entry.session_id)).size !== 1) {
+    errors.push("owner and mirrors must share one runtime");
+  }
+  return errors;
 }
 
-async function seedIsolatedHome(wardianHome) {
-  const settingsDir = path.join(wardianHome, "settings");
-  const seedPath = path.join(settingsDir, "workbench-proof-seed.json");
-  assertInside(wardianHome, settingsDir);
-  assertInside(wardianHome, seedPath);
-  await fs.mkdir(settingsDir, { recursive: true });
-  const seed = {
-    schema_version: 1,
-    scenario: "dockview-adapter-proof",
-    group_count: 4,
-    tab_count: 20,
-    layout_source: "wardian-proof-model",
-    contains_dockview_json: false,
-  };
-  await fs.writeFile(seedPath, `${JSON.stringify(seed, null, 2)}\n`, "utf8");
-  return seedPath;
-}
-
-async function measureBundles(wardianHome) {
-  const buildRoot = path.join(wardianHome, "bundle-measurement", `${Date.now()}`);
-  const baseOutDir = path.join(buildRoot, "base");
-  const candidateOutDir = path.join(buildRoot, "candidate");
-  assertInside(wardianHome, buildRoot);
-  assertInside(wardianHome, baseOutDir);
-  assertInside(wardianHome, candidateOutDir);
-  await fs.mkdir(buildRoot, { recursive: true });
-
-  await build({
-    root: repoRoot,
-    configFile: viteConfigPath,
-    logLevel: "warn",
-    build: {
-      outDir: baseOutDir,
-      emptyOutDir: true,
-    },
-  });
-  await build({
-    root: repoRoot,
-    configFile: viteConfigPath,
-    logLevel: "warn",
-    build: {
-      outDir: candidateOutDir,
-      emptyOutDir: true,
-      rollupOptions: {
-        input: {
-          app: path.join(repoRoot, "index.html"),
-          "workbench-proof": harnessPath,
-        },
-      },
-    },
-  });
-
-  const base = await collectBundleSize(baseOutDir);
-  const candidate = await collectBundleSize(candidateOutDir);
+function gateObservations(baseline) {
   return {
-    base_raw_bytes: base.raw_bytes,
-    base_gzip_bytes: base.gzip_bytes,
-    candidate_raw_bytes: candidate.raw_bytes,
-    candidate_gzip_bytes: candidate.gzip_bytes,
-    production_delta_raw_bytes: candidate.raw_bytes - base.raw_bytes,
-    production_delta_gzip_bytes: candidate.gzip_bytes - base.gzip_bytes,
-    candidate_files: candidate.files,
+    restore_p95_ms: baseline.runtime?.startup_restore_ms?.p95,
+    tab_switch_p95_ms: baseline.runtime?.tab_switch_ms?.p95,
+    group_focus_p95_ms: baseline.runtime?.group_focus_ms?.p95,
+    terminal_output_commit_p95_ms: baseline.runtime?.terminal_output_commit_ms?.p95,
+    stream_gap_count: baseline.runtime?.stream_gap_count,
+    overview_settle_p95_ms: baseline.runtime?.overview_settle_ms?.p95,
+    heavy_surface_resume_p95_ms: baseline.runtime?.heavy_surface_resume_ms?.p95,
+    react_commit_max_ms: baseline.runtime?.react_commit_max_ms,
+    bundle_delta_gzip_bytes: baseline.bundle?.production_delta_gzip_bytes,
+    xterm_renderer_peak: baseline.runtime?.renderer_peaks?.xterm,
+    webgl_context_peak: baseline.runtime?.renderer_peaks?.webgl,
   };
 }
 
-async function collectBundleSize(outDir) {
-  const files = await listFiles(outDir);
-  const assets = files.filter((file) => /\.(?:js|css)$/i.test(file));
-  let rawBytes = 0;
-  let gzipBytes = 0;
-  const entries = [];
-  for (const file of assets) {
-    const content = await fs.readFile(file);
-    const raw = content.byteLength;
-    const gzip = gzipSync(content).byteLength;
-    rawBytes += raw;
-    gzipBytes += gzip;
-    entries.push({
-      file: path.relative(outDir, file).replaceAll(path.sep, "/"),
-      raw_bytes: raw,
-      gzip_bytes: gzip,
-    });
+function evaluateGates(baseline) {
+  const observed = gateObservations(baseline);
+  for (const [metric, value] of Object.entries(observed)) {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`Missing observed metric: ${metric}`);
   }
-  entries.sort((left, right) => right.raw_bytes - left.raw_bytes);
-  return { raw_bytes: rawBytes, gzip_bytes: gzipBytes, files: entries };
-}
-
-async function listFiles(directory) {
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const nested = await Promise.all(entries.map((entry) => {
-    const resolved = path.join(directory, entry.name);
-    return entry.isDirectory() ? listFiles(resolved) : [resolved];
+  const checks = Object.entries(gates).map(([metric, gate]) => ({
+    metric,
+    observed: observed[metric],
+    operator: "<=",
+    limit: gate.limit,
+    unit: gate.unit,
+    passed: observed[metric] <= gate.limit,
   }));
-  return nested.flat();
+  const result = { schema_version: 1, passed: checks.every((check) => check.passed), checks };
+  if (!result.passed) throw new Error(`Workbench performance gate failure:\n${JSON.stringify(result, null, 2)}`);
+  return result;
 }
 
-async function measureRuntime() {
-  const server = await createServer({
-    root: repoRoot,
-    configFile: viteConfigPath,
-    logLevel: "error",
-    server: {
-      host: "127.0.0.1",
-      port: 0,
-      strictPort: false,
+async function seedHome(home, fixture) {
+  const settings = path.join(home, "settings");
+  const workbench = path.join(settings, "workbench.json");
+  const copiedFixture = path.join(settings, "workbench-performance-fixture.json");
+  for (const target of [settings, workbench, copiedFixture]) assertInsideHome(home, target);
+  await fs.mkdir(settings, { recursive: true });
+  await fs.writeFile(workbench, JSON.stringify(fixture.workbench), "utf8");
+  await fs.writeFile(copiedFixture, `${JSON.stringify(fixture, null, 2)}\n`, "utf8");
+  return path.relative(home, copiedFixture).replaceAll(path.sep, "/");
+}
+
+async function filesUnder(directory) {
+  return (await Promise.all((await fs.readdir(directory, { withFileTypes: true })).map(async (entry) => {
+    const target = path.join(directory, entry.name);
+    return entry.isDirectory() ? filesUnder(target) : [target];
+  }))).flat();
+}
+
+async function gzipBytes(directory) {
+  let total = 0;
+  for (const file of (await filesUnder(directory)).filter((entry) => /\.(?:js|css)$/i.test(entry))) {
+    total += gzipSync(await fs.readFile(file)).byteLength;
+  }
+  return total;
+}
+
+async function productionBundleDelta(home) {
+  const { build } = await import("vite");
+  const root = path.join(home, "bundle-measurement");
+  const base = path.join(root, "flag-off");
+  const candidate = path.join(root, "flag-on");
+  for (const target of [root, base, candidate]) assertInsideHome(home, target);
+  await fs.mkdir(root, { recursive: true });
+  const previous = process.env.VITE_WARDIAN_WORKBENCH;
+  const previousPerf = process.env.VITE_WARDIAN_WORKBENCH_PERF;
+  const previousGrace = process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
+  try {
+    delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
+    delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
+    process.env.VITE_WARDIAN_WORKBENCH = "0";
+    await build({ root: repoRoot, logLevel: "warn", build: { outDir: base, emptyOutDir: true } });
+    process.env.VITE_WARDIAN_WORKBENCH = "1";
+    await build({ root: repoRoot, logLevel: "warn", build: { outDir: candidate, emptyOutDir: true } });
+  } finally {
+    if (previous === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
+    else process.env.VITE_WARDIAN_WORKBENCH = previous;
+    if (previousPerf === undefined) delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
+    else process.env.VITE_WARDIAN_WORKBENCH_PERF = previousPerf;
+    if (previousGrace === undefined) delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
+    else process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS = previousGrace;
+  }
+  const baseGzip = await gzipBytes(base);
+  const candidateGzip = await gzipBytes(candidate);
+  return {
+    base_gzip_bytes: baseGzip,
+    candidate_gzip_bytes: candidateGzip,
+    production_delta_gzip_bytes: Math.max(0, candidateGzip - baseGzip),
+  };
+}
+
+function benchmarkValidationPlugin() {
+  return {
+    name: "wardian-workbench-benchmark-validation",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.replaceAll("\\", "/").endsWith("/src/main.tsx")) return null;
+      return {
+        code: `import { validateWorkbenchDocument as __wardianValidateWorkbenchDocument } from "./features/workbench/workbenchModel";\n`
+          + `globalThis.__WARDIAN_VALIDATE_WORKBENCH__ = __wardianValidateWorkbenchDocument;\n${code}`,
+        map: null,
+      };
     },
+  };
+}
+
+async function buildProductionRuntime(home, fixture) {
+  const { build } = await import("vite");
+  const outDir = path.join(home, "runtime-build");
+  assertInsideHome(home, outDir);
+  const previousFlag = process.env.VITE_WARDIAN_WORKBENCH;
+  const previousPerf = process.env.VITE_WARDIAN_WORKBENCH_PERF;
+  const previousGrace = process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
+  try {
+    process.env.VITE_WARDIAN_WORKBENCH = "1";
+    process.env.VITE_WARDIAN_WORKBENCH_PERF = "1";
+    process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS = String(
+      fixture.benchmark.heavy_surface_hidden_grace_ms,
+    );
+    await build({
+      root: repoRoot,
+      logLevel: "warn",
+      plugins: [benchmarkValidationPlugin()],
+      resolve: { alias: { "react-dom/client": "react-dom/profiling" } },
+      build: { outDir, emptyOutDir: true },
+    });
+  } finally {
+    if (previousFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
+    else process.env.VITE_WARDIAN_WORKBENCH = previousFlag;
+    if (previousPerf === undefined) delete process.env.VITE_WARDIAN_WORKBENCH_PERF;
+    else process.env.VITE_WARDIAN_WORKBENCH_PERF = previousPerf;
+    if (previousGrace === undefined) delete process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS;
+    else process.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS = previousGrace;
+  }
+  return outDir;
+}
+
+function browserFixture(fixture) {
+  localStorage.setItem("wardian-settings", JSON.stringify({
+    state: { gridCardDisplayMode: "chat" },
+    version: 2,
+  }));
+  const clone = (value) => structuredClone(value);
+  const callbacks = new Map();
+  const listeners = new Map();
+  let callbackId = 1;
+  let eventId = 1;
+  const trackedRuntime = fixture.terminal_presentations[0].session_id;
+  const trackedOwner = fixture.terminal_presentations.find((entry) => entry.mode === "owner").presentation_id;
+  const runtime = {
+    document: clone(fixture.workbench),
+    events: [],
+    last_ack: 0,
+    stream_gap_count: 0,
+    react_commits: [],
+    xterm_peak: 0,
+    xterm_live: 0,
+    webgl_peak: 0,
+    webgl_live: 0,
+    terminal_burst_started_at: null,
+    terminal_burst_last_sequence: null,
+    terminal_last_commit_ms: null,
+  };
+  const brokerState = (sessionId = trackedRuntime, presentationId = null) => ({
+    session_id: sessionId, runtime_generation: 1, lease_epoch: 1,
+    stream_sequence: runtime.events.length, interaction_sequence: 1,
+    geometry: { cols: 80, rows: 24 },
+    owner_presentation_id: sessionId === trackedRuntime ? trackedOwner : presentationId,
+    pending_activation: null, runtime_state: "live",
+  });
+  const snapshot = (sessionId = trackedRuntime) => ({
+    snapshot_id: `perf-snapshot-${sessionId}`, session_id: sessionId, runtime_generation: 1,
+    sequence_barrier: 0, geometry: { cols: 80, rows: 24 }, terminal_state_base64: "",
+    visible_grid: "", scrollback: [],
+  });
+  const presentation = (request) => ({
+    presentation_id: request.presentation_id, client_kind: "desktop",
+    desired_geometry: request.desired_geometry ?? { cols: 80, rows: 24 },
+    visibility: request.visibility, render_state: request.render_state,
+    interaction_capability: request.requested_interaction, interaction_sequence: 1,
+    requires_resync: false,
+  });
+  const registration = (request) => ({
+    presentation: presentation(request),
+    broker_state: brokerState(request.session_id, request.presentation_id),
+    initial_snapshot: snapshot(request.session_id),
+  });
+  const emit = (name, payload) => {
+    for (const listener of listeners.get(name) ?? []) {
+      callbacks.get(listener.callback_id)?.({ event: name, id: listener.event_id, payload: clone(payload) });
+    }
+  };
+  runtime.emit_terminal_burst = (lineCount) => {
+    runtime.terminal_burst_started_at = performance.now();
+    runtime.terminal_last_commit_ms = null;
+    const first = runtime.events.length + 1;
+    for (let index = 0; index < lineCount; index += 1) {
+      const sequence = runtime.events.length + 1;
+      runtime.events.push({
+        sequence, runtime_generation: 1, type: "output",
+        bytes: [...new TextEncoder().encode(`perf-${sequence}\r\n`)],
+      });
+    }
+    emit("terminal-session-events-ready", {
+      session_id: trackedRuntime, runtime_generation: 1,
+      latest_sequence: runtime.events.length,
+    });
+    runtime.terminal_burst_last_sequence = runtime.events.length;
+    return { first, last: runtime.events.length };
+  };
+  window.__WARDIAN_WORKBENCH_PERF__ = runtime;
+  window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+    supportsFiber: true,
+    inject: () => 1,
+    onCommitFiberRoot: (_id, root) => {
+      const duration = root?.current?.actualDuration;
+      if (Number.isFinite(duration) && duration >= 0) runtime.react_commits.push(duration);
+    },
+    onCommitFiberUnmount: () => undefined,
+  };
+  const originalContext = HTMLCanvasElement.prototype.getContext;
+  const liveWebglContexts = new Set();
+  const contextsByCanvas = new WeakMap();
+  const loseContextWrapped = new WeakSet();
+  const wrappedLoseExtensions = new WeakSet();
+  const refreshWebglLiveCount = () => {
+    for (const entry of [...liveWebglContexts]) {
+      if (!entry.canvas.isConnected || entry.context.isContextLost?.()) {
+        liveWebglContexts.delete(entry);
+      }
+    }
+    runtime.webgl_live = liveWebglContexts.size;
+    runtime.webgl_peak = Math.max(runtime.webgl_peak, runtime.webgl_live);
+  };
+  const releaseCanvasContexts = (canvasContexts) => {
+    for (const entry of canvasContexts) liveWebglContexts.delete(entry);
+    canvasContexts.clear();
+    refreshWebglLiveCount();
+  };
+  HTMLCanvasElement.prototype.getContext = function getContext(type, ...args) {
+    const context = originalContext.call(this, type, ...args);
+    if (context && (type === "webgl" || type === "webgl2")) {
+      let canvasContexts = contextsByCanvas.get(this);
+      if (!canvasContexts) {
+        canvasContexts = new Set();
+        contextsByCanvas.set(this, canvasContexts);
+        this.addEventListener("webglcontextlost", () => releaseCanvasContexts(canvasContexts));
+      }
+      if (![...canvasContexts].some((entry) => entry.context === context)) {
+        const entry = { canvas: this, context };
+        canvasContexts.add(entry);
+        liveWebglContexts.add(entry);
+      }
+      if (!loseContextWrapped.has(context)) {
+        loseContextWrapped.add(context);
+        const originalGetExtension = context.getExtension.bind(context);
+        context.getExtension = (name) => {
+          const extension = originalGetExtension(name);
+          if (
+            name === "WEBGL_lose_context"
+            && extension?.loseContext
+            && !wrappedLoseExtensions.has(extension)
+          ) {
+            wrappedLoseExtensions.add(extension);
+            const originalLoseContext = extension.loseContext.bind(extension);
+            extension.loseContext = () => {
+              releaseCanvasContexts(canvasContexts);
+              return originalLoseContext();
+            };
+          }
+          return extension;
+        };
+      }
+      refreshWebglLiveCount();
+    }
+    return context;
+  };
+  const observePeaks = () => {
+    runtime.xterm_live = document.querySelectorAll(".xterm").length;
+    runtime.xterm_peak = Math.max(runtime.xterm_peak, runtime.xterm_live);
+    refreshWebglLiveCount();
+  };
+  const installPeakObserver = () => {
+    if (!document.documentElement) return;
+    new MutationObserver(observePeaks).observe(
+      document.documentElement,
+      { childList: true, subtree: true },
+    );
+    observePeaks();
+  };
+  if (document.documentElement) installPeakObserver();
+  else window.addEventListener("DOMContentLoaded", installPeakObserver, { once: true });
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined };
+  const emptyLibrarySection = (stubbed = false) => ({
+    tree: { path: "", name: "Root", children: [] },
+    stubbed,
+  });
+  const defaults = {
+    list_agent_classes: [], list_provider_readiness: [], load_watchlists: [], load_watchlist_prefs: null,
+    load_agent_interactions: {}, load_queue_items: [], load_queue_preferences: {},
+    load_onboarding_hints: { dismissed_hint_ids: ["spawn-agent-first-run:v1"] },
+    list_workflows: [], list_scheduled_runs: [], load_workflow_library: { folders: [], rootWorkflowIds: [] },
+    workflow_list_blueprints: [], workflow_list_runs: [], get_topology: { edges: [], ignored_pairs: [], fallback_groups: [] },
+    workflow_validate: { ok: true, diagnostics: [] },
+    workflow_write: { written: true, diagnostics: [] },
+    get_pair_activity: [], load_app_settings: null, load_shell_settings: null, list_available_shells: [],
+    sync_provider_theme_settings: null, library_watch: null, library_unwatch: null,
+    get_library_index: {
+      sections: {
+        skills: emptyLibrarySection(),
+        prompts: emptyLibrarySection(),
+        workflows: emptyLibrarySection(),
+        classes: emptyLibrarySection(),
+        mcps: emptyLibrarySection(true),
+      },
+      deployments: {},
+      orphans: [],
+    },
+  };
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+    transformCallback: (callback) => { const id = callbackId++; callbacks.set(id, callback); return id; },
+    unregisterCallback: (id) => callbacks.delete(id), convertFileSrc: (value) => value,
+    invoke: async (command, args = {}) => {
+      if (command === "get_workbench_boot_config") return { safe_mode: false };
+      if (command === "load_workbench_state") return {
+        source: "primary", document: clone(runtime.document), notice: null,
+        durable_revision: runtime.document.revision, durable_token: `perf-${runtime.document.revision}`,
+      };
+      if (command === "save_workbench_state") {
+        runtime.document = clone(args.document);
+        return { outcome: "saved", durable_revision: args.document.revision, durable_token: `perf-${args.document.revision}`, request_id: args.request_id };
+      }
+      if (command === "list_agents") return clone(fixture.agents);
+      if (command === "register_terminal_presentation") return registration(args.request);
+      if (command === "update_terminal_presentation") return registration(args.request);
+      if (command === "report_terminal_presentation_viewport") return presentation(args.request);
+      if (command === "subscribe_terminal_events") return {
+        broker_state: brokerState(args.request.session_id),
+        initial_snapshot: snapshot(args.request.session_id),
+      };
+      if (command === "read_terminal_events") {
+        const after = args.request.after_sequence;
+        const events = runtime.events.filter((event) => event.sequence > after).slice(0, args.request.max_events);
+        if (events[0] && events[0].sequence !== after + 1) runtime.stream_gap_count += 1;
+        return { status: "events", runtime_generation: 1, events,
+          next_sequence: events.at(-1)?.sequence ?? after, available_from_sequence: 1,
+          latest_sequence: runtime.events.length, recovery_snapshot: null };
+      }
+      if (command === "ack_terminal_events") {
+        if (args.request.session_id === trackedRuntime) {
+          runtime.last_ack = args.request.applied_sequence;
+          if (
+            runtime.terminal_burst_started_at !== null
+            && runtime.terminal_burst_last_sequence !== null
+            && runtime.last_ack >= runtime.terminal_burst_last_sequence
+            && runtime.terminal_last_commit_ms === null
+          ) {
+            runtime.terminal_last_commit_ms = performance.now() - runtime.terminal_burst_started_at;
+          }
+        }
+        return { runtime_generation: 1, acknowledged_sequence: args.request.applied_sequence };
+      }
+      if (["unsubscribe_terminal_events", "unregister_terminal_presentation"].includes(command)) {
+        return brokerState(args.request.session_id, args.request.presentation_id);
+      }
+      if (command === "plugin:event|listen") {
+        const id = eventId++; const list = listeners.get(args.event) ?? [];
+        list.push({ callback_id: args.handler, event_id: id }); listeners.set(args.event, list); return id;
+      }
+      if (command === "plugin:event|unlisten") return null;
+      return clone(defaults[command] ?? null);
+    },
+  };
+}
+
+async function preparedPage(browser, baseUrl, fixture, errors) {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
+  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(browserFixture, fixture);
+  const started = performance.now();
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  try {
+    await page.locator('[data-testid="workbench-host"]').waitFor({ timeout: 20_000 });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      app_shell: document.querySelector('[data-testid="app-shell"]') !== null,
+      body: document.body?.innerText.slice(0, 2_000) ?? "",
+      tauri: typeof window.__TAURI_INTERNALS__?.invoke,
+    }));
+    throw new Error(`Production workbench host did not mount: ${JSON.stringify({ diagnostic, errors })}\n${error}`);
+  }
+  const validation = await page.evaluate((document) => {
+    if (typeof window.__WARDIAN_VALIDATE_WORKBENCH__ !== "function") {
+      throw new Error("Canonical workbench validator is unavailable in the production benchmark build");
+    }
+    return window.__WARDIAN_VALIDATE_WORKBENCH__(document);
+  }, fixture.workbench);
+  if (!validation.valid) {
+    throw new Error(`Canonical workbench validation failed: ${JSON.stringify(validation.errors)}`);
+  }
+  try {
+    await page.waitForFunction(() => new Set(
+      [...document.querySelectorAll('[role="tab"][data-surface-id]')]
+        .map((tab) => tab.getAttribute("data-surface-id")),
+    ).size === 20, undefined, { timeout: 10_000 });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      tabs: [...document.querySelectorAll('[role="tab"][data-surface-id]')]
+        .map((tab) => tab.getAttribute("data-surface-id")),
+      groups: [...document.querySelectorAll('[data-testid="workbench-group"]')]
+        .map((group) => group.getAttribute("data-group-id")),
+      panels: [...document.querySelectorAll('[data-testid="surface-panel"][data-surface-id]')]
+        .map((panel) => panel.getAttribute("data-surface-id")),
+      notice: document.querySelector('[data-testid="workbench-persistence-notice"]')?.textContent ?? null,
+    }));
+    throw new Error(`Production restore did not expose 20 unique tabs: ${JSON.stringify({ diagnostic, errors })}\n${error}`);
+  }
+  return { page, restore_ms: performance.now() - started };
+}
+
+async function twoFrames(page) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+async function clickSurfaceTabFromUser(page, surfaceId) {
+  await page.evaluate(() => {
+    const runtime = window.__WARDIAN_WORKBENCH_PERF__;
+    runtime.tab_activation_started_at = null;
+    window.addEventListener("pointerdown", () => {
+      runtime.tab_activation_started_at = performance.now();
+    }, { capture: true, once: true });
+  });
+  await page.locator(
+    `[role="tab"][data-surface-id=${JSON.stringify(surfaceId)}]`,
+  ).filter({ visible: true }).first().click();
+}
+
+async function measureTabActivation(page, surfaceId) {
+  await clickSurfaceTabFromUser(page, surfaceId);
+  return await page.evaluate(async (id) => {
+    const selector = `[role="tab"][data-surface-id=${JSON.stringify(id)}]`;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (![...document.querySelectorAll(selector)].some(
+      (candidate) => candidate.getAttribute("aria-selected") === "true",
+    )) {
+      throw new Error(`Surface tab ${id} did not activate`);
+    }
+    const started = window.__WARDIAN_WORKBENCH_PERF__.tab_activation_started_at;
+    if (!Number.isFinite(started)) throw new Error(`Surface tab ${id} did not receive user input`);
+    return performance.now() - started;
+  }, surfaceId);
+}
+
+async function waitForHeavyRendererReleased(page, surfaceId, timeoutMs) {
+  await page.waitForFunction((id) => {
+    const panel = document.querySelector(`[data-testid="surface-panel"][data-surface-id=${JSON.stringify(id)}]`);
+    return panel?.querySelector('[data-heavy-renderer-state="released"]') !== null;
+  }, surfaceId, { timeout: timeoutMs });
+}
+
+async function measureHeavySurfaceActivation(page, surfaceId) {
+  await clickSurfaceTabFromUser(page, surfaceId);
+  return await page.evaluate(async (id) => {
+    const tabSelector = `[role="tab"][data-surface-id=${JSON.stringify(id)}]`;
+    const panelSelector = `[data-testid="surface-panel"][data-surface-id=${JSON.stringify(id)}]`;
+    const panel = document.querySelector(panelSelector);
+    if (!(panel instanceof HTMLElement)) {
+      throw new Error(`Heavy surface ${id} is unavailable`);
+    }
+    const started = window.__WARDIAN_WORKBENCH_PERF__.tab_activation_started_at;
+    if (!Number.isFinite(started)) throw new Error(`Heavy surface ${id} did not receive user input`);
+    const deadline = started + 20_000;
+    while (performance.now() < deadline) {
+      const currentPanel = document.querySelector(panelSelector);
+      const readySurface = id === "perf-graph"
+        ? currentPanel?.querySelector('[data-testid="graph-view"]')
+        : currentPanel?.querySelector("canvas");
+      const rect = readySurface?.getBoundingClientRect();
+      const mounted = currentPanel?.querySelector('[data-heavy-renderer-state="mounted"]') !== null;
+      const selected = [...document.querySelectorAll(tabSelector)].some(
+        (candidate) => candidate.getAttribute("aria-selected") === "true",
+      );
+      if (
+        selected
+        && mounted
+        && rect
+        && rect.width > 0
+        && rect.height > 0
+      ) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return performance.now() - started;
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    const finalPanel = document.querySelector(panelSelector);
+    const finalReady = id === "perf-graph"
+      ? finalPanel?.querySelector('[data-testid="graph-view"]')
+      : finalPanel?.querySelector("canvas");
+    throw new Error(`Heavy surface ${id} did not remount within 20000ms: ${JSON.stringify({
+      selected: [...document.querySelectorAll(tabSelector)].map(
+        (candidate) => candidate.getAttribute("aria-selected"),
+      ),
+      panel: finalPanel !== null,
+      state: finalPanel?.querySelector('[data-heavy-renderer-state]')
+        ?.getAttribute("data-heavy-renderer-state") ?? null,
+      ready: finalReady !== null && finalReady !== undefined,
+      rect: finalReady ? {
+        width: finalReady.getBoundingClientRect().width,
+        height: finalReady.getBoundingClientRect().height,
+      } : null,
+    })}`);
+  }, surfaceId);
+}
+
+async function measureRuntime(fixture, runtimeOutDir) {
+  const [{ chromium }, { preview }] = await Promise.all([
+    import("@playwright/test"),
+    import("vite"),
+  ]);
+  const server = await preview({
+    root: repoRoot,
+    logLevel: "error",
+    build: { outDir: runtimeOutDir },
+    preview: { host: "127.0.0.1", port: 0 },
   });
   let browser;
   try {
-    await server.listen();
-    const baseUrl = server.resolvedUrls?.local[0]?.replace(/\/$/, "");
-    if (!baseUrl) throw new Error("Vite did not expose a local measurement URL");
+    const baseUrl = server.resolvedUrls?.local[0];
+    if (!baseUrl) throw new Error("Vite did not expose a performance URL");
     browser = await chromium.launch();
-    const browserVersion = browser.version();
-    const warmupPage = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
-    await installBrowserInstrumentation(warmupPage);
-    await installProofHostRoute(warmupPage);
-    await warmupPage.goto(`${baseUrl}/__workbench-proof-measurement.html`, { waitUntil: "domcontentloaded" });
-    await warmupPage.locator('[data-testid="workbench-proof"][data-ready="true"]').waitFor({ timeout: 20_000 });
-    await warmupPage.locator('[data-testid="proof-graph-wrapper"]').waitFor({ state: "attached", timeout: 20_000 });
-    await warmupPage.locator('[data-testid="proof-garden-wrapper"]').waitFor({ state: "attached", timeout: 20_000 });
-    await warmupPage.close();
-
-    const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
-    const consoleErrors = [];
-    const pageErrors = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-    page.on("pageerror", (error) => pageErrors.push(error.message));
-    await installBrowserInstrumentation(page);
-    await installProofHostRoute(page);
-
-    const startupStartedAt = performance.now();
-    await page.goto(`${baseUrl}/__workbench-proof-measurement.html`, { waitUntil: "domcontentloaded" });
-    await page.locator('[data-testid="workbench-proof"][data-ready="true"]').waitFor({ timeout: 20_000 });
-    const startupMs = performance.now() - startupStartedAt;
-    await page.locator('[data-testid="proof-graph-wrapper"]').waitFor({ state: "attached", timeout: 20_000 });
-    await page.locator('[data-testid="proof-garden-wrapper"]').waitFor({ state: "attached", timeout: 20_000 });
-    const heavyRenderersReadyMs = performance.now() - startupStartedAt;
-
-    const tabSwitchMs = await page.evaluate(async () => {
-      const runtime = window.__WARDIAN_WORKBENCH_PROOF__;
-      if (!runtime) throw new Error("proof runtime is unavailable");
-      const ids = ["graph", "terminal-owner", "synthetic-01", "terminal-owner"];
-      const samples = [];
-      for (let index = 0; index < 16; index += 1) {
-        const startedAt = performance.now();
-        runtime.commands.activateSurface(ids[index % ids.length]);
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        samples.push(performance.now() - startedAt);
-      }
-      return samples;
-    });
-
-    const dragMs = [];
-    for (let index = 0; index < 3; index += 1) {
-      const source = page.getByRole("tab", { name: "Terminal Owner", exact: true });
-      const target = page.getByRole("tab", { name: "Terminal Mirror 1", exact: true });
-      await source.click();
-      await source.focus();
-      await page.keyboard.press("Control+]");
-      await page.keyboard.press("F6");
-      const sourceBox = await source.boundingBox();
-      const targetBox = await target.boundingBox();
-      if (!sourceBox || !targetBox) throw new Error("Dockview drag handles are not measurable");
-      const startedAt = performance.now();
-      await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 16 });
-      await page.mouse.up();
-      await page.waitForFunction(() => window.__WARDIAN_WORKBENCH_PROOF__?.getModel()
-        .groups.find((group) => group.group_id === "proof-group-2")
-        ?.surface_ids.includes("terminal-owner") === true);
-      dragMs.push(performance.now() - startedAt);
-      await page.evaluate(() => window.__WARDIAN_WORKBENCH_PROOF__?.commands
-        .moveSurface("terminal-owner", "proof-group-1"));
-      await page.waitForFunction(() => window.__WARDIAN_WORKBENCH_PROOF__?.getModel()
-        .groups.find((group) => group.group_id === "proof-group-1")
-        ?.surface_ids.includes("terminal-owner") === true);
+    const errors = [];
+    const startup = [];
+    let page;
+    for (let index = 0; index < 5; index += 1) {
+      if (page) await page.close();
+      const prepared = await preparedPage(browser, baseUrl, fixture, errors);
+      startup.push(prepared.restore_ms);
+      page = prepared.page;
     }
-
-    const terminalOutputMs = await page.evaluate(async () => {
-      const runtime = window.__WARDIAN_WORKBENCH_PROOF__;
-      if (!runtime) throw new Error("proof runtime is unavailable");
-      const startedAt = performance.now();
-      await runtime.commands.emitTerminalBurst(500);
-      return performance.now() - startedAt;
+    const tabIds = Object.keys(fixture.workbench.surfaces);
+    const tabSwitch = [];
+    for (let index = 0; index < 20; index += 1) {
+      tabSwitch.push(await measureTabActivation(page, tabIds[index]));
+    }
+    const groupFocus = [];
+    for (const group of Object.values(fixture.workbench.groups)) {
+      groupFocus.push(await measureTabActivation(page, group.active_surface_id));
+    }
+    const terminalOutput = [];
+    for (let index = 0; index < 10; index += 1) {
+      const target = await page.evaluate(() => window.__WARDIAN_WORKBENCH_PERF__.emit_terminal_burst(20));
+      await page.waitForFunction((sequence) => window.__WARDIAN_WORKBENCH_PERF__.last_ack >= sequence, target.last);
+      terminalOutput.push(await page.evaluate(() => {
+        const duration = window.__WARDIAN_WORKBENCH_PERF__.terminal_last_commit_ms;
+        if (!Number.isFinite(duration) || duration < 0) {
+          throw new Error("Terminal commit instrumentation did not record an in-page duration");
+        }
+        return duration;
+      }));
+    }
+    await page.locator('[role="tab"][data-surface-id="perf-overview"]').click();
+    await page.evaluate(() => {
+      const overview = document.querySelector('[data-testid="agents-overview-container"]');
+      if (!overview) throw new Error("Agents Overview container is unavailable");
+      const runtime = window.__WARDIAN_WORKBENCH_PERF__;
+      runtime.overview_resize_started_at = performance.now();
+      runtime.overview_last_resize_at = performance.now();
+      new ResizeObserver(() => {
+        runtime.overview_last_resize_at = performance.now();
+      }).observe(overview);
     });
-
+    const overviewSettle = [];
+    for (const width of [1500, 1200, 900, 1400, 800, 1600]) {
+      await page.evaluate(() => {
+        window.__WARDIAN_WORKBENCH_PERF__.overview_resize_started_at = performance.now();
+      });
+      const started = performance.now();
+      await page.setViewportSize({ width, height: 850 });
+      await page.waitForFunction(() => {
+        const runtime = window.__WARDIAN_WORKBENCH_PERF__;
+        return runtime.overview_last_resize_at >= runtime.overview_resize_started_at
+          && performance.now() - runtime.overview_last_resize_at >= 120;
+      });
+      await twoFrames(page); overviewSettle.push(performance.now() - started);
+    }
+    const heavyResume = [];
+    const heavyGrace = fixture.benchmark.heavy_surface_hidden_grace_ms;
+    for (const surfaceId of ["perf-graph", "perf-garden", "perf-graph", "perf-garden"]) {
+      await measureHeavySurfaceActivation(page, surfaceId);
+      await measureTabActivation(page, "perf-agent-mirror-1");
+      await waitForHeavyRendererReleased(page, surfaceId, heavyGrace + 5_000);
+      heavyResume.push(await measureHeavySurfaceActivation(page, surfaceId));
+    }
     const observed = await page.evaluate(() => {
-      const runtime = window.__WARDIAN_WORKBENCH_PROOF__;
-      if (!runtime) throw new Error("proof runtime is unavailable");
-      const tabElements = [...document.querySelectorAll('[role="tab"]')];
-      const separators = [...document.querySelectorAll(".dv-sash")];
+      const runtime = window.__WARDIAN_WORKBENCH_PERF__;
       return {
-        model: runtime.getModel(),
-        metrics: structuredClone(runtime.metrics),
-        renderer_counts: {
-          mounted_surfaces: Object.keys(runtime.metrics.surface_mounts).length,
-          mounted_terminal_hosts: document.querySelectorAll('[data-testid^="proof-terminal-host-"]').length,
-          mounted_terminal_owners: document.querySelectorAll('[data-terminal-mode="owner"]').length,
-          mounted_terminal_mirrors: document.querySelectorAll('[data-terminal-mode="mirror"]').length,
-          mounted_graph_wrappers: document.querySelectorAll('[data-testid="proof-graph-wrapper"]').length,
-          mounted_garden_wrappers: document.querySelectorAll('[data-testid="proof-garden-wrapper"]').length,
-          canvas_elements: document.querySelectorAll("canvas").length,
-          webgl_canvases: window.__proofWebglCanvases?.size ?? 0,
-        },
-        accessibility: {
-          tab_count: tabElements.length,
-          tablist_count: document.querySelectorAll('[role="tablist"]').length,
-          selected_tab_count: tabElements.filter((element) => element.getAttribute("aria-selected") === "true").length,
-          roving_tabstop_count: tabElements.filter((element) => element.getAttribute("tabindex") === "0").length,
-          separator_count: separators.length,
-          separators_with_role: separators.filter((element) => element.getAttribute("role") === "separator").length,
-          separators_with_value: separators.filter((element) => element.hasAttribute("aria-valuenow")).length,
-        },
+        stream_gap_count: runtime.stream_gap_count,
+        react_commits: [...runtime.react_commits],
+        xterm_peak: runtime.xterm_peak,
+        webgl_peak: runtime.webgl_peak,
       };
     });
     await page.close();
-
-    if (consoleErrors.length > 0 || pageErrors.length > 0) {
-      throw new Error(`Browser proof emitted errors: ${JSON.stringify({ consoleErrors, pageErrors })}`);
+    if (errors.length > 0) throw new Error(`Production workbench emitted browser errors: ${JSON.stringify(errors)}`);
+    if (observed.react_commits.length === 0) {
+      throw new Error("React commit instrumentation produced no observed samples");
+    }
+    if (observed.xterm_peak < fixture.terminal_presentations.length) {
+      throw new Error(
+        `Expected ${fixture.terminal_presentations.length} measured terminal renderers, observed ${observed.xterm_peak}`,
+      );
     }
     return {
-      browser_version: browserVersion,
-      startup_measurement: "fresh browser context after Vite transform warm-up",
-      startup_ms: round(startupMs),
-      heavy_renderers_ready_ms: round(heavyRenderersReadyMs),
-      tab_switch_ms: summarize(tabSwitchMs, "tab switch"),
-      drag_ms: summarize(dragMs, "pointer drag"),
-      terminal_output_500_lines_ms: round(terminalOutputMs),
-      react_commit_measurement: "model publish to React layout effect",
-      react_commit_count: observed.metrics.react_commit_count,
-      react_commits: summarize(observed.metrics.react_commit_duration_ms, "React commit"),
-      model_command_ms: summarize(observed.metrics.model_command_duration_ms, "model command"),
-      renderer_counts: observed.renderer_counts,
-      surface_mounts: observed.metrics.surface_mounts,
-      surface_unmounts: observed.metrics.surface_unmounts,
-      terminal_write_chars: observed.metrics.terminal_write_chars,
-      terminal_webgl_loaded: observed.metrics.terminal_webgl_loaded,
-      terminal_webgl_failures: observed.metrics.terminal_webgl_failures,
-      adapter_move_events: observed.metrics.adapter_move_events,
-      accessibility: observed.accessibility,
-      final_group_count: observed.model.groups.length,
-      final_tab_count: Object.keys(observed.model.surfaces).length,
+      startup_restore_ms: summarize(startup, "startup restore"),
+      tab_switch_ms: summarize(tabSwitch, "tab switch"),
+      group_focus_ms: summarize(groupFocus, "group focus"),
+      terminal_output_commit_ms: summarize(terminalOutput, "terminal output commit"),
+      stream_gap_count: observed.stream_gap_count,
+      overview_settle_ms: summarize(overviewSettle, "Overview settle"),
+      heavy_surface_resume_ms: summarize(heavyResume, "heavy surface resume"),
+      react_commit_max_ms: round(Math.max(0, ...observed.react_commits)),
+      renderer_peaks: { xterm: observed.xterm_peak, webgl: observed.webgl_peak },
     };
   } finally {
     await browser?.close();
@@ -352,499 +765,104 @@ async function measureRuntime() {
   }
 }
 
-async function installProofHostRoute(page) {
-  await page.route("**/__workbench-proof-measurement.html", (route) => route.fulfill({
-    contentType: "text/html",
-    body: proofHostHtml(),
-  }));
-}
-
-async function installBrowserInstrumentation(page) {
-  await page.addInitScript(() => {
-    const tauriWindow = window;
-    let callbackId = 1;
-    tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined };
-    tauriWindow.__TAURI_INTERNALS__ = {
-      metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
-      transformCallback: () => callbackId++,
-      unregisterCallback: () => undefined,
-      convertFileSrc: (filePath) => filePath,
-      invoke: async (command) => {
-        if ([
-          "list_agents", "list_agent_classes", "list_provider_readiness", "load_watchlists",
-          "load_queue_items", "list_workflows", "list_scheduled_runs", "list_deployed_skills",
-          "workflow_list_blueprints", "workflow_list_runs", "get_pair_activity", "list_available_shells",
-        ].includes(command)) return [];
-        if (command === "get_topology") return { edges: [], ignored_pairs: [], fallback_groups: [] };
-        if (command === "load_agent_interactions" || command === "load_queue_preferences") return {};
-        if (command === "plugin:event|listen") return callbackId++;
-        return null;
-      },
-    };
-    window.__proofWebglCanvases = new Set();
-    const originalGetContext = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function getContext(type, ...args) {
-      const context = originalGetContext.call(this, type, ...args);
-      if (context && (type === "webgl" || type === "webgl2" || type === "experimental-webgl")) {
-        window.__proofWebglCanvases.add(this);
-      }
-      return context;
-    };
-  });
-}
-
-function proofHostHtml() {
-  return `<!doctype html>
-    <html>
-      <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <link rel="stylesheet" href="/src/styles/App.css" />
-      </head>
-      <body>
-        <div id="workbench-proof-root"></div>
-        <script type="module">
-          import RefreshRuntime from "/@react-refresh";
-          RefreshRuntime.injectIntoGlobalHook(window);
-          window.$RefreshReg$ = () => {};
-          window.$RefreshSig$ = () => (type) => type;
-          window.__vite_plugin_react_preamble_installed__ = true;
-        </script>
-        <script type="module">
-          import { mountDockviewEvaluationHarness } from "/src/layout/workbench/proof/DockviewEvaluationHarness.tsx";
-          mountDockviewEvaluationHarness(document.getElementById("workbench-proof-root"));
-        </script>
-      </body>
-    </html>`;
-}
-
-function summarize(values, label = "timing") {
-  if (!Array.isArray(values) || values.length === 0) {
-    throw new Error(`${label} samples must be a non-empty array`);
-  }
-  const samples = values.map((value, index) => {
-    if (!Number.isFinite(value) || value < 0) {
-      throw new Error(`${label} sample ${index} must be a finite non-negative number`);
-    }
-    return round(value);
-  }).sort((left, right) => left - right);
+function passingSelfTestBaseline() {
+  const timing = { samples: [1, 2, 3], median: 2, p95: 3, max: 3 };
   return {
-    samples,
-    median: percentile(samples, 0.5),
-    p95: percentile(samples, 0.95),
-    max: samples.at(-1),
-  };
-}
-
-function percentile(sorted, ratio) {
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)];
-}
-
-function round(value) {
-  return Math.round(value * 100) / 100;
-}
-
-function validatePromotionBaseline(baseline) {
-  const validationErrors = [];
-  const scenario = baseline?.scenario ?? {};
-  const bundle = baseline?.bundle ?? {};
-  const runtime = baseline?.runtime ?? {};
-  const rendererCounts = runtime.renderer_counts ?? {};
-  const accessibility = runtime.accessibility ?? {};
-  const adapterBoundary = baseline?.adapter_boundary ?? {};
-  const expectExact = (actual, expected, label) => {
-    if (actual !== expected) {
-      validationErrors.push(`${label} must equal ${JSON.stringify(expected)}; received ${JSON.stringify(actual)}`);
-    }
-  };
-  const expectFinite = (value, label, minimum = 0) => {
-    if (!Number.isFinite(value) || value < minimum) {
-      validationErrors.push(`${label} must be a finite number >= ${minimum}; received ${JSON.stringify(value)}`);
-    }
-  };
-  const expectAtLeast = (actual, minimum, label) => {
-    if (!Number.isFinite(actual) || actual < minimum) {
-      validationErrors.push(`${label} must be >= ${minimum}; received ${JSON.stringify(actual)}`);
-    }
-  };
-
-  expectExact(baseline?.schema_version, 2, "schema_version");
-  expectExact(scenario.group_count, 4, "scenario.group_count");
-  expectExact(scenario.tab_count, 20, "scenario.tab_count");
-  expectExact(scenario.xterm_owner_count, 1, "scenario.xterm_owner_count");
-  expectExact(scenario.xterm_mirror_count, 3, "scenario.xterm_mirror_count");
-  expectExact(runtime.final_group_count, 4, "runtime.final_group_count");
-  expectExact(runtime.final_tab_count, 20, "runtime.final_tab_count");
-
-  expectFinite(bundle.production_delta_raw_bytes, "bundle.production_delta_raw_bytes");
-  expectFinite(bundle.production_delta_gzip_bytes, "bundle.production_delta_gzip_bytes");
-  expectFinite(runtime.startup_ms, "runtime.startup_ms");
-  expectFinite(runtime.heavy_renderers_ready_ms, "runtime.heavy_renderers_ready_ms");
-  expectFinite(runtime.terminal_output_500_lines_ms, "runtime.terminal_output_500_lines_ms");
-
-  const timingSummaries = [
-    [runtime.tab_switch_ms, "runtime.tab_switch_ms"],
-    [runtime.drag_ms, "runtime.drag_ms"],
-    [runtime.react_commits, "runtime.react_commits"],
-    [runtime.model_command_ms, "runtime.model_command_ms"],
-  ];
-  for (const [summary, label] of timingSummaries) {
-    if (!summary || typeof summary !== "object") {
-      validationErrors.push(`${label} must be a timing summary`);
-      continue;
-    }
-    try {
-      const expectedSummary = summarize(summary.samples, label);
-      for (const field of ["median", "p95", "max"]) {
-        expectFinite(summary[field], `${label}.${field}`);
-        if (Number.isFinite(summary[field]) && summary[field] !== expectedSummary[field]) {
-          validationErrors.push(
-            `${label}.${field} must match its samples; expected ${expectedSummary[field]}, received ${summary[field]}`,
-          );
-        }
-      }
-    } catch (error) {
-      validationErrors.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-  if (Array.isArray(runtime.react_commits?.samples)) {
-    expectExact(runtime.react_commit_count, runtime.react_commits.samples.length, "runtime.react_commit_count");
-  }
-
-  expectExact(rendererCounts.mounted_surfaces, 20, "runtime.renderer_counts.mounted_surfaces");
-  expectExact(rendererCounts.mounted_terminal_hosts, 4, "runtime.renderer_counts.mounted_terminal_hosts");
-  expectExact(rendererCounts.mounted_terminal_owners, 1, "runtime.renderer_counts.mounted_terminal_owners");
-  expectExact(rendererCounts.mounted_terminal_mirrors, 3, "runtime.renderer_counts.mounted_terminal_mirrors");
-  expectExact(rendererCounts.mounted_graph_wrappers, 1, "runtime.renderer_counts.mounted_graph_wrappers");
-  expectExact(rendererCounts.mounted_garden_wrappers, 1, "runtime.renderer_counts.mounted_garden_wrappers");
-  expectAtLeast(rendererCounts.canvas_elements, 4, "runtime.renderer_counts.canvas_elements");
-  expectAtLeast(rendererCounts.webgl_canvases, 4, "runtime.renderer_counts.webgl_canvases");
-  expectExact(runtime.terminal_webgl_loaded, 4, "runtime.terminal_webgl_loaded");
-  expectExact(runtime.terminal_webgl_failures, 0, "runtime.terminal_webgl_failures");
-
-  const surfaceMounts = runtime.surface_mounts;
-  if (!surfaceMounts || typeof surfaceMounts !== "object" || Array.isArray(surfaceMounts)) {
-    validationErrors.push("runtime.surface_mounts must be an object");
-  } else {
-    expectExact(Object.keys(surfaceMounts).length, 20, "runtime.surface_mounts entry count");
-    for (const [surfaceId, mountCount] of Object.entries(surfaceMounts)) {
-      expectExact(mountCount, 1, `runtime.surface_mounts.${surfaceId}`);
-    }
-  }
-  const surfaceUnmounts = runtime.surface_unmounts;
-  if (!surfaceUnmounts || typeof surfaceUnmounts !== "object" || Array.isArray(surfaceUnmounts)) {
-    validationErrors.push("runtime.surface_unmounts must be an object");
-  } else {
-    expectExact(Object.keys(surfaceUnmounts).length, 0, "runtime.surface_unmounts entry count");
-  }
-  const terminalWrites = runtime.terminal_write_chars;
-  if (!terminalWrites || typeof terminalWrites !== "object" || Array.isArray(terminalWrites)) {
-    validationErrors.push("runtime.terminal_write_chars must be an object");
-  } else {
-    expectExact(Object.keys(terminalWrites).length, 4, "runtime.terminal_write_chars entry count");
-    for (const terminalId of ["terminal-owner", "terminal-mirror-1", "terminal-mirror-2", "terminal-mirror-3"]) {
-      expectFinite(terminalWrites[terminalId], `runtime.terminal_write_chars.${terminalId}`, 1);
-    }
-  }
-
-  expectExact(accessibility.tab_count, 20, "runtime.accessibility.tab_count");
-  expectExact(accessibility.tablist_count, 4, "runtime.accessibility.tablist_count");
-  expectExact(accessibility.selected_tab_count, 4, "runtime.accessibility.selected_tab_count");
-  expectExact(accessibility.roving_tabstop_count, 4, "runtime.accessibility.roving_tabstop_count");
-  expectExact(adapterBoundary.dockview_json_persisted, false, "adapter_boundary.dockview_json_persisted");
-  expectExact(
-    adapterBoundary.dockview_serialization_reference_count,
-    0,
-    "adapter_boundary.dockview_serialization_reference_count",
-  );
-
-  const thresholdObservations = {
-    bundle_delta_raw_bytes: bundle.production_delta_raw_bytes,
-    bundle_delta_gzip_bytes: bundle.production_delta_gzip_bytes,
-    startup_ms: runtime.startup_ms,
-    heavy_renderers_ready_ms: runtime.heavy_renderers_ready_ms,
-    tab_switch_p95_ms: runtime.tab_switch_ms?.p95,
-    model_command_p95_ms: runtime.model_command_ms?.p95,
-    react_commit_p95_ms: runtime.react_commits?.p95,
-    pointer_drag_p95_ms: runtime.drag_ms?.p95,
-    terminal_output_500_lines_ms: runtime.terminal_output_500_lines_ms,
-  };
-  for (const [metric, value] of Object.entries(thresholdObservations)) {
-    expectFinite(value, `promotion.${metric}`);
-  }
-
-  if (validationErrors.length > 0) {
-    throw new Error(`Invalid workbench measurement:\n${JSON.stringify({ validation_errors: validationErrors }, null, 2)}`);
-  }
-
-  const checks = Object.entries(PROMOTION_THRESHOLDS).map(([metric, threshold]) => {
-    const observed = thresholdObservations[metric];
-    return {
-      metric,
-      observed,
-      operator: "<=",
-      limit: threshold.limit,
-      unit: threshold.unit,
-      passed: observed <= threshold.limit,
-    };
-  });
-  const promotion = {
-    schema_version: 1,
-    passed: checks.every((check) => check.passed),
-    checks,
-  };
-  if (!promotion.passed) {
-    throw new Error(`Workbench promotion threshold failure:\n${JSON.stringify({ promotion }, null, 2)}`);
-  }
-  return promotion;
-}
-
-function createSelfTestBaseline() {
-  const surfaceIds = [
-    "terminal-owner", "terminal-mirror-1", "terminal-mirror-2", "terminal-mirror-3",
-    ...Array.from({ length: 16 }, (_, index) => `surface-${index + 1}`),
-  ];
-  const timing = () => summarize([1, 2, 3], "self-test timing");
-  return {
-    schema_version: 2,
-    scenario: {
-      group_count: 4,
-      tab_count: 20,
-      xterm_owner_count: 1,
-      xterm_mirror_count: 3,
-    },
-    bundle: {
-      production_delta_raw_bytes: 1000,
-      production_delta_gzip_bytes: 500,
-    },
     runtime: {
-      startup_ms: 10,
-      heavy_renderers_ready_ms: 20,
-      tab_switch_ms: timing(),
-      drag_ms: timing(),
-      terminal_output_500_lines_ms: 5,
-      react_commit_count: 3,
-      react_commits: timing(),
-      model_command_ms: timing(),
-      renderer_counts: {
-        mounted_surfaces: 20,
-        mounted_terminal_hosts: 4,
-        mounted_terminal_owners: 1,
-        mounted_terminal_mirrors: 3,
-        mounted_graph_wrappers: 1,
-        mounted_garden_wrappers: 1,
-        canvas_elements: 8,
-        webgl_canvases: 4,
-      },
-      surface_mounts: Object.fromEntries(surfaceIds.map((surfaceId) => [surfaceId, 1])),
-      surface_unmounts: {},
-      terminal_write_chars: {
-        "terminal-owner": 100,
-        "terminal-mirror-1": 100,
-        "terminal-mirror-2": 100,
-        "terminal-mirror-3": 100,
-      },
-      terminal_webgl_loaded: 4,
-      terminal_webgl_failures: 0,
-      accessibility: {
-        tab_count: 20,
-        tablist_count: 4,
-        selected_tab_count: 4,
-        roving_tabstop_count: 4,
-      },
-      final_group_count: 4,
-      final_tab_count: 20,
+      startup_restore_ms: timing, tab_switch_ms: timing, group_focus_ms: timing,
+      terminal_output_commit_ms: timing, stream_gap_count: 0, overview_settle_ms: timing,
+      heavy_surface_resume_ms: timing, react_commit_max_ms: 3,
+      renderer_peaks: { xterm: 4, webgl: 4 },
     },
-    adapter_boundary: {
-      dockview_json_persisted: false,
-      dockview_serialization_reference_count: 0,
-    },
+    bundle: { production_delta_gzip_bytes: 1024 },
   };
 }
 
-function expectSynchronousFailure(label, action, pattern) {
-  let failure;
-  try {
-    action();
-  } catch (error) {
-    failure = error;
-  }
-  if (!failure) {
-    throw new Error(`Self-test expected failure: ${label}`);
-  }
-  const message = failure instanceof Error ? failure.message : String(failure);
-  if (pattern && !pattern.test(message)) {
-    throw new Error(`Self-test ${label} failed with an unexpected error: ${message}`);
-  }
-}
-
-async function runSelfTest() {
-  const passed = [];
-  expectSynchronousFailure(
-    "relative WARDIAN_HOME",
-    () => resolveIsolatedWardianHome("wardian-workbench-proof-relative"),
-    /absolute path/,
-  );
-  passed.push("relative-home-rejected");
-
-  expectSynchronousFailure(
-    "workspace-root WARDIAN_HOME",
-    () => resolveIsolatedWardianHome(repoRoot),
-    /workspace root/,
-  );
-  passed.push("workspace-root-rejected");
-
-  const safeMissingHome = path.join(
-    path.resolve(os.tmpdir()),
-    `wardian-workbench-proof-self-test-${process.pid}-${Date.now()}`,
-  );
-  const resolvedSafeMissingHome = resolveIsolatedWardianHome(safeMissingHome);
-  if (!samePath(resolvedSafeMissingHome, canonicalizePath(safeMissingHome))) {
-    throw new Error("Self-test failed to canonicalize a missing isolated WARDIAN_HOME safely");
-  }
-  passed.push("missing-final-path-canonicalized");
-
-  const linkRoot = await fs.mkdtemp(path.join(path.resolve(os.tmpdir()), "wardian-workbench-path-test-"));
-  const escapeLink = path.join(linkRoot, "workspace-link");
-  try {
-    await fs.symlink(repoRoot, escapeLink, process.platform === "win32" ? "junction" : "dir");
-    expectSynchronousFailure(
-      "symlink or junction parent escape",
-      () => resolveIsolatedWardianHome(
-        path.join(escapeLink, `wardian-workbench-proof-escape-${process.pid}`),
-      ),
-      /OS temp root/,
-    );
-    passed.push("canonical-parent-escape-rejected");
-  } finally {
-    try {
-      await fs.unlink(escapeLink);
-    } catch (error) {
-      if (fsSync.existsSync(escapeLink)) {
-        await fs.rmdir(escapeLink);
-      } else if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-        throw error;
-      }
+async function selfTest() {
+  const fixture = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+  const errors = fixtureErrors(fixture);
+  if (errors.length > 0) throw new Error(errors.join("\n"));
+  const baseline = passingSelfTestBaseline();
+  const result = evaluateGates(baseline);
+  if (result.checks.length !== Object.keys(gates).length) throw new Error("Self-test omitted a gate");
+  const timingMetricKeys = {
+    restore_p95_ms: "startup_restore_ms",
+    tab_switch_p95_ms: "tab_switch_ms",
+    group_focus_p95_ms: "group_focus_ms",
+    terminal_output_commit_p95_ms: "terminal_output_commit_ms",
+    overview_settle_p95_ms: "overview_settle_ms",
+    heavy_surface_resume_p95_ms: "heavy_surface_resume_ms",
+  };
+  for (const metric of Object.keys(gates)) {
+    const failed = structuredClone(baseline);
+    if (metric === "bundle_delta_gzip_bytes") failed.bundle.production_delta_gzip_bytes = gates[metric].limit + 1;
+    else if (metric === "xterm_renderer_peak") failed.runtime.renderer_peaks.xterm = gates[metric].limit + 1;
+    else if (metric === "webgl_context_peak") failed.runtime.renderer_peaks.webgl = gates[metric].limit + 1;
+    else if (metric === "stream_gap_count") failed.runtime.stream_gap_count = 1;
+    else if (metric === "react_commit_max_ms") failed.runtime.react_commit_max_ms = gates[metric].limit + 1;
+    else {
+      const key = timingMetricKeys[metric];
+      failed.runtime[key].p95 = gates[metric].limit + 1;
     }
-    await fs.rmdir(linkRoot);
+    try { evaluateGates(failed); throw new Error(`Gate ${metric} did not fail closed`); }
+    catch (error) { if (!String(error).includes("gate failure")) throw error; }
   }
-
-  expectSynchronousFailure("empty timing samples", () => summarize([], "self-test"), /non-empty/);
-  passed.push("empty-samples-rejected");
-
-  const validBaseline = createSelfTestBaseline();
-  const promotion = validatePromotionBaseline(validBaseline);
-  if (!promotion.passed || promotion.checks.length !== Object.keys(PROMOTION_THRESHOLDS).length) {
-    throw new Error("Self-test valid baseline did not produce complete passing promotion checks");
-  }
-  passed.push("valid-baseline-passed");
-
-  const missingSamples = structuredClone(validBaseline);
-  missingSamples.runtime.react_commits.samples = [];
-  expectSynchronousFailure(
-    "missing timing samples",
-    () => validatePromotionBaseline(missingSamples),
-    /non-empty array/,
-  );
-  passed.push("missing-metrics-rejected");
-
-  const nonFiniteSamples = structuredClone(validBaseline);
-  nonFiniteSamples.runtime.model_command_ms.samples[0] = Number.NaN;
-  expectSynchronousFailure(
-    "non-finite timing samples",
-    () => validatePromotionBaseline(nonFiniteSamples),
-    /finite non-negative/,
-  );
-  passed.push("non-finite-metrics-rejected");
-
-  const wrongFixtureCount = structuredClone(validBaseline);
-  wrongFixtureCount.scenario.tab_count = 19;
-  expectSynchronousFailure(
-    "wrong fixture count",
-    () => validatePromotionBaseline(wrongFixtureCount),
-    /scenario\.tab_count/,
-  );
-  passed.push("fixture-count-mismatch-rejected");
-
-  const failedThreshold = structuredClone(validBaseline);
-  failedThreshold.bundle.production_delta_raw_bytes = PROMOTION_THRESHOLDS.bundle_delta_raw_bytes.limit + 1;
-  expectSynchronousFailure(
-    "failed promotion threshold",
-    () => validatePromotionBaseline(failedThreshold),
-    /threshold failure/,
-  );
-  passed.push("threshold-failure-rejected");
-
-  process.stdout.write(`${JSON.stringify({ self_test: "passed", checks: passed }, null, 2)}\n`);
+  const missing = structuredClone(baseline);
+  delete missing.runtime.group_focus_ms;
+  try { evaluateGates(missing); throw new Error("Missing observation did not fail closed"); }
+  catch (error) { if (!String(error).includes("Missing observed metric")) throw error; }
+  process.stdout.write(`${JSON.stringify({ self_test: "passed", fixture: fixture.scenario, gates }, null, 2)}\n`);
 }
 
 async function main() {
-  const wardianHome = resolveIsolatedWardianHome(process.env.WARDIAN_HOME);
-  await fs.mkdir(wardianHome, { recursive: true });
-  const seedPath = await seedIsolatedHome(wardianHome);
-  const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"));
-  const lockfile = JSON.parse(await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8"));
-  const harnessSource = await fs.readFile(harnessPath, "utf8");
-  const bundle = await measureBundles(wardianHome);
-  const runtime = await measureRuntime();
+  const home = isolatedWardianHome(process.env.WARDIAN_HOME);
+  if (process.argv.includes("--validate-home-only")) {
+    process.stdout.write(`${home}\n`);
+    return;
+  }
+  if (process.argv.includes("--check")) {
+    const baseline = JSON.parse(await fs.readFile(baselinePath, "utf8"));
+    const gateResult = evaluateGates(baseline);
+    process.stdout.write(`${JSON.stringify({
+      baseline: path.relative(repoRoot, baselinePath),
+      gates: gateResult,
+    }, null, 2)}\n`);
+    return;
+  }
+  const fixture = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+  const errors = fixtureErrors(fixture);
+  if (errors.length > 0) throw new Error(`Invalid performance fixture:\n${errors.join("\n")}`);
+  await fs.mkdir(home, { recursive: true });
+  const seedFile = await seedHome(home, fixture);
+  // Bundle comparison and the benchmark-only production build both control
+  // Vite compile-time flags. Keep them serialized before serving static output.
+  const bundle = await productionBundleDelta(home);
+  const runtimeOutDir = await buildProductionRuntime(home, fixture);
+  const runtime = await measureRuntime(fixture, runtimeOutDir);
   const baseline = {
-    schema_version: 2,
+    schema_version: 1,
     measured_at: new Date().toISOString(),
     environment: {
       platform: process.platform,
       arch: process.arch,
       node: process.version,
-      cpu: os.cpus()[0]?.model ?? "unknown",
-      logical_cpu_count: os.cpus().length,
-      total_memory_bytes: os.totalmem(),
-      wardian_home: "isolated-os-temp",
+      wardian_home: "isolated",
+      renderer_build: "production",
+      react_runtime: "react-dom/profiling",
+      heavy_surface_hidden_grace_ms: fixture.benchmark.heavy_surface_hidden_grace_ms,
     },
-    package: {
-      name: "dockview-react",
-      version: packageJson.dependencies["dockview-react"],
-      license: "MIT",
-      unpacked_size_bytes: 3300226,
-      react_version: lockfile.packages["node_modules/react"].version,
-      react_dom_version: lockfile.packages["node_modules/react-dom"].version,
-      react_peer_compatible: true,
-    },
-    scenario: {
-      group_count: 4,
-      tab_count: 20,
-      xterm_owner_count: 1,
-      xterm_mirror_count: 3,
-      heavy_renderers: ["GraphView", "GardenView"],
-      seed_file: path.relative(wardianHome, seedPath).replaceAll(path.sep, "/"),
-    },
+    scenario: { fixture: seedFile, groups: 4, tabs: 20, agents: 20, owner: 1, mirrors: 3 },
     bundle,
     runtime,
-    adapter_boundary: {
-      model_source: "wardian-proof-model",
-      dockview_json_persisted: false,
-      dockview_serialization_reference_count: (harnessSource.match(/\.(?:toJSON|fromJSON)\s*\(/g) ?? []).length,
-      renderer_mode: "always",
-      production_route_present: false,
-    },
   };
-  baseline.promotion = validatePromotionBaseline(baseline);
+  baseline.gates = evaluateGates(baseline);
   await fs.mkdir(path.dirname(baselinePath), { recursive: true });
   await fs.writeFile(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
-  process.stdout.write(`${JSON.stringify({
-    baseline: path.relative(repoRoot, baselinePath).replaceAll(path.sep, "/"),
-    bundle_delta_raw_bytes: bundle.production_delta_raw_bytes,
-    bundle_delta_gzip_bytes: bundle.production_delta_gzip_bytes,
-    startup_ms: runtime.startup_ms,
-    switch_p95_ms: runtime.tab_switch_ms.p95,
-    drag_p95_ms: runtime.drag_ms.p95,
-    react_commit_p95_ms: runtime.react_commits.p95,
-    mounted_surfaces: runtime.renderer_counts.mounted_surfaces,
-    webgl_canvases: runtime.renderer_counts.webgl_canvases,
-    promotion_passed: baseline.promotion.passed,
-  }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ baseline: path.relative(repoRoot, baselinePath), gates: baseline.gates }, null, 2)}\n`);
 }
 
-const operation = process.argv.includes("--self-test") ? runSelfTest : main;
+const operation = process.argv.includes("--self-test") ? selfTest : main;
 operation().catch((error) => {
-  process.stderr.write(`workbench performance proof failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

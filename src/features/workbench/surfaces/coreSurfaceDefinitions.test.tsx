@@ -20,11 +20,22 @@ import {
   SuspendedSurfaceRenderer,
   DEFAULT_GRAPH_SURFACE_STATE,
   normalizeCoreViewSurfaceState,
+  resolveHeavySurfaceHiddenGraceMs,
 } from "./coreSurfaceDefinitions";
 
 describe("core view surface definitions", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("bounds the build-time heavy renderer grace override and defaults safely", () => {
+    expect(resolveHeavySurfaceHiddenGraceMs("250")).toBe(30_000);
+    expect(resolveHeavySurfaceHiddenGraceMs("1", true)).toBe(1);
+    expect(resolveHeavySurfaceHiddenGraceMs("250", true)).toBe(250);
+    expect(resolveHeavySurfaceHiddenGraceMs("300000", true)).toBe(300_000);
+    for (const value of [undefined, "", " 250 ", "0", "-1", "1.5", "300001", "NaN"]) {
+      expect(resolveHeavySurfaceHiddenGraceMs(value, true)).toBe(30_000);
+    }
   });
 
   it("registers the exact singleton render policies and bounded state contracts", () => {

@@ -33,6 +33,8 @@
     "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
     "docs:demo-gif": "node scripts/capture-readme-demo-real.mjs",
     "docs:demo-gif:real": "node scripts/capture-readme-demo-real.mjs",
+    "perf:workbench": "node scripts/measure-workbench-performance.mjs",
+    "perf:workbench:check": "node scripts/measure-workbench-performance.mjs --check",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",

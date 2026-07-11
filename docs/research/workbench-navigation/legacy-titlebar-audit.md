@@ -59,7 +59,7 @@ flag-off development server cannot satisfy the run accidentally.
 | `e2e-native/tests/terminal-rendering-native.test.mjs` | Scheduled for the Task 17 native semantic helper migration. |
 | `e2e-native/tests/terminal-visibility-snapshot-native.test.mjs` | Scheduled for the Task 17 native semantic helper migration. |
 | `e2e-native/tests/terminal-wheel-scroll-native.test.mjs` | Scheduled for the Task 17 native semantic helper migration. |
-| `scripts/measure-view-performance.mjs` | Scheduled for replacement by the Task 18 workbench performance harness. |
+| `scripts/measure-view-performance.mjs` | Removed in Task 18 after replacement by the fail-closed production workbench performance harness. |
 | `scripts/capture-doc-screenshots.mjs` | Scheduled for the Task 20 semantic capture migration. |
 | `scripts/capture-readme-demo-real.mjs` | Scheduled for the Task 20 semantic capture migration. |
 | `src/styles/App.css` | Retained only for the flag-off comparison; Task 19 removes the legacy titlebar navigation styles after the cutover gates pass. |

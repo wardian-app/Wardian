@@ -397,6 +397,24 @@ describe("DockviewLayoutAdapter", () => {
     }));
   });
 
+  it("defers rather than drops user activation during canonical projection", async () => {
+    const onCommand = vi.fn();
+    render(
+      <DockviewLayoutAdapter
+        document={makeTwoGroupDocument()}
+        on_command={onCommand}
+      />,
+    );
+
+    fireEvent.pointerDown(screen.getByRole("tab", { name: /agents overview/i }));
+
+    await waitFor(() => expect(onCommand).toHaveBeenCalledWith({
+      type: "set_active_surface",
+      group_id: "group-1",
+      surface_id: "surface-1",
+    }));
+  });
+
   it.each(["Delete", "Backspace"])(
     "routes %s on a focused tab through the guarded close boundary",
     async (key) => {

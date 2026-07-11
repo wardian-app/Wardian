@@ -796,7 +796,20 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   useLayoutEffect(() => {
     if (!api || safe_mode) return;
     let activationScheduled = false;
+    let activationRetryTimer: number | null = null;
     let pendingActivation: { group_id: string; surface_id: string | null } | null = null;
+    const commitPendingActivation = (): void => {
+      if (projectionGuardRef.current > 0) {
+        activationRetryTimer = window.setTimeout(commitPendingActivation, 0);
+        return;
+      }
+      activationRetryTimer = null;
+      activationScheduled = false;
+      const activation = pendingActivation;
+      pendingActivation = null;
+      if (!activation) return;
+      emitCommand({ type: "set_active_surface", ...activation });
+    };
     const scheduleActivation = (groupId: string, surfaceId: string | null): void => {
       const currentDocument = documentRef.current;
       const currentGroup = currentDocument.groups[groupId];
@@ -807,13 +820,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       pendingActivation = { group_id: groupId, surface_id: surfaceId };
       if (activationScheduled) return;
       activationScheduled = true;
-      queueMicrotask(() => {
-        activationScheduled = false;
-        const activation = pendingActivation;
-        pendingActivation = null;
-        if (!activation || projectionGuardRef.current > 0) return;
-        emitCommand({ type: "set_active_surface", ...activation });
-      });
+      queueMicrotask(commitPendingActivation);
     };
     const moveDisposable = api.onDidMovePanel((event) => {
       const index = event.panel.group.panels.findIndex((panel) => panel.id === event.panel.id);
@@ -831,7 +838,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       });
     });
     const activeDisposable = api.onDidActivePanelChange((event) => {
-      if (projectionGuardRef.current > 0 || event.origin !== "user" || !event.panel) return;
+      if (event.origin !== "user" || !event.panel) return;
       scheduleActivation(event.panel.group.id, event.panel.id);
     });
     const activeGroupDisposable = api.onDidActiveGroupChange((group) => {
@@ -879,6 +886,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       requestCanonicalReconcile();
     });
     return () => {
+      if (activationRetryTimer !== null) window.clearTimeout(activationRetryTimer);
       moveDisposable.dispose();
       activeDisposable.dispose();
       activeGroupDisposable.dispose();

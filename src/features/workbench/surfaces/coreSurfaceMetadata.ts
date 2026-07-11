@@ -6,7 +6,34 @@ import type {
 } from "../../../types";
 import type { GraphRelationshipReason } from "../../graph/graphProjection";
 
-export const HEAVY_SURFACE_HIDDEN_GRACE_MS = 30_000;
+export const DEFAULT_HEAVY_SURFACE_HIDDEN_GRACE_MS = 30_000;
+export const MIN_HEAVY_SURFACE_HIDDEN_GRACE_MS = 1;
+export const MAX_HEAVY_SURFACE_HIDDEN_GRACE_MS = 300_000;
+
+/**
+ * Resolves the build-time heavy-renderer grace override without weakening the
+ * production default. Invalid, fractional, zero, negative, and excessive
+ * values fail closed to 30 seconds.
+ */
+export function resolveHeavySurfaceHiddenGraceMs(
+  value: unknown,
+  benchmark_enabled = false,
+): number {
+  if (!benchmark_enabled || typeof value !== "string" || !/^[1-9]\d*$/.test(value)) {
+    return DEFAULT_HEAVY_SURFACE_HIDDEN_GRACE_MS;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed)
+    && parsed >= MIN_HEAVY_SURFACE_HIDDEN_GRACE_MS
+    && parsed <= MAX_HEAVY_SURFACE_HIDDEN_GRACE_MS
+    ? parsed
+    : DEFAULT_HEAVY_SURFACE_HIDDEN_GRACE_MS;
+}
+
+export const HEAVY_SURFACE_HIDDEN_GRACE_MS = resolveHeavySurfaceHiddenGraceMs(
+  import.meta.env.VITE_WARDIAN_HEAVY_SURFACE_GRACE_MS,
+  import.meta.env.VITE_WARDIAN_WORKBENCH_PERF === "1",
+);
 export const CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION = 1;
 export const CORE_VIEW_SURFACE_MAX_STATE_BYTES = 4 * 1024;
 

@@ -1,12 +1,12 @@
 # Dockview 7.0.2 adapter evaluation
 
-Decision: Promote
+Decision: Promote (confirmed by the production workbench rebaseline)
 
-Promote `dockview-react` 7.0.2 as the leading replaceable renderer for the
-production workbench adapter. This is a promotion of the renderer candidate and
-the measurement contract, not of a second application route or a durable
-Dockview model. Production splits must not ship until the adapter supplies
-accessible, keyboard-adjustable separator semantics.
+Promote `dockview-react` 7.0.2 as the replaceable renderer for the production
+workbench adapter. The Phase 0 proof and the Task 18 production-workbench
+profile both pass their unchanged gates. This promotes the renderer and
+measurement contract, not a second application route or a durable Dockview
+model.
 
 ## Scope and method
 
@@ -30,6 +30,64 @@ Every proof command ran with an explicit OS-temp `WARDIAN_HOME` named
 existing parent before any directory creation, rejects relative paths, the
 profile and production home, the workspace root, and symlink or junction
 escapes. `--self-test` exercises those guards without running a browser build.
+
+## Production workbench rebaseline
+
+Task 18 replaced the proof-only profile with a built production-workbench
+profile. Its machine-readable result is in
+[workbench-performance-baseline.json](./workbench-performance-baseline.json).
+The command fails before filesystem mutation unless `WARDIAN_HOME` is an
+explicit absolute isolated path under the workspace performance root or the OS
+temporary directory. Unset, empty, relative, profile-root, production-home,
+workspace-root, and canonical path escapes all exit nonzero with the same
+refusal message.
+
+The repository source is the deterministic
+[workbench-performance-v1.json](../../../scripts/fixtures/workbench-performance-v1.json)
+fixture. The profiler stages that fixture inside the isolated home as
+`settings/workbench-performance-fixture.json`; this staged relative path is what
+the machine-readable baseline records, not a second input. The fixture contains
+20 persisted tabs in four groups, 20 mock agents, one terminal owner, and three
+mirrors of the same runtime. It includes Agents Overview, Graph, Garden, Queue,
+Library, and Workflows. The profiler builds and serves Wardian's flagged
+production output rather than the Phase 0 proof route. It measures five fresh
+restores, 20 tab activations, four group focus changes, ten ordered terminal
+bursts, six Overview resizes, and four heavy-surface resume cycles. React
+commits, live xterm renderers, live WebGL contexts, and stream sequence gaps are
+instrumented in page. A separate flag-off/flag-on production build comparison
+supplies the gzip bundle delta. No observed result is supplied by the fixture or
+defaulted when instrumentation is absent.
+
+| Production measure | Observed | Gate | Result |
+|---|---:|---:|---|
+| Startup restore p95 | 553.52 ms | 1,500 ms | Accept |
+| Tab switch p95 | 64.2 ms | 100 ms | Accept |
+| Group focus p95 | 31 ms | 75 ms | Accept |
+| Terminal output commit p95 | 13.4 ms | 50 ms | Accept |
+| Terminal stream gaps | 0 | 0 | Accept |
+| Agents Overview settle p95 | 216.16 ms | 300 ms | Accept |
+| Graph/Garden resume p95 | 64.3 ms | 500 ms | Accept |
+| Maximum React commit | 22.4 ms | 50 ms | Accept |
+| Production bundle gzip delta | +90,342 bytes | +256,000 bytes (250 KiB) | Accept |
+| Peak live xterm renderers | 13 | 24 | Accept |
+| Peak live WebGL contexts | 3 | 12 | Accept |
+
+The first complete production profiling run recorded 15 WebGL contexts against
+the limit of 12; every other gate passed. Its counter retained contexts whose
+canvases had been detached without emitting `webglcontextlost`, so the value
+measured allocation history instead of the concurrent resource peak the gate
+is intended to constrain. The correction tracks live contexts by canvas,
+removes entries for detached canvases, observes
+`webglcontextlost` and `WEBGL_lose_context`, and excludes contexts whose
+`isContextLost()` state is true. The 12-context threshold was not changed or
+widened. The corrected production run observed a peak of three and passed.
+
+This rebaseline closes the Phase 0 measurement condition: the replaceable
+adapter passes in the real workbench composition with production surfaces,
+restoration, responsive Overview behavior, and bounded renderer resources.
+The final decision remains **Promote**. Native PTY ownership, geometry, and
+remote transfer claims remain covered by native tests rather than this browser
+profile.
 
 ## Candidate facts
 
@@ -128,14 +186,12 @@ from group 1's Graph tab to group 2's Garden tab. Pointer movement and the
 separate `Alt+Shift+ArrowRight` model command both moved the terminal owner from
 group 1 to group 2 without changing renderer identity or mount count.
 
-The gap is split separators: three Dockview sash elements exposed neither
-`role="separator"` nor `aria-valuenow`. This is fixable within the replaceable
-renderer adapter by supplying adapter-owned separator controls (or an upstream
-public separator hook) that call Wardian split-ratio commands. Production
-splits must not be enabled until that path supports arrow-key adjustment,
-values, orientation, focus restoration, and React/browser accessibility tests.
-The durable model and command API must not depend on Dockview DOM selectors to
-solve it.
+The Phase 0 gap was split separators: three Dockview sash elements exposed
+neither `role="separator"` nor `aria-valuenow`. The production adapter has since
+closed that gate with Wardian-owned separator controls that expose orientation,
+current/minimum/maximum values and route arrow-key adjustment through canonical
+split-ratio commands. React and browser coverage verify that behavior without
+making the durable model or command API depend on Dockview DOM selectors.
 
 ## Maintenance and release risk
 
@@ -159,8 +215,8 @@ The candidate passed the Phase 0 promotion rules:
 - Wardian's plain model restored and drove every tested layout command.
 - No Dockview serialization or durable schema was used.
 - `renderer: "always"` preserved surface and terminal ownership across moves.
-- Keyboard tab/group behavior and ARIA tabs passed; the remaining separator gap
-  has a bounded adapter solution and an explicit pre-production gate.
+- Keyboard tab/group behavior, ARIA tabs, and the production adapter's
+  keyboard-adjustable separator controls pass their accessibility coverage.
 - The measured bundle and interaction deltas fit the provisional ceilings
   above.
 

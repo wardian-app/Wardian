@@ -736,12 +736,12 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - Delete after replacement: `scripts/measure-view-performance.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Test fail-closed behavior.** Unset/empty/production-default/non-absolute `WARDIAN_HOME` exits nonzero with `Refusing to benchmark without an explicit isolated WARDIAN_HOME.`
-- [ ] **Step 2: Use a deterministic fixture** with 20 tabs/four groups, 20 agents, one owner/three mirrors, Agents Overview, Graph, Garden, Queue, Library, and Workflows.
-- [ ] **Step 3: Emit observed values** for startup restore, tab switch, group focus, terminal output commit/gaps, Overview settle, heavy-surface resume, max React commit, renderer/WebGL peaks, and bundle gzip delta. Never hardcode observed results.
-- [ ] **Step 4: Enforce initial gates:** restore p95 ≤1500 ms, tab p95 ≤100 ms, group p95 ≤75 ms, output commit p95 ≤50 ms, zero stream gaps, Overview settle p95 ≤300 ms, heavy resume p95 ≤500 ms, max commit ≤50 ms, bundle delta ≤250 KiB, xterm ≤24, WebGL ≤12.
-- [ ] **Step 5: Run** `npm run perf:workbench` and `npm run perf:workbench:check` with `VITE_WARDIAN_WORKBENCH=1` and an explicit workspace-local `.tmp/workbench-performance` or OS temp home. **Expected:** baseline JSON written and gates pass. If a gate fails, optimize or document/review a justified threshold change; never silently widen it.
-- [ ] **Step 6: Finalize the Promote decision** in the evaluation document and commit `perf(workbench): establish navigation cutover baseline`.
+- [x] **Step 1: Test fail-closed behavior.** Unset/empty/production-default/non-absolute `WARDIAN_HOME` exits nonzero with `Refusing to benchmark without an explicit isolated WARDIAN_HOME.`
+- [x] **Step 2: Use a deterministic fixture** with 20 tabs/four groups, 20 agents, one owner/three mirrors, Agents Overview, Graph, Garden, Queue, Library, and Workflows.
+- [x] **Step 3: Emit observed values** for startup restore, tab switch, group focus, terminal output commit/gaps, Overview settle, heavy-surface resume, max React commit, renderer/WebGL peaks, and bundle gzip delta. Never hardcode observed results.
+- [x] **Step 4: Enforce initial gates:** restore p95 ≤1500 ms, tab p95 ≤100 ms, group p95 ≤75 ms, output commit p95 ≤50 ms, zero stream gaps, Overview settle p95 ≤300 ms, heavy resume p95 ≤500 ms, max commit ≤50 ms, bundle delta ≤250 KiB, xterm ≤24, WebGL ≤12.
+- [x] **Step 5: Run** `npm run perf:workbench` and `npm run perf:workbench:check` with `VITE_WARDIAN_WORKBENCH=1` and an explicit workspace-local `.tmp/workbench-performance` or OS temp home. **Expected:** baseline JSON written and gates pass. If a gate fails, optimize or document/review a justified threshold change; never silently widen it.
+- [x] **Step 6: Finalize the Promote decision** in the evaluation document and commit `perf(workbench): establish navigation cutover baseline`.
 
 ### Task 19: Cut over only after browser, native, safe-mode, and performance gates pass
 
