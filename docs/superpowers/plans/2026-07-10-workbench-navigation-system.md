@@ -717,13 +717,13 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
 - Modify: `e2e-native/tests/remote-gateway-native.test.mjs`
 - Modify: `package.json`
 
-- [ ] **Step 1: Replace native `selectGridView` helpers** with `openWorkbenchSurface(driver, "agents-overview")` using semantic roles/data attributes.
-- [ ] **Step 2: Prove persistence with one isolated home.** Save two revisions, inspect primary/backup, restart, verify exact tree/groups/tabs/IDs, corrupt primary and recover backup, then write schema 99 and prove both files remain byte-identical.
-- [ ] **Step 3: Prove desktop owner/mirror.** Open two same-agent presentations; passive mount/focus/observer do not activate; explicit begin/ack does; mirror input/resize is nonfatal; canonical geometry is stable; output/geometry sequence has no gaps through races/timeouts/disconnect.
-- [ ] **Step 4: Prove desktop→authenticated remote→desktop.** Desired remote geometry does not resize while mirror; stale remote input/resize returns lease state without closing socket; activation and fallback apply the correct geometry.
-- [ ] **Step 5: Prove presentation/runtime separation.** Close all Overview/Agent Session presentations, verify mock agent/PTY alive, reopen with output continuity. Run safe mode once and prove it neither flattens nor rewrites the split tree.
-- [ ] **Step 6: Add `test:e2e:native:workbench`; run** native setup, a debug no-bundle build compiled with `VITE_WARDIAN_WORKBENCH=1`, and the three focused files. **Expected:** PASS with zero infrastructure skips and no real provider.
-- [ ] **Step 7: Commit** `test(native): prove workbench persistence and terminal leases`.
+- [x] **Step 1: Replace native `selectGridView` helpers** with `openWorkbenchSurface(driver, "agents-overview")` using semantic roles/data attributes.
+- [x] **Step 2: Prove persistence with one isolated home.** Save two revisions, inspect primary/backup, restart, verify exact tree/groups/tabs/IDs, corrupt primary and recover backup, then write schema 99 and prove both files remain byte-identical.
+- [x] **Step 3: Prove desktop owner/mirror.** Open two same-agent presentations; passive mount/focus/observer do not activate; explicit begin/ack does; mirror input/resize is nonfatal; canonical geometry is stable; output/geometry sequence has no gaps through races/timeouts/disconnect.
+- [x] **Step 4: Prove desktop→authenticated remote→desktop.** Desired remote geometry does not resize while mirror; stale remote input/resize returns lease state without closing socket; activation and fallback apply the correct geometry.
+- [x] **Step 5: Prove presentation/runtime separation.** Close all Overview/Agent Session presentations, verify mock agent/PTY alive, reopen with output continuity. Run safe mode once and prove it neither flattens nor rewrites the split tree.
+- [x] **Step 6: Add `test:e2e:native:workbench`; run** native setup, a debug no-bundle build compiled with `VITE_WARDIAN_WORKBENCH=1`, and the three focused files. **Expected:** PASS with zero infrastructure skips and no real provider.
+- [x] **Step 7: Commit** `test(native): prove workbench persistence and terminal leases`.
 
 ### Task 18: Rebaseline production workbench performance with fail-closed fixtures
 

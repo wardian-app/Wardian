@@ -43,6 +43,7 @@
     "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "test:e2e:native": "node scripts/run-native-e2e.mjs",
     "test:e2e:native:fast": "node scripts/run-native-e2e-fast.mjs",
+    "test:e2e:native:workbench": "node scripts/run-native-e2e-fast.mjs e2e-native/tests/workbench-persistence-native.test.mjs e2e-native/tests/terminal-presentation-broker-native.test.mjs e2e-native/tests/workbench-runtime-lifecycle-native.test.mjs e2e-native/tests/remote-gateway-native.test.mjs",
     "test:e2e:native:watch": "node scripts/run-native-e2e-watch.mjs",
     "setup:e2e:native": "node scripts/setup-native-e2e.mjs",
     "setup:e2e:native:windows": "npm run setup:e2e:native"

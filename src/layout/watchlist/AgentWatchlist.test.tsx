@@ -138,6 +138,18 @@ describe('AgentWatchlist', () => {
     expect(screen.getByText('Beta')).toBeInTheDocument();
   });
 
+  it('exposes roster target selection as semantic state', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        selectedAgentIds={new Set(['agent-1'])}
+      />,
+    );
+
+    expect(screen.getByLabelText('Agent Alpha')).toHaveAttribute('data-selected', 'true');
+    expect(screen.getByLabelText('Agent Beta')).toHaveAttribute('data-selected', 'false');
+  });
+
   it('routes plain, Ctrl, and Shift clicks only through roster selection', () => {
     render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
     const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;

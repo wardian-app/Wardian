@@ -811,6 +811,7 @@ export default function AgentWatchlist({
         onContextMenu={(e) => handleContextMenu(e, agentId)}
         tabIndex={0}
         aria-label={`Agent ${agent.session_name}`}
+        data-selected={isSelected ? "true" : "false"}
         className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? `drag-over-${dropTarget?.type === "agent" ? dropTarget.position : "before"}` : ""} ${isNestedTeamDropTarget ? "bg-[var(--color-wardian-accent)]/10" : ""} ${isBeingDragged ? "opacity-50" : ""} ${options.nested ? "ml-2 border-l border-wardian-border/40" : ""} select-none`}
         style={{ cursor: "grab", gridTemplateColumns: gridTemplate }}
       >

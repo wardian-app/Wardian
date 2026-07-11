@@ -188,6 +188,12 @@ test("native app build args include explicit Cargo features from environment", (
       "build",
       "--debug",
       "--no-bundle",
+      "--config",
+      JSON.stringify({
+        build: {
+          beforeBuildCommand: "npm run build && npm run stage-cli:dev",
+        },
+      }),
       "--features",
       "terminal-trace",
     ]);

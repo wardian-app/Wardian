@@ -312,7 +312,21 @@ function npmInvocation(args) {
 }
 
 export function nativeAppBuildArgs() {
-  const args = ["run", "tauri", "--", "build", "--debug", "--no-bundle"];
+  const debugBuildConfig = JSON.stringify({
+    build: {
+      beforeBuildCommand: "npm run build && npm run stage-cli:dev",
+    },
+  });
+  const args = [
+    "run",
+    "tauri",
+    "--",
+    "build",
+    "--debug",
+    "--no-bundle",
+    "--config",
+    debugBuildConfig,
+  ];
   const features = (process.env.WARDIAN_NATIVE_BUILD_FEATURES || "").trim();
   if (features) {
     args.push("--features", features);

@@ -18,6 +18,7 @@ import {
   terminalTextIncludes,
   writeJsonArtifact,
 } from "../lib/rendering-audit.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const runRealRendering = process.env.WARDIAN_E2E_REAL_RENDERING === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -262,19 +263,6 @@ function seedOpenCodeRenderingState(wardianHome) {
   kv.tips_hidden = true;
   fs.writeFileSync(kvPath, `${JSON.stringify(kv, null, 2)}\n`, "utf8");
   return stateHome;
-}
-
-async function selectGridView(driver) {
-  try {
-    const gridTab = await driver.wait(
-      until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-      20000,
-    );
-    await driver.wait(until.elementIsVisible(gridTab), 20000);
-    await gridTab.click();
-  } catch (error) {
-    throw new Error(`Timed out selecting Grid view.\n${JSON.stringify(await readPageDiagnostics(driver), null, 2)}\n${error}`);
-  }
 }
 
 function auditColumnTracks() {
@@ -1819,7 +1807,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
   await waitForAppShell(driver, 20000);
   await forceDarkTheme(driver);
   await driver.manage().window().setRect({ width: auditWindowWidth, height: auditWindowHeight });
-  await selectGridView(driver);
+  await openWorkbenchSurface(driver, "agents-overview");
 
   const manifest = {
     run_id: RUN_ID,

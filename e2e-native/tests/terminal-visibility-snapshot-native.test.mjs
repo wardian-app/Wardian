@@ -12,6 +12,7 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 // Visibility-scoped WebGL contexts: terminals only hold a WebGL context while
 // their card is on screen. This test proves the demotion/promotion lifecycle
@@ -217,12 +218,7 @@ test(
     });
     assert.equal(bottomAgent.session_id, BOTTOM_SESSION_ID);
 
-    const gridTab = await driver.wait(
-      until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-      20000,
-    );
-    await driver.wait(until.elementIsVisible(gridTab), 20000);
-    await gridTab.click();
+    await openWorkbenchSurface(driver, "agents-overview");
     await driver.wait(until.elementLocated(By.id(`agent-card-${BOTTOM_SESSION_ID}`)), 20000);
     if (!(await driver.executeScript(() => Boolean(window.__wardianTerminalDebug?.snapshot)))) {
       if (skipNativeBuild) {

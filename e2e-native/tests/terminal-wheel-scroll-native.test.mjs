@@ -12,6 +12,7 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
@@ -298,12 +299,7 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
   });
   assert.equal(agent.session_id, SESSION_ID);
 
-  const gridTab = await driver.wait(
-    until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-    20000,
-  );
-  await driver.wait(until.elementIsVisible(gridTab), 20000);
-  await gridTab.click();
+  await openWorkbenchSurface(driver, "agents-overview");
   const card = await driver.wait(
     until.elementLocated(By.id(`agent-card-${SESSION_ID}`)),
     20000,

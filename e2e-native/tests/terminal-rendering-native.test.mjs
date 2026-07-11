@@ -13,6 +13,7 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
@@ -161,21 +162,6 @@ async function activateAgentCard(driver, sessionId) {
   await card.click();
 }
 
-async function selectGridView(driver) {
-  const gridTab = await driver.wait(
-    until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-    20000,
-  );
-  await driver.wait(until.elementIsVisible(gridTab), 20000);
-  await gridTab.click();
-  await driver.wait(async () => {
-    return await driver.executeScript(() => {
-      const activeTab = document.querySelector(".titlebar-tab.active");
-      return activeTab?.textContent?.trim() === "Grid";
-    });
-  }, 10000);
-}
-
 async function waitForTerminalHost(driver) {
   const host = await driver.wait(
     until.elementLocated(By.css(TERMINAL_HOST_SELECTOR)),
@@ -287,7 +273,7 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
 
   const agent = await spawnRenderingMockAgent(driver, harness.repoRoot);
   assert.equal(agent.session_id, SESSION_ID);
-  await selectGridView(driver);
+  await openWorkbenchSurface(driver, "agents-overview");
   await activateAgentCard(driver, SESSION_ID);
   await waitForTerminalHost(driver);
   if (!(await terminalDebugAvailable(driver))) {

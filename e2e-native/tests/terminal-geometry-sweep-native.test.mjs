@@ -13,6 +13,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { writeJsonArtifact } from "../lib/rendering-audit.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const runGeometrySweep = process.env.WARDIAN_E2E_TERMINAL_GEOMETRY_SWEEP === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -107,21 +108,6 @@ async function forceSweepSettings(driver) {
   await driver.wait(async () => {
     return await driver.executeScript(() => document.documentElement.getAttribute("data-theme") === "dark");
   }, 20000);
-}
-
-async function selectGridView(driver) {
-  const gridTab = await driver.wait(
-    until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-    20000,
-  );
-  await driver.wait(until.elementIsVisible(gridTab), 20000);
-  await gridTab.click();
-  await driver.wait(async () => {
-    return await driver.executeScript(() => {
-      const activeTab = document.querySelector(".titlebar-tab.active");
-      return activeTab?.textContent?.trim() === "Grid";
-    });
-  }, 10000);
 }
 
 async function waitForAgentTerminal(driver, sessionId) {
@@ -292,7 +278,7 @@ test("Wardian terminal geometry sweep records renderer metrics across window wid
   });
   assert.equal(agent.session_id, SESSION_ID);
 
-  await selectGridView(driver);
+  await openWorkbenchSurface(driver, "agents-overview");
   await waitForAgentTerminal(driver, SESSION_ID);
   await waitForRenderedFrame(driver, SESSION_ID);
   const debugAvailable = await driver.executeScript(() => Boolean(window.__wardianTerminalDebug?.snapshot));

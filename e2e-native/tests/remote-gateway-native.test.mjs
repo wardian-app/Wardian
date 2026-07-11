@@ -14,10 +14,164 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import { openWorkbenchSurface, waitForWorkbenchReady } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
 const REMOTE_SESSION_COOKIE_NAME = "__Host-wardian_remote_session";
+
+async function invokeTauri(driver, command, args = {}) {
+  const result = await driver.executeAsyncScript((cmd, payload, done) => {
+    window.__TAURI_INTERNALS__.invoke(cmd, payload).then(
+      (value) => done({ ok: true, value }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, command, args);
+
+  assert.equal(result.ok, true, `${command} failed: ${result.error}`);
+  return result.value;
+}
+
+async function waitFor(label, timeoutMs, probe) {
+  const startedAt = Date.now();
+  let last = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      last = await probe();
+      if (last?.ok) return last;
+    } catch (error) {
+      last = { ok: false, error: String(error) };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(last)}`);
+}
+
+function writePersistentRemoteMockScript(harness, sessionId) {
+  const scriptPath = path.join(harness.isolatedHome, `remote-terminal-${RUN_ID}.cjs`);
+  fs.writeFileSync(
+    scriptPath,
+    `
+"use strict";
+const readline = require("node:readline");
+let tick = 0;
+process.stdout.write(JSON.stringify({
+  type: "init",
+  session_id: ${JSON.stringify(sessionId)},
+  timestamp: new Date().toISOString(),
+}) + "\\n");
+process.stdout.write("REMOTE_BROKER_READY_${RUN_ID}\\r\\n");
+setInterval(() => {
+  tick += 1;
+  process.stdout.write("remote-broker-tick:" + tick + "\\r\\n");
+}, 100);
+const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on("line", (line) => process.stdout.write("remote-echo:" + line + "\\r\\n"));
+process.stdin.resume();
+`,
+    "utf8",
+  );
+  return scriptPath;
+}
+
+function createJsonSocketInbox(socket) {
+  const queued = [];
+  const seen = [];
+  const waiters = [];
+  let closed = false;
+
+  const flush = () => {
+    for (let waiterIndex = 0; waiterIndex < waiters.length; waiterIndex += 1) {
+      const waiter = waiters[waiterIndex];
+      const messageIndex = queued.findIndex(waiter.predicate);
+      if (messageIndex < 0) continue;
+      const [message] = queued.splice(messageIndex, 1);
+      waiters.splice(waiterIndex, 1);
+      clearTimeout(waiter.timer);
+      waiter.resolve(message);
+      waiterIndex -= 1;
+    }
+  };
+
+  socket.on("message", (data) => {
+    const message = JSON.parse(data.toString());
+    queued.push(message);
+    seen.push(message);
+    flush();
+  });
+  socket.on("close", () => {
+    closed = true;
+    for (const waiter of waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(`terminal socket closed while waiting; seen=${JSON.stringify(seen)}`));
+    }
+  });
+  socket.on("error", (error) => {
+    for (const waiter of waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  });
+
+  return {
+    seen,
+    next(predicate, timeoutMs = 15000) {
+      const messageIndex = queued.findIndex(predicate);
+      if (messageIndex >= 0) {
+        const [message] = queued.splice(messageIndex, 1);
+        return Promise.resolve(message);
+      }
+      if (closed) {
+        return Promise.reject(new Error(`terminal socket is closed; seen=${JSON.stringify(seen)}`));
+      }
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          const index = waiters.indexOf(waiter);
+          if (index >= 0) waiters.splice(index, 1);
+          reject(new Error(`Timed out waiting for terminal socket message; seen=${JSON.stringify(seen)}`));
+        }, timeoutMs);
+        waiters.push(waiter);
+        flush();
+      });
+    },
+  };
+}
+
+async function openJsonSocket(url, options) {
+  const socket = new WebSocket(url, options);
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  return socket;
+}
+
+async function waitForSocketClose(socket, timeoutMs = 15000) {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Timed out waiting for terminal socket close")), timeoutMs);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function readDesktopBrokerState(driver, sessionId, presentationId, runtimeGeneration) {
+  return await invokeTauri(driver, "update_terminal_presentation", {
+    request: {
+      presentation_id: presentationId,
+      session_id: sessionId,
+      runtime_generation: runtimeGeneration,
+      desired_geometry: { cols: 96, rows: 28 },
+      visibility: "visible",
+      render_state: "mounted",
+      requested_interaction: "interactive",
+      observed_lease_epoch: 0,
+    },
+  });
+}
 
 function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -173,33 +327,36 @@ async function assertPreAuthRateLimitIsAudited(baseUrl, canonicalOrigin, deviceI
   );
 }
 
-test("remote gateway authenticates native app agent reads", { timeout: 180000 }, async (t) => {
+test("remote gateway authenticates broker ownership transitions across desktop and remote", { timeout: 240000 }, async (t) => {
   const harness = await createNativeHarness();
-  try {
-    if (!skipNativeBuild) {
-      ensureNativeAppBuilt(harness);
-    }
-  } catch (error) {
-    t.skip(String(error));
-    return;
-  }
-
   prepareIsolatedHome(harness);
   const gatewayPort = await getFreePort();
   writeRemoteGatewayConfig(harness, gatewayPort);
   const baseUrl = `http://127.0.0.1:${gatewayPort}`;
   const canonicalOrigin = `https://127.0.0.1:${gatewayPort}`;
+  const workspacePath = path.join(harness.repoRoot, "e2e-native");
+  const sessionId = `e2e-remote-gateway-${RUN_ID}`;
+  const sessionName = `E2E-REMOTE-GATEWAY-${RUN_ID}`;
+  const mockScript = writePersistentRemoteMockScript(harness, sessionId);
+  const previousWorkbenchFlag = process.env.VITE_WARDIAN_WORKBENCH;
+  const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
+  process.env.VITE_WARDIAN_WORKBENCH = "1";
+  process.env.WARDIAN_MOCK_SCRIPT = mockScript;
 
-  let session;
+  let session = null;
   try {
+    if (!skipNativeBuild) ensureNativeAppBuilt(harness);
+    assert.ok(harness.appPath, "Expected a native Wardian application path");
     session = await startNativeSession(harness);
-  } catch (error) {
-    t.skip(String(error));
-    return;
+  } finally {
+    if (previousWorkbenchFlag === undefined) delete process.env.VITE_WARDIAN_WORKBENCH;
+    else process.env.VITE_WARDIAN_WORKBENCH = previousWorkbenchFlag;
+    if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
+    else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
   }
 
   t.after(async () => {
-    await session.close();
+    await session?.close();
   });
 
   await waitForAppShell(session.driver, 20000);
@@ -214,10 +371,6 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
   assert.equal(manifest.status, 200);
   assert.equal((await manifest.json()).start_url, "/remote");
 
-  const workspacePath = path.join(harness.repoRoot, "e2e-native");
-  const sessionId = `e2e-remote-gateway-${RUN_ID}`;
-  const sessionName = `E2E-REMOTE-GATEWAY-${RUN_ID}`;
-
   const result = await session.driver.executeAsyncScript(
     (sessionId, sessionName, folder, done) => {
       window.__TAURI_INTERNALS__.invoke("spawn_agent", {
@@ -226,7 +379,7 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
           agentClass: "TestClass",
           folder,
           resumeSession: sessionId,
-          isOff: true,
+          isOff: false,
           configOverride: { provider: "mock" },
         },
       }).then(
@@ -242,6 +395,66 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
   assert.equal(result.agent.session_id, sessionId);
   assert.equal(result.agent.session_name, sessionName);
+
+  await waitForWorkbenchReady(session.driver);
+  await openWorkbenchSurface(session.driver, "agent-session", sessionId);
+  const desktopSurface = await waitFor("desktop agent presentation", 30000, async () => {
+    const tabs = await session.driver.executeScript((resourceKey) => {
+      return Array.from(
+        document.querySelectorAll(
+          '[role="tab"][data-surface-type="agent-session"][data-resource-key]',
+        ),
+      )
+        .filter((tab) => tab.getAttribute("data-resource-key") === resourceKey)
+        .map((tab) => ({ surfaceId: tab.getAttribute("data-surface-id") }));
+    }, sessionId);
+    return { ok: tabs.length === 1 && Boolean(tabs[0].surfaceId), tabs };
+  });
+  const desktopPresentationId = `${desktopSurface.tabs[0].surfaceId}:agent:${sessionId}`;
+
+  const terminalSnapshot = await invokeTauri(session.driver, "request_terminal_snapshot", {
+    request: { session_id: sessionId },
+  });
+  const desktopRegistered = await waitFor("registered desktop terminal presentation", 30000, async () => {
+    const value = await invokeTauri(session.driver, "update_terminal_presentation", {
+      request: {
+        presentation_id: desktopPresentationId,
+        session_id: sessionId,
+        runtime_generation: terminalSnapshot.runtime_generation,
+        desired_geometry: { cols: 96, rows: 28 },
+        visibility: "visible",
+        render_state: "mounted",
+        requested_interaction: "interactive",
+        observed_lease_epoch: 0,
+      },
+    });
+    return { ok: value.presentation.presentation_id === desktopPresentationId, value };
+  });
+  assert.equal(desktopRegistered.value.broker_state.owner_presentation_id, null);
+  assert.equal(desktopRegistered.value.broker_state.pending_activation, null);
+
+  const desktopBegin = await invokeTauri(session.driver, "begin_terminal_activation", {
+    request: {
+      session_id: sessionId,
+      presentation_id: desktopPresentationId,
+      runtime_generation: terminalSnapshot.runtime_generation,
+      observed_lease_epoch: desktopRegistered.value.broker_state.lease_epoch,
+    },
+  });
+  assert.equal(desktopBegin.decision.status, "accepted");
+  assert.ok(desktopBegin.activation_id);
+  assert.ok(desktopBegin.snapshot);
+  const desktopAck = await invokeTauri(session.driver, "ack_terminal_activation", {
+    request: {
+      session_id: sessionId,
+      presentation_id: desktopPresentationId,
+      runtime_generation: desktopBegin.decision.runtime_generation,
+      lease_epoch: desktopBegin.decision.lease_epoch,
+      activation_id: desktopBegin.activation_id,
+    },
+  });
+  assert.equal(desktopAck.decision.status, "accepted");
+  assert.equal(desktopAck.broker_state.owner_presentation_id, desktopPresentationId);
 
   const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
   const publicKeySpkiDer = keys.publicKey.export({ type: "spki", format: "der" });
@@ -410,4 +623,271 @@ test("remote gateway authenticates native app agent reads", { timeout: 180000 },
     body: JSON.stringify({ action: "pause", target: sessionId }),
   });
   assert.equal(forgedHostMutationStatus, 403);
+
+  const sessionCookie = cookie.split(";", 1)[0];
+  const ticketResponse = await fetch(`${baseUrl}/remote/api/ws-ticket`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: sessionCookie,
+      Origin: canonicalOrigin,
+      "x-wardian-csrf": sessionBody.csrf_nonce,
+    },
+    body: JSON.stringify({ stream: "terminal_attach" }),
+  });
+  await assertStatus(ticketResponse, 200, "terminal websocket ticket");
+  const terminalTicket = await ticketResponse.json();
+  assert.ok(terminalTicket.ticket);
+
+  const desktopBeforeRemote = await readDesktopBrokerState(
+    session.driver,
+    sessionId,
+    desktopPresentationId,
+    terminalSnapshot.runtime_generation,
+  );
+  assert.equal(desktopBeforeRemote.broker_state.owner_presentation_id, desktopPresentationId);
+  const canonicalDesktopGeometry = desktopBeforeRemote.broker_state.geometry;
+
+  const terminalSocket = await openJsonSocket(
+    `${baseUrl.replace("http:", "ws:")}/remote/api/agents/${encodeURIComponent(sessionId)}/terminal-stream`,
+    {
+      headers: {
+        Cookie: sessionCookie,
+        Host: `127.0.0.1:${gatewayPort}`,
+        Origin: canonicalOrigin,
+      },
+    },
+  );
+  t.after(() => {
+    if (terminalSocket.readyState === WebSocket.OPEN) terminalSocket.terminate();
+  });
+  const inbox = createJsonSocketInbox(terminalSocket);
+  terminalSocket.send(JSON.stringify({
+    protocol_version: 2,
+    ticket: terminalTicket.ticket,
+    cols: 120,
+    rows: 40,
+  }));
+
+  const registered = await inbox.next((message) => message.type === "registered");
+  assert.equal(registered.protocol_version, 2);
+  assert.equal(registered.presentation.client_kind, "remote");
+  assert.equal(registered.broker_state.owner_presentation_id, desktopPresentationId);
+  assert.deepEqual(registered.broker_state.geometry, canonicalDesktopGeometry);
+  const remotePresentationId = registered.presentation.presentation_id;
+
+  terminalSocket.send(JSON.stringify({
+    type: "report_viewport",
+    runtime_generation: registered.broker_state.runtime_generation,
+    cols: 220,
+    rows: 70,
+  }));
+  const remoteViewport = await inbox.next(
+    (message) => message.type === "presentation_state"
+      && message.presentation?.presentation_id === remotePresentationId,
+  );
+  assert.deepEqual(remoteViewport.presentation.desired_geometry, { cols: 220, rows: 70 });
+  const desktopAfterRemoteViewport = await readDesktopBrokerState(
+    session.driver,
+    sessionId,
+    desktopPresentationId,
+    terminalSnapshot.runtime_generation,
+  );
+  assert.deepEqual(
+    desktopAfterRemoteViewport.broker_state.geometry,
+    canonicalDesktopGeometry,
+    "a remote mirror viewport must not resize the canonical PTY",
+  );
+
+  const staleLeaseEpoch = Math.max(0, registered.broker_state.lease_epoch - 1);
+  terminalSocket.send(JSON.stringify({
+    type: "input",
+    runtime_generation: registered.broker_state.runtime_generation,
+    lease_epoch: staleLeaseEpoch,
+    data: `STALE_REMOTE_INPUT_${RUN_ID}\r`,
+  }));
+  const staleInput = await inbox.next(
+    (message) => message.type === "input_result" && message.decision?.reason === "lease_epoch_changed",
+  );
+  assert.equal(staleInput.decision.status, "rejected");
+
+  terminalSocket.send(JSON.stringify({
+    type: "resize",
+    runtime_generation: registered.broker_state.runtime_generation,
+    lease_epoch: staleLeaseEpoch,
+    geometry_sequence: 1,
+    cols: 210,
+    rows: 65,
+  }));
+  const staleResize = await inbox.next(
+    (message) => message.type === "resize_result"
+      && message.result?.decision?.reason === "lease_epoch_changed",
+  );
+  assert.equal(staleResize.result.decision.status, "rejected");
+
+  terminalSocket.send(JSON.stringify({
+    type: "input",
+    runtime_generation: registered.broker_state.runtime_generation,
+    lease_epoch: registered.broker_state.lease_epoch,
+    data: `MIRROR_REMOTE_INPUT_${RUN_ID}\r`,
+  }));
+  const mirrorInput = await inbox.next(
+    (message) => message.type === "input_result" && message.decision?.reason === "not_owner",
+  );
+  assert.equal(mirrorInput.decision.status, "rejected");
+
+  terminalSocket.send(JSON.stringify({ type: "request_snapshot" }));
+  const liveAfterStaleMessages = await inbox.next((message) => message.type === "snapshot");
+  assert.equal(liveAfterStaleMessages.snapshot.runtime_generation, terminalSnapshot.runtime_generation);
+  assert.equal(terminalSocket.readyState, WebSocket.OPEN);
+
+  terminalSocket.send(JSON.stringify({
+    type: "begin_activation",
+    runtime_generation: registered.broker_state.runtime_generation,
+    observed_lease_epoch: desktopAfterRemoteViewport.broker_state.lease_epoch,
+  }));
+  const remoteBegin = await inbox.next((message) => message.type === "activation_begin");
+  assert.equal(remoteBegin.result.decision.status, "accepted");
+  assert.ok(remoteBegin.result.activation_id);
+  assert.ok(remoteBegin.result.snapshot);
+  terminalSocket.send(JSON.stringify({
+    type: "ack_activation",
+    runtime_generation: remoteBegin.result.decision.runtime_generation,
+    lease_epoch: remoteBegin.result.decision.lease_epoch,
+    activation_id: remoteBegin.result.activation_id,
+  }));
+  const remoteAck = await inbox.next((message) => message.type === "activation_ack");
+  assert.equal(remoteAck.result.decision.status, "accepted");
+  assert.equal(remoteAck.result.broker_state.owner_presentation_id, remotePresentationId);
+  assert.deepEqual(remoteAck.result.broker_state.geometry, { cols: 220, rows: 70 });
+
+  terminalSocket.send(JSON.stringify({
+    type: "input",
+    runtime_generation: remoteAck.result.broker_state.runtime_generation,
+    lease_epoch: remoteAck.result.broker_state.lease_epoch,
+    data: `REMOTE_OWNER_INPUT_${RUN_ID}\r`,
+  }));
+  const remoteOwnerInput = await inbox.next(
+    (message) => message.type === "input_result" && message.decision?.status === "accepted",
+  );
+  assert.equal(remoteOwnerInput.decision.owner_presentation_id, remotePresentationId);
+
+  await readDesktopBrokerState(
+    session.driver,
+    sessionId,
+    desktopPresentationId,
+    terminalSnapshot.runtime_generation,
+  );
+  const desktopTakeoverBegin = await invokeTauri(session.driver, "begin_terminal_activation", {
+    request: {
+      session_id: sessionId,
+      presentation_id: desktopPresentationId,
+      runtime_generation: remoteAck.result.broker_state.runtime_generation,
+      observed_lease_epoch: remoteAck.result.broker_state.lease_epoch,
+    },
+  });
+  assert.equal(desktopTakeoverBegin.decision.status, "accepted");
+  const desktopTakeoverAck = await invokeTauri(session.driver, "ack_terminal_activation", {
+    request: {
+      session_id: sessionId,
+      presentation_id: desktopPresentationId,
+      runtime_generation: desktopTakeoverBegin.decision.runtime_generation,
+      lease_epoch: desktopTakeoverBegin.decision.lease_epoch,
+      activation_id: desktopTakeoverBegin.activation_id,
+    },
+  });
+  assert.equal(desktopTakeoverAck.decision.status, "accepted");
+  assert.equal(desktopTakeoverAck.broker_state.owner_presentation_id, desktopPresentationId);
+  assert.deepEqual(desktopTakeoverAck.broker_state.geometry, { cols: 96, rows: 28 });
+
+  terminalSocket.send(JSON.stringify({
+    type: "input",
+    runtime_generation: remoteAck.result.broker_state.runtime_generation,
+    lease_epoch: remoteAck.result.broker_state.lease_epoch,
+    data: `STALE_AFTER_DESKTOP_TAKEOVER_${RUN_ID}\r`,
+  }));
+  const staleAfterDesktopTakeover = await inbox.next(
+    (message) => message.type === "input_result" && message.decision?.status === "rejected",
+  );
+  assert.equal(staleAfterDesktopTakeover.decision.reason, "lease_epoch_changed");
+  terminalSocket.send(JSON.stringify({ type: "request_snapshot" }));
+  await inbox.next((message) => message.type === "snapshot");
+  assert.equal(terminalSocket.readyState, WebSocket.OPEN);
+
+  await readDesktopBrokerState(
+    session.driver,
+    sessionId,
+    desktopPresentationId,
+    terminalSnapshot.runtime_generation,
+  );
+  terminalSocket.send(JSON.stringify({
+    type: "begin_activation",
+    runtime_generation: desktopTakeoverAck.broker_state.runtime_generation,
+    observed_lease_epoch: desktopTakeoverAck.broker_state.lease_epoch,
+  }));
+  const remoteFallbackBegin = await inbox.next((message) => message.type === "activation_begin");
+  terminalSocket.send(JSON.stringify({
+    type: "ack_activation",
+    runtime_generation: remoteFallbackBegin.result.decision.runtime_generation,
+    lease_epoch: remoteFallbackBegin.result.decision.lease_epoch,
+    activation_id: remoteFallbackBegin.result.activation_id,
+  }));
+  const remoteFallbackAck = await inbox.next((message) => message.type === "activation_ack");
+  assert.equal(remoteFallbackAck.result.broker_state.owner_presentation_id, remotePresentationId);
+
+  terminalSocket.terminate();
+  await waitForSocketClose(terminalSocket);
+  const fallback = await waitFor("desktop fallback after remote disconnect", 30000, async () => {
+    const value = await readDesktopBrokerState(
+      session.driver,
+      sessionId,
+      desktopPresentationId,
+      terminalSnapshot.runtime_generation,
+    );
+    return {
+      ok: value.broker_state.owner_presentation_id === desktopPresentationId
+        && value.broker_state.pending_activation === null,
+      value,
+    };
+  });
+  const fallbackGeometry = fallback.value.broker_state.geometry;
+  assert.ok(
+    Number.isInteger(fallbackGeometry.cols)
+      && fallbackGeometry.cols >= 20
+      && fallbackGeometry.cols <= 500,
+    `fallback columns are outside the desktop broker range: ${JSON.stringify(fallbackGeometry)}`,
+  );
+  assert.ok(
+    Number.isInteger(fallbackGeometry.rows)
+      && fallbackGeometry.rows >= 8
+      && fallbackGeometry.rows <= 200,
+    `fallback rows are outside the desktop broker range: ${JSON.stringify(fallbackGeometry)}`,
+  );
+  const fallbackConsistency = await waitFor(
+    "desktop fallback broker and snapshot geometry consistency",
+    30000,
+    async () => {
+      const broker = await readDesktopBrokerState(
+        session.driver,
+        sessionId,
+        desktopPresentationId,
+        terminalSnapshot.runtime_generation,
+      );
+      const snapshot = await invokeTauri(session.driver, "request_terminal_snapshot", {
+        request: { session_id: sessionId },
+      });
+      return {
+        ok: broker.broker_state.owner_presentation_id === desktopPresentationId
+          && broker.broker_state.runtime_generation === snapshot.runtime_generation
+          && broker.broker_state.geometry.cols === snapshot.geometry.cols
+          && broker.broker_state.geometry.rows === snapshot.geometry.rows,
+        broker,
+        snapshot,
+      };
+    },
+  );
+  assert.deepEqual(
+    fallbackConsistency.snapshot.geometry,
+    fallbackConsistency.broker.broker_state.geometry,
+  );
 });

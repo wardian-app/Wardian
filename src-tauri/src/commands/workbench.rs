@@ -38,7 +38,7 @@ pub async fn load_workbench_state(
     load_workbench_state_for_home(&home, state.inner()).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn save_workbench_state(
     document: WorkbenchDocumentV1,
     expected_revision: u64,
@@ -61,7 +61,7 @@ pub async fn save_workbench_state(
     .await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn reset_workbench_state(
     expected_revision: u64,
     expected_token: String,
