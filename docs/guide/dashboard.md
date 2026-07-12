@@ -1,6 +1,6 @@
 # Dashboard
 
-Dashboard is a Workbench surface that summarizes active agents, telemetry, and quick controls in a denser operational view than Agents Overview.
+Dashboard is a Workbench surface that summarizes active agents, telemetry, and quick controls in a denser operational view than Agents.
 
 Use it when you want to compare agent health, spot stuck sessions, or apply quick lifecycle actions without reading every terminal.
 
@@ -11,7 +11,7 @@ Use it when you want to compare agent health, spot stuck sessions, or apply quic
 - Compare live state across several agents.
 - Pause, restart, delete, or query an agent from a compact row.
 - Check workspace and telemetry at a glance before opening a terminal.
-- Decide whether to open an agent session or place Queue, Agents Overview, or another surface beside it.
+- Decide whether to open an agent session or place Queue, Agents, or another surface beside it.
 
 ## Basic Workflow
 
@@ -19,7 +19,7 @@ Use it when you want to compare agent health, spot stuck sessions, or apply quic
 2. Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use an empty-pane Home state, then choose **Dashboard**.
 3. Scan status, hardware usage, workspace, and last activity for each active agent.
 4. Use quick controls such as pause, restart, delete, or query when an agent needs attention.
-5. Use **Open** or **Open to Side** from the right roster when you need the full agent terminal, or open [Agents Overview](./agents-overview.md) for multi-agent monitoring.
+5. Use **Open** or **Open to Side** from the right roster when you need the full agent terminal, or open [Agents](./agents-overview.md) for multi-agent monitoring.
 
 Dashboard is a singleton surface. Opening it again focuses its existing tab instead of creating a duplicate. You can move that tab between panes or keep it beside Queue or an agent session.
 
@@ -34,7 +34,7 @@ Dashboard is a singleton surface. Opening it again focuses its existing tab inst
 ## Related Links
 
 - [Workbench](./workbench.md)
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Watchlists](./watchlists.md)
 - [Queue](./queue.md)
 - [Settings](./settings.md)

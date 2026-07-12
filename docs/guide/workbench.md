@@ -1,17 +1,21 @@
 # Workbench
 
-The Workbench is Wardian's main workspace. Every app surface opens as a tab, and panes let you keep several surfaces visible at the same time. Opening Queue, Dashboard, Library, Workflows, Graph, Garden, Agents Overview, or an agent session no longer replaces a global page.
+The Workbench is Wardian's main workspace. Every app surface opens as a tab, and panes let you keep several surfaces visible at the same time. Opening Queue, Dashboard, Library, Workflows, Graph, Garden, Agents, or an agent session no longer replaces a global page.
 
-Use the Workbench when you want to keep context in place: an agent terminal beside Queue, an Overview beside Source Control, or a workflow beside the agents running it.
+Use the Workbench when you want to keep context in place: an agent terminal beside Queue, Agents beside Source Control, or a workflow beside the agents running it.
 
-![Wardian Workbench with pane-local tabs, Agents Overview, Queue, auxiliary rail, and agent roster](../assets/screenshots/workbench-navigation/tabs-and-splits.png)
+![Wardian Workbench with pane-local tabs, Agents, Queue, auxiliary rail, and agent roster](../assets/screenshots/workbench-navigation/tabs-and-splits.png)
 
 ## Open a Surface
+
+An empty tab is a surface launcher. Choose a core surface directly from its icon, title, and description, reopen recent work, or select **Browse all surfaces** for resource-backed choices such as Agent Session.
+
+![Wardian new-tab surface launcher with core tools](../assets/screenshots/workbench-navigation/surface-launcher.png)
 
 There are three common entry points:
 
 - Press `Ctrl+P` on Windows/Linux or `Cmd+P` on macOS for **Quick Open**.
-- Select the **+** button in a pane. An empty pane also shows a **Home** state with **Open Surface**.
+- Select the **+** button in a pane, or choose a tool in an empty pane's launcher.
 - Press `Ctrl+Shift+P` / `Cmd+Shift+P` for the searchable command palette.
 
 The surface picker is a compact searchable list. Select a surface name to open it in the current pane, or press `Ctrl+Enter` / `Cmd+Enter` on the selected result to open it to the side. There is no separate visible “Open to Side” button in the picker. A surface that is already open as a singleton, such as Dashboard or Queue, is focused instead of duplicated.
@@ -20,7 +24,7 @@ The **Agent Session** choice needs one selected agent in the right roster. For a
 
 ## Work with Tabs and Panes
 
-Each pane has its own tab strip and active surface. The only fixed pane-header controls are **+** and **…**.
+Each pane has its own tab strip and active surface. Top-edge strips form the window chrome; strips in downward splits remain local. The **+** sits immediately after the tabs, while **…** remains at the far edge.
 
 - Select a tab to bring that surface forward.
 - Drag a tab within its strip to reorder it.
@@ -53,7 +57,7 @@ The same terminal can appear in more than one desktop or remote presentation. Th
 - **Mirror** follows the same output and is read-only until explicitly activated.
 - **Connecting** is waiting for the terminal broker.
 
-Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly activate that presentation. Keyboard focus alone does not steal ownership. If Wardian has reclaimed an off-screen renderer to stay within resource limits, select **Activate terminal renderer** to reconstruct it from the retained terminal snapshot.
+Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly request interaction ownership for that presentation. Keyboard focus alone does not steal ownership. Wardian may reclaim hidden renderers to stay within resource limits; visible renderers restore and fit themselves automatically.
 
 ## Left Rail and Right Roster
 
@@ -90,7 +94,7 @@ Workbench shortcuts do not intercept normal typing inside text fields or termina
 
 ## Related Guides
 
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Watchlists](./watchlists.md)
 - [Queue](./queue.md)
 - [Command Panel](./command-panel.md)

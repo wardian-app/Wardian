@@ -8,7 +8,7 @@ Use it when you need to review finished work, catch failed workflow runs, respon
 
 ## When to Use It
 
-- Review agent completions after working in [Agents Overview](./agents-overview.md), an agent-session tab, [Command Panel](./command-panel.md), or the [Wardian CLI](./cli.md).
+- Review agent completions after working in [Agents](./agents-overview.md), an agent-session tab, [Command Panel](./command-panel.md), or the [Wardian CLI](./cli.md).
 - Triage workflow completions and failures from the [Workflow View](./workflows.md).
 - Keep unread outcomes visible while you inspect files, source control, or follow-up terminals.
 
@@ -83,7 +83,7 @@ Desktop alerts use Wardian's native desktop notification plugin when available, 
 
 ## Practical Workflow
 
-1. Let agents or workflows run from Agents Overview, agent-session tabs, Command Panel, CLI, or the Workflows surface.
+1. Let agents or workflows run from Agents, agent-session tabs, Command Panel, CLI, or the Workflows surface.
 2. Watch the Queue badge for new completions.
 3. Open Queue, review summaries, and expand details when the summary was truncated.
 4. Open the source agent terminal in a tab or choose a visible response button when an Action needed card appears. To keep both contexts visible, leave Queue active and choose **Open to Side** for the agent in the right roster.
@@ -102,7 +102,7 @@ Desktop alerts use Wardian's native desktop notification plugin when available, 
 
 - [Getting Started](./getting-started.md)
 - [Workbench](./workbench.md)
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)
 - [Workflows](../workflows/index.md)

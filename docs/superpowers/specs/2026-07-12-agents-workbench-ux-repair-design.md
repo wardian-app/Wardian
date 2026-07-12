@@ -12,6 +12,8 @@ The left sidebar controls and right window controls remain stable chrome regions
 
 Tabs are compact, flat surfaces. The active tab connects visually to its content; close appears on the active or hovered tab. The New Surface plus action appears immediately after the last visible tab through Dockview's after-tabs action slot. Overflow and pane actions stay at the far edge. The top row remains 36 pixels high.
 
+An empty group is a launcher, not a placeholder. It presents the registered core surfaces as a responsive tool grid with a recognizable line icon, title, and one-line purpose, followed by recently closed work. Selecting a tool opens it directly in that group; the full surface dialog remains available for resource-backed and future contributions.
+
 ## Agents surface
 
 All user-facing `Agents Overview` copy becomes `Agents`. The internal `agents-overview` surface type remains unchanged so persisted workbenches continue to load.
@@ -29,6 +31,8 @@ Maximize enters `single` and restore returns to the previous `auto` or `grid` mo
 `Activate terminal renderer` is removed from the interface, tests, and guides. Renderer eviction remains an internal resource-management state.
 
 When a visible presentation needs a renderer, Wardian waits for nonzero container bounds, restores Xterm, fits it to those bounds, and reveals it after the first fitted frame. A slow restore may show a quiet loading state. A genuine failure shows an error and Retry action.
+
+The same reveal gate applies on first mount and when a hidden presentation becomes visible again. Stale snapshot canvases are removed before reveal so a renderer captured at another card or pane size is never briefly scaled into the current surface.
 
 Renderer geometry is presentation-local. A `ResizeObserver` drives fitting for tab changes, pane resizing, grid resizing, sidebar changes, and maximize/restore. Only the interactive owner submits rows and columns to the PTY. Mirrors render normally but cannot resize the PTY. Remote and desktop presentations therefore cannot corrupt one another's geometry.
 
@@ -52,11 +56,12 @@ The repair requires:
 
 - No separate tab bar appears below the window chrome.
 - New Surface plus is immediately after the tabs.
+- An empty group offers a themed, keyboard-accessible surface launcher instead of raw placeholder controls.
 - Top-edge split groups participate in the titlebar; lower groups retain local headers.
 - The surface is labeled `Agents` everywhere users see it.
 - Wide Agents surfaces reproduce the original broad multi-agent grid.
 - Auto never renders a one-column multi-agent strip stack.
 - `Activate terminal renderer` is absent from source, tests, documentation, and runtime UI.
 - Visible reclaimed terminals restore automatically and fit before display.
+- Initial and returning terminals never reveal a stale downscaled snapshot before their first fitted frame.
 - Only the current interaction owner resizes the PTY.
-

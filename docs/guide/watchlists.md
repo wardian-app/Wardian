@@ -135,12 +135,12 @@ Closing an agent-session tab is not a lifecycle action. It detaches that present
 
 - The roster is the targeting surface for many tools. Check selection before broadcasting or running prompts.
 - CLI team and watchlist commands mutate persisted state directly; use an isolated `WARDIAN_HOME` for tests and scripts that should not affect your normal roster.
-- Status and thought snippets are compact summaries. Open an agent session, use [Agents Overview](./agents-overview.md), or use the CLI watch command for detailed output.
+- Status and thought snippets are compact summaries. Open an agent session, use [Agents](./agents-overview.md), or use the CLI watch command for detailed output.
 
 ## Related Links
 
 - [Workbench](./workbench.md)
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Dashboard](./dashboard.md)
 - [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)

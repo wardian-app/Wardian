@@ -134,7 +134,7 @@ Open the **Agent Configuration** rail item and fill in the spawn form:
 4. Set the workspace to `<absolute-workspace-path>`.
 5. Click **Initialize**.
 
-The new agent appears in the right roster and in Agents Overview. If Agents Overview is not open, press `Ctrl+P` / `Cmd+P` and choose **Agents Overview**, or use **Open** on the agent in the roster to create an agent-session tab.
+The new agent appears in the right roster and in Agents. If Agents is not open, press `Ctrl+P` / `Cmd+P` and choose **Agents**, or use **Open** on the agent in the roster to create an agent-session tab.
 
 ![Wardian Grid showing active agents with status and terminal cards](../assets/screenshots/grid/active-agent-state.png)
 
@@ -155,7 +155,7 @@ Click inside the agent terminal to explicitly activate that presentation, then s
 Summarize this workspace in five bullets. Do not edit files.
 ```
 
-Use a read-only prompt for the first run. After you trust the provider, you can ask it to inspect files, make changes, run commands, or coordinate with other Wardian agents. If the terminal shows **Mirror** or **Read only**, click inside it before typing. If it shows **Activate terminal renderer**, select that action first.
+Use a read-only prompt for the first run. After you trust the provider, you can ask it to inspect files, make changes, run commands, or coordinate with other Wardian agents. If the terminal shows **Mirror** or **Read only**, click inside it before typing to request interaction ownership. Visible renderers restore and fit automatically.
 
 ## 8. Review the Result in Queue
 
@@ -208,7 +208,7 @@ Related docs:
 ## Next Steps
 
 - Learn tabs, splits, restore, and terminal ownership in [Workbench](./workbench.md).
-- Monitor several agents with [Agents Overview](./agents-overview.md).
+- Monitor several agents with [Agents](./agents-overview.md).
 - Learn the persistent shell in [UI Overview](./ui-overview.md).
 - Recover from first-run launch, provider, terminal, Queue, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
 - Manage reusable prompts, skills, classes, and workflow blueprints in [Library](./library.md).

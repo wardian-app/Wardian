@@ -12,8 +12,8 @@ Use this index to find the guide that matches the task you are trying to finish.
 
 ## Run and Monitor Agents
 
-- [Agents Overview](./agents-overview.md): monitor agents in adaptive Auto, multi-card Grid, or focused Single mode.
-- [Grid](./grid.md): map the former Grid page to the current Agents Overview Grid mode.
+- [Agents](./agents-overview.md): monitor agents in adaptive Auto, multi-card Grid, or focused Single mode.
+- [Grid](./grid.md): map the former Grid page to the current Agents Grid mode.
 - [Dashboard](./dashboard.md): compare live agent health and quick controls.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.

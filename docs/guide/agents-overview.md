@@ -1,14 +1,14 @@
-# Agents Overview
+# Agents
 
-Agents Overview is the Workbench surface for monitoring several agent sessions at once. It replaces the old assumption that Grid is Wardian's global page: Grid is now one display mode inside this surface.
+Agents is the Workbench surface for monitoring several agent sessions at once. It replaces the old assumption that Grid is Wardian's global page: Grid is now one display mode inside this surface.
 
-Use Agents Overview when you want live terminals or normalized chat activity arranged together, then switch to a focused presentation when one agent needs more space.
+Use Agents when you want live terminals or normalized chat activity arranged together, then switch to a focused presentation when one agent needs more space.
 
-## Open Agents Overview
+## Open Agents
 
-Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Home state, then choose **Agents Overview**. Wardian keeps a single Agents Overview surface and focuses it when you open it again.
+Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Home state, then choose **Agents**. Wardian keeps a single Agents surface and focuses it when you open it again.
 
-The right roster controls which agents auxiliary tools target. It does not filter Agents Overview automatically. Use **Filter agents** in the surface to narrow the visible cards by agent name, class, provider, or workspace.
+The right roster controls which agents auxiliary tools target. It does not filter Agents automatically. Use **Filter agents** in the surface to narrow the visible cards by agent name, class, provider, or workspace.
 
 ## Choose a Layout Mode
 
@@ -29,7 +29,7 @@ Each card can show either:
 
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Grid > Grid card display**. Unsent Chat text stays with that agent when you switch modes.
 
-In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until activated. If a card shows **Activate terminal renderer**, select it to restore a renderer reclaimed from an older presentation.
+In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until ownership transfers. Reclaimed renderers restore and fit automatically when visible.
 
 ## Arrange and Focus Agents
 
@@ -38,16 +38,16 @@ In Terminal mode, click inside the terminal before typing. When the same agent t
 - Use **Maximize** on a card to enter Single mode for that agent.
 - Use **Minimize** to return to Auto.
 - Right-click the background and choose **Reset Grid Layout** to discard the manual Grid arrangement without resetting the whole Workbench.
-- Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents Overview tab does not.
+- Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents tab does not.
 
-Overview layouts have minimum usable terminal and chat sizes. When every requested card cannot fit, the surface favors usable cards and scrolling over shrinking terminals until they become unreadable.
+Auto uses the original broad grid when every card has useful space and switches to the focused agent when the surface becomes too small. Grid always honors the user's chosen tracks and row sizing instead of silently stacking cards.
 
 ## Important Boundaries
 
-- Closing Agents Overview closes only that Workbench presentation. Agents keep running.
+- Closing Agents closes only that Workbench presentation. Agents keep running.
 - Closing an individual agent-session tab also leaves the runtime alive. Use Delete, Pause, Restart, or Clear only when you intend to alter the agent lifecycle.
-- Roster selection and Overview focus are separate. Roster selection targets tools; Overview focus chooses the agent shown in Single mode.
-- Grid is not a global navigation destination. It is an Overview mode retained for multi-agent compatibility and control.
+- Roster selection and Agents focus are separate. Roster selection targets tools; Agents focus chooses the agent shown in Single mode.
+- Grid is not a global navigation destination. It is an Agents mode retained for multi-agent compatibility and control.
 
 ## Related Guides
 

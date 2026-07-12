@@ -26,7 +26,7 @@ Both modes operate on your current agent selection in the right roster.
 2. Open the **Command** tab in the left sidebar.
 3. Click a starred quick prompt or type a broadcast message.
 4. Confirm the all-agent fallback when no agents are selected.
-5. Keep the active agent session, [Agents Overview](./agents-overview.md), [Dashboard](./dashboard.md), or [Queue](./queue.md) visible while responses arrive.
+5. Keep the active agent session, [Agents](./agents-overview.md), [Dashboard](./dashboard.md), or [Queue](./queue.md) visible while responses arrive.
 
 ## Quick Prompts
 
@@ -87,5 +87,5 @@ Roster selection is a targeting action, not navigation. If you also want a selec
 - [Library](./library.md)
 - [Watchlists](./watchlists.md)
 - [Workbench](./workbench.md)
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Wardian CLI](./cli.md)

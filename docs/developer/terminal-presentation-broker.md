@@ -1,6 +1,6 @@
 # Terminal Presentation Broker
 
-One agent runtime can appear in Agents Overview, one or more Agent Session
+One agent runtime can appear in Agents, one or more Agent Session
 surfaces, and authenticated remote clients at the same time. The Rust terminal
 session broker makes those views independent presentations of one PTY without
 allowing them to fight over input or geometry.

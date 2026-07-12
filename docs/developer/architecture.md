@@ -12,7 +12,7 @@ invariants:
   library files own reusable prompts, skills, classes, and workflow blueprints;
   watchlist/team records own roster organization until a broader project-scope
   model exists.
-- **Surfaces are lenses, not state silos.** Agents Overview, Dashboard, Graph,
+- **Surfaces are lenses, not state silos.** Agents, Dashboard, Graph,
   Garden, Library, Workflows, Queue, and future workbench contributions resolve
   and mutate canonical Wardian records through shared commands or file
   contracts. A surface owns bounded presentation state, not a private copy of
@@ -69,7 +69,7 @@ invariants:
   rendering adapter and never owns durable state. See
   [Workbench Surfaces](./workbench-surfaces.md).
 - **Visual Builder**: A specialized canvas for designing complex multi-agent workflows, featuring the [Integrated Variable Assistant](./visual-builder.md).
-- **Agents Overview**: A responsive workbench surface for monitoring multiple
+- **Agents**: A responsive workbench surface for monitoring multiple
   terminal presentations in Auto, Grid, or Single mode.
 - **Queue Surface**: A triage surface for unread agent completions and workflow outcomes.
 

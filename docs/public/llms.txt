@@ -14,7 +14,7 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 ## Core Workspace
 
 - https://docs.wardian.org/guide/agents-overview - Monitor agents with adaptive Auto, multi-card Grid, or focused Single layouts and switch cards between Terminal and Chat.
-- https://docs.wardian.org/guide/grid - Map the former Grid page to the current Agents Overview Grid mode.
+- https://docs.wardian.org/guide/grid - Map the former Grid page to the current Agents Grid mode.
 - https://docs.wardian.org/guide/dashboard - Compare live agent health, runtime status, and summary controls.
 - https://docs.wardian.org/guide/watchlists - Group, select, sort, and monitor agents in the roster.
 - https://docs.wardian.org/guide/queue - Review completed agent and workflow results, action-needed items, and notification behavior.

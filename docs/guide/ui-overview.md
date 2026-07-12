@@ -6,15 +6,15 @@ Wardian uses a persistent app shell around a tab-based [Workbench](./workbench.m
 
 ## Title Bar
 
-The title bar is intentionally quiet: its center is drag space, not navigation or a command toolbar. Dashboard, Queue, Library, Workflows, Graph, Garden, Agents Overview, and agent sessions open as pane-local tabs. Use `Ctrl+P` / `Cmd+P` for Quick Open and `Ctrl+Shift+P` / `Cmd+Shift+P` for the command palette.
+Wardian uses frameless, Obsidian-style top chrome: the topmost Workbench tab groups occupy the center of the window bar rather than sitting beneath a separate titlebar. Side-by-side top groups divide that row; groups split downward keep a local tab header. Empty header space drags the native window.
 
-The title bar retains the left sidebar toggle, optional telemetry, right roster toggle, and native window controls.
+The chrome retains the left sidebar toggle, optional telemetry, right roster toggle, and native window controls. Commands remain in Quick Open (`Ctrl+P` / `Cmd+P`) and the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), not in another toolbar.
 
 ## Workbench
 
 The center workspace is composed of tabbed panes. Each pane can contain several surfaces and can be split right or down. Drag tabs to reorder them, move them between panes, or drop them at an edge to create a split.
 
-Use the **+** button in a pane or its empty **Home** state to open a surface there. In Quick Open, `Ctrl+Enter` / `Cmd+Enter` opens the selected surface to the side; the picker has no separate visible Open to Side button. The pane **…** menu contains split, merge, zoom/restore, and pane-close actions. Right-click a tab for tab-specific move, split, and close actions, or use the close button shown on the active or hovered tab.
+Use the **+** button immediately after a pane's tabs or its empty **Home** state to open a surface there. In Quick Open, `Ctrl+Enter` / `Cmd+Enter` opens the selected surface to the side; the picker has no separate visible Open to Side button. The pane **…** menu remains at the far edge and contains split, merge, zoom/restore, and pane-close actions. Right-click a tab for tab-specific move, split, and close actions, or use the close button shown on the active or hovered tab.
 
 Wardian persists the layout and restores it after restart. Recently closed surfaces can be reopened. Recoverable placeholders keep unavailable surface or agent references visible instead of silently deleting them; **Reset Workbench** deliberately returns to the default layout.
 
@@ -46,17 +46,17 @@ Roster selection sets the target for auxiliary tools such as Explorer, Source Co
 
 See [Watchlists](./watchlists.md) for grouping and targeting behavior.
 
-## Agents Overview
+## Agents
 
-[Agents Overview](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Grid is a mode inside this surface, not a global app page.
+[Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Grid is a mode inside this surface, not a global app page.
 
-Agent cards can show the real provider terminal or a normalized Chat view. Closing the Overview surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
+Agent cards can show the real provider terminal or a normalized Chat view. Closing the Agents surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
 
 ## Terminal Continuity
 
-Wardian brokers terminal output, input ownership, and canonical geometry across Overview cards, agent-session tabs, and remote presentations. A presentation becomes interactive only after explicit terminal activation. Focus traversal alone does not steal the input lease or resize the shared PTY.
+Wardian brokers terminal output, input ownership, and canonical geometry across Agents cards, agent-session tabs, and remote presentations. A presentation becomes interactive only after an explicit ownership request. Focus traversal alone does not steal the input lease or resize the shared PTY.
 
-If several presentations show the same terminal, the active one is labeled **Owner** and the others are **Mirror** / **Read only**. Wardian can reclaim old renderers while retaining terminal state; select **Activate terminal renderer** to reconstruct one when needed.
+If several presentations show the same terminal, the active one is labeled **Owner** and the others are **Mirror** / **Read only**. Wardian can reclaim hidden renderers while retaining terminal state; a visible presentation restores and fits its renderer automatically.
 
 ## Common Keyboard Shortcuts
 
@@ -77,7 +77,7 @@ Workbench shortcuts yield to text inputs and terminal-owned key combinations. Se
 ## Related Guides
 
 - [Workbench](./workbench.md)
-- [Agents Overview](./agents-overview.md)
+- [Agents](./agents-overview.md)
 - [Watchlists](./watchlists.md)
 - [Dashboard](./dashboard.md)
 - [Queue](./queue.md)

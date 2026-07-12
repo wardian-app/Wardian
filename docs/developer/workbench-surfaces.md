@@ -165,7 +165,7 @@ local draft for Use Disk, Replace Disk, or Export Local JSON.
 On a fresh V1 home, Wardian performs one validated import from the legacy
 `wardian-layout` local-storage record. It imports only clamped left/right
 sidebar widths, bottom-terminal open/height state, and the initial surface. A
-legacy Grid selection maps to Agents Overview. The old record is removed only
+legacy Grid selection maps to Agents. The old record is removed only
 after the exact migration save is acknowledged; resets or later saves cannot
 accidentally acknowledge the import. Teams, watchlists, agent state, and domain
 stores are not migrated into the workbench document.
@@ -221,4 +221,4 @@ data. Values other than the exact string `1` do not enable safe mode.
   presentations leaves runtimes live.
 
 See [Terminal Presentation Broker](./terminal-presentation-broker.md) for the
-runtime contract used by Agent Session and Agents Overview terminals.
+runtime contract used by Agent Session and Agents terminals.

@@ -35,7 +35,7 @@ Categories:
 
 - **General**: app version and update status.
 - **Appearance**: app theme and top bar telemetry visibility.
-- **Grid**: display mode for agent cards in Agents Overview surfaces.
+- **Grid**: display mode for agent cards in Agents surfaces.
 - **Queue**: queue event desktop and sound notification rules.
 - **Explorer**: file click behavior and the external app or editor used by the
   Explorer.
@@ -111,7 +111,7 @@ binaries show it by default.
 ## Grid
 
 The **Grid card display** control sets the global display mode for cards in
-Agents Overview surfaces:
+Agents surfaces:
 
 - **Terminal** shows the provider terminal/TUI, including raw keyboard control,
   approvals, and raw output.

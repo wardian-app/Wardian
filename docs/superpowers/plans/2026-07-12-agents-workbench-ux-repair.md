@@ -120,3 +120,22 @@
 - [ ] Run secret and status checks, inspect the final diff, and obtain a whole-branch review.
 - [ ] Push the branch, embed a representative screenshot in PR #667, and verify CI.
 
+### Task 6: Repair empty tabs and first terminal paint
+
+**Files:**
+- Modify: `src/features/workbench/HomeSurface.tsx`
+- Test: `src/features/workbench/HomeSurface.test.tsx`
+- Modify: `src/layout/workbench/WorkbenchHost.tsx`
+- Modify: `src/layout/workbench/workbench.css`
+- Modify: `src/features/terminal/AgentTerminal.tsx`
+- Test: `src/features/terminal/AgentTerminal.test.tsx`
+- Modify: focused browser E2E and screenshot coverage.
+
+**Interfaces:**
+- Consumes: registered surface contributions, recently closed surfaces, presentation visibility, renderer snapshots, and measured terminal bounds.
+- Produces: a direct empty-group tool launcher and a fitted-first terminal reveal path.
+
+- [ ] Replace the empty-group placeholder with a responsive surface grid using code-native icons, titles, and descriptions.
+- [ ] Preserve direct access to recently closed work and the full surface dialog.
+- [ ] Gate first and resumed terminal paint until nonzero measurement and fit complete, clearing stale snapshot overlays before reveal.
+- [ ] Add focused unit/browser coverage and capture launcher evidence.
