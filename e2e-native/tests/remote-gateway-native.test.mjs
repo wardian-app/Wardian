@@ -14,7 +14,11 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
-import { openWorkbenchSurface, waitForWorkbenchReady } from "../lib/workbench.mjs";
+import {
+  closeWorkbenchSurface,
+  openWorkbenchSurface,
+  waitForWorkbenchReady,
+} from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
@@ -393,6 +397,10 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   assert.equal(result.agent.session_name, sessionName);
 
   await waitForWorkbenchReady(session.driver);
+  // Agents auto-owns an otherwise unowned runtime for click-free first paint.
+  // This test establishes its own explicit Agent Session desktop owner before
+  // handing the lease to the authenticated remote client.
+  await closeWorkbenchSurface(session.driver, "agents-overview");
   await openWorkbenchSurface(session.driver, "agent-session", sessionId);
   const desktopSurface = await waitFor("desktop agent presentation", 30000, async () => {
     const tabs = await session.driver.executeScript((resourceKey) => {
