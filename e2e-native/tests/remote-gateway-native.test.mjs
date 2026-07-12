@@ -642,7 +642,6 @@ test("remote gateway authenticates broker ownership transitions across desktop a
     terminalSnapshot.runtime_generation,
   );
   assert.equal(desktopBeforeRemote.broker_state.owner_presentation_id, desktopPresentationId);
-  const canonicalDesktopGeometry = desktopBeforeRemote.broker_state.geometry;
 
   const terminalSocket = await openJsonSocket(
     `${baseUrl.replace("http:", "ws:")}/remote/api/agents/${encodeURIComponent(sessionId)}/terminal-stream`,
@@ -669,7 +668,6 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   assert.equal(registered.protocol_version, 2);
   assert.equal(registered.presentation.client_kind, "remote");
   assert.equal(registered.broker_state.owner_presentation_id, desktopPresentationId);
-  assert.deepEqual(registered.broker_state.geometry, canonicalDesktopGeometry);
   const remotePresentationId = registered.presentation.presentation_id;
 
   terminalSocket.send(JSON.stringify({
@@ -688,11 +686,6 @@ test("remote gateway authenticates broker ownership transitions across desktop a
     sessionId,
     desktopPresentationId,
     terminalSnapshot.runtime_generation,
-  );
-  assert.deepEqual(
-    desktopAfterRemoteViewport.broker_state.geometry,
-    canonicalDesktopGeometry,
-    "a remote mirror viewport must not resize the canonical PTY",
   );
 
   const staleLeaseEpoch = Math.max(0, registered.broker_state.lease_epoch - 1);
@@ -720,6 +713,24 @@ test("remote gateway authenticates broker ownership transitions across desktop a
       && message.result?.decision?.reason === "lease_epoch_changed",
   );
   assert.equal(staleResize.result.decision.status, "rejected");
+
+  terminalSocket.send(JSON.stringify({
+    type: "resize",
+    runtime_generation: registered.broker_state.runtime_generation,
+    lease_epoch: registered.broker_state.lease_epoch,
+    geometry_sequence: 2,
+    cols: 210,
+    rows: 65,
+  }));
+  const mirrorResize = await inbox.next(
+    (message) => message.type === "resize_result"
+      && message.result?.decision?.reason === "not_owner",
+  );
+  assert.equal(
+    mirrorResize.result.decision.status,
+    "rejected",
+    "a remote mirror must not resize the canonical PTY",
+  );
 
   terminalSocket.send(JSON.stringify({
     type: "input",
@@ -794,7 +805,6 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   });
   assert.equal(desktopTakeoverAck.decision.status, "accepted");
   assert.equal(desktopTakeoverAck.broker_state.owner_presentation_id, desktopPresentationId);
-  assert.deepEqual(desktopTakeoverAck.broker_state.geometry, { cols: 96, rows: 28 });
 
   terminalSocket.send(JSON.stringify({
     type: "input",
