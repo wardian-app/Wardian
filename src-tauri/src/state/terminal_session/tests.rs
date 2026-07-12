@@ -1859,6 +1859,7 @@ async fn ack_submitted_before_deadline_wins_while_external_queue_is_full() {
         })
         .await
         .expect("begin pending takeover");
+    let lease_epoch = pending.decision.lease_epoch;
     let activation_id = pending.activation_id.expect("activation id");
 
     let release = broker
@@ -1886,7 +1887,7 @@ async fn ack_submitted_before_deadline_wins_while_external_queue_is_full() {
                 session_id: "session-1".to_string(),
                 presentation_id: "takeover".to_string(),
                 runtime_generation: generation,
-                lease_epoch: pending.decision.lease_epoch,
+                lease_epoch,
                 activation_id: ack_activation_id,
             })
             .await
@@ -2017,7 +2018,9 @@ async fn ack_submitted_after_deadline_is_rejected_as_stale() {
         .block_actor_for_test("session-1")
         .await
         .expect("block actor");
+    let activation_id = pending.activation_id.expect("activation id");
     timer.fire(Duration::from_secs(5)).await;
+    wait_for_activation_deadline_elapsed(&broker, &activation_id).await;
     let ack_broker = broker.clone();
     let ack = tokio::spawn(async move {
         ack_broker
@@ -2026,7 +2029,7 @@ async fn ack_submitted_after_deadline_is_rejected_as_stale() {
                 presentation_id: "takeover".to_string(),
                 runtime_generation: generation,
                 lease_epoch: pending.decision.lease_epoch,
-                activation_id: pending.activation_id.expect("activation id"),
+                activation_id,
             })
             .await
     });
