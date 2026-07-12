@@ -825,7 +825,7 @@ reset_workbench_state({ expected_revision, expected_token, request_id }: { expec
   ```
 
 - [x] **Step 7: Run** `PR_BODY=<body> npm run check:frontend-screenshot -- origin/main HEAD`. **Expected:** `Frontend screenshot evidence found in the PR body.`
-- [ ] **Step 8: Create** PR title `feat(workbench): replace fixed navigation with restorable surface tabs`, then run `gh pr checks <number> --repo wardian-app/Wardian --watch --fail-fast`. Fix failures in scoped atomic commits and re-run until all required checks pass.
+- [x] **Step 8: Create** PR title `feat(workbench): replace fixed navigation with restorable surface tabs`, then run `gh pr checks <number> --repo wardian-app/Wardian --watch --fail-fast`. Fix failures in scoped atomic commits and re-run until all required checks pass.
 - [x] **Step 9: Create the timed cleanup issue** `Remove workbench safe mode and terminal compatibility adapters before Wardian 0.6.0`, requiring one stable 0.5.x workbench release and recovery-report review before removing safe mode, raw desktop command adapters, and remote v1.
 
 ## Completion Definition
