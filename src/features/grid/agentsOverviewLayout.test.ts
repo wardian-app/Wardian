@@ -18,7 +18,7 @@ const terminalAgents = (count: number): AgentsOverviewLayoutAgent[] =>
     cardMode: "terminal",
   }));
 
-describe("Agents Overview layout", () => {
+describe("Agents layout", () => {
   it("scores all column candidates and breaks area ties by empty cells", () => {
     const candidates = generateAgentsOverviewCandidates({
       agents: terminalAgents(5),
@@ -66,6 +66,38 @@ describe("Agents Overview layout", () => {
     expect(result.visibleAgentIds).toEqual(["agent-2"]);
   });
 
+  it("never resolves Auto to a one-column multi-agent grid", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(4),
+      containerSize: { width: 1048, height: 2200 },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not preserve a legacy one-column Auto grid through hysteresis", () => {
+    const agents = terminalAgents(4);
+    const legacyLayout = resolveAgentsOverviewLayout({
+      mode: "grid",
+      agents,
+      containerSize: { width: 1048, height: 2200 },
+      gap: 8,
+    });
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents,
+      containerSize: { width: 1048, height: 2200 },
+      previousLayout: { ...legacyLayout, requestedMode: "auto" },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBeGreaterThanOrEqual(2);
+  });
+
   it("keeps explicit Grid and reports scroll dimensions instead of becoming Single", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "grid",
@@ -95,11 +127,11 @@ describe("Agents Overview layout", () => {
   });
 
   it("requires a 10 percent score improvement before changing a viable Auto grid", () => {
-    const agents = terminalAgents(4);
+    const agents = terminalAgents(6);
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1048, height: 2000 },
+      containerSize: { width: 1600, height: 1600 },
       gap: 8,
     });
     expect(previous.candidate?.columns).toBe(2);
@@ -107,15 +139,15 @@ describe("Agents Overview layout", () => {
     const unconstrainedChoice = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1048, height: 2200 },
+      containerSize: { width: 1610, height: 1600 },
       gap: 8,
     });
-    expect(unconstrainedChoice.candidate?.columns).toBe(1);
+    expect(unconstrainedChoice.candidate?.columns).toBe(3);
 
     const smallImprovement = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1048, height: 2200 },
+      containerSize: { width: 1610, height: 1600 },
       previousLayout: previous,
       gap: 8,
     });

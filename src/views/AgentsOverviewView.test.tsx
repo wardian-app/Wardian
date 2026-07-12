@@ -213,7 +213,7 @@ describe('AgentsOverviewView maximize behavior', () => {
     }
   });
 
-  it('does not size each mobile card to the full viewport height', () => {
+  it('preserves explicit Grid columns and row sizing in a narrow viewport', () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
     act(() => {
@@ -224,7 +224,7 @@ describe('AgentsOverviewView maximize behavior', () => {
       renderGrid(null);
 
       const root = screen.getByTestId('agent-grid');
-      expect(root.style.gridTemplateColumns).toBe('1fr');
+      expect(root.style.gridTemplateColumns).toBe('minmax(0, 0.5fr) minmax(0, 0.5fr)');
       expect(root.style.gridAutoRows).not.toBe('100%');
       expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
       expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
@@ -476,8 +476,29 @@ describe('AgentsOverviewView maximize behavior', () => {
 
   it('clamps explicit Grid tracks to card floors when manual weights are uneven', () => {
     expect(agentsOverviewGridTemplateColumns('grid', [0.2, 0.8], 520)).toBe(
-      'minmax(520px, 0.2fr) minmax(520px, 0.8fr)',
+      'minmax(0, 0.2fr) minmax(0, 0.8fr)',
     );
+  });
+
+  it('uses persisted column tracks and row height in explicit Grid mode', () => {
+    act(() => {
+      useLayoutStore.getState().setColumnTracks([0.2, 0.3, 0.5]);
+      useLayoutStore.getState().setRowHeight(612);
+    });
+
+    renderGrid(null, [...agents, {
+      session_id: 'agent-3',
+      session_name: 'Gamma',
+      agent_class: 'Reviewer',
+      folder: '/workspace',
+      is_off: false,
+    }]);
+
+    const root = screen.getByTestId('agent-grid');
+    expect(root.style.gridTemplateColumns).toBe(
+      'minmax(0, 0.2fr) minmax(0, 0.3fr) minmax(0, 0.5fr)',
+    );
+    expect(root.style.gridAutoRows).toBe('612px');
   });
 
   it('uses a narrower minimum width for chat cards', () => {
@@ -552,7 +573,7 @@ describe('AgentsOverviewView stacked mode', () => {
     expect(grid.style.minWidth).toBe('360px');
   });
 
-  it('keeps the container-derived shape canonical during a stack-exit gesture', () => {
+  it('previews the persisted columns during a stack-exit gesture', () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
     act(() => {
@@ -568,8 +589,8 @@ describe('AgentsOverviewView stacked mode', () => {
         fireEvent.mouseDown(container.querySelector('[data-resize-handle="stack-exit"]') as HTMLElement);
       });
 
-      expect(grid.style.gridTemplateColumns).toBe('1fr');
-      expect(grid.style.minWidth).toBe('520px');
+      expect(grid.style.gridTemplateColumns).toBe('minmax(0, 0.5fr) minmax(0, 0.5fr)');
+      expect(grid.style.minWidth).toBe('100%');
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
       act(() => {

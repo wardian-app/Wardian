@@ -97,6 +97,9 @@ describe("AgentsOverviewSurface", () => {
   it("adapts persisted state and surface identity to the view", () => {
     render(<AgentsOverviewSurface {...surfaceProps()} />);
 
+    expect(screen.getByRole("group", { name: "Agents mode" })).toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Filter Agents" })).toBeInTheDocument();
+
     expect(viewSpy).toHaveBeenLastCalledWith(expect.objectContaining({
       surfaceId: "surface-1",
       mode: "auto",
@@ -119,7 +122,7 @@ describe("AgentsOverviewSurface", () => {
       focused_agent_id: "agent-2",
     });
 
-    fireEvent.change(screen.getByRole("searchbox", { name: "Filter Agents Overview" }), {
+    fireEvent.change(screen.getByRole("searchbox", { name: "Filter Agents" }), {
       target: { value: "alp" },
     });
     expect(onStateChange).toHaveBeenCalledWith({

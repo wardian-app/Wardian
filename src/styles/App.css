@@ -43,6 +43,8 @@
 
   /* TopBar */
   --topbar-height: 36px;
+  --wardian-collapsed-right-chrome-width: 184px;
+  --wardian-mac-collapsed-left-chrome-overhang: 64px;
 
   /* Density */
   --density-panel-padding-x: 12px;
@@ -64,11 +66,10 @@
   min-height: var(--topbar-height);
   display: flex;
   align-items: stretch;
-  background: var(--color-wardian-sidebar-primary);
-  border-bottom: 1px solid var(--color-wardian-border);
+  background: transparent;
   user-select: none;
-  z-index: 50;
-  -webkit-app-region: drag;
+  pointer-events: none;
+  z-index: 52;
 }
 
 /* ── Zone Layout ─────────────────────────────────────── */
@@ -76,6 +77,9 @@
   display: flex;
   align-items: center;
   -webkit-app-region: no-drag;
+  background: var(--color-wardian-sidebar-primary);
+  border-bottom: 1px solid var(--color-wardian-border);
+  pointer-events: auto;
 }
 
 /* Zone 1: Aligns with entire left sidebar (rail + content) */
@@ -87,21 +91,44 @@
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Zone 2: Quiet drag space over the workbench. Commands live in the palette. */
-.titlebar-drag-space {
-  flex: 1;
-  min-width: 0;
-}
-
 /* Zone 3: Aligns with the right sidebar column */
 .titlebar-right {
   width: var(--titlebar-right-width, 240px);
-  min-width: 180px; /* Persistent area for window controls */
   padding: 0;
   flex-shrink: 0;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   justify-content: flex-end;
+  margin-left: auto;
+}
+
+/* Dockview supplies the center segment of the native top chrome. */
+.app-shell-titlebar {
+  position: absolute;
+  z-index: 52;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--topbar-height);
+  pointer-events: none;
+}
+
+.app-shell-titlebar > * {
+  width: 100%;
+  height: 100%;
+}
+
+.app-shell-content {
+  min-height: 0;
+}
+
+.app-shell-content > :not(.app-shell-workbench) {
+  height: calc(100% - var(--topbar-height));
+  margin-top: var(--topbar-height);
+}
+
+.app-shell-workbench {
+  height: 100%;
 }
 
 .titlebar-right-content {

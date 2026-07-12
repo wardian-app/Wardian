@@ -33,6 +33,7 @@ import type {
 import type { WorkbenchNodeV1, WorkbenchSurfaceV1 } from "../../types";
 import {
   WorkbenchGroupHeader,
+  WorkbenchNewSurfaceAction,
   type WorkbenchPaneTarget,
 } from "./WorkbenchGroupHeader";
 import { WorkbenchTab } from "./WorkbenchTab";
@@ -166,6 +167,68 @@ export function workbenchPaneTargets(
     target.group_id !== undefined
     && groupsAreWorkbenchAdjacent(root, groupId, target.group_id)
   ));
+}
+
+/** Reports whether a group header contributes to the window's top chrome. */
+export function workbenchGroupTouchesTopEdge(
+  node: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+  touchesTop = true,
+): boolean {
+  if (node.kind === "group") return touchesTop && node.group_id === groupId;
+  if (node.direction === "horizontal") {
+    return workbenchGroupTouchesTopEdge(node.first, groupId, touchesTop)
+      || workbenchGroupTouchesTopEdge(node.second, groupId, touchesTop);
+  }
+  return workbenchGroupTouchesTopEdge(node.first, groupId, touchesTop)
+    || workbenchGroupTouchesTopEdge(node.second, groupId, false);
+}
+
+export function workbenchGroupTouchesRightEdge(
+  node: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+  touchesRight = true,
+): boolean {
+  if (node.kind === "group") return touchesRight && node.group_id === groupId;
+  if (node.direction === "vertical") {
+    return workbenchGroupTouchesRightEdge(node.first, groupId, touchesRight)
+      || workbenchGroupTouchesRightEdge(node.second, groupId, touchesRight);
+  }
+  return workbenchGroupTouchesRightEdge(node.first, groupId, false)
+    || workbenchGroupTouchesRightEdge(node.second, groupId, touchesRight);
+}
+
+export function workbenchGroupTouchesLeftEdge(
+  node: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+  touchesLeft = true,
+): boolean {
+  if (node.kind === "group") return touchesLeft && node.group_id === groupId;
+  if (node.direction === "vertical") {
+    return workbenchGroupTouchesLeftEdge(node.first, groupId, touchesLeft)
+      || workbenchGroupTouchesLeftEdge(node.second, groupId, touchesLeft);
+  }
+  return workbenchGroupTouchesLeftEdge(node.first, groupId, touchesLeft)
+    || workbenchGroupTouchesLeftEdge(node.second, groupId, false);
+}
+
+export function workbenchGroupOwnsWindowChrome(
+  node: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+  zoomedGroupId: string | null,
+): boolean {
+  return zoomedGroupId === groupId || workbenchGroupTouchesTopEdge(node, groupId);
+}
+
+function workbenchGroupNeedsWindowControlClearance(
+  node: DeepReadonly<WorkbenchNodeV1>,
+  groupId: string,
+  zoomedGroupId: string | null,
+): boolean {
+  return zoomedGroupId === groupId || (
+    workbenchGroupTouchesTopEdge(node, groupId)
+    && workbenchGroupTouchesRightEdge(node, groupId)
+  );
 }
 
 function firstGroupId(node: DeepReadonly<WorkbenchNodeV1>): string {
@@ -438,11 +501,34 @@ function DockviewGroupActions({ group }: IDockviewHeaderActionsProps) {
       group_id={group.id}
       pane_targets={workbenchPaneTargets(runtime.document.root, group.id)}
       is_zoomed={runtime.zoomed_group_id === group.id}
-      on_open_surface={runtime.on_open_surface}
       on_toggle_zoom={runtime.on_toggle_zoom}
       on_split_group={runtime.on_split_group}
       on_close_group={runtime.on_close_group}
       on_join_group={runtime.on_join_group}
+    />
+  );
+}
+
+function DockviewNewSurfaceAction({ group }: IDockviewHeaderActionsProps) {
+  const runtime = useAdapterRuntime();
+  return (
+    <WorkbenchNewSurfaceAction
+      group_id={group.id}
+      window_drag_region={workbenchGroupOwnsWindowChrome(
+        runtime.document.root,
+        group.id,
+        runtime.zoomed_group_id,
+      )}
+      window_left_clearance={runtime.zoomed_group_id === group.id || (
+        workbenchGroupTouchesTopEdge(runtime.document.root, group.id)
+        && workbenchGroupTouchesLeftEdge(runtime.document.root, group.id)
+      )}
+      window_controls_clearance={workbenchGroupNeedsWindowControlClearance(
+        runtime.document.root,
+        group.id,
+        runtime.zoomed_group_id,
+      )}
+      on_open_surface={runtime.on_open_surface}
     />
   );
 }
@@ -657,7 +743,11 @@ function SafeWorkbenchLayout({
       data-active="true"
       tabIndex={-1}
     >
-      <header className="wardian-workbench-group-header">
+      <header
+        className="wardian-workbench-group-header"
+        data-left-chrome-clearance="true"
+        data-window-controls-clearance="true"
+      >
         <div role="tablist" aria-label={`Surfaces in ${group.group_id}`}>
           {group.surface_ids.map((surfaceId) => {
             const surface = document.surfaces[surfaceId];
@@ -704,11 +794,20 @@ function SafeWorkbenchLayout({
             );
           })}
         </div>
+        <WorkbenchNewSurfaceAction
+          group_id={group.group_id}
+          window_drag_region
+          window_controls_clearance
+          on_open_surface={on_open_surface}
+        />
+        <div
+          className="wardian-workbench-safe-void"
+          data-tauri-drag-region
+        />
         <WorkbenchGroupHeader
           group_id={group.group_id}
           pane_targets={workbenchPaneTargets(document.root, group.group_id)}
           is_zoomed={zoomed_group_id === group.group_id}
-          on_open_surface={on_open_surface}
           on_toggle_zoom={on_toggle_zoom}
           on_split_group={on_split_group}
           on_close_group={on_close_group}
@@ -1011,6 +1110,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
             components={DOCKVIEW_COMPONENTS}
             theme={WARDIAN_DOCKVIEW_THEME}
             defaultTabComponent={DockviewSurfaceTab}
+            leftHeaderActionsComponent={DockviewNewSurfaceAction}
             rightHeaderActionsComponent={DockviewGroupActions}
             watermarkComponent={DockviewEmptyGroup}
             dndStrategy="pointer"

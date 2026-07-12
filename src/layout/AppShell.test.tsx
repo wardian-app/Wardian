@@ -20,4 +20,20 @@ describe("AppShell", () => {
     expect(screen.getByTestId("app-shell-content")).toHaveAttribute("aria-busy", "true");
     expect(screen.getByRole("button", { name: "Close window" })).toBeEnabled();
   });
+
+  it("raises the workbench into the center segment of the top chrome", () => {
+    render(
+      <AppShell
+        titlebar={<div>Window chrome</div>}
+        leftRail={<div>Rail</div>}
+        leftPane={<div>Left pane</div>}
+        mainContent={<div>Workbench</div>}
+        roster={<div>Roster</div>}
+      />,
+    );
+
+    expect(screen.getByTestId("app-shell-titlebar")).toHaveClass("app-shell-titlebar");
+    expect(screen.getByTestId("app-shell-content")).toHaveClass("app-shell-content");
+    expect(screen.getByTestId("app-shell-main")).toHaveClass("app-shell-workbench");
+  });
 });

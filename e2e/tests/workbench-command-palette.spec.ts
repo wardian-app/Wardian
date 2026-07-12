@@ -25,9 +25,12 @@ test("keeps workbench commands in a searchable palette separate from Quick Open"
   await page.goto("/");
   await expect(page.getByTestId("workbench-host")).toBeVisible();
 
-  const titlebarCenter = page.getByTestId("titlebar-center");
-  await expect(titlebarCenter).toHaveAttribute("data-tauri-drag-region", "true");
-  await expect(titlebarCenter.getByRole("button")).toHaveCount(0);
+  await expect(page.getByTestId("titlebar-center")).toHaveCount(0);
+  const topHeaderDragRegion = page.locator(
+    ".dv-void-container[data-tauri-drag-region]",
+  ).first();
+  await expect(topHeaderDragRegion).toBeVisible();
+  await expect(topHeaderDragRegion.getByRole("button")).toHaveCount(0);
   await expect(page.getByRole("group", { name: "Workbench commands", exact: true }))
     .toHaveCount(0);
 

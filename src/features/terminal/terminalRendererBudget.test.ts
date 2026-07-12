@@ -40,6 +40,21 @@ describe("TerminalRendererBudget", () => {
 
     expect(evicted).toEqual(["xterm:b", "webgl:a"]);
   });
+
+  it("can decline an automatic acquisition without evicting a live renderer", () => {
+    const budget = new TerminalRendererBudget({ xtermLimit: 1, webglLimit: 1 });
+    const evicted = vi.fn();
+    budget.acquire("xterm", "visible-owner", evicted);
+
+    const result = budget.acquire("xterm", "automatic-restore", vi.fn(), {
+      evictExisting: false,
+    });
+
+    expect(result.granted).toBe(false);
+    expect(evicted).not.toHaveBeenCalled();
+    expect(budget.has("xterm", "visible-owner")).toBe(true);
+    expect(budget.has("xterm", "automatic-restore")).toBe(false);
+  });
 });
 
 describe("calculateTerminalMirrorFit", () => {

@@ -132,9 +132,10 @@ test("derives Auto from the measured container and keeps explicit Grid/Single st
   await page.setViewportSize({ width: 900, height: 600 });
   await page.getByRole("button", { name: "Grid", exact: true }).click();
   await expect(mode).toHaveAttribute("data-overview-mode", "grid");
-  await expect.poll(async () => page.getByTestId("agents-overview-container").evaluate(
-    (element) => element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight,
-  )).toBe(true);
+  await expect(visibleAgentCards(page)).toHaveCount(2);
+  await expect.poll(async () => grid.evaluate((element) =>
+    getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+  )).toBe(2);
 
   await page.getByRole("button", { name: "Single", exact: true }).click();
   await expect(mode).toHaveAttribute("data-overview-mode", "single");

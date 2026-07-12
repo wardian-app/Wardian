@@ -1,10 +1,9 @@
 import React from "react";
 import type { AgentTelemetry, AgentConfig, AppTelemetry } from "../../types";
 
-const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
-
 interface LeftSidebarControlsProps {
   disabled?: boolean;
+  macPlatform?: boolean;
   leftCollapsed: boolean;
   setLeftCollapsed: (collapsed: boolean) => void;
   telemetry: Record<string, AgentTelemetry>;
@@ -16,6 +15,7 @@ interface LeftSidebarControlsProps {
 
 export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
   disabled = false,
+  macPlatform = false,
   leftCollapsed,
   setLeftCollapsed,
   telemetry,
@@ -30,7 +30,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
   const totalMemory = appTelemetry.memory_mb + agentMemory;
 
   return (
-    <div className="titlebar-zone titlebar-left" style={isMac ? { paddingLeft: "72px" } : undefined}>
+    <div className="titlebar-zone titlebar-left" style={macPlatform ? { paddingLeft: "72px" } : undefined}>
       <button
         disabled={disabled}
         onClick={() => setLeftCollapsed(!leftCollapsed)}

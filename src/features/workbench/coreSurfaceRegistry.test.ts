@@ -18,6 +18,11 @@ describe("core workbench surface registry", () => {
   it("registers the exact migration policies and open commands", () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
 
+    expect(registry.presentation(makeSurface("agents", {
+      surface_type: "agents-overview",
+      state: registry.default_state("agents-overview"),
+    })).title).toBe("Agents");
+
     expect(["dashboard", "queue", "graph", "garden", "library", "workflows"].map((type) => {
       const definition = registry.get(type);
       return {

@@ -768,7 +768,7 @@ describe("readLegacyWorkbenchMigration", () => {
     });
   });
 
-  it("uses shell defaults and Agents Overview for corrupt or missing legacy state", () => {
+  it("uses shell defaults and Agents for corrupt or missing legacy state", () => {
     const expected = readLegacyWorkbenchMigration(null, { width: 1_200, height: 900 });
 
     expect(expected.shell_patch).toEqual({

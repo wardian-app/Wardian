@@ -369,7 +369,7 @@ test.describe("Workbench recovery", () => {
     })).toBe(false);
     await expect.poll(async () => (await ipc.calls("reset_workbench_state")).length).toBe(1);
     await expect(page.getByRole("tab")).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "New Surface" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Choose a surface" })).toBeVisible();
   });
 
   test("a delayed reset conflict locks shell mutations and outside-host navigation", async ({ page }) => {

@@ -28,7 +28,12 @@ export class TerminalRendererBudget {
     }
   }
 
-  acquire(kind: TerminalRendererKind, presentationId: string, onEvict: EvictionHandler) {
+  acquire(
+    kind: TerminalRendererKind,
+    presentationId: string,
+    onEvict: EvictionHandler,
+    options?: { evictExisting?: boolean },
+  ) {
     const pool = kind === "xterm" ? this.#xterms : this.#webgl;
     const limit = kind === "xterm" ? this.#xtermLimit : this.#webglLimit;
     const existing = pool.get(presentationId);
@@ -40,6 +45,9 @@ export class TerminalRendererBudget {
 
     let evictedPresentationId: string | null = null;
     if (pool.size >= limit) {
+      if (options?.evictExisting === false) {
+        return { granted: false, evictedPresentationId: null } as const;
+      }
       const oldest = pool.entries().next().value as [string, EvictionHandler] | undefined;
       if (oldest) {
         evictedPresentationId = oldest[0];

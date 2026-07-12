@@ -13,6 +13,9 @@ import {
   projectWorkbenchGroupSizes,
   routeWorkbenchDockviewDrop,
   shouldRecoverUnexpectedPanelRemoval,
+  workbenchGroupOwnsWindowChrome,
+  workbenchGroupTouchesLeftEdge,
+  workbenchGroupTouchesTopEdge,
   workbenchPaneTargets,
   workbenchSplitRatioCommands,
 } from "./DockviewLayoutAdapter";
@@ -132,6 +135,42 @@ describe("DockviewLayoutAdapter", () => {
       { group_id: "group-3", reference_group_id: "group-1", direction: "below" },
       { group_id: "group-4", reference_group_id: "group-2", direction: "below" },
     ]);
+  });
+
+  it("limits native window dragging to groups that touch the top edge", () => {
+    const root = makeMixedDepthThreeDocument().root;
+
+    expect(workbenchGroupTouchesTopEdge(root, "group-1")).toBe(true);
+    expect(workbenchGroupTouchesTopEdge(root, "group-2")).toBe(true);
+    expect(workbenchGroupTouchesTopEdge(root, "group-3")).toBe(false);
+    expect(workbenchGroupTouchesTopEdge(root, "group-4")).toBe(false);
+    expect(workbenchGroupTouchesLeftEdge(root, "group-1")).toBe(true);
+    expect(workbenchGroupTouchesLeftEdge(root, "group-3")).toBe(true);
+    expect(workbenchGroupTouchesLeftEdge(root, "group-2")).toBe(false);
+    expect(workbenchGroupTouchesLeftEdge(root, "group-4")).toBe(false);
+    expect(workbenchGroupOwnsWindowChrome(root, "group-3", null)).toBe(false);
+    expect(workbenchGroupOwnsWindowChrome(root, "group-3", "group-3")).toBe(true);
+  });
+
+  it("promotes a zoomed lower pane to the draggable window chrome", async () => {
+    const documentModel = makeTwoGroupDocument();
+    if (documentModel.root.kind !== "split") throw new Error("expected split root");
+    documentModel.root.direction = "vertical";
+    const { rerender } = render(<DockviewLayoutAdapter document={documentModel} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(2));
+    const lowerGroup = document.querySelector<HTMLElement>('[data-group-id="group-2"]');
+    const lowerEmptyHeader = lowerGroup?.querySelector<HTMLElement>(".dv-void-container");
+    expect(lowerEmptyHeader).not.toHaveAttribute("data-tauri-drag-region");
+
+    rerender(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        zoomed_group_id="group-2"
+      />,
+    );
+
+    await waitFor(() => expect(lowerEmptyHeader).toHaveAttribute("data-tauri-drag-region"));
   });
 
   it("projects canonical nested ratios through public group setSize calls", () => {
@@ -571,6 +610,18 @@ describe("DockviewLayoutAdapter", () => {
     if (!group) throw new Error("expected first workbench group");
     expect(within(group).getAllByRole("button").map((button) => button.getAttribute("aria-label")))
       .toEqual(["Open Surface", "Pane actions"]);
+
+    const tabs = group.querySelector(".dv-tabs-container");
+    const afterTabs = group.querySelector(".dv-left-actions-container");
+    const farEdge = group.querySelector(".dv-right-actions-container");
+    expect(tabs).not.toBeNull();
+    expect(afterTabs).toContainElement(within(group).getByRole("button", { name: "Open Surface" }));
+    expect(farEdge).toContainElement(within(group).getByRole("button", { name: "Pane actions" }));
+    expect(group.querySelector(".dv-void-container")).toHaveAttribute("data-tauri-drag-region");
+    expect(within(group).getByRole("button", { name: "Open Surface" }))
+      .not.toHaveAttribute("data-tauri-drag-region");
+    expect(within(group).getByRole("button", { name: "Pane actions" }))
+      .not.toHaveAttribute("data-tauri-drag-region");
 
     const paneActions = within(group).getByRole("button", { name: "Pane actions" });
     fireEvent.click(paneActions);

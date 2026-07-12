@@ -17,14 +17,12 @@ import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 type GridCardMode = "terminal" | "chat";
 
 export function agentsOverviewGridTemplateColumns(
-  mode: AgentsOverviewMode,
+  _mode: AgentsOverviewMode,
   tracks: readonly number[],
-  minimumTrackWidth: number,
+  _minimumTrackWidth: number,
 ): string {
   if (tracks.length <= 1) return "1fr";
-  return tracks.map((track) => mode === "grid"
-    ? `minmax(${minimumTrackWidth}px, ${track}fr)`
-    : `minmax(0, ${track}fr)`).join(" ");
+  return tracks.map((track) => `minmax(0, ${track}fr)`).join(" ");
 }
 
 function pruneRecordToIds<T>(record: Record<string, T>, allowedIds: Set<string>): Record<string, T> {
@@ -128,6 +126,7 @@ const AgentTerminalSlot = React.memo(function AgentTerminalSlot({
       visibility={visibility}
       renderState={renderState}
       requestedInteraction="interactive"
+      autoActivateWhenUnowned
       provider={provider}
       isMaximized={isMaximized}
       theme={theme}
@@ -229,10 +228,18 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const isMaximized = overviewLayout.presentationMode === "single";
   // User-forced stacking remains an explicit Grid affordance; Auto is always container-derived.
   const renderStacked = mode === "grid" && gridStacked && resizeType !== 'stack-exit';
-  const renderedColumnCount = renderStacked ? 1 : Math.max(1, overviewLayout.columns);
+  const persistedColumnCount = Math.max(
+    1,
+    Math.min(visibleAgents.length, manualLayout.column_tracks.length),
+  );
+  const renderedColumnCount = renderStacked
+    ? 1
+    : mode === "grid"
+      ? persistedColumnCount
+      : Math.max(1, overviewLayout.columns);
   const visibleColumnTracks = renderedColumnCount <= 1
     ? [1]
-    : mode === "grid" && manualLayout.column_tracks.length >= renderedColumnCount
+    : mode === "grid"
       ? manualLayout.column_tracks.slice(0, renderedColumnCount)
       : Array.from({ length: renderedColumnCount }, () => 1);
   const visibleRowCount = renderedColumnCount > 0
@@ -271,12 +278,12 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     setComposerFocusAgentId((current) => current === agentId ? null : current);
   };
 
-  const gridMinWidth = overviewLayout.requiresScroll
-    ? `${overviewLayout.contentWidth}px`
-    : '100%';
   const minimumGridTrackWidth = layoutAgents.some(({ cardMode }) => cardMode === "terminal")
     ? TERMINAL_CARD_FLOOR.width
     : CHAT_CARD_FLOOR.width;
+  const gridMinWidth = mode === "grid" && !isMaximized && renderedColumnCount <= 1
+    ? `${minimumGridTrackWidth}px`
+    : '100%';
   const gridTemplateColumns = (isMaximized || renderStacked)
     ? '1fr'
     : agentsOverviewGridTemplateColumns(mode, visibleColumnTracks, minimumGridTrackWidth);
@@ -284,11 +291,15 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const gridStyle: React.CSSProperties = {
     display: 'grid',
     gridTemplateColumns,
-    gridAutoRows: isMaximized ? '100%' : `${overviewLayout.cardHeight}px`,
+    gridAutoRows: isMaximized
+      ? '100%'
+      : mode === "grid"
+        ? `${manualLayout.row_height}px`
+        : `${overviewLayout.cardHeight}px`,
     gap: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
     background: 'transparent',
     padding: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
-    height: isMaximized ? '100%' : overviewLayout.requiresScroll ? `${overviewLayout.contentHeight}px` : '100%',
+    height: isMaximized ? '100%' : mode === "grid" ? 'auto' : '100%',
     minWidth: gridMinWidth,
   };
 
@@ -467,7 +478,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
 
       {/* Per-cell stack-exit handle: in stacked mode, drag a cell's right edge inward to exit.
           Use the same filter as the card render loop so handle positions align with visible rows. */}
-      {gridStacked && !isMaximized && (
+      {mode === "grid" && gridStacked && !isMaximized && (
         <>
           {visibleAgents
             .map((agent: AgentConfig, idx: number) => {
@@ -494,7 +505,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       )}
 
       {/* Global Track Resize Overlays (Gutters) */}
-      {!isMaximized && (
+      {mode === "grid" && !isMaximized && (
         <>
           {/* Vertical Gutters (Column Resizing) */}
           {!gridStacked && visibleColumnTracks.slice(0, -1).map((_weight, i) => {
@@ -525,7 +536,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
               data-resize-handle="v"
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
               style={{ 
-                top: renderStacked
+                top: mode === "grid"
                   ? `calc(${(i + 1) * manualLayout.row_height}px - 6px)`
                   : `calc(var(--density-grid-gap) + ${(i + 1) * overviewLayout.cardHeight}px + ${i} * var(--density-grid-gap) - 3px)`,
                 height: '12px',

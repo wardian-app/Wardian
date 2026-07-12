@@ -33,7 +33,7 @@ export type CoreSurfaceContribution = {
 };
 
 export const CORE_SURFACE_CONTRIBUTIONS: readonly CoreSurfaceContribution[] = Object.freeze([
-  { surface_type: "agents-overview", title: "Agents Overview", description: "Monitor active agents.", group: "Core views" },
+  { surface_type: "agents-overview", title: "Agents", description: "Monitor active agents.", group: "Core views" },
   { surface_type: "dashboard", title: "Dashboard", description: "Review habitat telemetry.", group: "Core views" },
   { surface_type: "queue", title: "Queue", description: "Review signals and action-needed work.", group: "Core views" },
   { surface_type: "graph", title: "Graph", description: "Explore agent relationships.", group: "Core views" },
@@ -148,7 +148,7 @@ function coreSurfaceDefinitions(
   return [
     surfaceDefinition({
       type: "agents-overview",
-      title: "Agents Overview",
+      title: "Agents",
       render_policy: "keep_alive",
       open_policy: "singleton",
       default_state: (): AgentsOverviewSurfaceState => ({ ...DEFAULT_AGENTS_OVERVIEW_STATE }),

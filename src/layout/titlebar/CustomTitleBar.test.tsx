@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CustomTitleBar } from "./CustomTitleBar";
 
@@ -41,17 +41,35 @@ describe("CustomTitleBar density", () => {
     expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("360px");
     expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("276px");
   });
+
+  it("reserves only the explicit window-control chrome when the roster is collapsed", () => {
+    const { container } = render(<CustomTitleBar {...titlebarProps} rightCollapsed />);
+    const titlebar = container.firstElementChild as HTMLElement;
+
+    expect(titlebar).toHaveAttribute("data-right-collapsed", "true");
+    expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("184px");
+  });
+
+  it("reserves macOS traffic lights and the sidebar toggle when the left pane is collapsed", () => {
+    const userAgent = vi.spyOn(window.navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    const { container } = render(<CustomTitleBar {...titlebarProps} leftCollapsed />);
+    const titlebar = container.firstElementChild as HTMLElement;
+
+    expect(titlebar).toHaveAttribute("data-platform", "mac");
+    expect(titlebar).toHaveAttribute("data-left-collapsed", "true");
+    expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("112px");
+    expect(screen.getByRole("button", { name: "Show Left Sidebar" }).parentElement)
+      .toHaveStyle({ paddingLeft: "72px" });
+    userAgent.mockRestore();
+  });
 });
 
 describe("CustomTitleBar navigation", () => {
-  it("keeps a quiet draggable center without fixed commands or global-view launchers", () => {
+  it("leaves the workbench center free for Dockview's real top-edge headers", () => {
     render(<CustomTitleBar {...titlebarProps} />);
 
-    const center = screen.getByTestId("titlebar-center");
-    expect(center).toHaveAttribute("data-navigation-mode", "workbench");
-    expect(center).toHaveAttribute("data-tauri-drag-region");
-    expect(center).toBeEmptyDOMElement();
-    expect(within(center).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("titlebar-center")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Quick Open" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Commands" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Grid" })).not.toBeInTheDocument();
@@ -74,7 +92,7 @@ describe("CustomTitleBar navigation", () => {
       />,
     );
 
-    expect(container.firstElementChild).toHaveAttribute("data-tauri-drag-region");
+    expect(container.firstElementChild).not.toHaveAttribute("data-tauri-drag-region");
     expect(screen.getByText("CPU 0.0%")).toBeInTheDocument();
     expect(screen.getByText("MEM 0MB")).toBeInTheDocument();
     expect(screen.getByText("0 Active")).toBeInTheDocument();

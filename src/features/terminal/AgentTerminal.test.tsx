@@ -644,6 +644,46 @@ describe("AgentTerminal scrollback", () => {
     expect(window.__wardianTerminalDebug?.snapshot("pane-provider-race")).toBeNull();
   });
 
+  it("does not mount a renderer when a delayed visible attach becomes hidden", async () => {
+    const providerGate = deferred<never[]>();
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "list_agents") {
+        return providerGate.promise;
+      }
+      return null;
+    });
+
+    const mounted = render(
+      <AgentTerminal
+        sessionId="provider-hide-race"
+        presentationId="pane-provider-hide-race"
+        visibility="visible"
+        renderState="mounted"
+        requestedInteraction="interactive"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_agents"));
+
+    mounted.rerender(
+      <AgentTerminal
+        sessionId="provider-hide-race"
+        presentationId="pane-provider-hide-race"
+        visibility="hidden"
+        renderState="suspended"
+        requestedInteraction="interactive"
+        theme="dark"
+      />,
+    );
+    await act(async () => {
+      providerGate.resolve([]);
+      await providerGate.promise;
+    });
+
+    expect(mockTerminal).not.toHaveBeenCalled();
+    expect(terminalRendererBudget.size("xterm")).toBe(0);
+  });
+
   async function assertFocusIsPassiveBeforeExplicitActivation(
     activation: "click" | "keyboard",
   ) {
@@ -733,6 +773,128 @@ describe("AgentTerminal scrollback", () => {
     "keeps DOM focus passive, then activates through the two-phase handshake by %s",
     assertFocusIsPassiveBeforeExplicitActivation,
   );
+
+  it("keeps an Agents terminal hidden until its unowned session is activated and fitted", async () => {
+    const activationAck = deferred<{
+      decision: {
+        status: "accepted";
+        reason: null;
+        runtime_generation: number;
+        lease_epoch: number;
+        owner_presentation_id: string;
+      };
+      broker_state: ReturnType<typeof modernBrokerState>;
+      snapshot: ReturnType<typeof modernSnapshot>;
+    }>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "agents-pane";
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "begin_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 1,
+            lease_epoch: 1,
+            owner_presentation_id: null,
+          },
+          activation_id: "agents-activation",
+          snapshot: modernSnapshot(),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        return activationAck.promise;
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("agents-pane", "agents-pane").presentation;
+      }
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="agents-pane"
+        provider="codex"
+        theme="dark"
+        autoActivateWhenUnowned
+      />,
+    );
+
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "ack_terminal_activation",
+      expect.anything(),
+    ));
+    expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+
+    activationAck.resolve({
+      decision: {
+        status: "accepted",
+        reason: null,
+        runtime_generation: 1,
+        lease_epoch: 1,
+        owner_presentation_id: "agents-pane",
+      },
+      broker_state: modernBrokerState("agents-pane"),
+      snapshot: modernSnapshot(),
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+    });
+    const latestFitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
+    expect(latestFitAddon.proposeDimensions).toHaveBeenCalled();
+  });
+
+  it("fits an unowned presentation locally instead of rendering it as a scaled mirror", async () => {
+    const unownedBroker = modernBrokerState();
+    unownedBroker.geometry = { cols: 240, rows: 80 };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "unowned-pane";
+      if (command === "register_terminal_presentation") {
+        const result = modernRegistrationResult(presentationId);
+        result.broker_state = unownedBroker;
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: unownedBroker, initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="unowned-pane"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+    });
+    expect(getLatestTerminalInstance().element.style.transform).toBe("");
+    expect(getLatestTerminalInstance().cols).toBe(80);
+    expect(getLatestTerminalInstance().rows).toBe(24);
+  });
 
   it("resyncs a restored hidden owner after its renderer mounts", async () => {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
@@ -827,7 +989,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("restores a budget-evicted owner without unregistering its presentation", async () => {
+  it("automatically restores a visible budget-evicted owner without unregistering its presentation", async () => {
     terminalRendererBudget.clear();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (
@@ -938,7 +1100,7 @@ describe("AgentTerminal scrollback", () => {
     for (let index = 0; index < 24; index += 1) {
       terminalRendererBudget.acquire("xterm", `other-${index}`, () => undefined);
     }
-    fireEvent.click(await screen.findByRole("button", { name: "Activate terminal renderer" }));
+    terminalRendererBudget.release("xterm", "other-0");
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
@@ -954,16 +1116,319 @@ describe("AgentTerminal scrollback", () => {
     );
   });
 
+  it("waits for nonzero measured bounds before automatically restoring an evicted renderer", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    let measuredWidth = 900;
+    let measuredHeight = 600;
+    rectSpy.mockImplementation(() => ({
+      width: measuredWidth,
+      height: measuredHeight,
+      top: 0,
+      left: 0,
+      right: measuredWidth,
+      bottom: measuredHeight,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect));
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="zero-bounds-restore" provider="codex" theme="dark" />);
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(1));
+
+      measuredWidth = 0;
+      measuredHeight = 0;
+      for (let index = 0; index < 24; index += 1) {
+        terminalRendererBudget.acquire("xterm", `zero-other-${index}`, () => undefined);
+      }
+      await act(async () => undefined);
+      expect(mockTerminal).toHaveBeenCalledTimes(1);
+
+      measuredWidth = 900;
+      measuredHeight = 600;
+      terminalRendererBudget.release("xterm", "zero-other-0");
+      act(() => resizeCallback?.([], {} as ResizeObserver));
+
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(2));
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("shows Retry only after automatic renderer restoration genuinely fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      render(<AgentTerminal sessionId="restore-retry" provider="codex" theme="dark" />);
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(1));
+
+      mockTerminal.mockImplementationOnce(() => {
+        throw new Error("renderer construction failed");
+      });
+      act(() => {
+        for (let index = 0; index < 24; index += 1) {
+          terminalRendererBudget.acquire("xterm", `retry-other-${index}`, () => undefined);
+        }
+        terminalRendererBudget.release("xterm", "retry-other-0");
+      });
+
+      const retry = await screen.findByRole("button", { name: "Retry" });
+      expect(screen.getByText("Terminal renderer failed to restore.")).toBeInTheDocument();
+
+      fireEvent.click(retry);
+
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument());
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("does not mount a hidden presentation and mounts it automatically once visible", async () => {
+    const view = render(
+      <AgentTerminal
+        sessionId="hidden-restore"
+        visibility="hidden"
+        renderState="suspended"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await act(async () => undefined);
+    expect(mockTerminal).not.toHaveBeenCalled();
+    expect(terminalRendererBudget.has("xterm", "hidden-restore")).toBe(false);
+
+    act(() => {
+      for (let index = 0; index < 24; index += 1) {
+        terminalRendererBudget.acquire("xterm", `hidden-other-${index}`, () => undefined);
+      }
+    });
+    await act(async () => undefined);
+    expect(mockTerminal).not.toHaveBeenCalled();
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="hidden-restore"
+        visibility="visible"
+        renderState="mounted"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    terminalRendererBudget.release("xterm", "hidden-other-0");
+
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(1));
+    expect(terminalRendererBudget.has("xterm", "hidden-restore")).toBe(true);
+  });
+
+  it("keeps more than the renderer budget of hidden cards from evicting one visible terminal", async () => {
+    render(
+      <>
+        {Array.from({ length: 30 }, (_, index) => (
+          <AgentTerminal
+            key={`hidden-${index}`}
+            sessionId={`hidden-budget-${index}`}
+            visibility="hidden"
+            renderState="suspended"
+            provider="codex"
+            theme="dark"
+          />
+        ))}
+        <AgentTerminal sessionId="visible-budget-owner" provider="codex" theme="dark" />
+      </>,
+    );
+
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(1));
+    expect(terminalRendererBudget.size("xterm")).toBe(1);
+    expect(terminalRendererBudget.has("xterm", "visible-budget-owner")).toBe(true);
+    for (let index = 0; index < 30; index += 1) {
+      expect(terminalRendererBudget.has("xterm", `hidden-budget-${index}`)).toBe(false);
+    }
+  });
+
+  it("does not churn competing visible AgentTerminal renderers when the xterm budget is full", async () => {
+    render(
+      <>
+        {Array.from({ length: 25 }, (_, index) => (
+          <AgentTerminal
+            key={index}
+            sessionId={`competing-visible-${index}`}
+            provider="codex"
+            theme="dark"
+          />
+        ))}
+      </>,
+    );
+
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(25));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(mockTerminal).toHaveBeenCalledTimes(25);
+    expect(terminalRendererBudget.size("xterm")).toBe(24);
+  });
+
+  it("cancels an in-flight restore when the presentation becomes hidden", async () => {
+    const restoreSnapshot = deferred<ReturnType<typeof modernSnapshot>>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: Record<string, unknown> } | undefined)?.request;
+      const presentationId = String(request?.presentation_id ?? "in-flight-pane");
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "request_terminal_snapshot") {
+        return restoreSnapshot.promise;
+      }
+      if (command === "update_terminal_presentation") {
+        const result = modernRegistrationResult("in-flight-pane");
+        return {
+          ...result,
+          presentation: {
+            ...result.presentation,
+            visibility: request?.visibility ?? "visible",
+            render_state: request?.render_state ?? "mounted",
+          },
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("in-flight-pane").presentation;
+      }
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      return undefined;
+    });
+
+    const view = render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="in-flight-pane"
+        visibility="visible"
+        renderState="mounted"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("register_terminal_presentation", expect.anything()));
+    mockInvoke.mockClear();
+
+    act(() => {
+      for (let index = 0; index < 24; index += 1) {
+        terminalRendererBudget.acquire("xterm", `in-flight-other-${index}`, () => undefined);
+      }
+      terminalRendererBudget.release("xterm", "in-flight-other-0");
+    });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("request_terminal_snapshot", expect.anything()));
+    const restoringTerminal = getLatestTerminalInstance();
+    expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="in-flight-pane"
+        visibility="hidden"
+        renderState="suspended"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    restoreSnapshot.resolve(modernSnapshot());
+
+    await waitFor(() => expect(restoringTerminal.dispose).toHaveBeenCalled());
+    await waitFor(() => {
+      const lifecycleUpdates = mockInvoke.mock.calls
+        .filter(([command]) => command === "update_terminal_presentation")
+        .map(([, payload]) => (payload as { request: { visibility: string; render_state: string } }).request);
+      expect(lifecycleUpdates[lifecycleUpdates.length - 1]).toMatchObject({
+        visibility: "hidden",
+        render_state: "suspended",
+      });
+      expect(lifecycleUpdates).not.toContainEqual(expect.objectContaining({ visibility: "visible", render_state: "mounted" }));
+    });
+  });
+
+  it("suspends the broker again when restoration fails after mounting the presentation", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: Record<string, unknown> } | undefined)?.request;
+      const presentationId = String(request?.presentation_id ?? "failure-after-mount");
+      if (command === "register_terminal_presentation") return modernRegistrationResult(presentationId);
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "request_terminal_snapshot") return modernSnapshot();
+      if (command === "update_terminal_presentation") {
+        const result = modernRegistrationResult("failure-after-mount");
+        return {
+          ...result,
+          presentation: {
+            ...result.presentation,
+            visibility: request?.visibility ?? "visible",
+            render_state: request?.render_state ?? "mounted",
+          },
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("failure-after-mount").presentation;
+      }
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      return undefined;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="failure-after-mount"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("register_terminal_presentation", expect.anything()));
+    mockInvoke.mockClear();
+    fitDimensions = null as never;
+
+    act(() => {
+      for (let index = 0; index < 24; index += 1) {
+        terminalRendererBudget.acquire("xterm", `failure-other-${index}`, () => undefined);
+      }
+      terminalRendererBudget.release("xterm", "failure-other-0");
+    });
+
+    await screen.findByRole("button", { name: "Retry" });
+    const renderStates = mockInvoke.mock.calls
+      .filter(([command]) => command === "update_terminal_presentation")
+      .map(([, payload]) => (payload as { request: { render_state: string } }).request.render_state);
+    expect(renderStates).toContain("mounted");
+    expect(renderStates[renderStates.length - 1]).toBe("suspended");
+  });
+
   it("reports mirror viewport geometry without resizing the native PTY", async () => {
+    fitDimensions = { cols: 100, rows: 30 };
+    const mirrorBroker = modernBrokerState("pane-owner");
+    mirrorBroker.geometry = { cols: 240, rows: 80 };
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       if (command === "register_terminal_presentation") {
-        return modernRegistrationResult(request?.presentation_id ?? "pane-mirror", "pane-owner");
+        const result = modernRegistrationResult(request?.presentation_id ?? "pane-mirror", "pane-owner");
+        result.broker_state = mirrorBroker;
+        result.initial_snapshot.geometry = mirrorBroker.geometry;
+        return result;
       }
       if (command === "subscribe_terminal_events") {
         return {
-          broker_state: modernBrokerState("pane-owner"),
-          initial_snapshot: modernSnapshot(),
+          broker_state: mirrorBroker,
+          initial_snapshot: { ...modernSnapshot(), geometry: mirrorBroker.geometry },
         };
       }
       if (command === "report_terminal_presentation_viewport") {
@@ -991,6 +1456,10 @@ describe("AgentTerminal scrollback", () => {
       "report_terminal_presentation_viewport",
       expect.anything(),
     ));
+    const mirrorRenderer = getLatestTerminalInstance();
+    expect(mirrorRenderer.cols).toBe(100);
+    expect(mirrorRenderer.rows).toBe(30);
+    expect(mirrorRenderer.element.style.transform).toBe("");
     expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
   });
 
@@ -2040,25 +2509,49 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("starts PTY polling even before fit reports a usable layout size", async () => {
-    rectSpy.mockReturnValue({
-      width: 0,
-      height: 0,
+  it("waits for usable bounds before mounting and then starts automatically", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    let width = 0;
+    let height = 0;
+    rectSpy.mockImplementation(() => ({
+      width,
+      height,
       top: 0,
       left: 0,
-      right: 0,
-      bottom: 0,
+      right: width,
+      bottom: height,
       x: 0,
       y: 0,
       toJSON: () => ({}),
-    } as DOMRect);
+    } as DOMRect));
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
 
-    render(<AgentTerminal sessionId="codex-early-poll" theme="dark" />);
+    try {
+      render(<AgentTerminal sessionId="codex-early-poll" theme="dark" />);
+      await act(async () => undefined);
+      expect(mockTerminal).not.toHaveBeenCalled();
+      expect(terminalRendererBudget.has("xterm", "codex-early-poll")).toBe(false);
 
-    await waitFor(() => {
-      const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
-    });
+      width = 900;
+      height = 600;
+      act(() => resizeCallback?.([], {} as ResizeObserver));
+
+      await waitFor(() => {
+        const instance = getLatestTerminalInstance();
+        expect(instance.write).toHaveBeenCalledWith("hello from codex\n", expect.any(Function));
+      });
+      expect(terminalRendererBudget.has("xterm", "codex-early-poll")).toBe(true);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
   });
 
   it("renders a small initial PTY tail before draining the full retained scrollback", async () => {
@@ -3371,6 +3864,75 @@ describe("AgentTerminal scrollback", () => {
 
       expect(querySnapshotOverlay()).toBeNull();
       expect(window.__wardianTerminalDebug?.snapshot("snap-overlay")?.renderer?.webglActive).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("refits a reused renderer and removes its stale snapshot before revealing it again", async () => {
+    const view = render(
+      <AgentTerminal
+        sessionId="snap-reveal"
+        theme="dark"
+        visibility="visible"
+        renderState="mounted"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("snap-reveal")?.renderer?.webglActive).toBe(true);
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+    });
+
+    const instance = getLatestTerminalInstance();
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = 320;
+    sourceCanvas.height = 200;
+    (instance.element as HTMLElement).appendChild(sourceCanvas);
+    const { spy } = stubCanvasContexts();
+
+    try {
+      act(() => {
+        __terminalTesting.demoteSessionToDom("snap-reveal");
+      });
+      expect(querySnapshotOverlay()).toBeTruthy();
+
+      view.rerender(
+        <AgentTerminal
+          sessionId="snap-reveal"
+          theme="dark"
+          visibility="hidden"
+          renderState="suspended"
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+        expect(instance.dispose).toHaveBeenCalled();
+        expect(querySnapshotOverlay()).toBeNull();
+      });
+
+      fitDimensions = { cols: 100, rows: 30 };
+      view.rerender(
+        <AgentTerminal
+          sessionId="snap-reveal"
+          theme="dark"
+          visibility="visible"
+          renderState="mounted"
+        />,
+      );
+
+      await waitFor(() => {
+        const revealedInstance = getLatestTerminalInstance();
+        const revealedFitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as {
+          proposeDimensions: ReturnType<typeof vi.fn>;
+        };
+        expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+        expect(querySnapshotOverlay()).toBeNull();
+        expect(revealedFitAddon.proposeDimensions).toHaveBeenCalled();
+        expect(revealedInstance).not.toBe(instance);
+        expect(revealedInstance.cols).toBe(100);
+        expect(revealedInstance.rows).toBe(30);
+      });
     } finally {
       spy.mockRestore();
     }

@@ -32,24 +32,29 @@ export function AppShell({
   return (
     <div
       data-testid="app-shell"
-      className="flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
+      className="app-shell relative flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
       style={{
         width: "var(--wardian-native-window-width, 100vw)",
         height: "var(--wardian-native-window-height, 100dvh)",
       }}
     >
-      {titlebar}
+      <div className="app-shell-titlebar" data-testid="app-shell-titlebar">
+        {titlebar}
+      </div>
       {status}
       {conflictDialog}
       <div
         aria-busy={contentBusy}
-        className="flex flex-1 overflow-hidden"
+        className="app-shell-content flex flex-1 overflow-hidden"
         data-testid="app-shell-content"
         inert={contentBusy ? true : undefined}
       >
         {leftRail}
         {leftPane}
-        <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
+        <main
+          className="app-shell-workbench flex-1 min-w-0 h-full flex flex-col overflow-hidden relative"
+          data-testid="app-shell-main"
+        >
           {mainContent}
           {mainOverlays}
         </main>

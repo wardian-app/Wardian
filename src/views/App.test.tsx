@@ -487,10 +487,13 @@ describe("Workbench persistence boot integration", () => {
     expect(mockInvoke).toHaveBeenCalledWith("get_workbench_boot_config", undefined);
     expect(mockInvoke).toHaveBeenCalledWith("load_workbench_state", undefined);
     expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
-    const titlebarCenter = screen.getByTestId("titlebar-center");
-    expect(titlebarCenter).toHaveAttribute("data-navigation-mode", "workbench");
-    expect(titlebarCenter).toHaveAttribute("data-tauri-drag-region");
-    expect(within(titlebarCenter).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("titlebar-center")).not.toBeInTheDocument();
+    const topHeaderDragRegion = document.querySelector<HTMLElement>(
+      ".dv-void-container[data-tauri-drag-region]",
+    );
+    expect(topHeaderDragRegion).not.toBeNull();
+    expect(topHeaderDragRegion && within(topHeaderDragRegion).queryByRole("button"))
+      .not.toBeInTheDocument();
     const cycle = new KeyboardEvent("keydown", {
       key: "Tab",
       ctrlKey: true,
@@ -555,10 +558,9 @@ describe("Workbench persistence boot integration", () => {
     expect(notice).toHaveAttribute("role", "status");
     expect(screen.getByTestId("app-shell")).toBeInTheDocument();
     expect(screen.getByTestId("workbench-host")).toBeInTheDocument();
-    const titlebarCenter = screen.getByTestId("titlebar-center");
-    expect(titlebarCenter).toHaveAttribute("data-navigation-mode", "workbench");
-    expect(titlebarCenter).toHaveAttribute("data-tauri-drag-region");
-    expect(within(titlebarCenter).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("titlebar-center")).not.toBeInTheDocument();
+    expect(document.querySelector(".wardian-workbench-safe-void"))
+      .toHaveAttribute("data-tauri-drag-region");
     const flaggedLegacyCycle = new KeyboardEvent("keydown", {
       key: "Tab",
       ctrlKey: true,
@@ -574,7 +576,7 @@ describe("Workbench persistence boot integration", () => {
     fireEvent.click(gridMode);
     await waitFor(() => expect(gridMode).toHaveAttribute("aria-pressed", "true"));
 
-    const overviewTab = screen.getByRole("tab", { name: "Agents Overview" });
+    const overviewTab = screen.getByRole("tab", { name: "Agents" });
     fireEvent.click(screen.getByTestId("sidebar-tab-workflows"));
     expect(overviewTab).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByTestId("workflows-surface")).not.toBeInTheDocument();
@@ -1942,7 +1944,7 @@ describe("Agent Watchlist Sidebar", () => {
     const sessionSurface = await screen.findByTestId("agent-session-surface");
     expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Agents Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Agents" })).toBeInTheDocument();
   });
 
   it("keeps command targets unchanged when a terminal receives focus", async () => {
@@ -2049,15 +2051,16 @@ describe("Agent Watchlist Sidebar", () => {
 // ── View Mode Toggle Tests ─────────────────────────────────────────────
 
 describe("Workbench surface navigation", () => {
-  it("keeps layout modes inside Agents Overview instead of the titlebar", async () => {
+  it("keeps Agents layout modes inside the surface instead of the titlebar", async () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
     const overview = screen.getByTestId("agents-overview-surface");
     expect(within(overview).getByText("Grid")).toBeInTheDocument();
-    const titlebar = screen.getByTestId("titlebar-center");
+    const titlebar = document.querySelector<HTMLElement>(".titlebar");
+    if (!titlebar) throw new Error("expected stable sidebar and window chrome");
     expect(within(titlebar).queryByRole("button", { name: "Dashboard" })).not.toBeInTheDocument();
-    expect(within(titlebar).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("titlebar-center")).not.toBeInTheDocument();
   });
 
   it("renders the graph view instead of the graph placeholder", async () => {
@@ -2103,14 +2106,14 @@ describe("Workbench surface navigation", () => {
     await openWorkbenchSurface("graph");
     expect(await screen.findByTestId("graph-view")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Agents Overview" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agents" }));
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
 
     await openWorkbenchSurface("garden");
     expect(await screen.findByTestId("garden-canvas")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Agents Overview" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agents" }));
     await screen.findByTestId("agent-grid");
     expect(screen.getByTestId("graph-view")).toBeInTheDocument();
     expect(screen.getByTestId("garden-canvas")).toBeInTheDocument();

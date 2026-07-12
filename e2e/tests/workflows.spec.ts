@@ -224,7 +224,7 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.getByTestId("titlebar-center");
+  const titlebar = page.locator(".titlebar");
   await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Blueprints" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Runs" })).toHaveCount(0);

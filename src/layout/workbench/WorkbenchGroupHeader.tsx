@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -9,6 +10,7 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { Ellipsis, Plus } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type WorkbenchPaneTarget = {
   group_id: string;
@@ -130,18 +132,73 @@ export type WorkbenchGroupHeaderProps = {
   group_id: string;
   pane_targets?: readonly WorkbenchPaneTarget[];
   is_zoomed?: boolean;
-  on_open_surface?: (groupId: string) => void;
   on_toggle_zoom?: (groupId: string) => void;
   on_split_group?: (groupId: string, direction: "horizontal" | "vertical") => void;
   on_close_group?: (groupId: string) => void;
   on_join_group?: (sourceGroupId: string, targetGroupId: string) => void;
 };
 
+export type WorkbenchNewSurfaceActionProps = {
+  group_id: string;
+  window_drag_region?: boolean;
+  window_left_clearance?: boolean;
+  window_controls_clearance?: boolean;
+  on_open_surface?: (groupId: string) => void;
+};
+
+/** Occupies Dockview's after-tabs slot and decorates only its empty top-edge space for Tauri. */
+export function WorkbenchNewSurfaceAction({
+  group_id,
+  window_drag_region = false,
+  window_left_clearance = false,
+  window_controls_clearance = false,
+  on_open_surface,
+}: WorkbenchNewSurfaceActionProps) {
+  const actionRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const header = actionRef.current?.closest<HTMLElement>(".dv-tabs-and-actions-container");
+    const emptyHeader = header?.querySelector<HTMLElement>(".dv-void-container");
+    if (!header || !emptyHeader) return;
+    if (window_drag_region) emptyHeader.setAttribute("data-tauri-drag-region", "");
+    if (window_left_clearance) header.dataset.leftChromeClearance = "true";
+    if (window_controls_clearance) header.dataset.windowControlsClearance = "true";
+
+    const toggleMaximize = (): void => {
+      if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+      void getCurrentWindow().toggleMaximize();
+    };
+    if (window_drag_region) emptyHeader.addEventListener("dblclick", toggleMaximize);
+    return () => {
+      if (window_drag_region) emptyHeader.removeAttribute("data-tauri-drag-region");
+      if (window_left_clearance) delete header.dataset.leftChromeClearance;
+      if (window_controls_clearance) delete header.dataset.windowControlsClearance;
+      if (window_drag_region) emptyHeader.removeEventListener("dblclick", toggleMaximize);
+    };
+  }, [window_controls_clearance, window_drag_region, window_left_clearance]);
+
+  return (
+    <div ref={actionRef} className="wardian-workbench-new-surface-action">
+      <button
+        type="button"
+        className="wardian-workbench-header-action"
+        aria-label="Open Surface"
+        title="Open Surface"
+        onClick={(event) => {
+          event.stopPropagation();
+          on_open_surface?.(group_id);
+        }}
+      >
+        <Plus aria-hidden="true" size={16} strokeWidth={1.75} />
+      </button>
+    </div>
+  );
+}
+
 export function WorkbenchGroupHeader({
   group_id,
   pane_targets = [],
   is_zoomed = false,
-  on_open_surface,
   on_toggle_zoom,
   on_split_group,
   on_close_group,
@@ -175,18 +232,6 @@ export function WorkbenchGroupHeader({
 
   return (
     <div className="wardian-workbench-group-actions">
-      <button
-        type="button"
-        className="wardian-workbench-header-action"
-        aria-label="Open Surface"
-        title="Open Surface"
-        onClick={(event) => {
-          event.stopPropagation();
-          on_open_surface?.(group_id);
-        }}
-      >
-        <Plus aria-hidden="true" size={16} strokeWidth={1.75} />
-      </button>
       <button
         type="button"
         className="wardian-workbench-header-action"

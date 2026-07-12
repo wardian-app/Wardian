@@ -178,9 +178,33 @@ test(
 
     await openWorkbenchSurface(driver, "agents-overview");
     await driver.wait(until.elementLocated(By.id(`agent-card-${SESSION_ID}`)), 20000);
-    await driver.wait(async () => (
-      await driver.findElements(By.css('[data-testid="agent-terminal-host"]'))
-    ).length >= 1, 20000);
+    const agentsTerminalHost = await driver.wait(until.elementLocated(By.css(
+      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+    )), 20000);
+    await driver.wait(until.elementIsVisible(agentsTerminalHost), 20000);
+    const initialAgentsFit = await waitFor("fitted Agents terminal first paint", 30000, async () => (
+      await driver.executeScript((host) => {
+        const rendererHost = host.firstElementChild;
+        const hostRect = host.getBoundingClientRect();
+        const rendererRect = rendererHost?.getBoundingClientRect();
+        const transform = rendererHost instanceof HTMLElement ? rendererHost.style.transform : "";
+        return {
+          ok: getComputedStyle(host).visibility === "visible"
+            && hostRect.width >= 10
+            && hostRect.height >= 10
+            && rendererRect !== undefined
+            && rendererRect.width >= 10
+            && rendererRect.height >= 10
+            && !transform.includes("scale("),
+          host_width: hostRect.width,
+          host_height: hostRect.height,
+          renderer_width: rendererRect?.width ?? 0,
+          renderer_height: rendererRect?.height ?? 0,
+          transform,
+        };
+      }, agentsTerminalHost)
+    ));
+    assert.equal(initialAgentsFit.transform, "", "Agents first paint must use a locally fitted renderer");
 
     await openWorkbenchSurface(driver, "agent-session", SESSION_ID);
     await waitForAgentSessionHost(driver);

@@ -95,7 +95,7 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("option", { name: "Agents Overview" }));
+    fireEvent.click(screen.getByRole("option", { name: "Agents" }));
     expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(1);
     expect(onClose).toHaveBeenCalledOnce();
 
@@ -108,7 +108,7 @@ describe("OpenSurfaceDialog", () => {
         on_close={onClose}
       />,
     );
-    fireEvent.click(screen.getByRole("option", { name: "Agents Overview" }));
+    fireEvent.click(screen.getByRole("option", { name: "Agents" }));
     expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(1);
 
     view.rerender(

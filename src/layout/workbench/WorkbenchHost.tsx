@@ -173,8 +173,12 @@ export function WorkbenchHost({
         render_home={(groupId) => (
           <HomeSurface
             group_id={groupId}
+            registry={registry}
             recently_closed={state.document.recently_closed}
             on_open_surface={openLauncher}
+            on_select_surface={(surfaceType, targetGroupId) => {
+              navigation.open({ surface_type: surfaceType, group_id: targetGroupId });
+            }}
             on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
           />
         )}

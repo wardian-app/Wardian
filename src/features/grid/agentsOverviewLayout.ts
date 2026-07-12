@@ -294,8 +294,13 @@ function chooseAutoCandidate(
   previousLayout: AgentsOverviewLayoutResult | null | undefined,
 ): AgentsOverviewGridCandidate | null {
   const previousOrientation = previousLayout?.candidate?.orientation;
+  // Auto has only two useful presentations for multiple agents: a broad grid
+  // or the focused singleton. A one-column multi-agent grid recreates the
+  // cramped stacked-card failure that Single is meant to avoid.
+  const candidates = generateAgentsOverviewCandidates({ agents, containerSize, gap })
+    .filter((candidate) => agents.length === 1 || candidate.columns >= 2);
   const best = selectBestAgentsOverviewCandidate(
-    generateAgentsOverviewCandidates({ agents, containerSize, gap }),
+    candidates,
     previousOrientation,
   );
   if (!best?.meetsHardFloor) return null;
@@ -304,6 +309,7 @@ function chooseAutoCandidate(
     previousLayout?.requestedMode !== "auto"
     || previousLayout.presentationMode !== "grid"
     || !previousLayout.candidate
+    || (agents.length > 1 && previousLayout.candidate.columns < 2)
   ) {
     return best;
   }

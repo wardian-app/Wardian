@@ -89,7 +89,7 @@ test.describe("responsive layout", () => {
     ))).toBe(Math.round(grown));
   });
 
-  test("Auto uses Single at the hard floor while explicit Grid remains scrollable", async ({ page }) => {
+  test("Auto uses Single at the hard floor while explicit Grid preserves its columns", async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 600 });
     await installResponsiveWorkbench(page, "auto");
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -103,8 +103,8 @@ test.describe("responsive layout", () => {
     await overview.getByRole("button", { name: "Grid", exact: true }).click();
     await expect(grid).toHaveAttribute("data-overview-mode", "grid");
     await expect(cards).toHaveCount(2);
-    await expect.poll(() => overview.getByTestId("agents-overview-container").evaluate(
-      (element) => element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight,
-    )).toBe(true);
+    await expect.poll(() => grid.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+    )).toBe(2);
   });
 });

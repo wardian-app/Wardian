@@ -1,12 +1,14 @@
 import React from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LeftSidebarControls } from "./LeftSidebarControls";
 import { RightWindowControls } from "./RightWindowControls";
 import type { AgentTelemetry, AgentConfig, AppTelemetry } from "../../types";
 
-const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
-const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
 const DEFAULT_LEFT_RAIL_WIDTH = 48;
+const MAC_COLLAPSED_LEFT_CHROME_WIDTH = 112;
+
+function isMacPlatform(): boolean {
+  return typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+}
 
 interface CustomTitleBarProps {
   workbenchBusy?: boolean;
@@ -24,26 +26,27 @@ interface CustomTitleBarProps {
 }
 
 export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
-  const leftWidth = DEFAULT_LEFT_RAIL_WIDTH + (props.leftCollapsed ? 0 : props.leftSidebarWidth);
-  const rightWidth = props.rightCollapsed ? 0 : props.rightSidebarWidth;
-
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isMac || !isTauri) return;
-    if ((e.target as HTMLElement).closest("button, input, select, a")) return;
-    getCurrentWindow().startDragging();
-  };
+  const isMac = isMacPlatform();
+  const leftWidth = props.leftCollapsed && isMac
+    ? MAC_COLLAPSED_LEFT_CHROME_WIDTH
+    : DEFAULT_LEFT_RAIL_WIDTH + (props.leftCollapsed ? 0 : props.leftSidebarWidth);
+  const rightWidth = props.rightCollapsed
+    ? (isMac ? 40 : 184)
+    : props.rightSidebarWidth;
 
   return (
     <div
       className="titlebar"
-      data-tauri-drag-region
-      onMouseDown={handleMouseDown}
+      data-platform={isMac ? "mac" : "desktop"}
+      data-left-collapsed={String(props.leftCollapsed)}
+      data-right-collapsed={String(props.rightCollapsed)}
       style={{ 
         "--titlebar-left-width": `${leftWidth}px`,
         "--titlebar-right-width": `${rightWidth}px`
       } as React.CSSProperties}
     >
       <LeftSidebarControls
+        macPlatform={isMac}
         disabled={props.workbenchBusy}
         leftCollapsed={props.leftCollapsed}
         setLeftCollapsed={props.setLeftCollapsed}
@@ -52,12 +55,6 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
         agents={props.agents}
         offAgentIds={props.offAgentIds}
         titlebarTelemetryVisible={props.titlebarTelemetryVisible}
-      />
-      <div
-        className="titlebar-drag-space"
-        data-testid="titlebar-center"
-        data-navigation-mode="workbench"
-        data-tauri-drag-region
       />
       <RightWindowControls
         rightCollapsed={props.rightCollapsed}

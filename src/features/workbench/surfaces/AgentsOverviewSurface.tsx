@@ -130,7 +130,7 @@ export function AgentsOverviewSurface({
       data-testid="agents-overview-surface"
     >
       <header className="flex flex-wrap items-center gap-2 border-b border-wardian-border bg-[var(--color-wardian-sidebar-secondary)] px-2 py-1.5">
-        <div aria-label="Agents Overview mode" className="flex items-center gap-1" role="group">
+        <div aria-label="Agents mode" className="flex items-center gap-1" role="group">
           {(["auto", "grid", "single"] as const).map((candidate) => (
             <button
               aria-pressed={state.mode === candidate}
@@ -146,7 +146,7 @@ export function AgentsOverviewSurface({
         <label className="ml-auto flex min-w-40 items-center gap-2 text-xs text-muted-neutral">
           <span>Filter agents</span>
           <input
-            aria-label="Filter Agents Overview"
+            aria-label="Filter Agents"
             className="min-w-0 flex-1 rounded border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-1 text-primary outline-none focus:border-[var(--color-wardian-accent)]"
             onChange={(event) => updateState({ search_query: event.target.value })}
             type="search"
