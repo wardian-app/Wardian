@@ -262,6 +262,11 @@ test(
     });
     assert.equal(agent.session_id, SESSION_ID);
 
+    // Agents intentionally claims an otherwise unowned runtime so its first
+    // terminal paint is interactive without a click. Close that presentation
+    // before this broker test establishes its own explicit owner/mirror pair.
+    await closeWorkbenchSurface(driver, "agents-overview");
+
     await openWorkbenchSurface(driver, {
       surface_type: "agent-session",
       resource_key: SESSION_ID,
