@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentConfig, AgentTelemetry, AgentsOverviewMode, CloneMode } from "../types";
 import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
@@ -8,6 +8,7 @@ import { useLayoutStore } from "../store/useLayoutStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useGridResize } from "../features/grid/useGridResize";
 import { useAgentsOverviewLayout } from "../features/grid/useAgentsOverviewLayout";
+import { MAX_XTERM_RENDERERS } from "../features/terminal/terminalRendererBudget";
 import {
   CHAT_CARD_FLOOR,
   TERMINAL_CARD_FLOOR,
@@ -217,13 +218,21 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     id: agent.session_id.toString(),
     cardMode: cardModeForAgent(agent.session_id.toString()),
   })), [cardModeOverrides, gridCardDisplayMode, renderableAgents]);
-  const { containerRef, layout: overviewLayout } = useAgentsOverviewLayout({
+  const {
+    containerRef,
+    containerSize: overviewContainerSize,
+    layout: overviewLayout,
+  } = useAgentsOverviewLayout({
     mode,
     agents: layoutAgents,
     focusedAgentId,
     recentAgentIds,
   });
-  const visibleAgentIds = new Set(overviewLayout.visibleAgentIds);
+  const autoLayoutMeasured = mode !== "auto"
+    || (overviewContainerSize.width > 0 && overviewContainerSize.height > 0);
+  const visibleAgentIds = new Set(
+    autoLayoutMeasured ? overviewLayout.visibleAgentIds : [],
+  );
   const visibleAgents = renderableAgents.filter((agent) => visibleAgentIds.has(agent.session_id.toString()));
   const isMaximized = overviewLayout.presentationMode === "single";
   // User-forced stacking remains an explicit Grid affordance; Auto is always container-derived.
@@ -247,6 +256,74 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     : 0;
   const visibleAgentIdKey = visibleAgents.map((agent) => agent.session_id.toString()).join('\0');
   const renderableAgentIdKey = renderableAgents.map((agent) => agent.session_id.toString()).join('\0');
+  const [viewportAgentIds, setViewportAgentIds] = useState<Set<string>>(() => new Set());
+
+  useLayoutEffect(() => {
+    const root = containerRef.current;
+    const grid = gridRef.current;
+    const logicalIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
+    if (!root || !grid || surfaceVisibility !== "visible") {
+      setViewportAgentIds(new Set());
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") {
+      setViewportAgentIds(new Set(Array.from(logicalIds).slice(0, MAX_XTERM_RENDERERS)));
+      return;
+    }
+
+    const observedCards = Array.from(
+      grid.querySelectorAll<HTMLElement>("[data-agent-grid-card-id]"),
+    ).filter((card) => logicalIds.has(card.dataset.agentGridCardId ?? ""));
+    const rootBounds = root.getBoundingClientRect();
+    const verticalMargin = 320;
+    const rootIsMeasured = rootBounds.width >= 10 && rootBounds.height >= 10;
+    const initiallyNearViewport = new Set(
+      (rootIsMeasured ? observedCards : [])
+        .filter((card) => {
+          const bounds = card.getBoundingClientRect();
+          return bounds.width >= 10
+            && bounds.height >= 10
+            && bounds.bottom >= rootBounds.top - verticalMargin
+            && bounds.top <= rootBounds.bottom + verticalMargin;
+        })
+        .map((card) => card.dataset.agentGridCardId ?? "")
+        .filter(Boolean),
+    );
+    const nearViewportAgentIds = new Set(initiallyNearViewport);
+    const publishMountedAgentIds = () => {
+      const next = new Set(
+        observedCards
+          .map((card) => card.dataset.agentGridCardId ?? "")
+          .filter((agentId) => nearViewportAgentIds.has(agentId))
+          .slice(0, MAX_XTERM_RENDERERS),
+      );
+      setViewportAgentIds((current) => {
+        if (
+          current.size === next.size
+          && Array.from(current).every((agentId) => next.has(agentId))
+        ) {
+          return current;
+        }
+        return next;
+      });
+    };
+    publishMountedAgentIds();
+
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const agentId = (entry.target as HTMLElement).dataset.agentGridCardId;
+        if (!agentId || !logicalIds.has(agentId)) continue;
+        if (entry.isIntersecting) nearViewportAgentIds.add(agentId);
+        else nearViewportAgentIds.delete(agentId);
+      }
+      publishMountedAgentIds();
+    }, {
+      root,
+      rootMargin: `${verticalMargin}px 0px`,
+    });
+    observedCards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [containerRef, surfaceVisibility, visibleAgentIdKey]);
 
   useEffect(() => {
     if (overviewLayout.focusedAgentId !== focusedAgentId) {
@@ -325,6 +402,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
         const isAgentVisible = surfaceVisibility === "visible" && visibleAgentIds.has(agentId);
+        const isAgentRendererActive = isAgentVisible && viewportAgentIds.has(agentId);
         const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
@@ -365,6 +443,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
         return (
           <div
             id={`agent-card-${agentId}`}
+            data-agent-grid-card-id={agentId}
             data-testid="agent-card"
             key={agentId}
             style={isAgentVisible ? undefined : { display: "none" }}
@@ -464,8 +543,8 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                     isMaximized={isAgentMaximized}
                     theme={theme}
                     workspacePath={visibleWorkspacePath}
-                    visibility={isAgentVisible ? "visible" : "hidden"}
-                    renderState={isAgentVisible ? "mounted" : "suspended"}
+                    visibility={isAgentRendererActive ? "visible" : "hidden"}
+                    renderState={isAgentRendererActive ? "mounted" : "suspended"}
                     onTerminalFocus={onTerminalFocus}
                     onTitleChange={handleTitleChange}
                   />

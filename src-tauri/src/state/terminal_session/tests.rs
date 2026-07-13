@@ -1595,6 +1595,36 @@ async fn stale_geometry_sequence_is_nonfatal_and_limits_depend_on_client_kind() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_geometry_ack_does_not_return_a_replay_snapshot() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer).await;
+    register_desktop(&broker, "owner").await;
+    let active = activate(&broker, "owner", generation, 0).await;
+    let current = active.broker_state.geometry;
+
+    let result = broker
+        .resize(TerminalGeometryRequest {
+            lease: TerminalLeaseIdentity {
+                session_id: "session-1".to_string(),
+                presentation_id: "owner".to_string(),
+                runtime_generation: generation,
+                lease_epoch: active.broker_state.lease_epoch,
+            },
+            geometry_sequence: 1,
+            geometry: current,
+        })
+        .await
+        .expect("unchanged resize acknowledgement");
+
+    assert_eq!(
+        result.decision.status,
+        TerminalLeaseDecisionStatus::Accepted
+    );
+    assert_eq!(result.geometry, current);
+    assert!(result.snapshot.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn termination_closes_consumers_and_uses_two_second_shutdown_budget() {
     let timer = Arc::new(ManualTimer::default());
     let (broker, generation) = start(timer.clone()).await;

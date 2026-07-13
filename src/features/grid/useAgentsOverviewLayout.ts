@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AGENTS_OVERVIEW_RESIZE_DEBOUNCE_MS,
   DEFAULT_AGENTS_OVERVIEW_GAP,
@@ -47,9 +47,20 @@ export function useAgentsOverviewLayout(
   const [containerSize, setContainerSize] = useState<AgentsOverviewContainerSize>(EMPTY_CONTAINER_SIZE);
   const previousLayoutRef = useRef<AgentsOverviewLayoutResult | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current;
-    if (!container || typeof ResizeObserver === "undefined") return;
+    if (!container) return;
+
+    const initialBounds = container.getBoundingClientRect();
+    const initialSize = normalizedSize({
+      width: initialBounds.width,
+      height: initialBounds.height,
+    });
+    if (initialSize.width > 0 && initialSize.height > 0) {
+      setContainerSize((current) => sizesMatch(current, initialSize) ? current : initialSize);
+    }
+
+    if (typeof ResizeObserver === "undefined") return;
 
     let timer: ReturnType<typeof setTimeout> | null = null;
     let pendingSize: AgentsOverviewContainerSize | null = null;

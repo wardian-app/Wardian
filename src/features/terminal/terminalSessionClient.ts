@@ -97,6 +97,17 @@ export class TerminalSessionClient {
     return this.#presentations.size;
   }
 
+  /** Refreshes a mounted view's callbacks without replaying broker registration. */
+  rebindPresentation(
+    presentationId: string,
+    callbacks: TerminalPresentationCallbacks,
+  ): boolean {
+    const binding = this.#presentations.get(presentationId);
+    if (!binding) return false;
+    binding.callbacks = callbacks;
+    return true;
+  }
+
   async registerPresentation(
     registration: TerminalPresentationRegistration,
     callbacks: TerminalPresentationCallbacks,

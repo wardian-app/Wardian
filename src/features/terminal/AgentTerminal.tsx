@@ -952,8 +952,8 @@ function planTerminalOutputChunk(
     focusReported: entry.opencodeFocusReported,
   });
 
-  entry.opencodeFocusReported = plan.focusReported;
   if (options?.queueCapabilityResponses !== false) {
+    entry.opencodeFocusReported = plan.focusReported;
     for (const input of plan.outgoingInputs) {
       queueAgentInput(sessionId, input);
     }
@@ -1253,6 +1253,7 @@ async function reportTerminalSize(
 // full content box, with FitAddon as the fallback if the internals move.
 function proposeTerminalDimensions(
   renderer: TerminalRendererEntry,
+  options?: { useRenderedRowGeometry?: boolean },
 ): { cols: number; rows: number } | null {
   try {
     const cell = (
@@ -1268,7 +1269,10 @@ function proposeTerminalDimensions(
     const hostHeight = renderer.host.clientHeight;
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
-      const rows = proposeTerminalRows(hostHeight, cellHeight, renderedTerminalRowHeight(renderer));
+      const renderedRowHeight = options?.useRenderedRowGeometry === false
+        ? null
+        : renderedTerminalRowHeight(renderer);
+      const rows = proposeTerminalRows(hostHeight, cellHeight, renderedRowHeight);
       if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
         return { cols, rows };
       }
@@ -1350,7 +1354,12 @@ async function fitTerminalToContainer(
   entry.lastMeasuredHostSize = { width, height };
 
   try {
-    const proposedDimensions = proposeTerminalDimensions(renderer);
+    const proposedDimensions = proposeTerminalDimensions(renderer, {
+      // A forced fit runs during mount/remount before the browser has painted
+      // fresh row DOM. Preserved rows can report stale heights and create a
+      // resize -> repaint -> resize cascade, so use xterm's cell metrics only.
+      useRenderedRowGeometry: !force,
+    });
     entry.fitCount += 1;
     if (!proposedDimensions) {
       return false;
@@ -1367,7 +1376,7 @@ async function fitTerminalToContainer(
     container.style.overflow = "hidden";
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
-    } else if (options?.reportUnchanged !== false) {
+    } else if (options?.reportUnchanged === true) {
       void reportTerminalSize(entry, nextCols, nextRows, { force: true });
     }
     return true;
@@ -1415,9 +1424,6 @@ function applyCanonicalGeometry(entry: TerminalSessionEntry, cols: number, rows:
   entry.applyingCanonicalGeometry = true;
   try {
     resizeParser(entry, cols, rows);
-    if (entry.renderer && (entry.renderer.term.cols !== cols || entry.renderer.term.rows !== rows)) {
-      entry.renderer.term.resize(cols, rows);
-    }
   } finally {
     entry.applyingCanonicalGeometry = false;
   }
@@ -1434,14 +1440,18 @@ async function applyBrokerSnapshot(
   entry.generation = snapshot.runtime_generation;
   entry.brokerDecoder = new TextDecoder();
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
-  resetTerminalOutputBuffers(entry);
   const state = decodeTerminalSnapshot(snapshot);
   if (state) {
-    await writeTerminalControl(entry.parser, state);
-    if (entry.renderer && !entry.disposed) {
-      await writeTerminalControl(entry.renderer.term, state);
-      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
-    }
+    // Restored snapshots must pass through the same provider capability and
+    // theme normalization as live output. Writing raw broker state here
+    // regressed Codex composer recoloring and color-probe filtering.
+    await writeTerminalOutputBatch(terminalKey, entry, [state], {
+      resetBeforeWrite: true,
+      recordOutput: false,
+      queueCapabilityResponses: false,
+    });
+  } else {
+    resetTerminalOutputBuffers(entry);
   }
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
@@ -1584,7 +1594,7 @@ async function writeTerminalOutputBatch(
     entry.recentNormalizedWritePreviews.splice(0, entry.recentNormalizedWritePreviews.length - 12);
   }
   if (options?.recordOutput !== false) {
-    useQueueStore.getState().appendAgentTerminalOutput(sessionId, batchedWrite, entry.provider);
+    useQueueStore.getState().appendAgentTerminalOutput(entry.sessionId, batchedWrite, entry.provider);
   }
   let scrollbackData = "";
   const viewportData = batchedWrite;
@@ -2784,13 +2794,9 @@ export const AgentTerminal = memo(function AgentTerminal({
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(state, session.presentationState);
             }
-            queueMicrotask(() => {
-              if (terminalRef.current) {
-                void fitTerminalToContainer(session, terminalRef.current, {
-                  force: true,
-                });
-              }
-            });
+            // Broker state changes do not change this presentation's DOM
+            // bounds. Fitting here created an owner feedback loop: resize ->
+            // broker snapshot/state -> forced unchanged fit -> resize.
           },
           onRegistrationRecovered: (result) => {
             if (!isMounted || session.disposed) {
@@ -2830,39 +2836,15 @@ export const AgentTerminal = memo(function AgentTerminal({
         };
         try {
           const registrationLifecycle = presentationLifecycleRef.current;
-          const result = await session.terminalClient.registerPresentation(
-            {
-              presentation_id: presentationId,
-              session_id: sessionId,
-              client_kind: "desktop",
-              desired_geometry: geometryForRenderer(renderer),
+          const rebound = session.terminalClient.rebindPresentation(presentationId, callbacks);
+          if (rebound) {
+            const reconciled = await session.terminalClient.updatePresentation(presentationId, {
+              desired_geometry:
+                session.presentationState?.desired_geometry ?? geometryForRenderer(renderer),
               visibility: registrationLifecycle.visibility,
               render_state: registrationLifecycle.renderState,
               requested_interaction: registrationLifecycle.requestedInteraction,
               observed_lease_epoch: session.brokerState?.lease_epoch ?? 0,
-            },
-            callbacks,
-          );
-          if (!isMounted) {
-            return;
-          }
-          session.presentationState = result.presentation;
-          session.brokerState = result.broker_state;
-          if (presentationObserverMountedRef.current) {
-            onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
-          }
-          const latestLifecycle = presentationLifecycleRef.current;
-          const lifecycleChangedDuringRegistration =
-            latestLifecycle.visibility !== registrationLifecycle.visibility ||
-            latestLifecycle.renderState !== registrationLifecycle.renderState ||
-            latestLifecycle.requestedInteraction !== registrationLifecycle.requestedInteraction;
-          if (lifecycleChangedDuringRegistration) {
-            const reconciled = await session.terminalClient.updatePresentation(presentationId, {
-              desired_geometry: result.presentation.desired_geometry,
-              visibility: latestLifecycle.visibility,
-              render_state: latestLifecycle.renderState,
-              requested_interaction: latestLifecycle.requestedInteraction,
-              observed_lease_epoch: result.broker_state.lease_epoch,
             });
             if (!isMounted) {
               return;
@@ -2870,13 +2852,59 @@ export const AgentTerminal = memo(function AgentTerminal({
             if (reconciled) {
               session.presentationState = reconciled.presentation;
               session.brokerState = reconciled.broker_state;
-              if (presentationObserverMountedRef.current) {
-                onPresentationStateChangeRef.current?.(
-                  reconciled.broker_state,
-                  reconciled.presentation,
-                );
+            }
+            await session.terminalClient.requestPresentationSnapshot(presentationId);
+          } else {
+            const result = await session.terminalClient.registerPresentation(
+              {
+                presentation_id: presentationId,
+                session_id: sessionId,
+                client_kind: "desktop",
+                desired_geometry: geometryForRenderer(renderer),
+                visibility: registrationLifecycle.visibility,
+                render_state: registrationLifecycle.renderState,
+                requested_interaction: registrationLifecycle.requestedInteraction,
+                observed_lease_epoch: session.brokerState?.lease_epoch ?? 0,
+              },
+              callbacks,
+            );
+            if (!isMounted) {
+              return;
+            }
+            session.presentationState = result.presentation;
+            session.brokerState = result.broker_state;
+            const latestLifecycle = presentationLifecycleRef.current;
+            const lifecycleChangedDuringRegistration =
+              latestLifecycle.visibility !== registrationLifecycle.visibility ||
+              latestLifecycle.renderState !== registrationLifecycle.renderState ||
+              latestLifecycle.requestedInteraction !== registrationLifecycle.requestedInteraction;
+            if (lifecycleChangedDuringRegistration) {
+              const reconciled = await session.terminalClient.updatePresentation(presentationId, {
+                desired_geometry: result.presentation.desired_geometry,
+                visibility: latestLifecycle.visibility,
+                render_state: latestLifecycle.renderState,
+                requested_interaction: latestLifecycle.requestedInteraction,
+                observed_lease_epoch: result.broker_state.lease_epoch,
+              });
+              if (!isMounted) {
+                return;
+              }
+              if (reconciled) {
+                session.presentationState = reconciled.presentation;
+                session.brokerState = reconciled.broker_state;
               }
             }
+          }
+          let currentBrokerState = session.brokerState;
+          const currentPresentationState = session.presentationState;
+          if (!currentBrokerState || !currentPresentationState) {
+            throw new Error("Terminal presentation registration did not return state");
+          }
+          if (presentationObserverMountedRef.current) {
+            onPresentationStateChangeRef.current?.(
+              currentBrokerState,
+              currentPresentationState,
+            );
           }
           const lifecycleBeforeActivation = presentationLifecycleRef.current;
           if (
@@ -2884,7 +2912,7 @@ export const AgentTerminal = memo(function AgentTerminal({
             lifecycleBeforeActivation.visibility === "visible" &&
             lifecycleBeforeActivation.renderState === "mounted" &&
             lifecycleBeforeActivation.requestedInteraction === "interactive" &&
-            session.brokerState.owner_presentation_id === null
+            currentBrokerState.owner_presentation_id === null
           ) {
             const activation = await session.terminalClient.activate(presentationId);
             if (!isMounted) {
@@ -2892,13 +2920,14 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             if (activation.ack) {
               session.brokerState = activation.ack.broker_state;
+              currentBrokerState = activation.ack.broker_state;
             }
           }
           const activeLifecycle = presentationLifecycleRef.current;
           if (
             activeLifecycle.renderState === "mounted" &&
-            session.presentationState.requires_resync &&
-            session.brokerState.owner_presentation_id === presentationId
+            currentPresentationState.requires_resync &&
+            currentBrokerState.owner_presentation_id === presentationId
           ) {
             await session.terminalClient.resyncOwner(presentationId);
           }
@@ -2967,7 +2996,10 @@ export const AgentTerminal = memo(function AgentTerminal({
                 // renderer is live — otherwise the terminal keeps stale columns
                 // and renders narrow until the user manually resizes the window.
                 if (!hadWebgl && activeRenderer.webglAddon) {
-                  requestAnimationFrame(() => void checkSizing({ force: true }));
+                  requestAnimationFrame(() => void checkSizing({
+                    force: true,
+                    reportUnchanged: false,
+                  }));
                 }
               } else if (!visibilityDemoteTimer) {
                 // Debounced: drag, maximize, and view-switch churn briefly
@@ -2989,12 +3021,17 @@ export const AgentTerminal = memo(function AgentTerminal({
         // synced to the settled measurement even when the renderer already
         // matches it (e.g. restored agents whose PTY opened at a stale size) —
         // otherwise the terminal only converges on the first manual resize.
-        setTimeout(() => void checkSizing({ force: true }), 50);
-        setTimeout(() => void checkSizing({ force: true }), 300);
+        setTimeout(() => void checkSizing({ force: true, reportUnchanged: false }), 50);
+        // One settled unchanged report is sufficient to synchronize a PTY
+        // that happened to start at the renderer's already-correct geometry.
+        setTimeout(() => void checkSizing({ force: true, reportUnchanged: true }), 300);
         // Web/custom terminal fonts can finish loading after mount, changing the
         // cell metrics; re-fit once they're ready so columns don't stay stale.
         if (typeof document !== "undefined" && document.fonts?.ready) {
-          void document.fonts.ready.then(() => checkSizing({ force: true }));
+          void document.fonts.ready.then(() => checkSizing({
+            force: true,
+            reportUnchanged: false,
+          }));
         }
 
         resizeObserver = new ResizeObserver(() => {
@@ -3066,9 +3103,6 @@ export const AgentTerminal = memo(function AgentTerminal({
       }
       xtermRef.current = null;
       fitAddonRef.current = null;
-      if (entry && !entry.legacyMode) {
-        void entry.terminalClient.unregisterPresentation(presentationId).catch(() => undefined);
-      }
     };
   }, [
     performFit,
@@ -3082,6 +3116,16 @@ export const AgentTerminal = memo(function AgentTerminal({
     terminalKey,
     workspacePath,
   ]);
+
+  // Renderer revisions are presentation-internal (for example viewport
+  // suspend/resume) and must not unregister the broker binding. Only an actual
+  // component identity change or unmount releases the presentation.
+  useEffect(() => () => {
+    const entry = terminalSessionMap.get(terminalKey);
+    if (entry && !entry.legacyMode) {
+      void entry.terminalClient.unregisterPresentation(presentationId).catch(() => undefined);
+    }
+  }, [presentationId, sessionId, terminalKey]);
 
   useEffect(() => {
     const entry = terminalSessionMap.get(terminalKey);

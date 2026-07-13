@@ -2300,18 +2300,21 @@ impl TerminalSessionActor {
             ));
         }
         let geometry = clamp_geometry(request.geometry, client_kind);
+        let geometry_changed = geometry != self.geometry;
         self.commit_geometry(geometry, request.geometry_sequence)
             .await?;
         if let Some(record) = self.presentations.get_mut(&request.lease.presentation_id) {
             record.last_geometry_sequence = request.geometry_sequence;
             record.state.desired_geometry = Some(geometry);
         }
-        let snapshot = self.snapshot();
         Ok(TerminalGeometryCommitResult {
             decision: self.accepted_decision(),
             geometry_sequence: request.geometry_sequence,
             geometry: self.geometry,
-            snapshot: Some(snapshot),
+            // An unchanged viewport report must not force every presentation
+            // to reset and replay a full terminal snapshot. The caller already
+            // has the current frame and no canonical geometry changed.
+            snapshot: geometry_changed.then(|| self.snapshot()),
         })
     }
 

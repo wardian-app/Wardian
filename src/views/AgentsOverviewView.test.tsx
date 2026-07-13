@@ -166,6 +166,113 @@ beforeEach(() => {
 });
 
 describe('AgentsOverviewView maximize behavior', () => {
+  it('mounts terminal renderers only for cards near the Agents scroll viewport', async () => {
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+    let observerCallback: IntersectionObserverCallback | null = null;
+    const observedCards = new Map<string, Element>();
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+      private readonly callback: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+        observerCallback = callback;
+      }
+      observe(target: Element) {
+        const agentId = (target as HTMLElement).dataset.agentGridCardId;
+        if (agentId) observedCards.set(agentId, target);
+        this.callback([{
+          isIntersecting: true,
+          target,
+        } as IntersectionObserverEntry], this);
+      }
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    } as unknown as typeof IntersectionObserver;
+
+    const manyAgents = Array.from({ length: 30 }, (_, index): AgentConfig => ({
+      session_id: `agent-${index + 1}`,
+      session_name: `Agent ${index + 1}`,
+      agent_class: 'Coder',
+      folder: 'C:/project',
+      is_off: false,
+    }));
+
+    try {
+      renderGrid(null, manyAgents);
+
+      await waitFor(() => {
+        const latestProps = new Map<string, {
+          visibility: 'visible' | 'hidden';
+          renderState: 'mounted' | 'suspended';
+        }>();
+        for (const [props] of terminalRenderSpy.mock.calls) {
+          latestProps.set(props.sessionId, props);
+        }
+        expect(Array.from(latestProps.values()).filter(
+          ({ renderState }) => renderState === 'mounted',
+        )).toHaveLength(24);
+        expect(latestProps.get('agent-25')).toMatchObject({
+          visibility: 'hidden',
+          renderState: 'suspended',
+        });
+      });
+
+      const firstCard = observedCards.get('agent-1');
+      if (!observerCallback || !firstCard) throw new Error('expected viewport observer');
+      act(() => observerCallback!([{
+        isIntersecting: false,
+        target: firstCard,
+      } as IntersectionObserverEntry], {} as IntersectionObserver));
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(latestProps.get('agent-1')).toMatchObject({ renderState: 'suspended' });
+        expect(latestProps.get('agent-25')).toMatchObject({ renderState: 'mounted' });
+      });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
+  it('keeps every renderer suspended while the Dockview viewport has zero geometry', async () => {
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    } as unknown as typeof IntersectionObserver;
+
+    try {
+      renderGrid(null, Array.from({ length: 30 }, (_, index): AgentConfig => ({
+        session_id: `zero-agent-${index + 1}`,
+        session_name: `Agent ${index + 1}`,
+        agent_class: 'Coder',
+        folder: 'C:/project',
+        is_off: false,
+      })));
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(Array.from(latestProps.values()).filter(
+          ({ renderState }) => renderState === 'mounted',
+        )).toHaveLength(0);
+      });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
   it('derives stable terminal presentation IDs from the surface and agent IDs', () => {
     renderGrid(null, agents);
 
@@ -294,7 +401,7 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
   });
 
-  it('keeps terminal panes memoized when only card header state changes', () => {
+  it('keeps terminal panes memoized when only card header state changes', async () => {
     const stableProps = {
       surfaceId: 'overview-surface',
       mode: 'grid' as const,
@@ -333,7 +440,12 @@ describe('AgentsOverviewView maximize behavior', () => {
       onTerminalFocus: vi.fn(),
     };
     const { rerender } = render(<AgentsOverviewView {...stableProps} />);
-    expect(terminalRenderSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const latestProps = new Map<string, { renderState: string }>();
+      for (const [props] of terminalRenderSpy.mock.calls) latestProps.set(props.sessionId, props);
+      expect(latestProps.get('agent-1')?.renderState).toBe('mounted');
+      expect(latestProps.get('agent-2')?.renderState).toBe('mounted');
+    });
 
     terminalRenderSpy.mockClear();
     rerender(
