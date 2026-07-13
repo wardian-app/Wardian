@@ -23,6 +23,7 @@ import { useWorkbenchCommands } from "../../features/workbench/useWorkbenchComma
 import type { WorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import {
   DockviewLayoutAdapter,
+  type WorkbenchPanelRendererPolicy,
   type WorkbenchSurfaceRenderer,
   type WorkbenchSurfaceTitle,
 } from "./DockviewLayoutAdapter";
@@ -140,7 +141,7 @@ export function WorkbenchHost({
     }]).accepted;
   }, [store]);
 
-  const renderSurface = render_surface ?? ((surface) => {
+  const defaultRenderSurface = useCallback<WorkbenchSurfaceRenderer>((surface) => {
     const presentation = registry.presentation(surface);
     return (
       <section className="wardian-workbench-placeholder">
@@ -148,8 +149,18 @@ export function WorkbenchHost({
         <p>This registered surface will adopt its existing Wardian view in the migration phase.</p>
       </section>
     );
-  });
-  const titleSurface = surface_title ?? ((surface) => registry.presentation(surface).title);
+  }, [registry]);
+  const defaultTitleSurface = useCallback<WorkbenchSurfaceTitle>(
+    (surface) => registry.presentation(surface).title,
+    [registry],
+  );
+  const rendererPolicy = useCallback<WorkbenchPanelRendererPolicy>((surface) => (
+      registry.get(surface.surface_type)?.render_policy === "recreate_from_state"
+        ? "onlyWhenVisible" as const
+        : "always" as const
+    ), [registry]);
+  const renderSurface = render_surface ?? defaultRenderSurface;
+  const titleSurface = surface_title ?? defaultTitleSurface;
 
   return (
     <div
@@ -167,9 +178,7 @@ export function WorkbenchHost({
         zoomed_group_id={state.zoomed_group_id}
         render_surface={renderSurface}
         surface_title={titleSurface}
-        renderer_policy={(surface) => registry.get(surface.surface_type)?.render_policy === "recreate_from_state"
-          ? "onlyWhenVisible"
-          : "always"}
+        renderer_policy={rendererPolicy}
         render_home={(groupId) => (
           <HomeSurface
             group_id={groupId}

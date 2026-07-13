@@ -107,6 +107,31 @@ describe("DockviewLayoutAdapter", () => {
     );
   });
 
+  it("recreates a canonical empty group after Dockview removes its final panel", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const initial = makeSingleGroupDocument([surface]);
+    const closed = apply(initial, { type: "close_surface", surface_id: surface.surface_id });
+    const renderHome = (groupId: string) => (
+      <div data-testid="canonical-empty-home" data-group-id={groupId}>
+        <h2>Choose a surface</h2>
+      </div>
+    );
+    const { rerender } = render(
+      <DockviewLayoutAdapter document={initial} render_home={renderHome} />,
+    );
+
+    await screen.findByRole("tab", { name: /agents overview/i });
+    rerender(<DockviewLayoutAdapter document={closed} render_home={renderHome} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(1));
+    const group = screen.getByTestId("workbench-group");
+    expect(group).toHaveAttribute("data-group-id", "group-1");
+    expect(within(group).queryAllByRole("tab")).toHaveLength(0);
+    expect(within(group).getByRole("heading", { name: "Choose a surface" })).toBeVisible();
+    expect(within(group).getByRole("button", { name: "Open Surface" })).toBeVisible();
+    expect(within(group).getByRole("button", { name: "Pane actions" })).toBeVisible();
+  });
+
   it("requests recovery only for canonical panels removed outside projection", () => {
     const documentModel = makeTwoGroupDocument();
     expect(shouldRecoverUnexpectedPanelRemoval(documentModel, "surface-1", false)).toBe(true);

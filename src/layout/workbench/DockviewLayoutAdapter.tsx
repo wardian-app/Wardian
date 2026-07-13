@@ -93,6 +93,8 @@ type AdapterRuntime = Pick<
   | "on_join_group"
   | "render_home"
 > & {
+  render_surface?: WorkbenchSurfaceRenderer;
+  surface_title?: WorkbenchSurfaceTitle;
   zoomed_group_id: string | null;
   on_close_surface: (surfaceId: string) => void;
   on_move_surface: (surfaceId: string, targetGroupId: string) => void;
@@ -466,7 +468,9 @@ function DockviewSurfacePanel({ params }: IDockviewPanelProps<WorkbenchPanelPara
         : { "data-resource-key": surface.resource_key })}
       className="wardian-workbench-surface-panel"
     >
-      {params.render_surface?.(surface, { visible }) ?? surface.surface_type}
+      {runtime.render_surface?.(surface, { visible })
+        ?? params.render_surface?.(surface, { visible })
+        ?? surface.surface_type}
     </div>
   );
 }
@@ -477,7 +481,7 @@ function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<Workbench
   return (
     <WorkbenchTab
       surface={params.surface}
-      title={params.title}
+      title={runtime.surface_title?.(params.surface) ?? params.title}
       group_id={groupId}
       pane_targets={workbenchPaneTargets(runtime.document.root, groupId)}
       on_close={() => runtime.on_close_surface(params.surface.surface_id)}
@@ -687,6 +691,12 @@ function reconcileDockview(
     if (!(group.id in document.groups)) api.removeGroup(group);
   }
 
+  // Dockview removes a group's DOM node when its final panel is removed. The
+  // canonical Wardian group still exists and must own its empty-surface
+  // launcher, header actions, and routing context rather than falling through
+  // to Dockview's container-level watermark.
+  ensureGroups(api, document.root, false);
+
   projectWorkbenchGroupSizes(api, document.root);
 
   for (const groupId of groupIdsInTreeOrder(document.root)) {
@@ -868,8 +878,21 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   const pendingCloseFocusRef = useRef<{ surface_id: string; group_id: string } | null>(null);
   const documentRef = useRef(document);
   const onCommandRef = useRef(on_command);
+  const renderSurfaceRef = useRef(render_surface);
+  const surfaceTitleRef = useRef(surface_title);
   documentRef.current = document;
   onCommandRef.current = on_command;
+  renderSurfaceRef.current = render_surface;
+  surfaceTitleRef.current = surface_title;
+
+  const renderSurfaceProxy = useCallback<WorkbenchSurfaceRenderer>(
+    (surface, lifecycle) => renderSurfaceRef.current?.(surface, lifecycle),
+    [],
+  );
+  const surfaceTitleProxy = useCallback<WorkbenchSurfaceTitle>(
+    (surface) => surfaceTitleRef.current?.(surface) ?? surfaceTitle(surface),
+    [],
+  );
 
   const requestCanonicalReconcile = useCallback(() => {
     if (reconcileScheduledRef.current) return;
@@ -900,6 +923,8 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
 
   const runtime = useMemo<AdapterRuntime>(() => ({
     document,
+    render_surface,
+    surface_title,
     on_open_surface: props.on_open_surface,
     on_toggle_zoom: props.on_toggle_zoom,
     on_split_group: props.on_split_group,
@@ -926,6 +951,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   }), [
     document,
     emitCommand,
+    render_surface,
     props.on_close_group,
     props.on_join_group,
     props.on_open_surface,
@@ -934,6 +960,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     props.on_toggle_zoom,
     props.render_home,
     requestSurfaceClose,
+    surface_title,
     zoomed_group_id,
   ]);
 
@@ -953,8 +980,8 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       reconcileDockview(
         api,
         document,
-        render_surface,
-        surface_title,
+        renderSurfaceProxy,
+        surfaceTitleProxy,
         renderer_policy,
         expectedMovesRef.current,
         transaction,
@@ -966,7 +993,16 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     } finally {
       releaseProjectionGuard();
     }
-  }, [api, document, reconcileNonce, render_surface, renderer_policy, safe_mode, surface_title, zoomed_group_id]);
+  }, [
+    api,
+    document,
+    reconcileNonce,
+    renderSurfaceProxy,
+    renderer_policy,
+    safe_mode,
+    surfaceTitleProxy,
+    zoomed_group_id,
+  ]);
 
   useLayoutEffect(() => {
     const pending = pendingCloseFocusRef.current;

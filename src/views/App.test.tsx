@@ -607,7 +607,7 @@ describe("Workbench persistence boot integration", () => {
     }
   });
 
-  it("routes roster Open and Open to Side into Agent Session surfaces", async () => {
+  it("reveals roster agents in Agents while keeping Open and Open to Side explicit", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const defaultInvoke = mockInvoke.getMockImplementation();
     mockInvoke.mockImplementation((command, args) => {
@@ -645,31 +645,15 @@ describe("Workbench persistence boot integration", () => {
     });
 
     fireEvent.doubleClick(betaRow);
-    const sessionSurface = await screen.findByTestId("agent-session-surface");
-    const openedSessionTab = await screen.findByRole("tab", { name: "Beta" });
-    await waitFor(() => expect(openedSessionTab).toHaveAttribute("aria-selected", "true"));
-    expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
-    expect(openedSessionTab).toHaveAttribute(
-      "data-resource-key",
-      "agent-2",
-    );
-    expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(1);
-
-    fireEvent.doubleClick(betaRow);
     await waitFor(() => {
-      expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(1);
+      expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "true");
+      expect(betaRow).toHaveAttribute("data-selected", "true");
     });
+    expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
 
-    const sessionTab = document.querySelector<HTMLElement>(
-      '[role="tab"][data-surface-type="agent-session"][data-resource-key="agent-2"]',
-    );
-    if (!sessionTab) throw new Error("Agent Session tab not found");
-    sessionTab.focus();
-    fireEvent.keyDown(sessionTab, { key: "Delete" });
-    await waitFor(() => expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument());
-    expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
-
-    fireEvent.doubleClick(betaRow);
+    fireEvent.contextMenu(betaRow);
+    fireEvent.click(within(screen.getByTestId("agent-open-context-menu"))
+      .getByRole("button", { name: "Open" }));
     await screen.findByTestId("agent-session-surface");
 
     fireEvent.contextMenu(betaRow);
@@ -1927,7 +1911,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("opens another agent in its own surface without repurposing the overview", async () => {
+  it("reveals another agent in the existing Agents surface without creating a tab", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     render(<App />);
 
@@ -1941,10 +1925,12 @@ describe("Agent Watchlist Sidebar", () => {
 
     fireEvent.doubleClick(betaWatchlistRow);
 
-    const sessionSurface = await screen.findByTestId("agent-session-surface");
-    expect(within(sessionSurface).getByRole("heading", { name: "Beta" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Beta" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Agents" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "true");
+      expect(betaWatchlistRow).toHaveAttribute("data-selected", "true");
+    });
+    expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
+    expect(document.getElementById("agent-card-agent-2")).toBeVisible();
   });
 
   it("keeps command targets unchanged when a terminal receives focus", async () => {

@@ -88,6 +88,8 @@ interface AgentWatchlistProps {
   onOpenAgent?: (agentId: string) => void;
   /** Opens the agent in a new workbench group beside the current one. */
   onOpenAgentToSide?: (agentId: string) => void;
+  /** Selects and reveals the agent in the existing Agents surface. */
+  onRevealAgent?: (agentId: string) => void;
   /** @deprecated Use onOpenAgent. Retained for the legacy navigation flag path. */
   onAgentClick?: (agentId: string) => void;
   onRename: (agentId: string, newName: string) => Promise<void>;
@@ -134,6 +136,7 @@ export default function AgentWatchlist({
   onSelectAgent,
   onOpenAgent,
   onOpenAgentToSide,
+  onRevealAgent,
   onAgentClick,
   onRename,
   onReorderAgents,
@@ -207,6 +210,7 @@ export default function AgentWatchlist({
   // Navigation is deliberately separate from roster targeting. The deprecated
   // alias keeps the flag-off shell working while callers move to workbench tabs.
   const openAgent = onOpenAgent ?? onAgentClick;
+  const revealAgent = onRevealAgent ?? onAgentClick ?? onOpenAgent;
 
   // ── Load watchlists is now handled in App.tsx ──────────────────────────
 
@@ -800,13 +804,13 @@ export default function AgentWatchlist({
         onDoubleClick={(e) => {
           e.stopPropagation();
           if (wasDragging.current || e.ctrlKey || e.metaKey || e.shiftKey) return;
-          openAgent?.(agentId);
+          revealAgent?.(agentId);
         }}
         onKeyDown={(e) => {
           if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
           e.preventDefault();
           e.stopPropagation();
-          openAgent?.(agentId);
+          revealAgent?.(agentId);
         }}
         onContextMenu={(e) => handleContextMenu(e, agentId)}
         tabIndex={0}

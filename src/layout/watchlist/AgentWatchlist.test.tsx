@@ -24,6 +24,7 @@ describe('AgentWatchlist', () => {
   const mockOnSelectAgent = vi.fn();
   const mockOnOpenAgent = vi.fn();
   const mockOnOpenAgentToSide = vi.fn();
+  const mockOnRevealAgent = vi.fn();
   const mockOnAgentClick = vi.fn();
   const mockOnRename = vi.fn(async () => {});
   const mockOnReorderAgents = vi.fn();
@@ -70,6 +71,7 @@ describe('AgentWatchlist', () => {
     onSelectionChange: mockOnSelectionChange,
     onOpenAgent: mockOnOpenAgent,
     onOpenAgentToSide: mockOnOpenAgentToSide,
+    onRevealAgent: mockOnRevealAgent,
     onAgentClick: mockOnAgentClick,
     onRename: mockOnRename,
     onReorderAgents: mockOnReorderAgents,
@@ -182,23 +184,25 @@ describe('AgentWatchlist', () => {
     expect(mockOnAgentClick).not.toHaveBeenCalled();
   });
 
-  it('opens an agent on an unmodified double-click without using the legacy callback', () => {
+  it('reveals an agent on an unmodified double-click without opening a tab', () => {
     render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
     const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
 
     fireEvent.doubleClick(alphaRow);
 
-    expect(mockOnOpenAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnAgentClick).not.toHaveBeenCalled();
   });
 
-  it('opens the focused agent with Enter without changing roster selection', () => {
+  it('reveals the focused agent with Enter without opening a tab', () => {
     render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
     const alphaRow = screen.getByLabelText('Agent Alpha');
 
     fireEvent.keyDown(alphaRow, { key: 'Enter' });
 
-    expect(mockOnOpenAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnSelectAgent).not.toHaveBeenCalled();
     expect(mockOnSelectionChange).not.toHaveBeenCalled();
   });
@@ -227,6 +231,7 @@ describe('AgentWatchlist', () => {
         {...defaultProps}
         onOpenAgent={undefined}
         onOpenAgentToSide={undefined}
+        onRevealAgent={undefined}
       />,
     );
 

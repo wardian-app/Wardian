@@ -941,6 +941,47 @@ function AppBody() {
     });
   }, [workbenchNavigation]);
 
+  const revealAgentInOverview = useCallback((sessionId: string) => {
+    setSelectedAgentIds(new Set([sessionId]));
+    const store = workbenchPersistence.store;
+    const snapshot = store.getState();
+    const overviewSurface = snapshot.surface_mru
+      .map((surfaceId) => snapshot.document.surfaces[surfaceId])
+      .find((surface) => surface?.surface_type === "agents-overview")
+      ?? Object.values(snapshot.document.surfaces)
+        .find((surface) => surface.surface_type === "agents-overview");
+
+    if (!overviewSurface) {
+      workbenchNavigation.open({
+        surface_type: "agents-overview",
+        state: {
+          ...normalizeAgentsOverviewSurfaceState(
+            workbenchRegistry.default_state("agents-overview"),
+          ),
+          focused_agent_id: sessionId,
+        },
+      });
+    } else {
+      const currentState = normalizeAgentsOverviewSurfaceState(overviewSurface.state);
+      workbenchNavigation.focus(overviewSurface.surface_id);
+      store.getState().apply_commands([{
+        type: "update_surface_state",
+        surface_id: overviewSurface.surface_id,
+        state_schema_version: overviewSurface.state_schema_version,
+        state: { ...currentState, focused_agent_id: sessionId },
+      }]);
+    }
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.getElementById(`agent-card-${sessionId}`)?.scrollIntoView?.({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+    });
+  }, [setSelectedAgentIds, workbenchNavigation, workbenchPersistence.store, workbenchRegistry]);
+
   const workbenchNotice = [
     workbenchPersistence.notice,
     workbenchPersistence.safe_mode
@@ -1360,6 +1401,7 @@ function AppBody() {
           filter={rosterFilter}
           onFilterChange={setRosterFilter}
           onSelectAgent={selectAgent}
+          onRevealAgent={revealAgentInOverview}
           onOpenAgent={openAgent}
           onOpenAgentToSide={openAgentToSide}
           onRename={renameAgent}

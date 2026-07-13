@@ -345,7 +345,7 @@ test("keeps the left rail auxiliary while routing its object action to a surface
   await expect(surfaceTab(page, "workflows")).toHaveAttribute("aria-selected", "true");
 });
 
-test("separates roster selection from open and duplicates Agent Session only to side", async ({ page }) => {
+test("reveals roster agents in Agents and reserves tab creation for explicit Open actions", async ({ page }) => {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   await bootWorkbench(
     page,
@@ -365,13 +365,20 @@ test("separates roster selection from open and duplicates Agent Session only to 
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
 
   await alphaRow.dblclick();
+  await expect(surfaceTab(page, "agents-overview")).toHaveCount(1);
+  await expect(surfaceTab(page, "agents-overview")).toHaveAttribute("aria-selected", "true");
+  await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
+
+  await alphaRow.click({ button: "right" });
+  await page.getByTestId("agent-open-context-menu")
+    .getByRole("button", { name: "Open", exact: true })
+    .click();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(1);
 
-  await alphaRow.click();
-  await activeWorkbenchGroup(page).getByLabel("Open Surface", { exact: true }).click();
-  await launcher.getByRole("option")
-    .and(page.locator('[data-surface-type="agent-session"]'))
-    .click({ modifiers: ["ControlOrMeta"] });
+  await alphaRow.click({ button: "right" });
+  await page.getByTestId("agent-open-context-menu")
+    .getByRole("button", { name: "Open to Side", exact: true })
+    .click();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(2);
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
 });
