@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { By, Key, until } from "selenium-webdriver";
+import { By, until } from "selenium-webdriver";
 
 import {
   createNativeHarness,
@@ -241,11 +241,9 @@ test(
     assert.ok(liveAgent, "Closing presentations must not remove the agent runtime");
     assert.equal(liveAgent.is_off, false, "Closing presentations must not turn the agent off");
 
-    const reopenRow = await driver.wait(
-      until.elementLocated(By.css(`[aria-label=${JSON.stringify(`Agent ${SESSION_NAME}`)}]`)),
-      20000,
-    );
-    await reopenRow.sendKeys(Key.ENTER);
+    // Roster Enter now reveals the agent in Agents. Reopening a dedicated
+    // Agent Session is an explicit surface action.
+    await openWorkbenchSurface(driver, "agent-session", SESSION_ID);
     await waitForAgentSessionHost(driver);
     const afterReopen = await readSnapshot(driver);
     assert.equal(afterReopen.runtime_generation, beforeClose.snapshot.runtime_generation);
