@@ -13,6 +13,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { writeJsonArtifact } from "../lib/rendering-audit.mjs";
+import { resolveAgentTerminalPresentationId } from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const runGeometrySweep = process.env.WARDIAN_E2E_TERMINAL_GEOMETRY_SWEEP === "1";
@@ -123,11 +124,11 @@ async function waitForAgentTerminal(driver, sessionId) {
   );
 }
 
-async function waitForRenderedFrame(driver, sessionId) {
+async function waitForRenderedFrame(driver, sessionId, presentationId) {
   let last = null;
   const startedAt = Date.now();
   while (Date.now() - startedAt < 30000) {
-    last = await readGeometryCapture(driver, sessionId);
+    last = await readGeometryCapture(driver, sessionId, presentationId);
     const text = `${last.domRows.join("\n")}\n${(last.debug?.lines ?? []).join("\n")}`;
     const previews = (last.debug?.recentWritePreviews ?? []).join("\n");
     if (text.includes("▐ glyph") && text.includes("✓ check") && text.includes("Ω")) {
@@ -141,8 +142,8 @@ async function waitForRenderedFrame(driver, sessionId) {
   throw new Error(`Timed out waiting for deterministic geometry frame: ${JSON.stringify(last)}`);
 }
 
-async function readGeometryCapture(driver, sessionId) {
-  return await driver.executeScript((sid) => {
+async function readGeometryCapture(driver, sessionId, presentationId) {
+  return await driver.executeScript((sid, pid) => {
     const card = document.getElementById(`agent-card-${sid}`);
     const host = card?.querySelector('[data-testid="agent-terminal-host"]') ?? null;
     const screen = host?.querySelector(".xterm-screen") ?? null;
@@ -175,9 +176,9 @@ async function readGeometryCapture(driver, sessionId) {
         viewportRect: toRect(viewport),
         rowsRect: toRect(rows),
       },
-      debug: window.__wardianTerminalDebug?.snapshot(sid) ?? null,
+      debug: window.__wardianTerminalDebug?.snapshot(pid) ?? null,
     };
-  }, sessionId);
+  }, sessionId, presentationId);
 }
 
 async function writeScreenshot(driver, filePath) {
@@ -280,7 +281,6 @@ test("Wardian terminal geometry sweep records renderer metrics across window wid
 
   await openWorkbenchSurface(driver, "agents-overview");
   await waitForAgentTerminal(driver, SESSION_ID);
-  await waitForRenderedFrame(driver, SESSION_ID);
   const debugAvailable = await driver.executeScript(() => Boolean(window.__wardianTerminalDebug?.snapshot));
   if (!debugAvailable) {
     if (skipNativeBuild) {
@@ -289,11 +289,13 @@ test("Wardian terminal geometry sweep records renderer metrics across window wid
     }
     assert.fail("Expected terminal debug snapshots in the geometry sweep build");
   }
+  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
+  await waitForRenderedFrame(driver, SESSION_ID, presentationId);
 
   for (const width of sweepWidths) {
     await driver.manage().window().setRect({ width, height: sweepHeight });
     await new Promise((resolve) => setTimeout(resolve, 750));
-    const capture = await waitForRenderedFrame(driver, SESSION_ID);
+    const capture = await waitForRenderedFrame(driver, SESSION_ID, presentationId);
     const name = `width-${String(width).padStart(4, "0")}`;
     const artifact = path.join(evidenceDir, `${name}.json`);
     const screenshot = path.join(evidenceDir, `${name}.png`);

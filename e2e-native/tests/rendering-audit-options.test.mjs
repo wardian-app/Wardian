@@ -1654,12 +1654,38 @@ test("deterministic Wardian rendering audit scrolls through the terminal debug A
     "utf8",
   );
 
+  assert.match(renderingTestSource, /resolveAgentTerminalPresentationId/);
   assert.match(renderingTestSource, /__wardianTerminalDebug\?\.scrollToTop/);
-  assert.match(renderingTestSource, /snapshot\?\.\(sid\)/);
+  assert.match(renderingTestSource, /snapshot\?\.\(pid\)/);
   assert.match(renderingTestSource, /viewportY === 0/);
+  assert.doesNotMatch(renderingTestSource, /snapshot\?\.\(sid\)/);
   assert.doesNotMatch(renderingTestSource, /viewport\.scrollTop = 0/);
-  assert.match(terminalSource, /scrollToBottom: \(sessionId: string\) => boolean/);
-  assert.match(terminalSource, /scrollToViewportLine: \(sessionId: string, line: number\) => boolean/);
+  assert.match(terminalSource, /scrollToBottom: \(presentationId: string\) => boolean/);
+  assert.match(terminalSource, /scrollToViewportLine: \(presentationId: string, line: number\) => boolean/);
+});
+
+test("native terminal debug consumers never pass runtime session identities", () => {
+  const consumerFiles = [
+    "opencode-native.test.mjs",
+    "real-provider-rendering-native.test.mjs",
+    "terminal-geometry-sweep-native.test.mjs",
+    "terminal-rendering-native.test.mjs",
+    "terminal-visibility-snapshot-native.test.mjs",
+    "terminal-wheel-scroll-native.test.mjs",
+  ];
+
+  for (const file of consumerFiles) {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), "e2e-native", "tests", file),
+      "utf8",
+    );
+    assert.match(source, /resolveAgentTerminalPresentationId/, `${file} must resolve an exact presentation`);
+    assert.doesNotMatch(
+      source,
+      /__wardianTerminalDebug[^\n]*(?:\bsid\b|\bsessionId\b)/,
+      `${file} must not pass a runtime session identity to terminal debug`,
+    );
+  }
 });
 
 test("outside capture records native terminal ANSI size probe responses", () => {
@@ -1833,7 +1859,9 @@ test("Wardian geometry sweep records terminal metrics across app window sizes", 
   assert.match(testSource, /WARDIAN_E2E_TERMINAL_SWEEP_WIDTHS/);
   assert.match(testSource, /WARDIAN_E2E_TERMINAL_SWEEP_ROW_HEIGHT/);
   assert.match(testSource, /geometry-sweep/);
-  assert.match(testSource, /__wardianTerminalDebug\?\.snapshot/);
+  assert.match(testSource, /resolveAgentTerminalPresentationId/);
+  assert.match(testSource, /__wardianTerminalDebug\?\.snapshot\(pid\)/);
+  assert.doesNotMatch(testSource, /__wardianTerminalDebug\?\.snapshot\(sid\)/);
   assert.match(testSource, /cssCellWidth/);
   assert.match(testSource, /hostRect/);
 });

@@ -18,6 +18,10 @@ import {
   terminalTextIncludes,
   writeJsonArtifact,
 } from "../lib/rendering-audit.mjs";
+import {
+  readTerminalDebugSnapshot as readPresentationDebugSnapshot,
+  resolveAgentTerminalPresentationId,
+} from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const runRealRendering = process.env.WARDIAN_E2E_REAL_RENDERING === "1";
@@ -366,7 +370,8 @@ async function waitForAgentTerminal(driver, sessionId) {
 }
 
 async function readTerminalCapture(driver, sessionId) {
-  return await driver.executeScript((sid) => {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
+  return await driver.executeScript((sid, pid) => {
     const card = document.getElementById(`agent-card-${sid}`);
     const host = card?.querySelector('[data-testid="agent-terminal-host"]') ?? null;
     const screen = host?.querySelector(".xterm-screen") ?? null;
@@ -445,9 +450,9 @@ async function readTerminalCapture(driver, sessionId) {
           rowsLineHeight: rowsStyle?.lineHeight ?? "",
         },
       },
-      debug: window.__wardianTerminalDebug?.snapshot(sid) ?? null,
+      debug: window.__wardianTerminalDebug?.snapshot(pid) ?? null,
     };
-  }, sessionId);
+  }, sessionId, presentationId);
 }
 
 async function waitForReadableTerminal(driver, sessionId) {
@@ -1043,9 +1048,10 @@ function hasXtermScrollback(capture) {
 
 async function dumpRawOutputLog(driver, sessionId, label) {
   try {
+    const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
     const chunks = await driver.executeScript(
-      (sid) => window.__wardianTerminalDebug?.rawOutputLog?.(sid) ?? null,
-      sessionId,
+      (pid) => window.__wardianTerminalDebug?.rawOutputLog?.(pid) ?? null,
+      presentationId,
     );
     if (!Array.isArray(chunks) || chunks.length === 0) {
       return null;
@@ -1524,50 +1530,55 @@ async function setWindowRect(driver, rect) {
 }
 
 async function scrollTerminalDebug(driver, sessionId, action, line = 0) {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
   await driver.wait(async () => {
-    return await driver.executeScript((sid, scrollAction, targetLine) => {
+    return await driver.executeScript((pid, scrollAction, targetLine) => {
       if (scrollAction === "top") {
-        return window.__wardianTerminalDebug?.scrollToTop?.(sid) === true;
+        return window.__wardianTerminalDebug?.scrollToTop?.(pid) === true;
       }
       if (scrollAction === "middle") {
-        return window.__wardianTerminalDebug?.scrollToViewportLine?.(sid, targetLine) === true;
+        return window.__wardianTerminalDebug?.scrollToViewportLine?.(pid, targetLine) === true;
       }
       if (scrollAction === "bottom") {
-        return window.__wardianTerminalDebug?.scrollToBottom?.(sid) === true;
+        return window.__wardianTerminalDebug?.scrollToBottom?.(pid) === true;
       }
       return false;
-    }, sessionId, action, line);
+    }, presentationId, action, line);
   }, 5000);
 }
 
 async function waitForViewportLine(driver, sessionId, expectedViewportY) {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
   await driver.wait(async () => {
-    return await driver.executeScript((sid, targetViewportY) => {
-      const snapshot = window.__wardianTerminalDebug?.snapshot?.(sid);
+    return await driver.executeScript((pid, targetViewportY) => {
+      const snapshot = window.__wardianTerminalDebug?.snapshot?.(pid);
       if (!snapshot) {
         return false;
       }
       return snapshot.viewportY === targetViewportY;
-    }, sessionId, expectedViewportY);
+    }, presentationId, expectedViewportY);
   }, 5000);
 }
 
 async function waitForViewportBottom(driver, sessionId) {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
   await driver.wait(async () => {
-    return await driver.executeScript((sid) => {
-      const snapshot = window.__wardianTerminalDebug?.snapshot?.(sid);
+    return await driver.executeScript((pid) => {
+      const snapshot = window.__wardianTerminalDebug?.snapshot?.(pid);
       if (!snapshot) {
         return false;
       }
       return snapshot.viewportY === snapshot.baseY;
-    }, sessionId);
+    }, presentationId);
   }, 5000);
 }
 
 async function dispatchTerminalWheel(driver, sessionId, deltaY) {
-  return await driver.executeScript((sid, wheelDeltaY) => {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
+  return await driver.executeScript((sid, pid, wheelDeltaY) => {
     const card = document.getElementById(`agent-card-${sid}`);
-    const host = card?.querySelector('[data-testid="agent-terminal-host"]');
+    const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
     const targets = [
       host?.querySelector(".xterm-screen"),
       host?.querySelector(".xterm-viewport"),
@@ -1603,13 +1614,13 @@ async function dispatchTerminalWheel(driver, sessionId, deltaY) {
       card_container_html: card
         ? (card.querySelector(".terminal-container")?.innerHTML ?? "").slice(0, 500)
         : null,
-      snapshot: window.__wardianTerminalDebug?.snapshot?.(sid) ?? null,
+      snapshot: window.__wardianTerminalDebug?.snapshot?.(pid) ?? null,
     };
-  }, sessionId, deltaY);
+  }, sessionId, presentationId, deltaY);
 }
 
 async function scrollTerminalUserWheelUp(driver, sessionId) {
-  const before = await readTerminalDebugSnapshot(driver, sessionId);
+  const before = await readAgentTerminalDebugSnapshot(driver, sessionId);
   const beforeViewportY = before?.renderer?.viewportY ?? before?.viewportY ?? 0;
   const baseY = before?.renderer?.baseY ?? before?.baseY ?? 0;
   assert.ok(baseY > 0, `Expected scrollback before user wheel scroll for ${sessionId}: ${JSON.stringify(before)}`);
@@ -1618,14 +1629,14 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     lastDispatch = await dispatchTerminalWheel(driver, sessionId, -1200);
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const current = await readTerminalDebugSnapshot(driver, sessionId);
+    const current = await readAgentTerminalDebugSnapshot(driver, sessionId);
     const currentViewportY = current?.renderer?.viewportY ?? current?.viewportY ?? 0;
     if (currentViewportY < beforeViewportY) {
       return { before, after: current };
     }
   }
 
-  const after = await readTerminalDebugSnapshot(driver, sessionId);
+  const after = await readAgentTerminalDebugSnapshot(driver, sessionId);
   // TUI-owned-scroll terminals (e.g. opencode) intentionally forward wheel
   // events to the provider instead of scrolling the xterm viewport, so an
   // unmoved viewport is the correct behavior there, not a failure.
@@ -1651,8 +1662,9 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   );
 }
 
-async function readTerminalDebugSnapshot(driver, sessionId) {
-  return await driver.executeScript((sid) => window.__wardianTerminalDebug?.snapshot?.(sid) ?? null, sessionId);
+async function readAgentTerminalDebugSnapshot(driver, sessionId) {
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId, 60_000);
+  return await readPresentationDebugSnapshot(driver, presentationId);
 }
 
 async function addCapturedState(record, driver, providerDir, sessionId, stateName, options = {}) {
@@ -1665,7 +1677,7 @@ async function addCapturedState(record, driver, providerDir, sessionId, stateNam
 }
 
 async function addScrollbackEvidence(record, driver, providerDir, sessionId, baseName) {
-  const snapshot = await readTerminalDebugSnapshot(driver, sessionId);
+  const snapshot = await readAgentTerminalDebugSnapshot(driver, sessionId);
   const baseY = snapshot?.baseY ?? 0;
   const rows = snapshot?.rows ?? 0;
   if (baseY <= 0) {

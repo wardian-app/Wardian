@@ -215,8 +215,6 @@ declare global {
   interface Window {
     __wardianTerminalDebug?: {
       presentationIds: () => string[];
-      /** @deprecated Use presentationIds. Renderer debug state is presentation-owned. */
-      sessionIds: () => string[];
       scrollToTop: (presentationId: string) => boolean;
       scrollToBottom: (presentationId: string) => boolean;
       scrollToViewportLine: (presentationId: string, line: number) => boolean;
@@ -293,9 +291,6 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
     configurable: true,
     value: Object.freeze({
       presentationIds: () => Array.from(terminalSessionMap.keys()),
-      // Kept temporarily for older external diagnostics. Despite its legacy
-      // name, these have always been presentation IDs.
-      sessionIds: () => Array.from(terminalSessionMap.keys()),
       scrollToTop: (presentationId: string) => {
         const entry = terminalSessionMap.get(presentationId);
         if (!entry) {

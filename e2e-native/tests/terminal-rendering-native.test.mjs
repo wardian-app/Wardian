@@ -13,6 +13,10 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+  resolveAgentTerminalPresentationId,
+} from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -74,15 +78,9 @@ async function readVisibleRows(driver) {
   );
 }
 
-async function readTerminalDebug(driver, sessionId) {
-  return await driver.executeScript((sid) => {
-    return window.__wardianTerminalDebug?.snapshot(sid) ?? null;
-  }, sessionId);
-}
-
-async function readRenderedText(driver, sessionId) {
+async function readRenderedText(driver, presentationId) {
   const rows = await readVisibleRows(driver);
-  const debug = await readTerminalDebug(driver, sessionId);
+  const debug = await readTerminalDebugSnapshot(driver, presentationId);
   return {
     domRows: rows,
     debug,
@@ -100,12 +98,12 @@ async function writeScreenshot(driver, harness, name) {
   return filePath;
 }
 
-async function writeDebugArtifact(driver, harness, sessionId, name) {
+async function writeDebugArtifact(driver, harness, presentationId, name) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dir = path.join(harness.repoRoot, "e2e", "screenshots", "terminal-rendering", timestamp);
   fs.mkdirSync(dir, { recursive: true });
   const artifact = {
-    debug: await readTerminalDebug(driver, sessionId),
+    debug: await readTerminalDebugSnapshot(driver, presentationId),
     domRows: await readVisibleRows(driver),
   };
   const filePath = path.join(dir, `${name}.json`);
@@ -170,17 +168,23 @@ async function waitForTerminalHost(driver) {
   await driver.wait(until.elementIsVisible(host), 20000);
 }
 
-async function waitForRenderedGlyphs(driver) {
+async function waitForRenderedGlyphs(driver, presentationId, requiredStableSamples = 1) {
   const startedAt = Date.now();
   let last = null;
+  let stableSamples = 0;
   while (Date.now() - startedAt < 30000) {
-    last = await readRenderedText(driver, SESSION_ID);
+    last = await readRenderedText(driver, presentationId);
     if (
       last.text.includes("▐ glyph") &&
       last.text.includes("✓ check") &&
       last.text.includes("Ω")
     ) {
-      return;
+      stableSamples += 1;
+      if (stableSamples >= requiredStableSamples) {
+        return last;
+      }
+    } else {
+      stableSamples = 0;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -193,8 +197,8 @@ async function terminalDebugAvailable(driver) {
   });
 }
 
-async function assertInsideMatchesOutside(driver, sessionId) {
-  const debug = await readTerminalDebug(driver, sessionId);
+async function assertInsideMatchesOutside(driver, presentationId) {
+  const debug = await readTerminalDebugSnapshot(driver, presentationId);
   assert.ok(debug, "Expected Wardian terminal debug snapshot");
 
   const debugRows = normalizeRows(debug.lines ?? []);
@@ -207,17 +211,17 @@ async function assertInsideMatchesOutside(driver, sessionId) {
   assert.deepEqual(nonEmptyRows(debugRows), nonEmptyRows(outsideRows));
 }
 
-async function scrollTerminalToTop(driver, sessionId) {
+async function scrollTerminalToTop(driver, presentationId) {
   await driver.wait(async () => {
-    return await driver.executeScript((sid) => {
-      return window.__wardianTerminalDebug?.scrollToTop?.(sid) === true;
-    }, sessionId);
+    return await driver.executeScript((pid) => {
+      return window.__wardianTerminalDebug?.scrollToTop?.(pid) === true;
+    }, presentationId);
   }, 5000);
   await driver.wait(async () => {
-    return await driver.executeScript((sid) => {
-      const snapshot = window.__wardianTerminalDebug?.snapshot?.(sid);
+    return await driver.executeScript((pid) => {
+      const snapshot = window.__wardianTerminalDebug?.snapshot?.(pid);
       return snapshot ? snapshot.viewportY === 0 : false;
-    }, sessionId);
+    }, presentationId);
   }, 5000);
 }
 
@@ -283,26 +287,27 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
     }
     assert.fail("Expected terminal debug snapshots to be exposed in the native rendering build");
   }
-  await waitForRenderedGlyphs(driver);
-  await assertInsideMatchesOutside(driver, SESSION_ID);
+  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
+  await waitForRenderedGlyphs(driver, presentationId);
+  await assertInsideMatchesOutside(driver, presentationId);
   await writeScreenshot(driver, harness, "initial");
 
   await driver.manage().window().setRect({ width: 980, height: 680 });
-  await waitForRenderedGlyphs(driver);
-  await assertInsideMatchesOutside(driver, SESSION_ID);
+  await waitForRenderedGlyphs(driver, presentationId);
+  await assertInsideMatchesOutside(driver, presentationId);
   await writeScreenshot(driver, harness, "resized");
 
-  await scrollTerminalToTop(driver, SESSION_ID);
-  const scrolledDebug = await readTerminalDebug(driver, SESSION_ID);
+  await scrollTerminalToTop(driver, presentationId);
+  const scrolledDebug = await readTerminalDebugSnapshot(driver, presentationId);
   assert.ok(
     scrolledDebug.lines.some((line) => line.includes("render-01") || line.includes("render-02")),
     `Expected top scrollback rows after scrolling to top, got ${JSON.stringify(scrolledDebug)}`,
   );
-  await assertInsideMatchesOutside(driver, SESSION_ID);
+  await assertInsideMatchesOutside(driver, presentationId);
   await writeScreenshot(driver, harness, "scrolled-top");
 
   await invokeTauri(driver, "pause_agent", { sessionId: SESSION_ID });
-  const afterPause = await readRenderedText(driver, SESSION_ID);
+  const afterPause = await readRenderedText(driver, presentationId);
   assert.ok(
     afterPause.text.includes("▐ glyph"),
     `Expected rendered rows to remain inspectable after pause, got ${JSON.stringify(afterPause)}`,
@@ -310,8 +315,7 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
   await writeScreenshot(driver, harness, "paused");
 
   await invokeTauri(driver, "resume_agent", { sessionId: SESSION_ID });
-  await waitForRenderedGlyphs(driver);
-  const afterResume = await readRenderedText(driver, SESSION_ID);
+  const afterResume = await waitForRenderedGlyphs(driver, presentationId, 3);
   assert.ok(
     afterResume.text.includes("▐ glyph"),
     `Expected rendered rows after resume, got ${JSON.stringify(afterResume)}`,
@@ -321,6 +325,6 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
     afterResume.debug?.baseY,
     `Expected resume to return terminal viewport to bottom, got ${JSON.stringify(afterResume.debug)}`,
   );
-  await writeDebugArtifact(driver, harness, SESSION_ID, "resumed");
+  await writeDebugArtifact(driver, harness, presentationId, "resumed");
   await writeScreenshot(driver, harness, "resumed");
 });

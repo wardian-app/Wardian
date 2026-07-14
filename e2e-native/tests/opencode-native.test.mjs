@@ -11,6 +11,10 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+  resolveAgentTerminalPresentationId,
+} from "../lib/terminal-debug.mjs";
 
 const runRealOpenCode = process.env.WARDIAN_E2E_REAL_OPENCODE === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
@@ -36,9 +40,8 @@ async function readVisibleTerminalLines(driver) {
 }
 
 async function readTerminalDebugLines(driver, sessionId) {
-  return await driver.executeScript((sid) => {
-    return window.__wardianTerminalDebug?.snapshot(sid)?.lines ?? [];
-  }, sessionId);
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId);
+  return (await readTerminalDebugSnapshot(driver, presentationId))?.lines ?? [];
 }
 
 async function activateAgentCard(driver, sessionId) {
