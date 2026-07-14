@@ -95,8 +95,8 @@
 **Files:**
 - Review all changed files and PR #667.
 
-- [ ] **Step 1: Run frontend validation.** Run `npm run lint`, `npm run test`, `npm run test:e2e`, and `npm run build`; expect zero failures.
-- [ ] **Step 2: Run backend validation.** In `src-tauri`, run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, and `cargo check`; expect zero failures.
+- [x] **Step 1: Run frontend validation.** `npm run lint`, `npm run test` (1,908 passed, 1 skipped), `npm run test:e2e` (97 passed, 18 native-only skipped), and `npm run build` completed successfully.
+- [x] **Step 2: Run backend validation.** `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test` (1,161 passed across the app and integration suites), and `cargo check` completed successfully. Repository-wide `cargo fmt --check` still reports pre-existing formatting drift in unrelated Rust modules; direct `rustfmt --edition 2021 --check src-tauri/src/utils/app_settings.rs` passes for the Rust file changed by this branch.
 - [x] **Step 3: Check integrity.** Run `git diff --check`, `git status --short`, and inspect changed files for secrets or unrelated edits.
 - [ ] **Step 4: Commit and push.** Use a conventional commit such as `fix(workbench): stabilize tab and pane dragging` and push `feat/navigation-workbench`.
 - [ ] **Step 5: Update PR #667.** Add verification results and embed the uploaded feature screenshot using an HTTPS GitHub-hosted image.
