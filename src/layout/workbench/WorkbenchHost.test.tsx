@@ -6,7 +6,142 @@ import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
 import { WorkbenchHost, workbenchEdgeDropCommands } from "./WorkbenchHost";
 
+function makeNavigation(overrides: Partial<WorkbenchNavigationService> = {}) {
+  return {
+    open: vi.fn(),
+    open_to_side: vi.fn(),
+    focus: vi.fn(),
+    close: vi.fn(),
+    close_group: vi.fn(),
+    reset_workbench: vi.fn(),
+    ...overrides,
+  } as unknown as WorkbenchNavigationService;
+}
+
 describe("WorkbenchHost", () => {
+  it("opens the visual chooser by default and creates a surface only after selection", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+    const navigation = makeNavigation();
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+
+    expect(screen.getByRole("dialog", { name: "Choose a surface" })).toBeInTheDocument();
+    expect(navigation.open).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: /Agents:/i })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole("button", { name: /Agents:/i }));
+
+    expect(navigation.open).toHaveBeenCalledWith({
+      surface_type: "agents-overview",
+      group_id: "group-1",
+    });
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+    await waitFor(() => expect(addButton).toHaveFocus());
+  });
+
+  it("switches Browse all surfaces from the visual chooser to the searchable list", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(<WorkbenchHost store={store} navigation={makeNavigation()} />);
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+    fireEvent.click(screen.getByRole("button", { name: "Browse all surfaces" }));
+
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Open Surface" }), { key: "Escape" });
+    await waitFor(() => expect(addButton).toHaveFocus());
+  });
+
+  it("opens the searchable list directly when the new tab preference is palette", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(
+      <WorkbenchHost
+        store={store}
+        navigation={makeNavigation()}
+        new_tab_action="palette"
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open Surface" }));
+
+    expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+  });
+
+  it("closes the visual chooser on Escape and restores focus", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(<WorkbenchHost store={store} navigation={makeNavigation()} />);
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Choose a surface" }), { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+    await waitFor(() => expect(addButton).toHaveFocus());
+  });
+
+  it("closes the visual chooser from its backdrop", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(<WorkbenchHost store={store} navigation={makeNavigation()} />);
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose a surface" });
+    const backdrop = dialog.parentElement;
+    if (!backdrop) throw new Error("visual chooser backdrop missing");
+    fireEvent.mouseDown(backdrop);
+
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+    await waitFor(() => expect(addButton).toHaveFocus());
+  });
+
+  it("keeps keyboard Quick Open searchable when the new tab preference is home", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(
+      <WorkbenchHost
+        store={store}
+        navigation={makeNavigation()}
+        new_tab_action="home"
+      />,
+    );
+    fireEvent.keyDown(document.body, { key: "p", ctrlKey: true });
+
+    expect(await screen.findByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+  });
+
   it("routes tab close keys through the async navigation guard", async () => {
     const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
     const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([surface]) });

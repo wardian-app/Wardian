@@ -447,6 +447,7 @@ beforeEach(() => {
     autoPatchGemini: false,
     terminalFontSize: 14,
     terminalFontFamily: "",
+    workbenchNewTabAction: "home",
     app_settings_loaded: false,
   });
   useQueueStore.setState({

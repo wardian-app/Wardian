@@ -8,6 +8,7 @@ import {
 
 import { HomeSurface } from "../../features/workbench/HomeSurface";
 import { WorkbenchCommandPalette } from "../../features/workbench/WorkbenchCommandPalette";
+import { SurfaceHomeDialog } from "../../features/workbench/SurfaceHomeDialog";
 import {
   OpenSurfaceDialog,
   createCoreWorkbenchSurfaceRegistry,
@@ -21,6 +22,7 @@ import type { WorkbenchCommand } from "../../features/workbench/workbenchModel";
 import type { WorkbenchSurfaceRegistry } from "../../features/workbench/surfaceRegistry";
 import { useWorkbenchCommands } from "../../features/workbench/useWorkbenchCommands";
 import type { WorkbenchStore } from "../../features/workbench/useWorkbenchStore";
+import type { WorkbenchNewTabAction } from "../../types/settings";
 import {
   DockviewLayoutAdapter,
   type WorkbenchPanelRendererPolicy,
@@ -41,6 +43,7 @@ export type WorkbenchHostProps = {
   on_focus_left_dock?: () => void;
   on_focus_right_dock?: () => void;
   create_id?: (kind: WorkbenchIdKind) => string;
+  new_tab_action?: WorkbenchNewTabAction;
 };
 
 type WorkbenchDropPosition = "top" | "bottom" | "left" | "right" | "center";
@@ -89,6 +92,7 @@ export function WorkbenchHost({
   on_focus_left_dock,
   on_focus_right_dock,
   create_id,
+  new_tab_action = "home",
 }: WorkbenchHostProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const ownedRegistry = useMemo(createCoreWorkbenchSurfaceRegistry, []);
@@ -103,6 +107,8 @@ export function WorkbenchHost({
   );
   const navigation = suppliedNavigation ?? ownedNavigation;
   const [launcherGroupId, setLauncherGroupId] = useState<string | null>(null);
+  const [launcherPresentation, setLauncherPresentation] = useState<"home" | "palette" | null>(null);
+  const launcherReturnFocusRef = useRef<HTMLElement | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const state = useSyncExternalStore(
     (listener) => store.subscribe(() => listener()),
@@ -121,13 +127,30 @@ export function WorkbenchHost({
     create_id,
   });
 
-  const openLauncher = useCallback((groupId: string) => {
+  const openNewTabLauncher = useCallback((groupId: string) => {
+    launcherReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
     setLauncherGroupId(groupId);
+    setLauncherPresentation(new_tab_action);
+    store.getState().set_launcher_open(true);
+  }, [new_tab_action, store]);
+  const openPaletteForGroup = useCallback((groupId: string) => {
+    launcherReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setLauncherGroupId(groupId);
+    setLauncherPresentation("palette");
     store.getState().set_launcher_open(true);
   }, [store]);
+  const browseAllSurfaces = useCallback(() => {
+    setLauncherPresentation("palette");
+  }, []);
   const closeLauncher = useCallback(() => {
     store.getState().set_launcher_open(false);
     setLauncherGroupId(null);
+    setLauncherPresentation(null);
+    window.setTimeout(() => launcherReturnFocusRef.current?.focus(), 0);
   }, [store]);
   const activateGroup = useCallback((groupId: string): boolean => {
     const document = store.getState().document;
@@ -184,7 +207,7 @@ export function WorkbenchHost({
             group_id={groupId}
             registry={registry}
             recently_closed={state.document.recently_closed}
-            on_open_surface={openLauncher}
+            on_open_surface={openPaletteForGroup}
             on_select_surface={(surfaceType, targetGroupId) => {
               navigation.open({ surface_type: surfaceType, group_id: targetGroupId });
             }}
@@ -192,7 +215,7 @@ export function WorkbenchHost({
           />
         )}
         on_command={(command) => store.getState().apply_commands([command]).accepted}
-        on_open_surface={openLauncher}
+        on_open_surface={openNewTabLauncher}
         on_toggle_zoom={(groupId) => {
           if (!activateGroup(groupId)) return;
           void commands.execute("workbench.toggle_group_zoom");
@@ -221,8 +244,20 @@ export function WorkbenchHost({
           ));
         }}
       />
+      <SurfaceHomeDialog
+        open={state.launcher_open && launcherPresentation === "home"}
+        group_id={launcherGroupId ?? state.document.active_group_id}
+        registry={registry}
+        recently_closed={state.document.recently_closed}
+        on_select_surface={(surfaceType, targetGroupId) => {
+          navigation.open({ surface_type: surfaceType, group_id: targetGroupId });
+        }}
+        on_browse_all={browseAllSurfaces}
+        on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
+        on_close={closeLauncher}
+      />
       <OpenSurfaceDialog
-        open={state.launcher_open}
+        open={state.launcher_open && launcherPresentation !== "home"}
         group_id={launcherGroupId ?? state.document.active_group_id}
         resource_key={resource_key}
         navigation={navigation}

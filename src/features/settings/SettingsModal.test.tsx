@@ -54,6 +54,7 @@ describe("SettingsModal", () => {
       externalEditor: "system",
       externalEditorCustomExecutable: "",
       explorerFileClickAction: "preview",
+      workbenchNewTabAction: "home",
       shell_id: "auto",
       custom_executable: "",
       custom_args: "",
@@ -415,6 +416,32 @@ describe("SettingsModal", () => {
       });
     });
     expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
+  });
+
+  it("loads and saves the workbench new tab button preference", async () => {
+    useSettingsStore.setState({ workbenchNewTabAction: "home" });
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+
+    const select = screen.getByLabelText("New tab button");
+    expect(select).toHaveValue("home");
+    expect(screen.getByRole("option", { name: "Surface chooser" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Searchable list" })).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "palette" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_app_settings", {
+        settings: expect.objectContaining({
+          schema_version: 2,
+          overrides: expect.objectContaining({
+            workbench_new_tab_action: "palette",
+          }),
+        }),
+      });
+    });
+    expect(useSettingsStore.getState().workbenchNewTabAction).toBe("palette");
   });
 
   it("names the resolved default terminal choices", () => {

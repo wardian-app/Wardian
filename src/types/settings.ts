@@ -13,6 +13,7 @@ export type AppThemeSetting = 'dark' | 'light' | 'system';
 export type WatchlistNewAgentPosition = 'top' | 'bottom';
 export type ExternalEditorSetting = 'system' | 'vscode' | 'custom';
 export type ExplorerFileClickAction = 'preview' | 'external';
+export type WorkbenchNewTabAction = 'home' | 'palette';
 
 export interface CodexRuntimePolicy {
   sandbox_mode: CodexSandboxMode;
@@ -59,6 +60,7 @@ export interface AppSettings {
   external_editor: ExternalEditorSetting;
   external_editor_custom_executable: string | null;
   explorer_file_click_action: ExplorerFileClickAction;
+  workbench_new_tab_action: WorkbenchNewTabAction;
 }
 
 export interface AppSettingsOverrides {
@@ -72,6 +74,7 @@ export interface AppSettingsOverrides {
   external_editor?: ExternalEditorSetting;
   external_editor_custom_executable?: string | null;
   explorer_file_click_action?: ExplorerFileClickAction;
+  workbench_new_tab_action?: WorkbenchNewTabAction;
 }
 
 export interface SettingsDocument<TSettings, TOverrides> {

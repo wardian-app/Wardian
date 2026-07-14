@@ -348,6 +348,7 @@ function AppBody() {
     theme,
     autoPatchGemini,
     titlebarTelemetryVisible,
+    workbenchNewTabAction,
     app_settings_loaded,
     loadAppSettings,
     settingsOpen,
@@ -355,6 +356,7 @@ function AppBody() {
     toggleSettings,
   } = useSettingsStore();
   const resolvedTitlebarTelemetryVisible = app_settings_loaded && titlebarTelemetryVisible;
+  const resolvedWorkbenchNewTabAction = app_settings_loaded ? workbenchNewTabAction : "home";
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [teams, setTeams] = useState<AgentTeam[]>([]);
@@ -1351,6 +1353,7 @@ function AppBody() {
               safe_mode={workbenchPersistence.safe_mode}
               registry={workbenchRegistry}
               navigation={workbenchNavigation}
+              new_tab_action={resolvedWorkbenchNewTabAction}
               on_quick_open={openWorkbenchLauncher}
               resource_key={selectedWorkbenchResourceKey}
               render_surface={renderWorkbenchSurface}

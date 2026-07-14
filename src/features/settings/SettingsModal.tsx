@@ -19,6 +19,7 @@ import type {
   ExplorerFileClickAction,
   ExternalEditorSetting,
   WatchlistNewAgentPosition,
+  WorkbenchNewTabAction,
 } from "../../types/settings";
 
 interface SettingsModalProps {
@@ -83,6 +84,13 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Top bar telemetry",
     detail: "Shows CPU, memory, and active-agent counts in the top bar.",
     keywords: ["appearance", "titlebar", "top bar", "telemetry", "cpu", "memory", "active"],
+  },
+  {
+    id: "workbench-new-tab-action",
+    category: "Appearance",
+    label: "New tab button",
+    detail: "Choose whether the workbench + button opens visual cards or a searchable list.",
+    keywords: ["appearance", "workbench", "new tab", "surface", "chooser", "search"],
   },
   {
     id: "terminal-font-size",
@@ -389,6 +397,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     setExternalEditorCustomExecutable,
     explorerFileClickAction,
     setExplorerFileClickAction,
+    workbenchNewTabAction,
+    setWorkbenchNewTabAction,
     gridCardDisplayMode,
     setGridCardDisplayMode,
     watchlistNewAgentPosition,
@@ -561,6 +571,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     await useSettingsStore.getState().saveAppSettings();
   };
 
+  const handleWorkbenchNewTabActionChange = async (value: WorkbenchNewTabAction) => {
+    setWorkbenchNewTabAction(value);
+    await useSettingsStore.getState().saveAppSettings();
+  };
+
   const handleConversationLoggingChange = (value: ConversationLoggingSetting) => {
     setConversationLogging(value);
   };
@@ -713,6 +728,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             >
               <option value="show">Show</option>
               <option value="hide">Hide</option>
+            </select>
+          </SettingRow>
+        );
+      case "workbench-new-tab-action":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <select
+              aria-label="New tab button"
+              value={workbenchNewTabAction}
+              onChange={(event) => void handleWorkbenchNewTabActionChange(
+                event.target.value as WorkbenchNewTabAction,
+              )}
+              className={optionClass}
+            >
+              <option value="home">Surface chooser</option>
+              <option value="palette">Searchable list</option>
             </select>
           </SettingRow>
         );
