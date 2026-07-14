@@ -1,6 +1,9 @@
 # Wardian Docs
 
-Wardian is a modular, local-first desktop habitat for the agents you run locally: connect agent tools, monitor live terminal sessions, manage reusable skills and prompts, review Queue evidence, and chain agents into deterministic workflows.
+Wardian is where local agent work becomes visible, durable, and malleable. Run
+the CLI agents you already use in real workspaces, inspect their sessions and
+evidence, and turn successful work into reusable prompts, skills, classes,
+workflows, and project context.
 
 This file is an agent-readable index for the public Wardian documentation. Use the linked pages as the canonical docs source.
 

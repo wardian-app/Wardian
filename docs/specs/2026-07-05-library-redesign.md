@@ -3,6 +3,16 @@
 - **Status:** Implemented
 - **Date:** 2026-07-05
 
+## Sources
+
+- [Malleable Software](https://www.inkandswitch.com/essay/malleable-software/)
+  informs the Library's role as an in-place authoring surface with many small
+  steps from use to creation, rather than a cliff from configuration to plugin
+  development.
+- [Entity-Oriented Agent Semantics](./2026-07-14-entity-oriented-agent-semantics.md)
+  records how Library assets contribute to a durable entity's reusable context,
+  relationships, and operational protocols without becoming its sole definition.
+
 ## Context and Problem Statement
 
 Wardian's library is one of its most distinctive features: skills and prompts can be
@@ -26,6 +36,33 @@ kept up with the concept:
 - The tree API embeds full file content for every item, making every refresh cost
   proportional to total library size, and item descriptions are taken from the
   first line of `SKILL.md` (usually `---`).
+
+## Library as a Tailoring Surface
+
+The Library is not only a repository of files. It is Wardian's in-place path for
+capturing a useful local adaptation and promoting it at the smallest appropriate
+level of reuse:
+
+| Need discovered in practice | Smallest Library or runtime move |
+| --- | --- |
+| Repeat an instruction. | Save or run a prompt. |
+| Reuse a procedure or contextual capability. | Create a skill. |
+| Apply that procedure to a chosen scope. | Deploy the skill to an agent, class, or user scope. |
+| Reuse an agent blueprint. | Edit or create a class with its instructions, defaults, and skills. |
+| Reuse a multi-entity process. | Author a workflow blueprint. |
+| Preserve a result worth reusing. | Promote evidence into a reviewed memory, prompt, skill, or workflow input. |
+
+The Library must keep these moves inspectable and reviewable. Prompt, skill,
+class, and workflow assets remain distinct: a prompt is a reusable invocation,
+a skill is a reusable procedure or context, a class is a reusable blueprint,
+and a workflow is a process with typed runtime semantics. They should not be
+collapsed into a single free-form persona document.
+
+This redesign does not add first-class asset variants, lightweight branching, or
+revision comparison. Those are a future part of the tailoring slope. When they
+are introduced, Library assets and workflow runs should preserve lineage and
+the exact asset revisions used, so a local experiment can be shared or adopted
+without silently changing a live deployment.
 
 ## Decisions Already Made
 

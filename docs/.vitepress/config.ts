@@ -5,7 +5,7 @@ const base = process.env.DOCS_BASE ?? "/";
 export default defineConfig({
   title: "Wardian",
   description:
-    "Public documentation for Wardian, the local command center for multi-agent CLI workflows.",
+    "Public documentation for Wardian, where local agent work becomes visible, durable, and malleable.",
   base,
   vite: {
     build: {
