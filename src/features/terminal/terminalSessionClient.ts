@@ -223,13 +223,22 @@ export class TerminalSessionClient {
     });
   }
 
-  async requestPresentationSnapshot(presentationId: string) {
+  /**
+   * Requests a fresh snapshot and applies it only while the initiating
+   * presentation generation still owns the restore. The guard is evaluated
+   * after IPC resolves, immediately before callback dispatch, so a rebind
+   * cannot redirect stale snapshot work into replacement callbacks.
+   */
+  async requestPresentationSnapshot(
+    presentationId: string,
+    shouldApply?: () => boolean,
+  ) {
     const binding = this.#requiredPresentation(presentationId);
     return this.#serialize(async () => {
       const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
         request: { session_id: this.sessionId },
       });
-      await this.#applySnapshot(binding, snapshot, true);
+      await this.#applySnapshot(binding, snapshot, true, shouldApply);
       if (snapshot.runtime_generation > this.#runtimeGeneration) {
         this.#runtimeGeneration = snapshot.runtime_generation;
       }
@@ -622,6 +631,7 @@ export class TerminalSessionClient {
     binding: PresentationBinding,
     snapshot: TerminalSnapshot,
     force = false,
+    shouldApply?: () => boolean,
   ) {
     if (
       !force &&
@@ -629,6 +639,9 @@ export class TerminalSessionClient {
         (snapshot.runtime_generation === binding.runtimeGeneration &&
           snapshot.sequence_barrier <= binding.appliedSequence))
     ) {
+      return;
+    }
+    if (shouldApply && !shouldApply()) {
       return;
     }
     await binding.callbacks.applySnapshot(snapshot);

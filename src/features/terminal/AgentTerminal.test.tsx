@@ -1707,6 +1707,127 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("does not apply a resolved stale restore snapshot to a replacement renderer", async () => {
+    const restoreSnapshot = deferred<ReturnType<typeof modernSnapshot>>();
+    const queuedUpdateStarted = deferred<void>();
+    const queuedUpdateRelease = deferred<ReturnType<typeof modernRegistrationResult>>();
+    let snapshotRequestCount = 0;
+    let holdNextUpdate = false;
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: Record<string, unknown> } | undefined)?.request;
+      const presentationId = String(request?.presentation_id ?? "resolved-stale-restore-pane");
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "request_terminal_snapshot") {
+        snapshotRequestCount += 1;
+        return snapshotRequestCount === 1 ? restoreSnapshot.promise : modernSnapshot();
+      }
+      if (command === "update_terminal_presentation") {
+        if (holdNextUpdate) {
+          holdNextUpdate = false;
+          queuedUpdateStarted.resolve();
+          return queuedUpdateRelease.promise;
+        }
+        const result = modernRegistrationResult("resolved-stale-restore-pane");
+        return {
+          ...result,
+          presentation: {
+            ...result.presentation,
+            visibility: request?.visibility ?? "visible",
+            render_state: request?.render_state ?? "mounted",
+          },
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("resolved-stale-restore-pane").presentation;
+      }
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      return undefined;
+    });
+
+    const view = render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="resolved-stale-restore-pane"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+
+    act(() => {
+      for (let index = 0; index < 24; index += 1) {
+        terminalRendererBudget.acquire(
+          "xterm",
+          `resolved-stale-restore-other-${index}`,
+          () => undefined,
+        );
+      }
+      terminalRendererBudget.release("xterm", "resolved-stale-restore-other-0");
+    });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "request_terminal_snapshot",
+      expect.anything(),
+    ));
+    expect(mockTerminal).toHaveBeenCalledTimes(2);
+
+    holdNextUpdate = true;
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="resolved-stale-restore-pane"
+        visibility="hidden"
+        renderState="suspended"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="resolved-stale-restore-pane"
+        visibility="visible"
+        renderState="mounted"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(3));
+    const replacement = getLatestTerminalInstance();
+    replacement.reset.mockClear();
+    replacement.write.mockClear();
+    replacement.refresh.mockClear();
+
+    const staleSnapshot = {
+      ...modernSnapshot(),
+      visible_grid: "stale restore must not reach the replacement",
+    };
+    await act(async () => {
+      restoreSnapshot.resolve(staleSnapshot);
+      await queuedUpdateStarted.promise;
+    });
+
+    expect(replacement.reset).not.toHaveBeenCalled();
+    expect(replacement.write).not.toHaveBeenCalled();
+    expect(replacement.refresh).not.toHaveBeenCalled();
+    expect(terminalRendererBudget.has("xterm", "resolved-stale-restore-pane")).toBe(true);
+
+    await act(async () => {
+      queuedUpdateRelease.resolve(modernRegistrationResult("resolved-stale-restore-pane"));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(snapshotRequestCount).toBe(2));
+  });
+
   it("cancels an in-flight restore when the presentation becomes hidden", async () => {
     const restoreSnapshot = deferred<ReturnType<typeof modernSnapshot>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {

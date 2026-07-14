@@ -2661,7 +2661,10 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry.legacyMode) {
         void drainPty(terminalKey);
       } else {
-        await entry.terminalClient.requestPresentationSnapshot(presentationId);
+        await entry.terminalClient.requestPresentationSnapshot(
+          presentationId,
+          restoringRendererRemainsCurrent,
+        );
         if (!restoringRendererRemainsCurrent()) {
           return;
         }
