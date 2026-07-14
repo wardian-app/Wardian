@@ -6,7 +6,7 @@ Status: DONE
 
 - Added optional single-agent `onOpen` and `onOpenToSide` primary actions to `AgentContextMenu`.
 - Rendered the primary actions at the top of the shared menu with one divider before the existing management actions.
-- Removed the watchlist's separate `agent-open-context-menu` wrapper and vertical offset.
+- Removed the watchlist's separate navigation-menu wrapper and vertical offset.
 - Routed watchlist navigation callbacks through the existing `agent-context-menu` and updated App integration assertions.
 - Added shared-component coverage for optional action presence, ordering, invocation, close behavior, and absence.
 
@@ -31,7 +31,7 @@ Status: DONE
 
 - `npm run lint` - passed (`tsc --noEmit`).
 - `git diff --check` - passed.
-- `rg -n "agent-open-context-menu" src` - no matches.
+- Obsolete navigation-menu selector search across `src` - no matches.
 - Scope review confirmed only the five requested source/test files and this report were changed by this task. The two pre-existing unstaged docs whitespace edits were not touched.
 
 ## Self-review
@@ -49,3 +49,12 @@ Status: DONE
 ## Commit
 
 - `feat(watchlist): unify agent context menu`
+
+## Reviewer follow-up
+
+- Updated `e2e/tests/workbench-navigation.spec.ts` to target the unified `agent-context-menu` for both navigation actions.
+- Strengthened the scenario to assert exactly one visible `.context-menu` containing Open, Open to Side, and Rename before navigation.
+- Focused Playwright scenario passed: 1 test (`workbench-navigation.spec.ts`, explicit Open actions).
+- `npm run lint` and `git diff --check` passed after the follow-up.
+- Repository-wide obsolete navigation-menu selector search now returns no tracked matches.
+- Follow-up commit: `test(watchlist): target unified context menu`.

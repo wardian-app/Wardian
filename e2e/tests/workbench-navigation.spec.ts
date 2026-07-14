@@ -370,13 +370,16 @@ test("reveals roster agents in Agents and reserves tab creation for explicit Ope
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
 
   await alphaRow.click({ button: "right" });
-  await page.getByTestId("agent-open-context-menu")
-    .getByRole("button", { name: "Open", exact: true })
-    .click();
+  const agentMenu = page.getByTestId("agent-context-menu");
+  await expect(page.locator(".context-menu:visible")).toHaveCount(1);
+  await expect(agentMenu.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+  await expect(agentMenu.getByRole("button", { name: "Open to Side", exact: true })).toBeVisible();
+  await expect(agentMenu.getByRole("button", { name: "Rename", exact: true })).toBeVisible();
+  await agentMenu.getByRole("button", { name: "Open", exact: true }).click();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(1);
 
   await alphaRow.click({ button: "right" });
-  await page.getByTestId("agent-open-context-menu")
+  await page.getByTestId("agent-context-menu")
     .getByRole("button", { name: "Open to Side", exact: true })
     .click();
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(2);
