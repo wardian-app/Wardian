@@ -8,6 +8,7 @@ import {
   Library as LibraryIcon,
   ListTodo,
   Network,
+  FilePlus2,
   Sprout,
   SquareTerminal,
   type LucideIcon,
@@ -24,6 +25,7 @@ const SURFACE_ICONS: Readonly<Record<string, LucideIcon>> = {
   "agent-session": SquareTerminal,
   "file-editor": FileCode2,
   browser: Globe2,
+  "new-tab": FilePlus2,
 };
 
 /** Resolves a compact visual identifier from a surface definition's icon token. */

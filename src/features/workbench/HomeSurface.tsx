@@ -28,7 +28,9 @@ function selectableContributions(
     [contribution.surface_type, contribution] as const
   )));
   return registry.list()
-    .filter((definition) => definition.resource_key === undefined)
+    .filter((definition) => (
+      definition.type !== "new-tab" && definition.resource_key === undefined
+    ))
     .map((definition) => {
       const contribution = metadata.get(definition.type);
       const title = contribution?.title ?? titleForType(definition.type);
@@ -48,7 +50,7 @@ function titleForType(surfaceType: string): string {
     .join(" ");
 }
 
-/** Derived discovery UI for an empty group; Home is never a persisted surface. */
+/** Surface discovery UI shared by derived empty groups and canonical New Tab panels. */
 export function HomeSurface({
   group_id,
   registry,

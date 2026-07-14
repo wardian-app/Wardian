@@ -35,6 +35,12 @@ describe("core workbench surface registry", () => {
       ok: true,
       state: { mode: "grid", last_multi_agent_mode: "grid" },
     });
+    expect(registry.get("new-tab")).toMatchObject({
+      open_policy: "allow_multiple",
+      render_policy: "recreate_from_state",
+      icon: "new-tab",
+    });
+    expect(registry.default_state("new-tab")).toEqual({});
 
     expect(["dashboard", "queue", "graph", "garden", "library", "workflows"].map((type) => {
       const definition = registry.get(type);

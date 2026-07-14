@@ -8,7 +8,6 @@ import {
 
 import { HomeSurface } from "../../features/workbench/HomeSurface";
 import { WorkbenchCommandPalette } from "../../features/workbench/WorkbenchCommandPalette";
-import { SurfaceHomeDialog } from "../../features/workbench/SurfaceHomeDialog";
 import {
   OpenSurfaceDialog,
   createCoreWorkbenchSurfaceRegistry,
@@ -108,7 +107,7 @@ export function WorkbenchHost({
   );
   const navigation = suppliedNavigation ?? ownedNavigation;
   const [launcherGroupId, setLauncherGroupId] = useState<string | null>(null);
-  const [launcherPresentation, setLauncherPresentation] = useState<"home" | "palette" | null>(null);
+  const [launcherPlaceholderId, setLauncherPlaceholderId] = useState<string | null>(null);
   const launcherReturnFocusRef = useRef<HTMLElement | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const state = useSyncExternalStore(
@@ -119,17 +118,27 @@ export function WorkbenchHost({
   const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
 
   const openNewTabLauncher = useCallback((groupId: string) => {
+    if (new_tab_action === "home") {
+      navigation.open({ surface_type: "new-tab", group_id: groupId });
+      return;
+    }
     launcherReturnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
     setLauncherGroupId(groupId);
-    setLauncherPresentation(new_tab_action);
+    setLauncherPlaceholderId(null);
     store.getState().set_launcher_open(true);
-  }, [new_tab_action, store]);
+  }, [navigation, new_tab_action, store]);
   const openPaletteForGroup = useCallback((groupId: string) => {
     launcherReturnFocusRef.current = null;
     setLauncherGroupId(groupId);
-    setLauncherPresentation("palette");
+    setLauncherPlaceholderId(null);
+    store.getState().set_launcher_open(true);
+  }, [store]);
+  const openPaletteForPlaceholder = useCallback((groupId: string, surfaceId: string) => {
+    launcherReturnFocusRef.current = null;
+    setLauncherGroupId(groupId);
+    setLauncherPlaceholderId(surfaceId);
     store.getState().set_launcher_open(true);
   }, [store]);
   const requestSearchableLauncher = useCallback(() => {
@@ -137,20 +146,17 @@ export function WorkbenchHost({
       launcherReturnFocusRef.current = null;
       setLauncherGroupId(store.getState().document.active_group_id);
     }
-    setLauncherPresentation("palette");
+    setLauncherPlaceholderId(null);
     store.getState().set_launcher_open(true);
   }, [store]);
   const requestQuickOpen = useCallback(() => {
     requestSearchableLauncher();
     on_quick_open?.();
   }, [on_quick_open, requestSearchableLauncher]);
-  const browseAllSurfaces = useCallback(() => {
-    setLauncherPresentation("palette");
-  }, []);
   const closeLauncher = useCallback(() => {
     store.getState().set_launcher_open(false);
     setLauncherGroupId(null);
-    setLauncherPresentation(null);
+    setLauncherPlaceholderId(null);
     launcherReturnFocusRef.current = null;
   }, [store]);
   const commands = useWorkbenchCommands({
@@ -198,7 +204,39 @@ export function WorkbenchHost({
         ? "onlyWhenVisible" as const
         : "always" as const
     ), [registry]);
-  const renderSurface = render_surface ?? defaultRenderSurface;
+  const baseRenderSurface = render_surface ?? defaultRenderSurface;
+  const renderSurface = useCallback<WorkbenchSurfaceRenderer>((surface, context) => {
+    if (surface.surface_type !== "new-tab") return baseRenderSurface(surface, context);
+    const groupId = Object.values(state.document.groups).find(
+      (group) => group.surface_ids.includes(surface.surface_id),
+    )?.group_id ?? state.document.active_group_id;
+    return (
+      <HomeSurface
+        group_id={groupId}
+        registry={registry}
+        recently_closed={state.document.recently_closed}
+        on_open_surface={(targetGroupId) => {
+          openPaletteForPlaceholder(targetGroupId, surface.surface_id);
+        }}
+        on_select_surface={(surfaceType) => {
+          navigation.open_from_placeholder(surface.surface_id, { surface_type: surfaceType });
+        }}
+        on_reopen_closed={() => {
+          store.getState().apply_commands([
+            { type: "discard_surface", surface_id: surface.surface_id },
+            { type: "reopen_closed_surface" },
+          ]);
+        }}
+      />
+    );
+  }, [
+    baseRenderSurface,
+    navigation,
+    openPaletteForPlaceholder,
+    registry,
+    state.document,
+    store,
+  ]);
   const titleSurface = surface_title ?? defaultTitleSurface;
 
   return (
@@ -261,20 +299,8 @@ export function WorkbenchHost({
           ));
         }}
       />
-      <SurfaceHomeDialog
-        open={state.launcher_open && launcherPresentation === "home"}
-        group_id={launcherGroupId ?? state.document.active_group_id}
-        registry={registry}
-        recently_closed={state.document.recently_closed}
-        on_select_surface={(surfaceType, targetGroupId) => {
-          navigation.open({ surface_type: surfaceType, group_id: targetGroupId });
-        }}
-        on_browse_all={browseAllSurfaces}
-        on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
-        on_close={closeLauncher}
-      />
       <OpenSurfaceDialog
-        open={state.launcher_open && launcherPresentation !== "home"}
+        open={state.launcher_open}
         group_id={launcherGroupId ?? state.document.active_group_id}
         resource_key={resource_key}
         navigation={navigation}
@@ -283,6 +309,7 @@ export function WorkbenchHost({
         on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
         on_close={closeLauncher}
         return_focus={launcherReturnFocusRef.current}
+        placeholder_surface_id={launcherPlaceholderId ?? undefined}
       />
       <WorkbenchCommandPalette
         open={commandPaletteOpen}

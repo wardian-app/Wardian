@@ -17,6 +17,7 @@ export type WorkbenchCommand =
   | { type: "open_surface"; surface: WorkbenchSurfaceV1; group_id?: string; index?: number }
   | { type: "focus_surface"; surface_id: string }
   | { type: "close_surface"; surface_id: string }
+  | { type: "discard_surface"; surface_id: string }
   | { type: "replace_surface"; surface: WorkbenchSurfaceV1 }
   | { type: "reopen_closed_surface" }
   | {
@@ -833,6 +834,70 @@ function closeGroupSurfaces(
   return { surfaces, recentlyClosed };
 }
 
+function removeWorkbenchSurface(
+  document: WorkbenchDocumentV1,
+  surfaceId: string,
+  trackInHistory: boolean,
+): WorkbenchCommandResult {
+  const location = groupContainingSurface(document, surfaceId);
+  const surface = document.surfaces[surfaceId];
+  if (!location || !surface) {
+    return commandRejected(document, "surface does not exist", "$.command.surface_id");
+  }
+  const group = document.groups[location.groupId];
+  const surfaceIds = group.surface_ids.filter((candidateId) => candidateId !== surfaceId);
+  const surfaces = { ...document.surfaces };
+  delete surfaces[surfaceId];
+  const recentlyClosed = trackInHistory
+    ? [
+        {
+          surface,
+          previous_group_id: location.groupId,
+          previous_index: location.index,
+        },
+        ...document.recently_closed,
+      ].slice(0, MAX_RECENTLY_CLOSED_SURFACES)
+    : document.recently_closed;
+  if (surfaceIds.length === 0 && Object.keys(document.groups).length > 1) {
+    const siblingSubtree = siblingSubtreeForGroup(document.root, location.groupId);
+    if (!siblingSubtree) {
+      return commandRejected(document, "group has no sibling subtree");
+    }
+    const removed = removeGroupLeaf(document.root, location.groupId);
+    if (!removed.removed || removed.node === null) {
+      return commandRejected(document, "group is not present in the tree");
+    }
+    const groups = { ...document.groups };
+    delete groups[location.groupId];
+    return acceptedCandidate(document, {
+      ...document,
+      root: removed.node,
+      groups,
+      surfaces,
+      active_group_id: document.active_group_id === location.groupId
+        ? leftmostGroupId(siblingSubtree)
+        : document.active_group_id,
+      recently_closed: recentlyClosed,
+    });
+  }
+  const activeSurfaceId = group.active_surface_id === surfaceId
+    ? nextActiveSurface(surfaceIds, location.index)
+    : group.active_surface_id;
+  return acceptedCandidate(document, {
+    ...document,
+    groups: {
+      ...document.groups,
+      [location.groupId]: {
+        ...group,
+        surface_ids: surfaceIds,
+        active_surface_id: activeSurfaceId,
+      },
+    },
+    surfaces,
+    recently_closed: recentlyClosed,
+  });
+}
+
 /** Applies a workbench command without mutating the input document. */
 export function applyWorkbenchCommand(
   document: WorkbenchDocumentV1,
@@ -889,63 +954,11 @@ export function applyWorkbenchCommand(
       });
     }
 
-    case "close_surface": {
-      const location = groupContainingSurface(document, command.surface_id);
-      const surface = document.surfaces[command.surface_id];
-      if (!location || !surface) {
-        return commandRejected(document, "surface does not exist", "$.command.surface_id");
-      }
-      const group = document.groups[location.groupId];
-      const surfaceIds = group.surface_ids.filter((surfaceId) => surfaceId !== command.surface_id);
-      const surfaces = { ...document.surfaces };
-      delete surfaces[command.surface_id];
-      const recentlyClosed = [
-        {
-          surface,
-          previous_group_id: location.groupId,
-          previous_index: location.index,
-        },
-        ...document.recently_closed,
-      ].slice(0, MAX_RECENTLY_CLOSED_SURFACES);
-      if (surfaceIds.length === 0 && Object.keys(document.groups).length > 1) {
-        const siblingSubtree = siblingSubtreeForGroup(document.root, location.groupId);
-        if (!siblingSubtree) {
-          return commandRejected(document, "group has no sibling subtree");
-        }
-        const removed = removeGroupLeaf(document.root, location.groupId);
-        if (!removed.removed || removed.node === null) {
-          return commandRejected(document, "group is not present in the tree");
-        }
-        const groups = { ...document.groups };
-        delete groups[location.groupId];
-        return acceptedCandidate(document, {
-          ...document,
-          root: removed.node,
-          groups,
-          surfaces,
-          active_group_id: document.active_group_id === location.groupId
-            ? leftmostGroupId(siblingSubtree)
-            : document.active_group_id,
-          recently_closed: recentlyClosed,
-        });
-      }
-      const activeSurfaceId = group.active_surface_id === command.surface_id
-        ? nextActiveSurface(surfaceIds, location.index)
-        : group.active_surface_id;
-      return acceptedCandidate(document, {
-        ...document,
-        groups: {
-          ...document.groups,
-          [location.groupId]: {
-            ...group,
-            surface_ids: surfaceIds,
-            active_surface_id: activeSurfaceId,
-          },
-        },
-        surfaces,
-        recently_closed: recentlyClosed,
-      });
-    }
+    case "close_surface":
+      return removeWorkbenchSurface(document, command.surface_id, true);
+
+    case "discard_surface":
+      return removeWorkbenchSurface(document, command.surface_id, false);
 
     case "reopen_closed_surface": {
       const closed = document.recently_closed[0];

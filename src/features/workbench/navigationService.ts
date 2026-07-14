@@ -19,6 +19,8 @@ export type WorkbenchNavigationOptions = {
 
 export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
+  /** Converts an inline New Tab in place, or discards it before focusing a matching singleton. */
+  open_from_placeholder(surface_id: string, request: OpenSurfaceRequest): string;
   open_to_side(
     request: OpenSurfaceRequest,
     direction?: "horizontal" | "vertical",
@@ -132,6 +134,49 @@ export function createWorkbenchNavigationService(
         surface,
         ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
       }]);
+      return surfaceId;
+    },
+
+    open_from_placeholder: (surfaceId, request) => {
+      const definition = registry.require(request.surface_type);
+      const document = store.getState().document;
+      const placeholder = document.surfaces[surfaceId];
+      if (!placeholder) throw new Error(`surface ${surfaceId} does not exist`);
+      if (placeholder.surface_type !== "new-tab") {
+        throw new Error(`surface ${surfaceId} is not a New Tab placeholder`);
+      }
+      const candidates = store.getState().surface_mru
+        .map((candidateId) => document.surfaces[candidateId])
+        .filter((surface): surface is WorkbenchSurfaceV1 => (
+          surface !== undefined && surface.surface_id !== surfaceId
+        ));
+      for (const surface of Object.values(document.surfaces)) {
+        if (
+          surface.surface_id !== surfaceId
+          && !candidates.some((candidate) => candidate.surface_id === surface.surface_id)
+        ) candidates.push(surface);
+      }
+      const existingId = registry.resolve_existing(
+        definition.open_policy === "singleton"
+          ? { ...request, duplicate: false }
+          : request,
+        candidates,
+      );
+      if (existingId) {
+        apply([
+          { type: "discard_surface", surface_id: surfaceId },
+          { type: "focus_surface", surface_id: existingId },
+        ]);
+        return existingId;
+      }
+
+      apply([
+        {
+          type: "replace_surface",
+          surface: createSurface(request, surfaceId),
+        },
+        { type: "focus_surface", surface_id: surfaceId },
+      ]);
       return surfaceId;
     },
 

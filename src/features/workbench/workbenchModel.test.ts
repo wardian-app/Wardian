@@ -426,6 +426,28 @@ describe("workbench model", () => {
     expect(document.recently_closed).toEqual([]);
   });
 
+  it("discards a transient surface without adding it to recently closed history", () => {
+    const dashboard = makeSurface("surface-dashboard", { surface_type: "dashboard" });
+    const placeholder = makeSurface("surface-new-tab", { surface_type: "new-tab", state: {} });
+    const previouslyClosed = {
+      surface: makeSurface("surface-closed", { surface_type: "queue" }),
+      previous_group_id: "group-1",
+      previous_index: 0,
+    };
+    const initial = makeSingleGroupDocument([dashboard, placeholder]);
+    initial.recently_closed = [previouslyClosed];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "discard_surface",
+      surface_id: placeholder.surface_id,
+    }));
+
+    expect(document.groups["group-1"].surface_ids).toEqual([dashboard.surface_id]);
+    expect(document.groups["group-1"].active_surface_id).toBe(dashboard.surface_id);
+    expect(document.surfaces[placeholder.surface_id]).toBeUndefined();
+    expect(document.recently_closed).toEqual([previouslyClosed]);
+  });
+
   it("collapses an active group closed through its final surface and reopens in the sibling subtree", () => {
     let document = makeSingleGroupDocument([makeSurface("surface-1")]);
     document = acceptedDocument(applyWorkbenchCommand(document, {

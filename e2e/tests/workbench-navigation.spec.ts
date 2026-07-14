@@ -322,7 +322,7 @@ test("offers a responsive keyboard-accessible launcher in an empty tab", async (
   await expect(surfaceTab(page, "queue")).toHaveAttribute("aria-selected", "true");
 });
 
-test("opens the visual plus chooser in its captured pane and transitions Browse all to search", async ({ page }) => {
+test("opens an inline New Tab in its captured pane and transitions Browse all to search", async ({ page }) => {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   const graph = makeWorkbenchSurface("graph-1", "graph");
   const document = makeWorkbenchDocument({
@@ -353,10 +353,11 @@ test("opens the visual plus chooser in its captured pane and transitions Browse 
 
   const targetGroup = workbenchGroup(page, "group-2");
   await targetGroup.getByLabel("Open Surface", { exact: true }).click();
-  const chooser = page.getByRole("dialog", { name: "Choose a surface", exact: true });
-  await expect(chooser).toBeVisible();
-  await expect(chooser.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
-  await chooser.getByRole("button", { name: /^Queue:/ }).click();
+  await expect(targetGroup.getByRole("tab", { name: "New Tab", exact: true }))
+    .toHaveAttribute("aria-selected", "true");
+  await expect(targetGroup.getByRole("heading", { name: "Choose a surface" })).toBeVisible();
+  await expect(targetGroup.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
+  await targetGroup.getByRole("button", { name: /^Queue:/ }).click();
 
   const queueTab = surfaceTab(page, "queue");
   await expect(queueTab).toBeVisible();
@@ -364,7 +365,7 @@ test("opens the visual plus chooser in its captured pane and transitions Browse 
     .toHaveAttribute("data-group-id", "group-2");
 
   await targetGroup.getByLabel("Open Surface", { exact: true }).click();
-  await chooser.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
+  await targetGroup.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
   const searchable = page.getByRole("dialog", { name: "Open Surface", exact: true });
   await expect(searchable).toBeVisible();
   await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
@@ -374,7 +375,7 @@ test("opens the visual plus chooser in its captured pane and transitions Browse 
   await page.keyboard.press(process.platform === "darwin" ? "Meta+p" : "Control+p");
   await expect(searchable).toBeVisible();
   await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
-  await expect(chooser).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Choose a surface", exact: true })).toHaveCount(0);
 });
 
 test("honors the persisted palette plus preference while Quick Open remains searchable", async ({ page }) => {
@@ -770,9 +771,9 @@ test("reveals roster agents in Agents and reserves tab creation for explicit Ope
 
   const alphaRow = page.getByLabel("Agent Alpha", { exact: true });
   await activeWorkbenchGroup(page).getByLabel("Open Surface", { exact: true }).click();
-  const chooser = page.getByRole("dialog", { name: "Choose a surface", exact: true });
-  await expect(chooser).toBeVisible();
-  await chooser.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
+  const newTabPanel = activeWorkbenchGroup(page);
+  await expect(newTabPanel.getByRole("heading", { name: "Choose a surface" })).toBeVisible();
+  await newTabPanel.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
   const launcher = page.getByRole("dialog", { name: "Open Surface", exact: true });
   await expect(launcher
     .getByRole("option")

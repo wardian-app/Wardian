@@ -638,33 +638,6 @@
   padding: clamp(2rem, 10vh, 7rem) 1rem 1rem;
 }
 
-.wardian-surface-home-backdrop {
-  position: absolute;
-  z-index: 10000;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--color-wardian-bg), transparent 58%);
-  padding: clamp(1rem, 5vh, 3rem);
-}
-
-.wardian-surface-home-dialog {
-  width: min(56rem, 100%);
-  max-height: min(42rem, calc(100vh - 2rem));
-  overflow: hidden;
-  border: 1px solid var(--color-wardian-border-heavy);
-  border-radius: 0.625rem;
-  background: var(--color-wardian-bg);
-  color: var(--color-wardian-text);
-  box-shadow: var(--shadow-wardian-accent);
-}
-
-.wardian-surface-home-dialog .wardian-workbench-home {
-  max-height: min(42rem, calc(100vh - 2rem));
-  padding: clamp(1.25rem, 4vh, 2.5rem) clamp(1rem, 3vw, 2.25rem);
-}
-
 .wardian-open-surface-dialog {
   width: min(36rem, 100%);
   max-height: min(32rem, calc(100vh - 4rem));

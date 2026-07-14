@@ -27,6 +27,7 @@ export type OpenSurfaceDialogProps = {
   on_reopen_closed?: () => void;
   on_close: () => void;
   return_focus?: HTMLElement | null;
+  placeholder_surface_id?: string;
 };
 
 const CONTRIBUTION_GROUPS: readonly CoreSurfaceGroup[] = ["Core views", "Sessions", "Reserved"];
@@ -56,6 +57,7 @@ export function OpenSurfaceDialog({
   on_reopen_closed,
   on_close,
   return_focus,
+  placeholder_surface_id,
 }: OpenSurfaceDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -115,7 +117,12 @@ export function OpenSurfaceDialog({
 
   const openChoice = (contribution: CoreSurfaceContribution): void => {
     if (choiceDisabled(contribution, registry, resource_key)) return;
-    navigation.open(requestFor(contribution.surface_type));
+    const request = requestFor(contribution.surface_type);
+    if (placeholder_surface_id) {
+      navigation.open_from_placeholder(placeholder_surface_id, request);
+    } else {
+      navigation.open(request);
+    }
     requestClose();
   };
 

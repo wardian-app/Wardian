@@ -110,6 +110,58 @@ describe("workbench navigation service", () => {
     })).toBe("agent-duplicate");
   });
 
+  it("replaces a New Tab placeholder in place without changing its pane or tab order", () => {
+    const registry = createSurfaceRegistry([
+      definition("new-tab"),
+      definition("notes"),
+    ]);
+    const first = makeSurface("first", { surface_type: "notes" });
+    const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
+    const last = makeSurface("last", { surface_type: "notes" });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([first, placeholder, last]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    expect(navigation.open_from_placeholder("placeholder", {
+      surface_type: "notes",
+      state: { label: "replacement" },
+    })).toBe("placeholder");
+
+    const document = store.getState().document;
+    expect(document.groups["group-1"].surface_ids).toEqual(["first", "placeholder", "last"]);
+    expect(document.groups["group-1"].active_surface_id).toBe("placeholder");
+    expect(document.surfaces.placeholder).toMatchObject({
+      surface_id: "placeholder",
+      surface_type: "notes",
+      state: { label: "replacement" },
+    });
+    expect(document.recently_closed).toEqual([]);
+  });
+
+  it("discards a New Tab placeholder and focuses an existing singleton without history", () => {
+    const registry = createSurfaceRegistry([
+      definition("new-tab"),
+      definition("singleton", { open_policy: "singleton" }),
+    ]);
+    const singleton = makeSurface("singleton-1", { surface_type: "singleton" });
+    const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([singleton, placeholder]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    expect(navigation.open_from_placeholder("placeholder", {
+      surface_type: "singleton",
+    })).toBe("singleton-1");
+
+    const document = store.getState().document;
+    expect(document.groups["group-1"].surface_ids).toEqual(["singleton-1"]);
+    expect(document.groups["group-1"].active_surface_id).toBe("singleton-1");
+    expect(document.surfaces.placeholder).toBeUndefined();
+    expect(document.recently_closed).toEqual([]);
+  });
+
   it("opens to the side as one transaction and activates the new group/tab", () => {
     const registry = createSurfaceRegistry([definition("notes")]);
     const store = createWorkbenchStore({

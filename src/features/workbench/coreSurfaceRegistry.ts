@@ -142,7 +142,7 @@ function restoreAgentsOverviewState(value: unknown, version: number) {
   };
 }
 
-function restoreEmptySurfaceState(type: "library" | "workflows", value: unknown, version: number) {
+function restoreEmptySurfaceState(type: string, value: unknown, version: number) {
   if (version !== 1) return { ok: false as const, error: `unsupported ${type} state version ${version}` };
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length > 0) {
     return { ok: false as const, error: `${type} state must be an empty object` };
@@ -154,6 +154,14 @@ function coreSurfaceDefinitions(
   dirtySurfacePrompt: DirtySurfacePrompt,
 ): readonly SurfaceDefinition[] {
   return [
+    surfaceDefinition({
+      type: "new-tab",
+      title: "New Tab",
+      render_policy: "recreate_from_state",
+      open_policy: "allow_multiple",
+      default_state: () => ({}),
+      restore_state: (value, version) => restoreEmptySurfaceState("new-tab", value, version),
+    }),
     surfaceDefinition({
       type: "agents-overview",
       title: "Agents",
