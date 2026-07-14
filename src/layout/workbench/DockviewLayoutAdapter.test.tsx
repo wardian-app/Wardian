@@ -21,6 +21,7 @@ import {
   workbenchGroupTouchesLeftEdge,
   workbenchGroupTouchesTopEdge,
   workbenchPaneTargets,
+  workbenchPaneSplitAdmission,
   workbenchSplitRatioCommands,
   WORKBENCH_PANE_MINIMUM_HEIGHT,
   WORKBENCH_PANE_MINIMUM_WIDTH,
@@ -116,6 +117,8 @@ describe("DockviewLayoutAdapter", () => {
       { left: 0, top: 0, width: 0, height: 0 },
       "center",
     )).toBe(true);
+    expect(canSplitWorkbenchPane(undefined, "right")).toBe(true);
+    expect(workbenchPaneSplitAdmission(undefined, "right")).toBe("unmeasured");
   });
 
   it("suppresses only edge overlays that the live destination cannot hold", () => {
@@ -146,6 +149,14 @@ describe("DockviewLayoutAdapter", () => {
       group: undefined,
     } as unknown as DockviewWillShowOverlayLocationEvent);
     expect(preventCenter).not.toHaveBeenCalled();
+
+    const preventUnmeasured = vi.fn();
+    handleWorkbenchDockviewOverlayAdmission({
+      position: "bottom",
+      preventDefault: preventUnmeasured,
+      group: undefined,
+    } as unknown as DockviewWillShowOverlayLocationEvent);
+    expect(preventUnmeasured).not.toHaveBeenCalled();
   });
 
   it("subscribes overlay admission with the ready API and disposes it on teardown", async () => {
@@ -745,6 +756,18 @@ describe("DockviewLayoutAdapter", () => {
     expect(impossibleEdgePreventDefault).toHaveBeenCalledOnce();
     expect(onSurfaceDrop).toHaveBeenCalledOnce();
 
+    const unmeasuredEdgePreventDefault = vi.fn();
+    routeWorkbenchDockviewDrop({
+      position: "right",
+      preventDefault: unmeasuredEdgePreventDefault,
+      getData: () => ({ panelId: "surface-1" }),
+      panel: undefined,
+      group: { id: "group-2", api: { boundingBox: undefined } },
+    } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
+    expect(unmeasuredEdgePreventDefault).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenLastCalledWith("surface-1", "group-2", "right");
+    expect(onSurfaceDrop).toHaveBeenCalledTimes(2);
+
     const groupPreventDefault = vi.fn();
     routeWorkbenchDockviewDrop({
       position: "center",
@@ -768,7 +791,7 @@ describe("DockviewLayoutAdapter", () => {
       group: { id: "stale-group" },
     } as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(staleEdgePreventDefault).toHaveBeenCalledOnce();
-    expect(onSurfaceDrop).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenCalledTimes(2);
 
     const soleTabSelfEdgePreventDefault = vi.fn();
     routeWorkbenchDockviewDrop({
@@ -782,7 +805,7 @@ describe("DockviewLayoutAdapter", () => {
       },
     } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(soleTabSelfEdgePreventDefault).toHaveBeenCalledOnce();
-    expect(onSurfaceDrop).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenCalledTimes(2);
   });
 
   it("uses accurate half-pane overlays except for a sole-tab self target", () => {

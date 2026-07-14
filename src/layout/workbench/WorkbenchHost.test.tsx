@@ -5,7 +5,11 @@ import { createCoreWorkbenchSurfaceRegistry } from "../../features/workbench/cor
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
 import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
-import { WorkbenchHost, workbenchEdgeDropCommands } from "./WorkbenchHost";
+import {
+  canSplitWorkbenchGroup,
+  WorkbenchHost,
+  workbenchEdgeDropCommands,
+} from "./WorkbenchHost";
 
 function makeNavigation(overrides: Partial<WorkbenchNavigationService> = {}) {
   return {
@@ -46,6 +50,12 @@ function makeTwoPaneDocument() {
 }
 
 describe("WorkbenchHost", () => {
+  it("keeps programmatic splits enabled while pane geometry is not yet measurable", () => {
+    expect(canSplitWorkbenchGroup(null, "group-1", "horizontal")).toBe(true);
+    const root = document.createElement("div");
+    expect(canSplitWorkbenchGroup(root, "group-1", "vertical")).toBe(true);
+  });
+
   it("renders the registry presentation icon when its token differs from the surface type", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     registry.register({

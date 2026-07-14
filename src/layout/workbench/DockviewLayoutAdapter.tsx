@@ -163,23 +163,35 @@ export type WorkbenchRectangle = {
 };
 
 export type WorkbenchDropPosition = "top" | "bottom" | "left" | "right" | "center";
+export type WorkbenchPaneSplitAdmission = "allowed" | "blocked" | "unmeasured";
 
 /**
- * Admits a 50/50 split only when both resulting panes can satisfy Wardian's
- * explicit Dockview group floor. Center moves never create panes and stay valid.
+ * Distinguishes a measured split decision from transiently unavailable layout.
+ * Center moves never create panes and are always allowed.
+ */
+export function workbenchPaneSplitAdmission(
+  bounds: WorkbenchRectangle | undefined,
+  position: WorkbenchDropPosition,
+): WorkbenchPaneSplitAdmission {
+  if (position === "center") return "allowed";
+  if (!bounds) return "unmeasured";
+  if (position === "left" || position === "right") {
+    if (!Number.isFinite(bounds.width)) return "unmeasured";
+    return bounds.width < WORKBENCH_PANE_MINIMUM_WIDTH * 2 ? "blocked" : "allowed";
+  }
+  if (!Number.isFinite(bounds.height)) return "unmeasured";
+  return bounds.height < WORKBENCH_PANE_MINIMUM_HEIGHT * 2 ? "blocked" : "allowed";
+}
+
+/**
+ * Returns false only for known-too-small panes. Unmeasured geometry stays
+ * enabled so Dockview readiness cannot suppress otherwise valid operations.
  */
 export function canSplitWorkbenchPane(
   bounds: WorkbenchRectangle | undefined,
   position: WorkbenchDropPosition,
 ): boolean {
-  if (position === "center") return true;
-  if (!bounds) return false;
-  if (position === "left" || position === "right") {
-    return Number.isFinite(bounds.width)
-      && bounds.width >= WORKBENCH_PANE_MINIMUM_WIDTH * 2;
-  }
-  return Number.isFinite(bounds.height)
-    && bounds.height >= WORKBENCH_PANE_MINIMUM_HEIGHT * 2;
+  return workbenchPaneSplitAdmission(bounds, position) !== "blocked";
 }
 
 /** Prevents Dockview from promising an edge preview its destination cannot hold. */
