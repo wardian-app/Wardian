@@ -318,6 +318,13 @@ test("opens the visual plus chooser in its captured pane and transitions Browse 
   const searchable = page.getByRole("dialog", { name: "Open Surface", exact: true });
   await expect(searchable).toBeVisible();
   await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(searchable).toHaveCount(0);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+p" : "Control+p");
+  await expect(searchable).toBeVisible();
+  await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
+  await expect(chooser).toHaveCount(0);
 });
 
 test("honors the persisted palette plus preference while Quick Open remains searchable", async ({ page }) => {
