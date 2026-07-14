@@ -1296,6 +1296,8 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         data-layout-source="wardian-model"
         data-safe-mode={String(safe_mode)}
         data-zoomed-group-id={zoomed_group_id ?? "none"}
+        data-pointer-drag-surface-id={pointerDragIdentityRef.current?.surface_id ?? "none"}
+        data-pointer-drag-pointer-id={pointerDragIdentityRef.current?.pointer_id ?? "none"}
         onPointerMoveCapture={trackPointerTargetGroup}
       >
         {safe_mode ? (

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkbenchDocumentV1 } from "../../types";
@@ -392,30 +392,63 @@ describe("DockviewLayoutAdapter", () => {
     diagnostic.mockRestore();
   });
 
-  it("bounds rejection diagnostics per recovery cycle and re-arms after its microtask", async () => {
-    const rejected = vi.fn(() => false);
-    let recoveryScheduled = false;
-    const recover = vi.fn(() => {
-      if (recoveryScheduled) return false;
-      recoveryScheduled = true;
-      queueMicrotask(() => {
-        recoveryScheduled = false;
-      });
-      return true;
+  it("bounds rejection diagnostics through the adapter and re-arms its recovery cycle", async () => {
+    type MoveListener = Parameters<DockviewApi["onDidMovePanel"]>[0];
+    const moveDescriptor = Object.getOwnPropertyDescriptor(
+      DockviewApi.prototype,
+      "onDidMovePanel",
+    );
+    if (!moveDescriptor?.get) throw new Error("expected DockviewApi move event getter");
+    let moveListener: MoveListener | undefined;
+    Object.defineProperty(DockviewApi.prototype, "onDidMovePanel", {
+      ...moveDescriptor,
+      get(this: DockviewApi) {
+        const subscribe = moveDescriptor.get?.call(this) as DockviewApi["onDidMovePanel"];
+        return ((listener: MoveListener) => {
+          moveListener = listener;
+          return subscribe(listener);
+        }) as DockviewApi["onDidMovePanel"];
+      },
     });
+    const rejected = vi.fn(() => false);
     const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const command = { type: "focus_surface", surface_id: "surface-1" } as const;
+    const event = {
+      panel: {
+        id: "surface-1",
+        group: {
+          id: "group-2",
+          panels: [{ id: "surface-1" }],
+        },
+      },
+    } as Parameters<MoveListener>[0];
 
-    dispatchWorkbenchAdapterCommand(command, rejected, recover);
-    dispatchWorkbenchAdapterCommand(command, rejected, recover);
+    try {
+      render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} on_command={rejected} />);
+      await waitFor(() => expect(moveListener).toBeDefined());
+      if (!moveListener) throw new Error("expected adapter move listener");
+      diagnostic.mockClear();
 
-    expect(diagnostic).toHaveBeenCalledOnce();
-    expect(diagnostic).toHaveBeenCalledWith("Workbench canonical command rejected", { command });
+      act(() => {
+        moveListener?.(event);
+        moveListener?.(event);
+      });
+      expect(diagnostic).toHaveBeenCalledOnce();
+      expect(diagnostic).toHaveBeenCalledWith("Workbench canonical command rejected", {
+        command: {
+          type: "move_surface",
+          surface_id: "surface-1",
+          group_id: "group-2",
+          index: 0,
+        },
+      });
 
-    await Promise.resolve();
-    dispatchWorkbenchAdapterCommand(command, rejected, recover);
-    expect(diagnostic).toHaveBeenCalledTimes(2);
-    diagnostic.mockRestore();
+      await act(async () => Promise.resolve());
+      act(() => moveListener?.(event));
+      expect(diagnostic).toHaveBeenCalledTimes(2);
+    } finally {
+      diagnostic.mockRestore();
+      Object.defineProperty(DockviewApi.prototype, "onDidMovePanel", moveDescriptor);
+    }
   });
 
   it("seeds both sides before subdividing mixed depth-three canonical trees", () => {
