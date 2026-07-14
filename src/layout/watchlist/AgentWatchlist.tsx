@@ -1155,75 +1155,47 @@ export default function AgentWatchlist({
 
       {/* ── Context Menu ───────────────────────────────────── */}
       {contextMenu.visible && contextMenu.agentId && (
-        <>
-          <div
-            data-testid="agent-open-context-menu"
-            className="context-menu"
-            style={{ top: contextMenu.y, left: contextMenu.x }}
-            onClick={(e) => e.stopPropagation()}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-          >
-            <button
-              className="context-menu-item"
-              onClick={() => {
-                openAgent?.(contextMenu.agentId!);
-                setContextMenu((current) => ({ ...current, visible: false }));
-              }}
-            >
-              Open
-            </button>
-            {onOpenAgentToSide && (
-              <button
-                className="context-menu-item"
-                onClick={() => {
-                  onOpenAgentToSide(contextMenu.agentId!);
-                  setContextMenu((current) => ({ ...current, visible: false }));
-                }}
-              >
-                Open to Side
-              </button>
-            )}
-          </div>
-          <AgentContextMenu
-            x={contextMenu.x}
-            y={contextMenu.y + (onOpenAgentToSide ? 66 : 36)}
-            agentId={contextMenu.agentId}
-            agentIds={contextMenu.agentIds}
-            teams={teams}
-            offAgentIds={offAgentIds}
-            watchlists={watchlists}
-            onInitiateRename={(id) => {
-              setEditingAgentId(id);
-              const a = agents.find(ag => ag.session_id === id);
-              if (a) setEditingAgentName(a.session_name);
-            }}
-            onQuery={onQuery}
-            onPause={onPause}
-            onRestart={onRestart}
-            onClear={onClear}
-            onClone={onClone}
-            onAddToList={(listId, agentId) => {
-              onAddToList(listId, agentId);
-              setContextMenu(p => ({ ...p, visible: false }));
-            }}
-            onRemoveFromList={(listId, agentId) => {
-              onRemoveFromList(listId, agentId);
-              setContextMenu(p => ({ ...p, visible: false }));
-            }}
-            onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
-              onAddAgentsToList(listId, ids);
-              setContextMenu(p => ({ ...p, visible: false }));
-            } : undefined}
-            onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
-              onRemoveAgentsFromList(listId, ids);
-              setContextMenu(p => ({ ...p, visible: false }));
-            } : undefined}
-            onDelete={onDelete}
-            onDeleteAgents={onDeleteAgents}
-            onCreateTeam={onCreateTeam}
-            onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
-          />
-        </>
+        <AgentContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          agentId={contextMenu.agentId}
+          agentIds={contextMenu.agentIds}
+          teams={teams}
+          offAgentIds={offAgentIds}
+          watchlists={watchlists}
+          onOpen={openAgent}
+          onOpenToSide={onOpenAgentToSide}
+          onInitiateRename={(id) => {
+            setEditingAgentId(id);
+            const a = agents.find(ag => ag.session_id === id);
+            if (a) setEditingAgentName(a.session_name);
+          }}
+          onQuery={onQuery}
+          onPause={onPause}
+          onRestart={onRestart}
+          onClear={onClear}
+          onClone={onClone}
+          onAddToList={(listId, agentId) => {
+            onAddToList(listId, agentId);
+            setContextMenu(p => ({ ...p, visible: false }));
+          }}
+          onRemoveFromList={(listId, agentId) => {
+            onRemoveFromList(listId, agentId);
+            setContextMenu(p => ({ ...p, visible: false }));
+          }}
+          onAddAgentsToList={onAddAgentsToList ? (listId, ids) => {
+            onAddAgentsToList(listId, ids);
+            setContextMenu(p => ({ ...p, visible: false }));
+          } : undefined}
+          onRemoveAgentsFromList={onRemoveAgentsFromList ? (listId, ids) => {
+            onRemoveAgentsFromList(listId, ids);
+            setContextMenu(p => ({ ...p, visible: false }));
+          } : undefined}
+          onDelete={onDelete}
+          onDeleteAgents={onDeleteAgents}
+          onCreateTeam={onCreateTeam}
+          onClose={() => setContextMenu(p => ({ ...p, visible: false }))}
+        />
       )}
 
       {teamContextMenu.visible && teamContextMenu.teamId && (() => {

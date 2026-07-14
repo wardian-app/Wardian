@@ -207,22 +207,29 @@ describe('AgentWatchlist', () => {
     expect(mockOnSelectionChange).not.toHaveBeenCalled();
   });
 
-  it('offers explicit Open and Open to Side context actions', () => {
+  it('offers navigation and management actions in one context menu', async () => {
     render(<AgentWatchlist {...defaultProps} />);
     const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
 
     fireEvent.contextMenu(alphaRow);
     expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByTestId('agent-open-context-menu')).getByRole('button', { name: 'Open' }));
+    expect(screen.getAllByTestId('agent-context-menu')).toHaveLength(1);
+    expect(document.querySelectorAll('.context-menu')).toHaveLength(1);
+    const menu = screen.getByTestId('agent-context-menu');
+    expect(within(menu).getByRole('button', { name: 'Rename' })).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole('button', { name: 'Open' }));
 
     expect(mockOnOpenAgent).toHaveBeenCalledWith('agent-1');
     expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByTestId('agent-context-menu')).not.toBeInTheDocument());
 
     fireEvent.contextMenu(alphaRow);
-    fireEvent.click(within(screen.getByTestId('agent-open-context-menu')).getByRole('button', { name: 'Open to Side' }));
+    expect(screen.getAllByTestId('agent-context-menu')).toHaveLength(1);
+    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Open to Side' }));
 
     expect(mockOnOpenAgentToSide).toHaveBeenCalledWith('agent-1');
+    await waitFor(() => expect(screen.queryByTestId('agent-context-menu')).not.toBeInTheDocument());
   });
 
   it('keeps the legacy onAgentClick callback as a flag-off navigation fallback', () => {

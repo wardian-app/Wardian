@@ -653,12 +653,12 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
 
     fireEvent.contextMenu(betaRow);
-    fireEvent.click(within(screen.getByTestId("agent-open-context-menu"))
+    fireEvent.click(within(screen.getByTestId("agent-context-menu"))
       .getByRole("button", { name: "Open" }));
     await screen.findByTestId("agent-session-surface");
 
     fireEvent.contextMenu(betaRow);
-    fireEvent.click(within(screen.getByTestId("agent-open-context-menu"))
+    fireEvent.click(within(screen.getByTestId("agent-context-menu"))
       .getByRole("button", { name: "Open to Side" }));
     await waitFor(() => {
       expect(screen.getAllByTestId("workbench-group")).toHaveLength(2);
