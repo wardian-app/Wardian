@@ -392,11 +392,20 @@ async function invokeTauri(driver, command, args = {}) {
 async function terminalText(driver, sessionId) {
   return await driver.executeScript((sid) => {
     const card = document.getElementById(`agent-card-${sid}`);
-    const host = card?.querySelector('[data-testid="agent-terminal-host"]');
+    const matchingHosts = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .filter((candidate) => candidate.getAttribute("data-terminal-session-id") === sid);
+    const host = matchingHosts.length === 1 ? matchingHosts[0] : null;
+    const presentationId = host?.getAttribute("data-terminal-presentation-id") ?? null;
+    const registeredPresentationIds = window.__wardianTerminalDebug?.presentationIds?.() ?? [];
+    const exactPresentationId = presentationId && registeredPresentationIds.includes(presentationId)
+      ? presentationId
+      : null;
     const rows = Array.from(host?.querySelectorAll(".xterm-rows > div") ?? [])
       .map((element) => element.textContent || "")
       .join("\n");
-    const debug = window.__wardianTerminalDebug?.snapshot?.(sid);
+    const debug = exactPresentationId
+      ? window.__wardianTerminalDebug?.snapshot?.(exactPresentationId)
+      : null;
     return [
       rows,
       debug?.lines?.join("\n") ?? "",

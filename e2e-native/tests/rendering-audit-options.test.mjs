@@ -1664,28 +1664,45 @@ test("deterministic Wardian rendering audit scrolls through the terminal debug A
   assert.match(terminalSource, /scrollToViewportLine: \(presentationId: string, line: number\) => boolean/);
 });
 
-test("native terminal debug consumers never pass runtime session identities", () => {
-  const consumerFiles = [
-    "opencode-native.test.mjs",
-    "real-provider-rendering-native.test.mjs",
-    "terminal-geometry-sweep-native.test.mjs",
-    "terminal-rendering-native.test.mjs",
-    "terminal-visibility-snapshot-native.test.mjs",
-    "terminal-wheel-scroll-native.test.mjs",
-  ];
+test("repository terminal debug consumers never pass runtime session identities", () => {
+  const sourceFiles = [];
+  const ignoredDirectories = new Set([
+    ".git",
+    ".tmp",
+    "dist",
+    "node_modules",
+    "playwright-report",
+    "target",
+    "vendor",
+  ]);
+  const collectSources = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory() && !ignoredDirectories.has(entry.name)) {
+        collectSources(entryPath);
+      } else if (/\.(?:[cm]?js|tsx?)$/.test(entry.name)) {
+        sourceFiles.push(entryPath);
+      }
+    }
+  };
+  collectSources(process.cwd());
 
-  for (const file of consumerFiles) {
-    const source = fs.readFileSync(
-      path.join(process.cwd(), "e2e-native", "tests", file),
-      "utf8",
-    );
-    assert.match(source, /resolveAgentTerminalPresentationId/, `${file} must resolve an exact presentation`);
+  const staleInvocation = /__wardianTerminalDebug\?\.(?:snapshot|rawOutputLog|scrollToTop|scrollToBottom|scrollToViewportLine|terminalLinks)(?:\?\.)?\(\s*(?:sid|sessionId)\b/;
+  for (const file of sourceFiles) {
+    const source = fs.readFileSync(file, "utf8");
     assert.doesNotMatch(
       source,
-      /__wardianTerminalDebug[^\n]*(?:\bsid\b|\bsessionId\b)/,
-      `${file} must not pass a runtime session identity to terminal debug`,
+      staleInvocation,
+      `${path.relative(process.cwd(), file)} must not pass a runtime session identity to terminal debug`,
     );
   }
+
+  const demoSource = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "capture-readme-demo-real.mjs"),
+    "utf8",
+  );
+  assert.match(demoSource, /data-terminal-presentation-id/);
+  assert.match(demoSource, /snapshot\?\.\(exactPresentationId\)/);
 });
 
 test("outside capture records native terminal ANSI size probe responses", () => {
