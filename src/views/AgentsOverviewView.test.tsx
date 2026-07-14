@@ -464,6 +464,42 @@ describe('AgentsOverviewView maximize behavior', () => {
     }
   });
 
+  it('keeps a narrow Auto roster visible in a floor-sized one-column grid', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    vi.useFakeTimers();
+
+    try {
+      render(<AgentsOverviewView {...gridProps(null, agents)} mode="auto" />);
+      const container = screen.getByTestId('agents-overview-container');
+      act(() => {
+        resizeCallback?.([{
+          target: container,
+          contentRect: { width: 800, height: 600 } as DOMRectReadOnly,
+        } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+        vi.advanceTimersByTime(120);
+      });
+
+      const grid = screen.getByTestId('agent-grid');
+      expect(grid).toHaveAttribute('data-overview-mode', 'grid');
+      expect(grid.style.gridTemplateColumns).toBe('1fr');
+      expect(grid.style.minWidth).toBe('520px');
+      expect(screen.getAllByTestId('agent-card')).toHaveLength(2);
+      expect(screen.queryByRole('button', { name: /^Minimize / })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('does not animate terminal card geometry during maximize restore', () => {
     renderGrid(null);
 

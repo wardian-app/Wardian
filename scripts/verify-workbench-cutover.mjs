@@ -118,12 +118,6 @@ const allowlistedMatches = Object.freeze([
     reason: "Grid is an Agents Overview presentation mode in this migrated suite.",
   },
   {
-    path: "e2e/tests/responsive-layout.spec.ts",
-    rule_ids: ["legacy-role-button-selector", "direct-desktop-surface-launch-click"],
-    context: /overview[\s\S]*Grid/i,
-    reason: "Grid is an Agents Overview presentation mode, not global navigation.",
-  },
-  {
     path: "e2e/tests/workbench-overview.spec.ts",
     rule_ids: ["legacy-role-button-selector", "direct-desktop-surface-launch-click"],
     context: /Grid/,

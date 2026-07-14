@@ -42,7 +42,7 @@ async function installResponsiveWorkbench(page: Page, mode: "auto" | "grid" | "s
   });
   await page.addInitScript(() => {
     localStorage.setItem("wardian-settings", JSON.stringify({
-      state: { gridCardDisplayMode: "chat" },
+      state: { gridCardDisplayMode: "terminal" },
       version: 2,
     }));
   });
@@ -89,7 +89,7 @@ test.describe("responsive layout", () => {
     ))).toBe(Math.round(grown));
   });
 
-  test("Auto uses Single at the hard floor while explicit Grid preserves its columns", async ({ page }) => {
+  test("Auto stacks the roster at the hard floor and Minimize restores the full roster", async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 600 });
     await installResponsiveWorkbench(page, "auto");
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -97,14 +97,23 @@ test.describe("responsive layout", () => {
     const overview = surfacePanel(page, "agents-overview");
     const grid = overview.locator('[data-testid="agent-grid"]');
     const cards = overview.locator('[data-testid="agent-card"]:visible');
-    await expect(grid).toHaveAttribute("data-overview-mode", "single");
-    await expect(cards).toHaveCount(1);
-
-    await overview.getByRole("button", { name: "Grid", exact: true }).click();
     await expect(grid).toHaveAttribute("data-overview-mode", "grid");
     await expect(cards).toHaveCount(2);
     await expect.poll(() => grid.evaluate(
       (element) => getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
-    )).toBe(2);
+    )).toBe(1);
+
+    await overview.getByRole("button", { name: "Single", exact: true }).click();
+    await expect(grid).toHaveAttribute("data-overview-mode", "single");
+    await expect(cards).toHaveCount(1);
+
+    await overview.getByRole("button", { name: /^Minimize / }).click();
+    await expect(overview.getByRole("button", { name: "Auto", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect(grid).toHaveAttribute("data-overview-mode", "grid");
+    await expect(cards).toHaveCount(2);
+    await expect.poll(() => grid.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+    )).toBe(1);
   });
 });

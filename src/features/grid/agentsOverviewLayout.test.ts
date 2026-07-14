@@ -53,7 +53,7 @@ describe("Agents layout", () => {
     expect(selectBestAgentsOverviewCandidate(candidates, "landscape")?.columns).toBe(3);
   });
 
-  it("falls back from Auto to Single when no candidate reaches the hard floor", () => {
+  it("keeps every agent in a one-column Auto grid below the card floor", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(3),
@@ -61,9 +61,12 @@ describe("Agents layout", () => {
       focusedAgentId: "agent-2",
     });
 
-    expect(result.presentationMode).toBe("single");
+    expect(result.presentationMode).toBe("grid");
     expect(result.focusedAgentId).toBe("agent-2");
-    expect(result.visibleAgentIds).toEqual(["agent-2"]);
+    expect(result.visibleAgentIds).toEqual(["agent-1", "agent-2", "agent-3"]);
+    expect(result.columns).toBe(1);
+    expect(result.cardWidth).toBe(TERMINAL_CARD_FLOOR.width);
+    expect(result.requiresScroll).toBe(true);
   });
 
   it("uses viewport capacity and vertical overflow for a large Auto roster", () => {
@@ -100,7 +103,7 @@ describe("Agents layout", () => {
     expect(result.contentHeight).toBe(TERMINAL_CARD_FLOOR.height);
   });
 
-  it("still resolves Auto to Single when the pane is one pixel too narrow for two useful cards", () => {
+  it("stacks Auto when the pane is one pixel too narrow for two useful cards", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(2),
@@ -108,10 +111,12 @@ describe("Agents layout", () => {
       gap: 8,
     });
 
-    expect(result.presentationMode).toBe("single");
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(1);
+    expect(result.visibleAgentIds).toEqual(["agent-1", "agent-2"]);
   });
 
-  it("never resolves Auto to a one-column multi-agent grid", () => {
+  it("uses multiple Auto columns whenever two floor-sized cards fit", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(4),
@@ -121,9 +126,10 @@ describe("Agents layout", () => {
 
     expect(result.presentationMode).toBe("grid");
     expect(result.columns).toBeGreaterThanOrEqual(2);
+    expect(result.visibleAgentIds).toHaveLength(4);
   });
 
-  it("does not preserve a legacy one-column Auto grid through hysteresis", () => {
+  it("does not preserve a one-column Auto grid after two floor-sized columns fit", () => {
     const agents = terminalAgents(4);
     const legacyLayout = resolveAgentsOverviewLayout({
       mode: "grid",
@@ -141,6 +147,7 @@ describe("Agents layout", () => {
 
     expect(result.presentationMode).toBe("grid");
     expect(result.columns).toBeGreaterThanOrEqual(2);
+    expect(result.visibleAgentIds).toHaveLength(4);
   });
 
   it("keeps explicit Grid and reports scroll dimensions instead of becoming Single", () => {
@@ -200,7 +207,7 @@ describe("Agents layout", () => {
     expect(smallImprovement.candidate?.columns).toBe(previous.candidate?.columns);
   });
 
-  it("changes Auto immediately after a hard-floor crossing", () => {
+  it("stacks Auto immediately after a two-column hard-floor crossing", () => {
     const agents = terminalAgents(2);
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
@@ -218,7 +225,9 @@ describe("Agents layout", () => {
       gap: 8,
     });
 
-    expect(narrowed.presentationMode).toBe("single");
+    expect(narrowed.presentationMode).toBe("grid");
+    expect(narrowed.columns).toBe(1);
+    expect(narrowed.visibleAgentIds).toEqual(["agent-1", "agent-2"]);
   });
 
   it("uses the strictest floor in a mixed terminal/chat population", () => {
@@ -243,7 +252,9 @@ describe("Agents layout", () => {
 
     expect(chatOnly.presentationMode).toBe("grid");
     expect(chatOnly.candidate?.columns).toBe(2);
-    expect(mixed.presentationMode).toBe("single");
+    expect(mixed.presentationMode).toBe("grid");
+    expect(mixed.candidate?.columns).toBe(1);
+    expect(mixed.visibleAgentIds).toEqual(["terminal", "chat"]);
   });
 
   it("falls back from a missing focused agent by recency and then stable order", () => {

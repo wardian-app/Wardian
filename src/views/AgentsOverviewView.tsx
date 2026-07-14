@@ -375,7 +375,9 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const minimumGridTrackWidth = layoutAgents.some(({ cardMode }) => cardMode === "terminal")
     ? TERMINAL_CARD_FLOOR.width
     : CHAT_CARD_FLOOR.width;
-  const gridMinWidth = mode === "grid" && !isMaximized && renderedColumnCount <= 1
+  const gridMinWidth = overviewLayout.presentationMode === "grid"
+    && !isMaximized
+    && renderedColumnCount <= 1
     ? `${minimumGridTrackWidth}px`
     : '100%';
   const gridTemplateColumns = (isMaximized || renderStacked)

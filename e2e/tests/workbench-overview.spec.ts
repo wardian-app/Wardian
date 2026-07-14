@@ -121,11 +121,13 @@ test("derives Auto from the measured container and keeps explicit Grid/Single st
   await page.setViewportSize({ width: 900, height: 600 });
   await page.waitForTimeout(60);
   await expect(mode).toHaveAttribute("data-overview-mode", "grid");
-  await expect(mode).toHaveAttribute("data-overview-mode", "single", { timeout: 2_000 });
+  await expect.poll(async () => grid.evaluate((element) =>
+    getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+  )).toBe(1);
 
   await page.setViewportSize({ width: 960, height: 600 });
   await page.waitForTimeout(180);
-  await expect(mode).toHaveAttribute("data-overview-mode", "single");
+  await expect(mode).toHaveAttribute("data-overview-mode", "grid");
   await page.setViewportSize({ width: 1920, height: 1080 });
   await expect(mode).toHaveAttribute("data-overview-mode", "grid", { timeout: 2_000 });
 

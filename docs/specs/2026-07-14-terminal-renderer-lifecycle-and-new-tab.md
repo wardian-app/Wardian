@@ -8,7 +8,7 @@ Renderer retirement is an ownership transition. Once a renderer is retired, new 
 
 For up to the renderer budget, all terminal cards in the visible Agents surface remain resident. Above the budget, residency uses a stable window: cards are retained until capacity is needed for an approaching card, rather than suspended immediately when they leave the intersection margin. Physical intersection controls WebGL promotion independently.
 
-Auto layout scores the number of useful agent cards that fit in the viewport, not whether the entire roster can be compressed into one screen. When at least two floor-sized cards fit side by side, Auto uses a multi-column grid and allows additional rows to scroll vertically. It uses Single only for one agent or when the actual pane cannot support two useful cards. Temporary focus is separate from responsive layout: entering Single remembers the last explicit multi-agent mode (`auto` or `grid`), and leaving focus restores it. An Auto-derived singleton is not presented as a user-maximized state.
+Auto layout scores the number of useful agent cards that fit in the viewport, not whether the entire roster can be compressed into one screen. When at least two floor-sized cards fit side by side, Auto uses a multi-column grid and allows additional rows to scroll vertically. Narrow panes stack the complete roster into a one-column scrolling grid; only an explicit Single selection hides the other agents. Temporary focus is therefore separate from responsive layout: entering Single remembers the last explicit multi-agent mode (`auto` or `grid`), and leaving focus always restores a visible multi-agent roster.
 
 Wardian also relies on xterm's own repaint after `scrollLines`; it must not issue a second full-grid refresh for every wheel event.
 
@@ -29,7 +29,7 @@ Every split affordance uses the destination pane's live geometry. Wardian advert
 - A delayed xterm write can overlap renderer retirement without a null dereference or operation on a disposed terminal.
 - Scrolling an Agents grid of at most 24 terminals preserves renderer identity and does not request replacement snapshots.
 - Larger grids use bounded, stable residency and prefer newly approaching cards without continuous boundary churn.
-- Auto shows a scrolling multi-column grid for a large roster whenever at least two useful cards fit, and explicit focus exits to the remembered Auto/Grid mode.
+- Auto shows the complete roster in a scrolling grid, selecting multiple columns when useful cards fit and one column otherwise; explicit focus exits to the remembered Auto/Grid mode.
 - Wheel scrolling performs one xterm-managed full repaint per input.
 - `+` creates an inline New Tab in the requested pane; choosing a card replaces it at the same surface id and index.
 - The palette preference and keyboard Quick Open behavior remain unchanged.

@@ -48,13 +48,13 @@
 **Interfaces:**
 - Consumes: `MAX_XTERM_RENDERERS`.
 - Produces: a stable set of resident agent presentation ids; physical intersection no longer directly means renderer destruction.
-- Produces: capacity-based Auto layout with vertical overflow and persisted `last_multi_agent_mode: "auto" | "grid"` focus restoration.
+- Produces: capacity-based Auto layout that preserves the complete roster through vertical overflow and persisted `last_multi_agent_mode: "auto" | "grid"` focus restoration.
 
 - [ ] Add tests proving a grid at or below capacity keeps every terminal mounted across intersection exit/re-entry and a grid above capacity only evicts a non-near resident when admitting a new near card.
 - [ ] Run `npm run test -- --run src/views/AgentsOverviewView.test.tsx` and confirm the continuity test fails.
 - [ ] Replace the transient intersection set with stable residency: seed all ids at or below capacity; above capacity retain residents and admit approaching ids by removing non-near residents first.
-- [ ] Replace Auto's all-roster compression score with viewport capacity: when at least two terminal-floor cards fit side by side, preserve their floor, maximize simultaneous capacity, and scroll excess rows; use Single only for one agent or a pane too narrow for two useful cards.
-- [ ] Separate explicit Single focus from Auto-derived presentation; persist the last Auto/Grid mode, restore it through a surface-owned exit callback, and hide Minimize for responsive Auto Single.
+- [x] Replace Auto's all-roster compression score with viewport capacity: preserve card floors, maximize simultaneous capacity, and scroll excess rows; stack the roster in one column when multiple columns do not fit, reserving Single for explicit focus or a one-agent roster.
+- [x] Separate explicit Single focus from responsive presentation; persist the last Auto/Grid mode and restore it through a surface-owned exit callback so Minimize always reveals the roster.
 - [ ] Remove eager WebGL promotion from the generic renderer reveal path so the terminal's physical intersection observer is the sole WebGL visibility authority.
 - [ ] Re-run the focused Agents and terminal tests.
 

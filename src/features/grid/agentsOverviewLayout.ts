@@ -311,12 +311,18 @@ function evaluateAutoCandidate(
 
   const rows = Math.ceil(agents.length / columns);
   const simultaneousRows = Math.min(rows, viewportRows);
-  const cardWidth = (width - (Math.max(0, columns - 1) * gap)) / columns;
+  const availableCardWidth = (width - (Math.max(0, columns - 1) * gap)) / columns;
+  // Auto is the responsive multi-agent mode. When the pane cannot fit two
+  // useful cards side by side, preserve the roster as a one-column scrolling
+  // grid instead of silently turning Auto into focused Single.
+  const cardWidth = columns === 1
+    ? Math.max(floor.width, availableCardWidth)
+    : availableCardWidth;
   const cardHeight = Math.max(
     floor.height,
     (height - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows,
   );
-  if (cardWidth < floor.width) return null;
+  if (columns > 1 && cardWidth < floor.width) return null;
 
   return {
     columns,
@@ -356,9 +362,11 @@ function chooseAutoCandidate(
     agents.length,
     Math.floor((finiteNonNegative(containerSize.width) + gap) / (floor.width + gap)),
   );
-  if (maxColumns < 2) return null;
+  const candidateColumns = maxColumns < 2
+    ? [1]
+    : Array.from({ length: maxColumns - 1 }, (_, index) => index + 2);
 
-  const candidates = Array.from({ length: maxColumns - 1 }, (_, index) => index + 2)
+  const candidates = candidateColumns
     .map((columns) => evaluateAutoCandidate(agents, containerSize, columns, gap))
     .filter((candidate): candidate is AgentsOverviewGridCandidate => candidate !== null);
   const best = [...candidates].sort((left, right) =>
@@ -369,7 +377,7 @@ function chooseAutoCandidate(
     previousLayout?.requestedMode !== "auto"
     || previousLayout.presentationMode !== "grid"
     || !previousLayout.candidate
-    || (agents.length > 1 && previousLayout.candidate.columns < 2)
+    || (best.columns >= 2 && previousLayout.candidate.columns < 2)
   ) {
     return best;
   }

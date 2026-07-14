@@ -14,9 +14,9 @@ The right roster controls which agents auxiliary tools target. It does not filte
 
 The surface header provides three modes:
 
-- **Auto** uses a scrolling multi-column grid whenever the pane can fit at least two useful cards side by side. It uses Single only for one visible agent or a pane too narrow for two cards, so a large roster does not get compressed into one screen or collapse just because more rows are needed.
+- **Auto** always keeps a multi-agent roster visible. It uses multiple columns whenever the pane can fit at least two useful cards side by side, and stacks the full roster into one scrolling column when it cannot. With one visible agent, that card naturally fills the surface.
 - **Grid** keeps multiple visible cards and enables direct grid sizing and ordering controls. The layout can scroll when the available area is smaller than the cards' usable floor.
-- **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it. **Minimize** restores the last explicit multi-agent mode, Auto or Grid; an Auto-derived one-agent presentation is not shown as a user-maximized state.
+- **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it. **Minimize** restores the last explicit multi-agent mode, Auto or Grid, and reveals the roster again.
 
 Auto derives its layout from the current surface dimensions and preserves useful card floors while extra rows scroll. It does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
 
@@ -40,7 +40,7 @@ In Terminal mode, click inside the terminal before typing. When the same agent t
 - Right-click the background and choose **Reset Grid Layout** to discard the manual Grid arrangement without resetting the whole Workbench.
 - Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents tab does not.
 
-Auto chooses the broadest useful grid the pane width can support and permits vertical overflow. It switches to the focused agent only when the pane is too narrow for two useful cards. Grid always honors the user's chosen tracks and row sizing instead of silently stacking cards.
+Auto chooses the broadest useful grid the pane width can support and permits vertical overflow. Below the two-card threshold it switches to a one-column roster without hiding agents. Grid always honors the user's chosen tracks and row sizing instead of silently changing the user's arrangement.
 
 ## Important Boundaries
 
