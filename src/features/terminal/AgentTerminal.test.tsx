@@ -4307,6 +4307,9 @@ describe("AgentTerminal scrollback", () => {
     const replacementRenderer = getLatestTerminalInstance();
     const parser = getLatestHeadlessTerminalInstance();
     replacementRenderer.write.mockClear();
+    replacementRenderer.reset.mockClear();
+    replacementRenderer.scrollToBottom.mockClear();
+    replacementRenderer.refresh.mockClear();
     parser.write.mockClear();
 
     await act(async () => {
@@ -4326,6 +4329,9 @@ describe("AgentTerminal scrollback", () => {
       expect.stringContaining("delayed codex preview"),
       expect.any(Function),
     );
+    expect(replacementRenderer.reset).not.toHaveBeenCalled();
+    expect(replacementRenderer.scrollToBottom).not.toHaveBeenCalled();
+    expect(replacementRenderer.refresh).not.toHaveBeenCalled();
   });
 
   it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {

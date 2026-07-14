@@ -1439,7 +1439,10 @@ async function fitTerminalToContainer(
   }
 }
 
-function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
+async function resetTerminalOutputBuffers(
+  entry: TerminalSessionEntry,
+  rendererIdentity: TerminalRendererEntry | null = entry.renderer,
+) {
   const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
   if (typeof parserWithReset.reset === "function") {
     parserWithReset.reset();
@@ -1448,11 +1451,14 @@ function resetTerminalOutputBuffers(entry: TerminalSessionEntry) {
   }
   (entry.parser as unknown as { scrollToBottom?: () => void }).scrollToBottom?.();
 
-  if (entry.renderer) {
-    removeSnapshotOverlay(entry.renderer);
-    entry.renderer.term.reset();
-    entry.renderer.term.scrollToBottom();
-    entry.renderer.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
+  if (rendererIdentity) {
+    await runRendererOperation(entry, rendererIdentity, (renderer, isCurrent) => {
+      if (!isCurrent()) return;
+      removeSnapshotOverlay(renderer);
+      renderer.term.reset();
+      renderer.term.scrollToBottom();
+      renderer.term.refresh(0, Math.max(0, renderer.term.rows - 1));
+    });
   }
 }
 
@@ -1504,7 +1510,7 @@ async function applyBrokerSnapshot(
       queueCapabilityResponses: false,
     });
   } else {
-    resetTerminalOutputBuffers(entry);
+    await resetTerminalOutputBuffers(entry);
   }
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
@@ -1590,9 +1596,17 @@ async function writeTerminalOutputBatch(
     return;
   }
 
+  const rendererIdentity = options?.rendererIdentity === undefined
+    ? entry.renderer
+    : options.rendererIdentity;
   if (options?.resetBeforeWrite) {
-    resetTerminalOutputBuffers(entry);
+    await resetTerminalOutputBuffers(entry, rendererIdentity);
   }
+  // A caller can deliberately carry a renderer identity across earlier awaits.
+  // Reject a retired or replaced capture before reading its buffer/capabilities.
+  const renderer = rendererIdentity && rendererRemainsCurrent(entry, rendererIdentity)
+    ? rendererIdentity
+    : null;
 
   const renderChunks = rawChunks.map((data) =>
     planTerminalOutputChunk(sessionId, data, entry, {
@@ -1630,9 +1644,6 @@ async function writeTerminalOutputBatch(
   // would feel unscrollable until the provider went quiet (observed live with
   // Claude). scrollRendererToBottomAfterWrite re-checks against this baseline
   // and skips the snap when the user scrolled away mid-batch.
-  const renderer = options?.rendererIdentity === undefined
-    ? entry.renderer
-    : options.rendererIdentity;
   const rendererBottomBeforeWrite = renderer
     ? {
         atBottom:
@@ -1757,7 +1768,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
         prefersLight: termTheme === LIGHT_TERM_THEME,
         focusReported: entry.opencodeFocusReported,
       });
-      resetTerminalOutputBuffers(entry);
+      await resetTerminalOutputBuffers(entry, renderer);
       await writeTerminalControl(entry.parser, themedState);
       if (renderer) {
         await runRendererOperation(entry, renderer, async (currentRenderer, isCurrent) => {
@@ -2029,7 +2040,7 @@ function resetLegacyTerminalSession(entry: TerminalSessionEntry) {
   entry.resizeCount = 0;
   entry.lastMeasuredHostSize = null;
   entry.pendingForceResize = true;
-  resetTerminalOutputBuffers(entry);
+  void resetTerminalOutputBuffers(entry);
   entry.titleHandlerRef.current?.("");
 }
 
