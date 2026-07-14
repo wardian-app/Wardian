@@ -14,7 +14,7 @@ The chrome retains the left sidebar toggle, optional telemetry, right roster tog
 
 The center workspace is composed of tabbed panes. Each pane can contain several surfaces and can be split right or down. Drag tabs to reorder them, move them between panes, or drop them at an edge to create a split.
 
-Use the **+** button immediately after a pane's tabs or its empty **Home** state to open a surface there. In Quick Open, `Ctrl+Enter` / `Cmd+Enter` opens the selected surface to the side; the picker has no separate visible Open to Side button. The pane **…** menu remains at the far edge and contains split, merge, zoom/restore, and pane-close actions. Right-click a tab for tab-specific move, split, and close actions, or use the close button shown on the active or hovered tab.
+Use the **+** button immediately after a pane's tabs to append an inline **New Tab** containing the visual surface launcher. Choosing an app replaces that tab in place. An actually empty pane derives the same launcher without persisting a tab. In Quick Open, `Ctrl+Enter` / `Cmd+Enter` opens the selected surface to the side; the picker has no separate visible Open to Side button. The pane **…** menu remains at the far edge and contains split, merge, zoom/restore, and pane-close actions. Right-click a tab for tab-specific move, split, and close actions, or use the close button shown on the active or hovered tab.
 
 Wardian persists the layout and restores it after restart. Recently closed surfaces can be reopened. Recoverable placeholders keep unavailable surface or agent references visible instead of silently deleting them; **Reset Workbench** deliberately returns to the default layout.
 
@@ -48,7 +48,7 @@ See [Watchlists](./watchlists.md) for grouping and targeting behavior.
 
 ## Agents
 
-[Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Grid is a mode inside this surface, not a global app page.
+[Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Auto keeps a multi-column layout whenever the pane can fit at least two useful cards side by side and lets additional rows scroll; it does not collapse to Single merely because the full roster cannot fit at once. Explicit Single is temporary focus and restores the previous Auto or Grid mode when minimized. Grid is a mode inside this surface, not a global app page.
 
 Agent cards can show the real provider terminal or a normalized Chat view. Closing the Agents surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
 

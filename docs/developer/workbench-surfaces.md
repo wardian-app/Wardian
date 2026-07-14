@@ -36,8 +36,8 @@ navigation service, but neither region owns the central workbench model.
 
 ### Pane chrome and commands
 
-Persistent pane chrome is intentionally small: pane-local tabs, `+` to open a
-surface, and `...` for pane actions. Tab actions belong in tab context menus;
+Persistent pane chrome is intentionally small: pane-local tabs, `+` to append
+an inline New Tab launcher, and `...` for pane actions. Tab actions belong in tab context menus;
 split, move, join, zoom, close-group, and other structural actions belong in
 the relevant pane/tab menus. Globally registered structural commands, including
 split, move, and zoom, also appear in the actual Ctrl/Cmd+Shift+P command
@@ -60,8 +60,11 @@ Use each identity for one purpose:
 - live runtime IDs belong to the backend and never replace `surface_id` in the
   persisted document.
 
-An empty group is valid. It derives the Home / New Surface UI without
-persisting a synthetic Home tab.
+An empty group is valid. It derives the Home UI without persisting a synthetic
+tab. A user-created `new-tab` surface is instead a canonical allow-multiple
+placeholder: navigation replaces it in place when the user chooses a surface,
+or discards it without close history when an existing singleton is focused.
+The model rejects placeholder-only discard for every other surface type.
 
 ## Registry Contract
 

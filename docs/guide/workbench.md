@@ -15,12 +15,12 @@ An empty pane is a surface launcher. Choose a core surface directly from its ico
 There are three common entry points:
 
 - Press `Ctrl+P` on Windows/Linux or `Cmd+P` on macOS for **Quick Open**.
-- Select the **+** button in a pane, or choose a tool in an empty pane's launcher.
+- Select the **+** button in a pane to open a **New Tab**, or choose a tool in an empty pane's launcher.
 - Press `Ctrl+Shift+P` / `Cmd+Shift+P` for the searchable command palette.
 
-By default, a pane's **+** button opens the visual **Surface chooser**. Choosing a card opens that surface in the pane whose **+** button you selected. Choose **Browse all surfaces** to hand the same pane-local request to the compact searchable list.
+By default, a pane's **+** button appends and focuses an ordinary **New Tab** in that pane. The tab contains the full visual surface launcher. Choosing a card replaces New Tab in place, preserving its pane and tab position; choosing an already-open singleton closes New Tab and focuses the existing tab. Choose **Browse all surfaces** to continue that same replacement through the compact searchable list.
 
-To make **+** open the searchable list directly, open **Settings > Appearance**, find **New tab button**, and select **Searchable list**. Select **Surface chooser** to restore the default. This preference changes only **+**: **Quick Open** always opens the searchable list.
+To make **+** open the searchable list directly, open **Settings > Appearance**, find **New tab button**, and select **Searchable list**. Select **New Tab** to restore the default. This preference changes only **+**: **Quick Open** always opens the searchable list.
 
 In the searchable list, select a surface name to open it in the captured pane, or press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS to open it to the side. There is no separate visible **Open to Side** button in the picker. A surface that is already open as a singleton, such as Dashboard or Queue, is focused instead of duplicated.
 
@@ -34,7 +34,7 @@ Each pane has its own tab strip and active surface. Every tab includes a compact
 - Drag a tab within its strip to reorder it.
 - Use the close button on the active tab, or reveal it by hovering another tab, to close that presentation.
 - Drop a tab in the center of another pane to move it there.
-- Drop a tab at a pane's edge to create a 50/50 split. The half-pane preview shows the space the new pane will occupy.
+- Drop a tab at a pane's edge to create a 50/50 split. The half-pane preview appears only when both resulting panes can remain usable; undersized destinations retain center-drop movement but do not advertise or commit an impossible edge split.
 - Right-click a tab to close it, split it right or down, or move it to an adjacent pane.
 - Open the pane's **…** menu for **Zoom pane** / **Restore pane**, **Split pane right**, **Split pane down**, **Merge into previous pane** / **Merge into next pane**, and **Close pane**. Dirty surfaces ask before they close.
 - Use the command palette or keyboard shortcuts when you prefer not to use a context menu.

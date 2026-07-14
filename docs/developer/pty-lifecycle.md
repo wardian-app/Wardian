@@ -110,6 +110,14 @@ Wardian's frontend terminal stack is built on `xterm.js` and is intentionally tr
 - Renderer instances are not the source of runtime truth. Each presentation has
   an independent renderer, while the Rust broker parser, snapshots, and ordered
   event stream remain canonical if it must be recreated.
+- Renderer retirement is lease-bound. Output/reset/refresh operations capture
+  one renderer identity before awaiting; retirement releases its budget slot
+  immediately but defers physical disposal until every in-flight operation
+  finishes. Post-await work may mutate only the captured renderer generation.
+- Agents keeps resident xterm renderers stable within the process budget while
+  scrolling. Intersection controls WebGL promotion separately, so leaving the
+  viewport does not cause destroy/recreate flicker. Above the budget, residency
+  changes only when an approaching card needs capacity.
 - Provider integrations must not depend on renderer-specific behavior.
 
 ### Capability Handling
@@ -151,8 +159,9 @@ The session model is split into two layers:
 - independent mounted presentation terminals that consume one ordered stream
   and can be disposed and reconstructed from a snapshot/barrier.
 
-When a presentation remounts and its renderer remains within the process-wide
-budget, Wardian can reuse it. If it was suspended or evicted, the presentation
+When a presentation remains resident within the process-wide budget, Wardian
+reuses its renderer across tab, layout, and viewport transitions. If it was
+suspended or evicted, the presentation
 applies a fresh bounded broker snapshot, discards events at or below the
 snapshot barrier, and then replays consecutive later events. It must resync
 again on a cursor gap or generation change.

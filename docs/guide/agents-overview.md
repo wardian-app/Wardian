@@ -14,11 +14,11 @@ The right roster controls which agents auxiliary tools target. It does not filte
 
 The surface header provides three modes:
 
-- **Auto** chooses Grid or Single from the available size and the number and minimum size of visible cards. It is the best default when you resize the application or a Workbench split frequently.
+- **Auto** uses a scrolling multi-column grid whenever the pane can fit at least two useful cards side by side. It uses Single only for one visible agent or a pane too narrow for two cards, so a large roster does not get compressed into one screen or collapse just because more rows are needed.
 - **Grid** keeps multiple visible cards and enables direct grid sizing and ordering controls. The layout can scroll when the available area is smaller than the cards' usable floor.
-- **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it, and **Minimize** to return to Auto.
+- **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it. **Minimize** restores the last explicit multi-agent mode, Auto or Grid; an Auto-derived one-agent presentation is not shown as a user-maximized state.
 
-Auto derives its layout from the current surface dimensions. It does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
+Auto derives its layout from the current surface dimensions and preserves useful card floors while extra rows scroll. It does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
 
 ## Terminal and Chat Cards
 
@@ -36,11 +36,11 @@ In Terminal mode, click inside the terminal before typing. When the same agent t
 - Drag card headers to reorder agents in Grid mode.
 - Drag row and column gutters to adjust manual Grid sizing.
 - Use **Maximize** on a card to enter Single mode for that agent.
-- Use **Minimize** to return to Auto.
+- Use **Minimize** to leave explicit focus and return to the previous Auto or Grid mode.
 - Right-click the background and choose **Reset Grid Layout** to discard the manual Grid arrangement without resetting the whole Workbench.
 - Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents tab does not.
 
-Auto uses the original broad grid when every card has useful space and switches to the focused agent when the surface becomes too small. Grid always honors the user's chosen tracks and row sizing instead of silently stacking cards.
+Auto chooses the broadest useful grid the pane width can support and permits vertical overflow. It switches to the focused agent only when the pane is too narrow for two useful cards. Grid always honors the user's chosen tracks and row sizing instead of silently stacking cards.
 
 ## Important Boundaries
 

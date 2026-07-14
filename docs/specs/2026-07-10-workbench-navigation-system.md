@@ -111,7 +111,7 @@ presentation state and never overwrite the target set implicitly.
 
 Central surface discovery uses:
 
-- a `+` button in every group tab strip;
+- a `+` button in every group tab strip that creates an inline New Tab;
 - Home / New Surface in an empty group;
 - Quick Open;
 - the command palette;
@@ -122,7 +122,7 @@ There is no mandatory Home hop between normal tasks.
 
 The titlebar is intentionally quiet. It does not expose persistent surface or
 command buttons. Each pane owns a browser-like tab strip; its persistent
-controls are limited to New Surface (`+`) and More Actions (`…`). Tab-specific
+controls are limited to New Tab (`+`) and More Actions (`…`). Tab-specific
 actions live in the tab context menu, pane structure actions live in the pane
 menu, and the searchable Quick Open and command palettes appear only while
 invoked.
@@ -236,15 +236,20 @@ Overview keeps its surface controller alive, but its hidden cards obey the same
 terminal budget. The Phase 0 proof includes a 20-tab/four-group case and an
 Overview dense enough to exercise both limits.
 
-Home / New Surface is derived UI for an empty group, not a persisted surface.
-An empty group is valid and renders Home. Opening a surface replaces that
-derived content without adding a Home tab.
+Home is derived UI for an empty group and is not persisted. A user-created New
+Tab is different: it is a registered, allow-multiple placeholder surface that
+renders the same launcher with ordinary tab identity. Choosing a surface
+replaces that placeholder atomically at its existing group and index. Focusing
+an already-open singleton or reopening recent work discards only the New Tab;
+the internal discard command rejects every non-New-Tab surface and does not add
+the placeholder to `recently_closed`.
 
 ### Initial taxonomy
 
 | Surface | Open policy | Render policy | Runtime policy | Notes |
 |---|---|---|---|---|
-| Agents Overview | singleton | keep alive | view only | Existing Grid evolved into responsive multi-agent overview |
+| New Tab | allow multiple | recreate from state | view only | Inline launcher; excluded from surface discovery |
+| Agents | singleton | keep alive | view only | Existing Grid evolved into responsive multi-agent monitoring |
 | Dashboard | singleton | recreate from state | view only | Aggregate telemetry |
 | Queue | singleton | recreate from state | view only | Signals and action-needed state |
 | Graph | singleton | suspend when hidden | view only | Heavy visualization keeps registered view state |
@@ -256,9 +261,9 @@ derived content without adding a Home tab.
 The registry reserves typed contracts for File Editor and Browser so they can
 be contributed later. Their actual views are outside this implementation.
 
-### Agents Overview modes
+### Agents modes
 
-Agents Overview exposes `Auto`, `Grid`, and `Single`.
+Agents exposes `Auto`, `Grid`, and `Single`.
 
 Its population is the current global active roster/watchlist filter, matching the
 agents the right roster exposes. Search and lifecycle/status filters may narrow
@@ -290,12 +295,15 @@ chat card, including 52 pixels of card chrome. These values are named constants
 and are recalibrated from the Phase 0 cell-metric baseline rather than hidden in
 CSS.
 
-`Auto` evaluates every row/column candidate, prefers the candidate that keeps
-all cards above their mode-specific floor, then breaks ties by larger minimum
-card area, fewer empty cells, and the previous orientation. If no all-agent
-candidate reaches the floor, it selects Single. Resize decisions are debounced
-for 120 ms and require either crossing a hard floor or a 10% score improvement
-over the current choice, preventing split-drag flicker.
+`Auto` evaluates useful viewport capacity rather than requiring the entire
+roster to fit at once. If at least two floor-sized cards fit side by side, it
+selects a multi-column grid, preserves the card floor, and allows additional
+rows to scroll vertically. It selects Single only for one visible agent or when
+the pane is too narrow for two useful cards. Resize decisions are debounced for
+120 ms and require either crossing a hard floor or a 10% score improvement over
+the current choice, preventing split-drag flicker. Explicit Single remembers
+the last explicit `Auto` or `Grid` mode and Minimize restores that mode; an
+Auto-derived singleton is not presented as user-maximized.
 
 Explicit Grid never silently becomes Single. If the requested grid cannot meet
 the floor, cards retain minimum dimensions and the surface scrolls. If the
@@ -417,6 +425,13 @@ until a user activates one.
 
 Each presentation owns its own xterm renderer. Reparenting one module-global
 renderer among DOM hosts is not allowed.
+
+Renderer retirement is lease-bound. Output, reset, refresh, and follow-up scroll
+work capture one renderer generation before awaiting; retirement immediately
+releases its budget slot but defers physical disposal until every in-flight
+operation releases its lease. Post-await work may mutate only that captured,
+still-current renderer. Agents scrolling changes WebGL priority independently
+and does not destroy resident xterm renderers within the process budget.
 
 Each broker runtime owns a monotonically increasing `runtime_generation` and
 `stream_sequence`. A fresh generation starts at sequence zero. One per-session
@@ -707,6 +722,14 @@ Reject Dockview if Wardian would need to persist its opaque/private schema,
 delegate surface lifecycle to component mount behavior, or bypass Wardian's
 command/registry model. The adapter interface must make a custom renderer or
 another library replaceable without migrating workbench documents.
+
+Wardian makes Dockview's 100 by 100 CSS-pixel group minima explicit. A shared
+tri-state admission check uses the live destination geometry for edge previews,
+drop commits, pane/tab menus, and keyboard commands: measured destinations below
+twice the relevant minimum are blocked, exact-boundary destinations are allowed,
+and transiently unmeasured destinations remain available. Center moves do not
+create a split and are always admitted. The drop path repeats the check so a
+resize between preview and commit cannot persist an impossible 50/50 split.
 
 ## Interaction and Accessibility
 
