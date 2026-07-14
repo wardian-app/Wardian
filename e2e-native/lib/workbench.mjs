@@ -204,6 +204,20 @@ export async function openWorkbenchSurface(
     return true;
   }), timeoutMs);
 
+  // The tab-strip plus opens the visual Home chooser by default. Native
+  // helpers continue through its explicit Browse action so the same code path
+  // can select resource-backed surfaces and preserve open-to-side modifiers.
+  await driver.wait(async () => await driver.executeScript(() => {
+    const palette = document.querySelector('[role="dialog"][aria-label="Open Surface"]');
+    if (palette) return true;
+    const home = document.querySelector('[role="dialog"][aria-label="Choose a surface"]');
+    const browse = [...(home?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent?.trim() === "Browse all surfaces");
+    if (!browse) return false;
+    browse.click();
+    return true;
+  }), timeoutMs);
+
   const dialog = await driver.wait(
     until.elementLocated(By.css('[role="dialog"][aria-label="Open Surface"]')),
     timeoutMs,
