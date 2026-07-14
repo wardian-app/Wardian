@@ -66,7 +66,13 @@ export async function openSurface(
   const group = activeWorkbenchGroup(page);
   await group.getByLabel("Open Surface", { exact: true }).click();
 
+  const homeDialog = page.getByRole("dialog", { name: "Choose a surface", exact: true });
   const dialog = page.getByRole("dialog", { name: "Open Surface", exact: true });
+  await homeDialog.or(dialog).waitFor({ state: "visible" });
+  if (await homeDialog.isVisible()) {
+    await homeDialog.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
+  }
+  await dialog.waitFor({ state: "visible" });
   const option = dialog
     .getByRole("option")
     .and(page.locator(dataAttribute("surface-type", surfaceType)));

@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import type { WorkbenchDocumentV1 } from "../../src/types";
+import type { AppSettings, WorkbenchNewTabAction } from "../../src/types/settings";
 import type { WorkbenchLoadResult } from "../../src/features/workbench/workbenchPersistence";
 import {
   installWorkbenchIpcMock,
@@ -57,6 +58,7 @@ async function bootWorkbench(
   page: Page,
   document: WorkbenchDocumentV1,
   agents: WorkbenchAgentFixture[] = [],
+  newTabAction: WorkbenchNewTabAction = "home",
 ): Promise<void> {
   // Browser navigation tests do not make terminal-runtime claims. Keeping the
   // Overview preference on Chat avoids coupling this suite to native PTY IPC.
@@ -69,12 +71,39 @@ async function bootWorkbench(
   await installWorkbenchIpcMock(page, {
     load_result: primaryLoad(document),
     agents,
+    responses: {
+      load_app_settings: {
+        schema_version: 2,
+        settings: {
+          theme: "system",
+          auto_patch_gemini: false,
+          terminal_font_size: 14,
+          terminal_font_family: null,
+          grid_card_display_mode: "chat",
+          watchlist_new_agent_position: "top",
+          titlebar_telemetry_visible: true,
+          external_editor: "system",
+          external_editor_custom_executable: null,
+          explorer_file_click_action: "preview",
+          workbench_new_tab_action: newTabAction,
+        } satisfies AppSettings,
+        overrides: newTabAction === "palette"
+          ? { workbench_new_tab_action: "palette" }
+          : {},
+        persisted: true,
+      },
+    },
   });
   await page.goto("/");
   await expect(page.getByTestId("workbench-host")).toBeVisible();
   await expect(page.getByTestId("workbench-group")).toHaveCount(
     Object.keys(document.groups).length,
   );
+}
+
+function workbenchGroup(page: Page, groupId: string): Locator {
+  return page.getByTestId("workbench-group")
+    .and(page.locator(`[data-group-id=${JSON.stringify(groupId)}]`));
 }
 
 function twoGroupDocument(): WorkbenchDocumentV1 {
@@ -243,6 +272,78 @@ test("offers a responsive keyboard-accessible launcher in an empty tab", async (
   await expect(surfaceTab(page, "queue")).toHaveAttribute("aria-selected", "true");
 });
 
+test("opens the visual plus chooser in its captured pane and transitions Browse all to search", async ({ page }) => {
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const graph = makeWorkbenchSurface("graph-1", "graph");
+  const document = makeWorkbenchDocument({
+    root: {
+      kind: "split",
+      node_id: "split-1",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    },
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id],
+        active_surface_id: dashboard.surface_id,
+      },
+      "group-2": {
+        group_id: "group-2",
+        surface_ids: [graph.surface_id],
+        active_surface_id: graph.surface_id,
+      },
+    },
+    surfaces: [dashboard, graph],
+    active_group_id: "group-1",
+  });
+  await bootWorkbench(page, document);
+
+  const targetGroup = workbenchGroup(page, "group-2");
+  await targetGroup.getByLabel("Open Surface", { exact: true }).click();
+  const chooser = page.getByRole("dialog", { name: "Choose a surface", exact: true });
+  await expect(chooser).toBeVisible();
+  await expect(chooser.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
+  await chooser.getByRole("button", { name: /^Queue:/ }).click();
+
+  const queueTab = surfaceTab(page, "queue");
+  await expect(queueTab).toBeVisible();
+  await expect(queueTab.locator('xpath=ancestor::*[@data-testid="workbench-group"][1]'))
+    .toHaveAttribute("data-group-id", "group-2");
+
+  await targetGroup.getByLabel("Open Surface", { exact: true }).click();
+  await chooser.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
+  const searchable = page.getByRole("dialog", { name: "Open Surface", exact: true });
+  await expect(searchable).toBeVisible();
+  await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
+});
+
+test("honors the persisted palette plus preference while Quick Open remains searchable", async ({ page }) => {
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  await bootWorkbench(
+    page,
+    makeWorkbenchDocument({ surfaces: [dashboard] }),
+    [],
+    "palette",
+  );
+
+  const group = activeWorkbenchGroup(page);
+  await group.getByLabel("Open Surface", { exact: true }).click();
+  const searchable = page.getByRole("dialog", { name: "Open Surface", exact: true });
+  await expect(searchable).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Choose a surface", exact: true })).toHaveCount(0);
+  const search = searchable.getByRole("combobox", { name: "Open a surface" });
+  await search.fill("Queue");
+  await expect(searchable.getByRole("option", { name: "Queue", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+p" : "Control+p");
+  await expect(searchable).toBeVisible();
+  await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
+});
+
 test("splits, moves, zooms, joins, closes, and reopens through semantic controls", async ({ page }) => {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   const queue = makeWorkbenchSurface("queue-1", "queue");
@@ -355,6 +456,9 @@ test("reveals roster agents in Agents and reserves tab creation for explicit Ope
 
   const alphaRow = page.getByLabel("Agent Alpha", { exact: true });
   await activeWorkbenchGroup(page).getByLabel("Open Surface", { exact: true }).click();
+  const chooser = page.getByRole("dialog", { name: "Choose a surface", exact: true });
+  await expect(chooser).toBeVisible();
+  await chooser.getByRole("button", { name: "Browse all surfaces", exact: true }).click();
   const launcher = page.getByRole("dialog", { name: "Open Surface", exact: true });
   await expect(launcher
     .getByRole("option")
@@ -370,8 +474,12 @@ test("reveals roster agents in Agents and reserves tab creation for explicit Ope
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
 
   await alphaRow.click({ button: "right" });
-  const agentMenu = page.getByTestId("agent-context-menu");
-  await expect(page.locator(".context-menu:visible")).toHaveCount(1);
+  const visibleAgentMenus = page.locator(
+    ".context-menu:visible, [data-testid='agent-context-menu']:visible",
+  );
+  await expect(visibleAgentMenus).toHaveCount(1);
+  const agentMenu = page.getByTestId("agent-context-menu").filter({ visible: true });
+  await expect(agentMenu).toHaveCount(1);
   await expect(agentMenu.getByRole("button", { name: "Open", exact: true })).toBeVisible();
   await expect(agentMenu.getByRole("button", { name: "Open to Side", exact: true })).toBeVisible();
   await expect(agentMenu.getByRole("button", { name: "Rename", exact: true })).toBeVisible();
