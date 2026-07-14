@@ -214,11 +214,13 @@ const RAW_OUTPUT_LOG_MAX_CHARS = 4_000_000;
 declare global {
   interface Window {
     __wardianTerminalDebug?: {
+      presentationIds: () => string[];
+      /** @deprecated Use presentationIds. Renderer debug state is presentation-owned. */
       sessionIds: () => string[];
-      scrollToTop: (sessionId: string) => boolean;
-      scrollToBottom: (sessionId: string) => boolean;
-      scrollToViewportLine: (sessionId: string, line: number) => boolean;
-      snapshot: (sessionId: string) => {
+      scrollToTop: (presentationId: string) => boolean;
+      scrollToBottom: (presentationId: string) => boolean;
+      scrollToViewportLine: (presentationId: string, line: number) => boolean;
+      snapshot: (presentationId: string) => {
         cols: number;
         rows: number;
         cursorX: number;
@@ -229,6 +231,11 @@ declare global {
         fitCount: number;
         resizeCount: number;
         lastReportedSize: { cols: number; rows: number } | null;
+        broker: {
+          runtimeGeneration: number;
+          leaseEpoch: number;
+          ownerPresentationId: string | null;
+        } | null;
         renderer: {
           cols: number;
           rows: number;
@@ -275,8 +282,8 @@ declare global {
         recentWritePreviews: string[];
         recentNormalizedWritePreviews: string[];
       } | null;
-      terminalLinks: (sessionId: string, bufferLineNumber: number) => Promise<TerminalProviderLinkSnapshot[] | null>;
-      rawOutputLog: (sessionId: string) => string[] | null;
+      terminalLinks: (presentationId: string, bufferLineNumber: number) => Promise<TerminalProviderLinkSnapshot[] | null>;
+      rawOutputLog: (presentationId: string) => string[] | null;
     };
   }
 }
@@ -285,9 +292,12 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
   Object.defineProperty(window, "__wardianTerminalDebug", {
     configurable: true,
     value: Object.freeze({
+      presentationIds: () => Array.from(terminalSessionMap.keys()),
+      // Kept temporarily for older external diagnostics. Despite its legacy
+      // name, these have always been presentation IDs.
       sessionIds: () => Array.from(terminalSessionMap.keys()),
-      scrollToTop: (sessionId: string) => {
-        const entry = terminalSessionMap.get(sessionId);
+      scrollToTop: (presentationId: string) => {
+        const entry = terminalSessionMap.get(presentationId);
         if (!entry) {
           return false;
         }
@@ -296,8 +306,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
         return true;
       },
-      scrollToBottom: (sessionId: string) => {
-        const entry = terminalSessionMap.get(sessionId);
+      scrollToBottom: (presentationId: string) => {
+        const entry = terminalSessionMap.get(presentationId);
         if (!entry) {
           return false;
         }
@@ -306,8 +316,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
         return true;
       },
-      scrollToViewportLine: (sessionId: string, line: number) => {
-        const entry = terminalSessionMap.get(sessionId);
+      scrollToViewportLine: (presentationId: string, line: number) => {
+        const entry = terminalSessionMap.get(presentationId);
         if (!entry) {
           return false;
         }
@@ -320,8 +330,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         entry.renderer?.term.refresh(0, Math.max(0, entry.renderer.term.rows - 1));
         return true;
       },
-      snapshot: (sessionId: string) => {
-        const entry = terminalSessionMap.get(sessionId);
+      snapshot: (presentationId: string) => {
+        const entry = terminalSessionMap.get(presentationId);
         const term = entry?.parser;
         const buffer = term?.buffer?.active;
         if (!entry || !term || !buffer) {
@@ -379,6 +389,13 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
           fitCount: entry.fitCount,
           resizeCount: entry.resizeCount,
           lastReportedSize: entry.lastReportedSize,
+          broker: entry.brokerState
+            ? {
+                runtimeGeneration: entry.brokerState.runtime_generation,
+                leaseEpoch: entry.brokerState.lease_epoch,
+                ownerPresentationId: entry.brokerState.owner_presentation_id,
+              }
+            : null,
           renderer: rendererTerm
             ? {
                 cols: rendererTerm.cols,
@@ -442,8 +459,8 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
               }
             : null,
           provider: entry.provider ?? null,
-          wheelStats: wheelDebugStats.get(sessionId) ?? null,
-          scrollTraces: scrollTraces.get(sessionId) ?? null,
+          wheelStats: wheelDebugStats.get(presentationId) ?? null,
+          scrollTraces: scrollTraces.get(presentationId) ?? null,
           usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
           supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
@@ -452,12 +469,12 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
         recentNormalizedWritePreviews: [...entry.recentNormalizedWritePreviews],
       };
       },
-      rawOutputLog: (sessionId: string) => {
-        const entry = terminalSessionMap.get(sessionId);
+      rawOutputLog: (presentationId: string) => {
+        const entry = terminalSessionMap.get(presentationId);
         return entry ? [...entry.rawOutputLog] : null;
       },
-      terminalLinks: async (sessionId: string, bufferLineNumber: number) => {
-        const entry = terminalSessionMap.get(sessionId);
+      terminalLinks: async (presentationId: string, bufferLineNumber: number) => {
+        const entry = terminalSessionMap.get(presentationId);
         const renderer = entry?.renderer;
         if (!renderer) {
           return null;
@@ -3437,6 +3454,8 @@ export const AgentTerminal = memo(function AgentTerminal({
       <div
         ref={terminalRef}
         data-testid="agent-terminal-host"
+        data-terminal-presentation-id={presentationId}
+        data-terminal-session-id={sessionId}
         tabIndex={0}
         onFocusCapture={handleFocusCapture}
         onWheel={handleWheel}

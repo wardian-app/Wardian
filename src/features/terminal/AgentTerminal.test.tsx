@@ -370,7 +370,21 @@ describe("AgentTerminal scrollback", () => {
       mockInvoke.mock.calls.filter(([command]) => command === "subscribe_terminal_events"),
     ).toHaveLength(1);
     expect(mockTerminal).toHaveBeenCalledTimes(2);
-    expect(screen.getAllByTestId("agent-terminal-host")).toHaveLength(2);
+    const terminalHosts = screen.getAllByTestId("agent-terminal-host");
+    expect(terminalHosts).toHaveLength(2);
+    expect(terminalHosts[0]).toHaveAttribute("data-terminal-presentation-id", "pane-a");
+    expect(terminalHosts[0]).toHaveAttribute("data-terminal-session-id", "modern-agent");
+    expect(terminalHosts[1]).toHaveAttribute("data-terminal-presentation-id", "pane-b");
+    expect(terminalHosts[1]).toHaveAttribute("data-terminal-session-id", "modern-agent");
+    expect(window.__wardianTerminalDebug?.presentationIds()).toEqual(
+      expect.arrayContaining(["pane-a", "pane-b"]),
+    );
+    expect(window.__wardianTerminalDebug?.snapshot("pane-a")?.renderer).toBeTruthy();
+    expect(window.__wardianTerminalDebug?.snapshot("pane-b")?.renderer).toBeTruthy();
+    expect(window.__wardianTerminalDebug?.snapshot("pane-a")?.broker).toEqual(
+      expect.objectContaining({ ownerPresentationId: null, runtimeGeneration: 1 }),
+    );
+    expect(window.__wardianTerminalDebug?.snapshot("modern-agent")).toBeNull();
     expect(onPresentationStateChange).toHaveBeenCalledWith(
       expect.objectContaining({ session_id: "modern-agent" }),
       expect.objectContaining({ presentation_id: "pane-a" }),
