@@ -116,16 +116,6 @@ export function WorkbenchHost({
     store.getInitialState,
   );
   const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
-  const commands = useWorkbenchCommands({
-    store,
-    navigation,
-    root_ref: rootRef,
-    on_quick_open,
-    on_command_palette: openCommandPalette,
-    on_focus_left_dock,
-    on_focus_right_dock,
-    create_id,
-  });
 
   const openNewTabLauncher = useCallback((groupId: string) => {
     launcherReturnFocusRef.current = document.activeElement instanceof HTMLElement
@@ -136,13 +126,23 @@ export function WorkbenchHost({
     store.getState().set_launcher_open(true);
   }, [new_tab_action, store]);
   const openPaletteForGroup = useCallback((groupId: string) => {
-    launcherReturnFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
+    launcherReturnFocusRef.current = null;
     setLauncherGroupId(groupId);
     setLauncherPresentation("palette");
     store.getState().set_launcher_open(true);
   }, [store]);
+  const requestSearchableLauncher = useCallback(() => {
+    if (!store.getState().launcher_open) {
+      launcherReturnFocusRef.current = null;
+      setLauncherGroupId(store.getState().document.active_group_id);
+    }
+    setLauncherPresentation("palette");
+    store.getState().set_launcher_open(true);
+  }, [store]);
+  const requestQuickOpen = useCallback(() => {
+    requestSearchableLauncher();
+    on_quick_open?.();
+  }, [on_quick_open, requestSearchableLauncher]);
   const browseAllSurfaces = useCallback(() => {
     setLauncherPresentation("palette");
   }, []);
@@ -150,8 +150,19 @@ export function WorkbenchHost({
     store.getState().set_launcher_open(false);
     setLauncherGroupId(null);
     setLauncherPresentation(null);
-    window.setTimeout(() => launcherReturnFocusRef.current?.focus(), 0);
+    launcherReturnFocusRef.current = null;
   }, [store]);
+  const commands = useWorkbenchCommands({
+    store,
+    navigation,
+    root_ref: rootRef,
+    on_quick_open: requestQuickOpen,
+    on_open_surface: requestSearchableLauncher,
+    on_command_palette: openCommandPalette,
+    on_focus_left_dock,
+    on_focus_right_dock,
+    create_id,
+  });
   const activateGroup = useCallback((groupId: string): boolean => {
     const document = store.getState().document;
     const group = document.groups[groupId];
@@ -265,6 +276,7 @@ export function WorkbenchHost({
         recently_closed={state.document.recently_closed}
         on_reopen_closed={() => { void commands.execute("workbench.reopen_closed_surface"); }}
         on_close={closeLauncher}
+        return_focus={launcherReturnFocusRef.current}
       />
       <WorkbenchCommandPalette
         open={commandPaletteOpen}

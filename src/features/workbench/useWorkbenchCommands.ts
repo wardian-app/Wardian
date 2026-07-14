@@ -43,6 +43,7 @@ export type UseWorkbenchCommandsOptions = {
   enabled?: boolean;
   create_id?: (kind: WorkbenchIdKind) => string;
   on_quick_open?: () => void;
+  on_open_surface?: () => void;
   on_command_palette?: () => void;
   on_focus_left_dock?: () => void;
   on_focus_right_dock?: () => void;
@@ -283,7 +284,8 @@ export function useWorkbenchCommands(
         );
         return true;
       case "workbench.open_surface":
-        current.store.getState().set_launcher_open(true);
+        if (current.on_open_surface) current.on_open_surface();
+        else current.store.getState().set_launcher_open(true);
         return true;
       case "workbench.quick_open":
         if (current.on_quick_open) current.on_quick_open();
@@ -309,6 +311,13 @@ export function useWorkbenchCommands(
     const handleKeyDown = (event: KeyboardEvent): void => {
       const commandId = shortcutForEvent(event);
       if (!commandId) return;
+      if (optionsRef.current.store.getState().launcher_open
+        && commandId !== "workbench.quick_open"
+        && commandId !== "workbench.open_surface") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       const isGlobalPalette = commandId === "workbench.command_palette"
         || commandId === "workbench.quick_open";
       const root = optionsRef.current.root_ref.current;

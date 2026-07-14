@@ -26,6 +26,7 @@ export type OpenSurfaceDialogProps = {
   recently_closed?: readonly ClosedSurfaceV1[];
   on_reopen_closed?: () => void;
   on_close: () => void;
+  return_focus?: HTMLElement | null;
 };
 
 const CONTRIBUTION_GROUPS: readonly CoreSurfaceGroup[] = ["Core views", "Sessions", "Reserved"];
@@ -54,6 +55,7 @@ export function OpenSurfaceDialog({
   recently_closed = [],
   on_reopen_closed,
   on_close,
+  return_focus,
 }: OpenSurfaceDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -82,15 +84,15 @@ export function OpenSurfaceDialog({
 
   useLayoutEffect(() => {
     if (open && !wasOpenRef.current) {
-      returnFocusRef.current = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+      returnFocusRef.current = return_focus ?? (
+        document.activeElement instanceof HTMLElement ? document.activeElement : null
+      );
       setQuery("");
       setActiveIndex(0);
       window.requestAnimationFrame(() => inputRef.current?.focus());
     }
     wasOpenRef.current = open;
-  }, [open]);
+  }, [open, return_focus]);
 
   const requestClose = useCallback(() => {
     on_close();

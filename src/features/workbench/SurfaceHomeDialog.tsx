@@ -51,6 +51,12 @@ export function SurfaceHomeDialog({
 
   if (!open) return null;
 
+  const focusableElements = (): HTMLElement[] => Array.from(
+    dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [],
+  );
+
   return (
     <div
       className="wardian-surface-home-backdrop"
@@ -64,10 +70,30 @@ export function SurfaceHomeDialog({
         aria-modal="true"
         aria-label="Choose a surface"
         className="wardian-surface-home-dialog"
-        onKeyDown={(event) => {
-          if (event.key !== "Escape") return;
-          event.preventDefault();
-          requestClose();
+        onKeyDownCapture={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            requestClose();
+            return;
+          }
+          if (event.key === "Tab") {
+            const focusable = focusableElements();
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (!first || !last) return;
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+            return;
+          }
+          if (event.ctrlKey || event.metaKey || event.altKey || event.key === "F6") {
+            event.stopPropagation();
+          }
         }}
       >
         <HomeSurface

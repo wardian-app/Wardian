@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
@@ -16,6 +16,32 @@ function makeNavigation(overrides: Partial<WorkbenchNavigationService> = {}) {
     reset_workbench: vi.fn(),
     ...overrides,
   } as unknown as WorkbenchNavigationService;
+}
+
+function makeTwoPaneDocument() {
+  const left = makeSurface("surface-left", { surface_type: "dashboard" });
+  const right = makeSurface("surface-right", { surface_type: "queue" });
+  const document = makeSingleGroupDocument([left]);
+  return {
+    ...document,
+    root: {
+      kind: "split" as const,
+      node_id: "split-1",
+      direction: "horizontal" as const,
+      ratio: 0.5,
+      first: { kind: "group" as const, group_id: "group-1" },
+      second: { kind: "group" as const, group_id: "group-2" },
+    },
+    groups: {
+      ...document.groups,
+      "group-2": {
+        group_id: "group-2",
+        surface_ids: [right.surface_id],
+        active_surface_id: right.surface_id,
+      },
+    },
+    surfaces: { ...document.surfaces, [right.surface_id]: right },
+  };
 }
 
 describe("WorkbenchHost", () => {
@@ -140,6 +166,121 @@ describe("WorkbenchHost", () => {
 
     expect(await screen.findByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { key: "p", ctrlKey: true, shiftKey: false, label: "Quick Open" },
+    { key: "p", metaKey: true, shiftKey: false, label: "Quick Open with Command" },
+    { key: "o", ctrlKey: true, shiftKey: true, label: "Open Surface" },
+  ])("switches an open visual chooser to the searchable list for $label", async (shortcut) => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(<WorkbenchHost store={store} navigation={makeNavigation()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open Surface" }));
+    const visualDialog = screen.getByRole("dialog", { name: "Choose a surface" });
+
+    fireEvent.keyDown(visualDialog, shortcut);
+
+    expect(screen.queryByRole("dialog", { name: "Choose a surface" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+  });
+
+  it("traps tab focus and blocks workbench shortcuts behind the visual chooser", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+    const navigation = makeNavigation();
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+    const dialog = screen.getByRole("dialog", { name: "Choose a surface" });
+    const first = screen.getByRole("button", { name: /Agents:/i });
+    const last = screen.getByRole("button", { name: "Browse all surfaces" });
+
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+
+    first.focus();
+    fireEvent.keyDown(dialog, { key: "w", ctrlKey: true });
+    fireEvent.keyDown(dialog, { key: "F6" });
+
+    expect(navigation.close).not.toHaveBeenCalled();
+    expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
+    expect(first).toHaveFocus();
+  });
+
+  it("restores direct Quick Open focus to its invocation after a prior plus session", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+
+    render(
+      <>
+        <button type="button">Quick invocation</button>
+        <WorkbenchHost store={store} navigation={makeNavigation()} />
+      </>,
+    );
+    const addButton = await screen.findByRole("button", { name: "Open Surface" });
+    addButton.focus();
+    fireEvent.click(addButton);
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Choose a surface" }), { key: "Escape" });
+    await waitFor(() => expect(addButton).toHaveFocus());
+
+    const invocation = screen.getByRole("button", { name: "Quick invocation" });
+    invocation.focus();
+    fireEvent.keyDown(invocation, { key: "p", ctrlKey: true });
+    fireEvent.keyDown(await screen.findByRole("dialog", { name: "Open Surface" }), { key: "Escape" });
+
+    await waitFor(() => expect(invocation).toHaveFocus());
+    expect(addButton).not.toHaveFocus();
+  });
+
+  it("opens a visual selection in the inactive pane whose plus was clicked", async () => {
+    const store = createWorkbenchStore({ initial_document: makeTwoPaneDocument() });
+    const navigation = makeNavigation();
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    const rightGroup = (await screen.findAllByTestId("workbench-group"))
+      .find((group) => group.dataset.groupId === "group-2");
+    if (!rightGroup) throw new Error("right group missing");
+    fireEvent.click(within(rightGroup).getByRole("button", { name: "Open Surface" }));
+    fireEvent.click(screen.getByRole("button", { name: /Agents:/i }));
+
+    expect(navigation.open).toHaveBeenCalledWith({
+      surface_type: "agents-overview",
+      group_id: "group-2",
+    });
+  });
+
+  it("keeps Browse all bound to the inactive pane whose plus was clicked", async () => {
+    const store = createWorkbenchStore({ initial_document: makeTwoPaneDocument() });
+    const navigation = makeNavigation();
+
+    render(<WorkbenchHost store={store} navigation={navigation} />);
+    const rightGroup = (await screen.findAllByTestId("workbench-group"))
+      .find((group) => group.dataset.groupId === "group-2");
+    if (!rightGroup) throw new Error("right group missing");
+    fireEvent.click(within(rightGroup).getByRole("button", { name: "Open Surface" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse all surfaces" }));
+    fireEvent.click(screen.getByRole("option", { name: "Agents" }));
+
+    expect(navigation.open).toHaveBeenCalledWith({
+      surface_type: "agents-overview",
+      group_id: "group-2",
+    });
   });
 
   it("routes tab close keys through the async navigation guard", async () => {
