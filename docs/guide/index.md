@@ -1,6 +1,9 @@
 # User Guide Index
 
-Use this index to find the guide that matches the task you are trying to finish.
+Use this index to find the guide that matches the task you are trying to
+finish. Begin with **Start and Orient** on a new installation. From there, the
+sections follow the practical path from running and monitoring work to reuse,
+automation, and extension. Take only the next step that helps the work at hand.
 
 ## Start and Orient
 

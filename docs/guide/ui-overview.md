@@ -1,6 +1,11 @@
 # User Interface Overview
 
-Wardian uses a persistent app shell around a tab-based [Workbench](./workbench.md). The shell keeps auxiliary tools and the agent roster available while the center can hold one surface, several tabs, or multiple split panes.
+Wardian features a dense local-first interface for watching, directing, and
+reorganizing the agents you run locally. Its persistent app shell surrounds a
+tab-based [Workbench](./workbench.md), keeping live terminals, reusable assets,
+workflow state, Queue evidence, auxiliary tools, and the agent roster close to
+the work. The center can hold one surface, several tabs, or multiple split panes
+without confusing the restorable layout with agent runtime state.
 
 ![Wardian workspace showing the left control rail, agent surfaces, and right agent roster](../assets/screenshots/grid/app-shell.png)
 
@@ -48,7 +53,7 @@ See [Watchlists](./watchlists.md) for grouping and targeting behavior.
 
 ## Agents
 
-[Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Auto keeps a multi-column layout whenever the pane can fit at least two useful cards side by side and lets additional rows scroll; it does not collapse to Single merely because the full roster cannot fit at once. Explicit Single is temporary focus and restores the previous Auto or Grid mode when minimized. Grid is a mode inside this surface, not a global app page.
+[Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Auto keeps the full roster visible: it uses multiple columns whenever useful cards fit side by side and stacks into one scrolling column otherwise. Explicit Single is temporary focus and restores the previous Auto or Grid mode when minimized. Grid is a mode inside this surface, not a global app page.
 
 Agent cards can show the real provider terminal or a normalized Chat view. Closing the Agents surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
 

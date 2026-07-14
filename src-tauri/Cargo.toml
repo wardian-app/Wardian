@@ -1,7 +1,7 @@
 [package]
 name = "Wardian"
 version = "0.4.3"
-description = "A modular, local-first desktop habitat for agents, workflows, and reusable context."
+description = "Where local agent work becomes visible, durable, and malleable."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
 build = "build.rs"

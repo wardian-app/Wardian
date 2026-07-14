@@ -1,6 +1,17 @@
 # Wardian Documentation
 
-This folder contains the public Wardian user guides, workflow references, and developer notes.
+**Where local agent work becomes visible, durable, and malleable.**
+
+Wardian runs the CLI agents you already use in real workspaces, keeps their
+sessions and evidence inspectable, and gives you a gradual path from a one-off
+instruction to reusable prompts, skills, classes, workflows, and project
+context.
+
+Start with the standard onboarding path below. Once you have run a first agent
+task, let the work—not a prescribed maturity model—determine what comes next.
+The rest of the documentation stays organized around concrete tasks. Over time,
+you can reuse a successful move, compose repeatable work, and extend the
+Habitat only when the smaller adaptation is no longer enough.
 
 ## Start Here
 
@@ -15,7 +26,8 @@ This folder contains the public Wardian user guides, workflow references, and de
 ## User Guides
 
 - [Guide Index](./guide/index.md)
-- [Library System](./guide/library.md)
+- [Library System](./guide/library.md): turn repeated instructions into prompts,
+  procedures into skills, and roles into reusable classes.
 - [Class Management](./guide/class-management.md)
 - [Explorer](./guide/explorer.md)
 - [Watchlists](./guide/watchlists.md)

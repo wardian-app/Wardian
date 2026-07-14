@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.4.3",
   "type": "module",
-  "description": "A modular, local-first desktop habitat for agents, workflows, and reusable context.",
+  "description": "Where local agent work becomes visible, durable, and malleable.",
   "license": "MIT",
   "repository": {
     "type": "git",
