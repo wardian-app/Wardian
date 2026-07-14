@@ -177,6 +177,18 @@
   white-space: nowrap;
 }
 
+.wardian-workbench-tab-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: 0 0 auto;
+  color: var(--color-wardian-text-muted);
+}
+
+.dv-tab.dv-active-tab .wardian-workbench-tab-icon,
+[role="tab"][aria-selected="true"] > .wardian-workbench-tab .wardian-workbench-tab-icon {
+  color: currentColor;
+}
+
 .wardian-workbench-tab-close {
   display: grid;
   width: 1.25rem;

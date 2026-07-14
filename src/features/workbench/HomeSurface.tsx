@@ -1,20 +1,9 @@
-import {
-  AppWindow,
-  Bot,
-  Gauge,
-  GitBranch,
-  Library,
-  ListTodo,
-  Network,
-  Sprout,
-  type LucideIcon,
-} from "lucide-react";
-
 import type { ClosedSurfaceV1 } from "../../types";
 import {
   CORE_SURFACE_CONTRIBUTIONS,
 } from "./coreSurfaceRegistry";
 import type { WorkbenchSurfaceRegistry } from "./surfaceRegistry";
+import { surfaceIconForType } from "./surfaceIcons";
 
 export type HomeSurfaceProps = {
   group_id: string;
@@ -23,16 +12,6 @@ export type HomeSurfaceProps = {
   on_open_surface: (groupId: string) => void;
   on_select_surface: (surfaceType: string, groupId: string) => void;
   on_reopen_closed?: () => void;
-};
-
-const SURFACE_ICONS: Readonly<Record<string, LucideIcon>> = {
-  "agents-overview": Bot,
-  dashboard: Gauge,
-  queue: ListTodo,
-  graph: Network,
-  garden: Sprout,
-  library: Library,
-  workflows: GitBranch,
 };
 
 type LauncherChoice = {
@@ -93,7 +72,7 @@ export function HomeSurface({
           role="group"
         >
           {choices.map((choice) => {
-            const Icon = SURFACE_ICONS[choice.surface_type] ?? AppWindow;
+            const Icon = surfaceIconForType(choice.surface_type);
             return (
               <button
                 aria-label={`${choice.title}: ${choice.description}`}

@@ -204,9 +204,13 @@ test("opens every migrated surface and focuses an existing singleton", async ({ 
   await openSurface(page, "agent-session", ALPHA_AGENT.session_id);
 
   for (const surfaceType of CORE_SINGLETON_SURFACES) {
-    await expect(surfaceTab(page, surfaceType)).toHaveCount(1);
+    const tab = surfaceTab(page, surfaceType);
+    await expect(tab).toHaveCount(1);
+    await expect(tab.locator(`[data-surface-icon=${JSON.stringify(surfaceType)}]`)).toBeVisible();
   }
-  await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(1);
+  const agentTab = surfaceTab(page, "agent-session", ALPHA_AGENT.session_id);
+  await expect(agentTab).toHaveCount(1);
+  await expect(agentTab.locator('[data-surface-icon="agent-session"]')).toBeVisible();
 
   await surfaceTab(page, "queue").click();
   await openSurface(page, "queue");

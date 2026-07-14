@@ -21,6 +21,7 @@ describe("WorkbenchTab", () => {
       </div>,
     );
     const tab = screen.getByRole("tab", { name: "Agents Overview" });
+    expect(tab.querySelector('[data-surface-icon="agents-overview"]')).toBeInTheDocument();
 
     fireEvent.pointerDown(tab, { pointerId: 7 });
     expect(onPointerDragStart).toHaveBeenCalledWith({

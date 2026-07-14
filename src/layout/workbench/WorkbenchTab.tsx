@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 
 import type { DeepReadonly } from "../../features/workbench/useWorkbenchStore";
+import { surfaceIconForType } from "../../features/workbench/surfaceIcons";
 import type { WorkbenchSurfaceV1 } from "../../types";
 import {
   WorkbenchContextMenu,
@@ -41,6 +42,7 @@ export function WorkbenchTab({
 }: WorkbenchTabProps) {
   const descriptorRef = useRef<HTMLSpanElement>(null);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const SurfaceIcon = surfaceIconForType(surface.surface_type);
 
   useLayoutEffect(() => {
     const tab = descriptorRef.current?.closest<HTMLElement>('[role="tab"]');
@@ -120,6 +122,13 @@ export function WorkbenchTab({
       className="wardian-workbench-tab"
       data-tab-group-id={group_id}
     >
+      <SurfaceIcon
+        aria-hidden="true"
+        className="wardian-workbench-tab-icon"
+        data-surface-icon={surface.surface_type}
+        size={14}
+        strokeWidth={1.75}
+      />
       <span className="wardian-workbench-tab-label">{title}</span>
       <span
         className="wardian-workbench-tab-close"

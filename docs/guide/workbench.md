@@ -28,7 +28,7 @@ The **Agent Session** choice needs one selected agent in the right roster. For a
 
 ## Work with Tabs and Panes
 
-Each pane has its own tab strip and active surface. Top-edge strips form the window chrome; strips in downward splits remain local. The **+** sits immediately after the tabs, while **…** remains at the far edge.
+Each pane has its own tab strip and active surface. Every tab includes a compact type icon shared with the surface chooser, so different tools and agent sessions remain recognizable when titles are truncated. Top-edge strips form the window chrome; strips in downward splits remain local. The **+** sits immediately after the tabs, while **…** remains at the far edge.
 
 - Select a tab to bring that surface forward.
 - Drag a tab within its strip to reorder it.
