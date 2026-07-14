@@ -1021,13 +1021,16 @@ function rendererRemainsCurrent(
   return !entry.disposed && !renderer.retired && entry.renderer === renderer;
 }
 
-// Lease a captured renderer across one async operation. The boolean tells the
-// caller whether synchronous refresh/scroll follow-up is still safe; retirement
-// drains the lease before physically disposing xterm.
+// Lease a captured renderer across one async operation. Post-write renderer
+// work belongs inside the callback after `isCurrent()` so retirement cannot
+// physically dispose xterm between the identity check and refresh/scroll.
 async function runRendererOperation(
   entry: TerminalSessionEntry,
   renderer: TerminalRendererEntry,
-  operation: (renderer: TerminalRendererEntry) => unknown | Promise<unknown>,
+  operation: (
+    renderer: TerminalRendererEntry,
+    isCurrent: () => boolean,
+  ) => unknown | Promise<unknown>,
 ) {
   if (!rendererRemainsCurrent(entry, renderer)) {
     return false;
@@ -1035,7 +1038,7 @@ async function runRendererOperation(
 
   renderer.inFlightOperations += 1;
   try {
-    await operation(renderer);
+    await operation(renderer, () => rendererRemainsCurrent(entry, renderer));
     return rendererRemainsCurrent(entry, renderer);
   } finally {
     renderer.inFlightOperations -= 1;
@@ -1580,6 +1583,7 @@ async function writeTerminalOutputBatch(
     resetBeforeWrite?: boolean;
     recordOutput?: boolean;
     queueCapabilityResponses?: boolean;
+    rendererIdentity?: TerminalRendererEntry | null;
   },
 ) {
   if (rawChunks.length === 0) {
@@ -1626,7 +1630,9 @@ async function writeTerminalOutputBatch(
   // would feel unscrollable until the provider went quiet (observed live with
   // Claude). scrollRendererToBottomAfterWrite re-checks against this baseline
   // and skips the snap when the user scrolled away mid-batch.
-  const renderer = entry.renderer;
+  const renderer = options?.rendererIdentity === undefined
+    ? entry.renderer
+    : options.rendererIdentity;
   const rendererBottomBeforeWrite = renderer
     ? {
         atBottom:
@@ -1672,29 +1678,27 @@ async function writeTerminalOutputBatch(
       preserveExistingViewport: false,
     });
     if (renderer) {
-      const remainsCurrent = await runRendererOperation(entry, renderer, (currentRenderer) =>
-        applyViewportRedrawInPlace(currentRenderer.term, viewportData, {
+      await runRendererOperation(entry, renderer, async (currentRenderer, isCurrent) => {
+        await applyViewportRedrawInPlace(currentRenderer.term, viewportData, {
           preserveExistingViewport: false,
-        }),
-      );
-      if (remainsCurrent) {
-        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-        scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
-      }
+        });
+        if (!isCurrent()) return;
+        currentRenderer.term.refresh(0, Math.max(currentRenderer.term.rows - 1, 0));
+        scrollRendererToBottomAfterWrite(currentRenderer, rendererBottomBeforeWrite);
+      });
     }
     return;
   }
   await writeTerminalControl(entry.parser, viewportData);
   if (renderer) {
-    const remainsCurrent = await runRendererOperation(entry, renderer, async (currentRenderer) => {
+    await runRendererOperation(entry, renderer, async (currentRenderer, isCurrent) => {
       // A frozen snapshot must never mask live output: drop it and let the DOM
       // renderer underneath show the stream until the terminal re-promotes.
       removeSnapshotOverlay(currentRenderer);
       await writeTerminalControl(currentRenderer.term, viewportData);
+      if (!isCurrent()) return;
+      scrollRendererToBottomAfterWrite(currentRenderer, rendererBottomBeforeWrite);
     });
-    if (remainsCurrent) {
-      scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
-    }
   }
   // NOTE: Claude/Gemini resize repaints scroll part of the pre-repaint
   // viewport into scrollback, leaving duplicate rows there — the same
@@ -1755,26 +1759,17 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       });
       resetTerminalOutputBuffers(entry);
       await writeTerminalControl(entry.parser, themedState);
-      const rendererCurrentAfterTheme = renderer
-        ? await runRendererOperation(entry, renderer, (currentRenderer) =>
-            writeTerminalControl(currentRenderer.term, themedState),
-          )
-        : false;
-      if (rendererCurrentAfterTheme && renderer) {
-        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-      }
-      const rowRepaint = rendererCurrentAfterTheme
-        ? codexVisibleComposerBlockRepaint(entry)
-        : null;
-      if (rowRepaint && renderer) {
-        const rendererCurrentAfterRepaint = await runRendererOperation(
-          entry,
-          renderer,
-          (currentRenderer) => writeTerminalControl(currentRenderer.term, rowRepaint),
-        );
-        if (rendererCurrentAfterRepaint) {
-          renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-        }
+      if (renderer) {
+        await runRendererOperation(entry, renderer, async (currentRenderer, isCurrent) => {
+          await writeTerminalControl(currentRenderer.term, themedState);
+          if (!isCurrent()) return;
+          currentRenderer.term.refresh(0, Math.max(currentRenderer.term.rows - 1, 0));
+          const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+          if (!rowRepaint) return;
+          await writeTerminalControl(currentRenderer.term, rowRepaint);
+          if (!isCurrent()) return;
+          currentRenderer.term.refresh(0, Math.max(currentRenderer.term.rows - 1, 0));
+        });
       }
       return;
     }
@@ -1794,20 +1789,18 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
     await writeTerminalOutputBatch(terminalKey, entry, [preview], {
       resetBeforeWrite: true,
       recordOutput: false,
+      rendererIdentity: renderer,
     });
-    const previewRenderer = entry.renderer;
-    if (previewRenderer && rendererRemainsCurrent(entry, previewRenderer)) {
-      previewRenderer.term.refresh(0, Math.max(previewRenderer.term.rows - 1, 0));
-    }
-    const rowRepaint = codexVisibleComposerBlockRepaint(entry);
-    if (
-      rowRepaint &&
-      previewRenderer &&
-      await runRendererOperation(entry, previewRenderer, (currentRenderer) =>
-        writeTerminalControl(currentRenderer.term, rowRepaint),
-      )
-    ) {
-      previewRenderer.term.refresh(0, Math.max(previewRenderer.term.rows - 1, 0));
+    if (renderer) {
+      await runRendererOperation(entry, renderer, async (currentRenderer, isCurrent) => {
+        if (!isCurrent()) return;
+        currentRenderer.term.refresh(0, Math.max(currentRenderer.term.rows - 1, 0));
+        const rowRepaint = codexVisibleComposerBlockRepaint(entry);
+        if (!rowRepaint) return;
+        await writeTerminalControl(currentRenderer.term, rowRepaint);
+        if (!isCurrent()) return;
+        currentRenderer.term.refresh(0, Math.max(currentRenderer.term.rows - 1, 0));
+      });
     }
   } catch (error) {
     console.warn("Codex terminal theme replay failed:", error);

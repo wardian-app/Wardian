@@ -555,6 +555,108 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("keeps post-write scroll inside the renderer lease when retirement wins the outer continuation", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-post-write-retirement";
+      if (command === "register_terminal_presentation") {
+        return registrationGate.promise;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const view = render(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-post-write-retirement"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "register_terminal_presentation",
+        expect.anything(),
+      ));
+
+      const renderer = getLatestTerminalInstance();
+      const lifecycle: string[] = [];
+      let writeSettled = false;
+      let settleRendererWrite: (() => void) | undefined;
+      renderer.write.mockImplementation((data: string, callback?: () => void) => {
+        if (data.includes("post-write retirement snapshot")) {
+          lifecycle.push("write-started");
+          settleRendererWrite = () => {
+            writeSettled = true;
+            lifecycle.push("write-settled");
+            callback?.();
+          };
+          return;
+        }
+        callback?.();
+      });
+      renderer.dispose.mockImplementation(() => lifecycle.push("disposed"));
+      renderer.scrollToBottom.mockImplementation(() => {
+        if (!writeSettled) return;
+        view.rerender(
+          <AgentTerminal
+            sessionId="modern-agent"
+            presentationId="pane-post-write-retirement"
+            visibility="hidden"
+            renderState="suspended"
+            provider="codex"
+            theme="dark"
+          />,
+        );
+        if (renderer.dispose.mock.calls.length > 0) {
+          throw new Error("post-write scroll used a disposed renderer");
+        }
+        lifecycle.push("post-write-scroll");
+      });
+
+      const registration = modernRegistrationResult("pane-post-write-retirement");
+      registration.initial_snapshot = {
+        ...modernSnapshot(),
+        visible_grid: "post-write retirement snapshot",
+      };
+      await act(async () => {
+        registrationGate.resolve(registration);
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(settleRendererWrite).toBeTypeOf("function"));
+
+      await act(async () => {
+        settleRendererWrite?.();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(renderer.dispose).toHaveBeenCalledTimes(1));
+
+      expect(screen.queryByText("Terminal Initialization Fatal Error:")).not.toBeInTheDocument();
+      expect(lifecycle).toEqual([
+        "write-started",
+        "write-settled",
+        "post-write-scroll",
+        "disposed",
+      ]);
+      expect(consoleError).not.toHaveBeenCalledWith(
+        "AgentTerminal Init Error:",
+        expect.anything(),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("does not refit, resize, or reset the renderer for an ordinary broker output update", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     let readCount = 0;
@@ -4115,6 +4217,115 @@ describe("AgentTerminal scrollback", () => {
       );
       expect(composerBlockWrite).toBeDefined();
     });
+  });
+
+  it("does not replay a delayed Codex preview into a replacement renderer", async () => {
+    const previewGate = deferred<string | null>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "codex-preview-owner";
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId, presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return {
+          broker_state: modernBrokerState(presentationId),
+          initial_snapshot: modernSnapshot(),
+        };
+      }
+      if (command === "update_terminal_presentation") {
+        return modernRegistrationResult(presentationId, presentationId);
+      }
+      if (command === "request_terminal_snapshot") return modernSnapshot();
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId, presentationId).presentation;
+      }
+      if (command === "read_agent_pty") {
+        const options = (args as { options?: { peek?: boolean } } | undefined)?.options;
+        return options?.peek ? previewGate.promise : null;
+      }
+      if (command === "unregister_terminal_presentation") {
+        return modernBrokerState();
+      }
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const view = render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="codex-preview-owner"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+
+    const originalRenderer = getLatestTerminalInstance();
+    for (const result of mockSerializeAddon.mock.results) {
+      result.value.serialize.mockReturnValue("");
+    }
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="codex-preview-owner"
+        provider="codex"
+        theme="light"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "read_agent_pty",
+      expect.objectContaining({ options: expect.objectContaining({ peek: true }) }),
+    ));
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="codex-preview-owner"
+        visibility="hidden"
+        renderState="suspended"
+        provider="codex"
+        theme="light"
+      />,
+    );
+    await waitFor(() => expect(originalRenderer.dispose).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="codex-preview-owner"
+        visibility="visible"
+        renderState="mounted"
+        provider="codex"
+        theme="light"
+      />,
+    );
+    await waitFor(() => expect(getLatestTerminalInstance()).not.toBe(originalRenderer));
+    const replacementRenderer = getLatestTerminalInstance();
+    const parser = getLatestHeadlessTerminalInstance();
+    replacementRenderer.write.mockClear();
+    parser.write.mockClear();
+
+    await act(async () => {
+      previewGate.resolve("delayed codex preview");
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(parser.write).toHaveBeenCalledWith(
+      expect.stringContaining("delayed codex preview"),
+      expect.any(Function),
+    ));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(replacementRenderer.write).not.toHaveBeenCalledWith(
+      expect.stringContaining("delayed codex preview"),
+      expect.any(Function),
+    );
   });
 
   it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
