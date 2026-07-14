@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import type { WorkbenchDocumentV1 } from "../../src/types";
@@ -8,11 +10,14 @@ import {
   makeWorkbenchDocument,
   makeWorkbenchSurface,
   type WorkbenchAgentFixture,
+  type WorkbenchIpcMockController,
 } from "../fixtures/workbenchIpcMock";
 import {
   activeWorkbenchGroup,
+  dragSurfaceTab,
   openSurface,
   surfaceTab,
+  waitForStableBoundingBoxes,
   type CoreWorkbenchSurfaceType,
 } from "../fixtures/workbench";
 
@@ -59,7 +64,7 @@ async function bootWorkbench(
   document: WorkbenchDocumentV1,
   agents: WorkbenchAgentFixture[] = [],
   newTabAction: WorkbenchNewTabAction = "home",
-): Promise<void> {
+): Promise<WorkbenchIpcMockController> {
   // Browser navigation tests do not make terminal-runtime claims. Keeping the
   // Overview preference on Chat avoids coupling this suite to native PTY IPC.
   await page.addInitScript(() => {
@@ -68,7 +73,7 @@ async function bootWorkbench(
       version: 2,
     }));
   });
-  await installWorkbenchIpcMock(page, {
+  const ipc = await installWorkbenchIpcMock(page, {
     load_result: primaryLoad(document),
     agents,
     responses: {
@@ -99,11 +104,54 @@ async function bootWorkbench(
   await expect(page.getByTestId("workbench-group")).toHaveCount(
     Object.keys(document.groups).length,
   );
+  return ipc;
 }
 
 function workbenchGroup(page: Page, groupId: string): Locator {
   return page.getByTestId("workbench-group")
     .and(page.locator(`[data-group-id=${JSON.stringify(groupId)}]`));
+}
+
+function tabSurfaceIds(group: Locator): Promise<string[]> {
+  return group.getByRole("tab").evaluateAll((tabs) => tabs.map((tab) => (
+    (tab as HTMLElement).dataset.surfaceId ?? ""
+  )));
+}
+
+function surfaceOwner(page: Page, surfaceId: string): Locator {
+  return page.getByRole("tab")
+    .and(page.locator(`[data-surface-id=${JSON.stringify(surfaceId)}]`))
+    .locator('xpath=ancestor::*[@data-testid="workbench-group"][1]');
+}
+
+function installDragErrorMonitor(page: Page): () => string[] {
+  const pageErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  return () => [
+    ...pageErrors.map((message) => `pageerror: ${message}`),
+    ...consoleErrors
+      .filter((message) => /Dockview group projection failed|uncaught|fatal/i.test(message))
+      .map((message) => `console: ${message}`),
+  ];
+}
+
+async function expectPersistedTopology(
+  ipc: WorkbenchIpcMockController,
+  assertion: (document: WorkbenchDocumentV1) => boolean,
+): Promise<void> {
+  await expect.poll(async () => {
+    const snapshot = await ipc.snapshot();
+    return assertion(snapshot.load_result.document);
+  }).toBe(true);
+}
+
+function noEmptyNonFinalGroup(document: WorkbenchDocumentV1): boolean {
+  return Object.keys(document.groups).length === 1
+    || Object.values(document.groups).every((group) => group.surface_ids.length > 0);
 }
 
 function twoGroupDocument(): WorkbenchDocumentV1 {
@@ -349,6 +397,210 @@ test("honors the persisted palette plus preference while Quick Open remains sear
   await page.keyboard.press(process.platform === "darwin" ? "Meta+p" : "Control+p");
   await expect(searchable).toBeVisible();
   await expect(searchable.getByRole("combobox", { name: "Open a surface" })).toBeFocused();
+});
+
+test("reorders tabs with real pointer coordinates and persists canonical order", async ({ page }) => {
+  const fatalDragErrors = installDragErrorMonitor(page);
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const ipc = await bootWorkbench(page, makeWorkbenchDocument({
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id, queue.surface_id],
+        active_surface_id: dashboard.surface_id,
+      },
+    },
+    surfaces: [dashboard, queue],
+  }));
+
+  const group = workbenchGroup(page, "group-1");
+  const initialGroupBounds = await group.boundingBox();
+  const dashboardBounds = await surfaceTab(page, "dashboard").boundingBox();
+  expect(initialGroupBounds).not.toBeNull();
+  expect(dashboardBounds).not.toBeNull();
+
+  await dragSurfaceTab(page, surfaceTab(page, "queue"), {
+    x: dashboardBounds!.x + 4,
+    y: dashboardBounds!.y + dashboardBounds!.height / 2,
+  });
+
+  await expect.poll(() => tabSurfaceIds(group)).toEqual(["queue-1", "dashboard-1"]);
+  await expect(page.getByTestId("workbench-group")).toHaveCount(1);
+  const finalGroupBounds = await group.boundingBox();
+  expect(finalGroupBounds).not.toBeNull();
+  expect(Math.abs(finalGroupBounds!.x - initialGroupBounds!.x)).toBeLessThanOrEqual(2);
+  expect(Math.abs(finalGroupBounds!.width - initialGroupBounds!.width)).toBeLessThanOrEqual(2);
+  await expectPersistedTopology(ipc, (document) => (
+    document.groups["group-1"]?.surface_ids.join(",") === "queue-1,dashboard-1"
+    && noEmptyNonFinalGroup(document)
+  ));
+  expect(fatalDragErrors()).toEqual([]);
+});
+
+test("moves a sole source tab to another pane center and collapses the source pane", async ({ page }) => {
+  const fatalDragErrors = installDragErrorMonitor(page);
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const document = makeWorkbenchDocument({
+    root: {
+      kind: "split",
+      node_id: "split-1",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    },
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id],
+        active_surface_id: dashboard.surface_id,
+      },
+      "group-2": {
+        group_id: "group-2",
+        surface_ids: [queue.surface_id],
+        active_surface_id: queue.surface_id,
+      },
+    },
+    surfaces: [dashboard, queue],
+    active_group_id: "group-2",
+  });
+  const ipc = await bootWorkbench(page, document);
+
+  const targetGroup = workbenchGroup(page, "group-1");
+  const sourceGroup = workbenchGroup(page, "group-2");
+  const [targetBounds, sourceBounds] = await Promise.all([
+    targetGroup.boundingBox(),
+    sourceGroup.boundingBox(),
+  ]);
+  expect(targetBounds).not.toBeNull();
+  expect(sourceBounds).not.toBeNull();
+
+  await dragSurfaceTab(page, surfaceTab(page, "queue"), {
+    x: targetBounds!.x + targetBounds!.width / 2,
+    y: targetBounds!.y + targetBounds!.height * 0.6,
+  });
+
+  await expect(page.getByTestId("workbench-group")).toHaveCount(1);
+  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-1");
+  await expect.poll(() => tabSurfaceIds(targetGroup)).toEqual(["dashboard-1", "queue-1"]);
+  await expect(sourceGroup).toHaveCount(0);
+  const finalBounds = await targetGroup.boundingBox();
+  expect(finalBounds).not.toBeNull();
+  const combinedLeft = Math.min(targetBounds!.x, sourceBounds!.x);
+  const combinedRight = Math.max(
+    targetBounds!.x + targetBounds!.width,
+    sourceBounds!.x + sourceBounds!.width,
+  );
+  expect(Math.abs(finalBounds!.x - combinedLeft)).toBeLessThanOrEqual(4);
+  expect(Math.abs(finalBounds!.x + finalBounds!.width - combinedRight)).toBeLessThanOrEqual(4);
+  await expectPersistedTopology(ipc, (saved) => (
+    saved.root.kind === "group"
+    && saved.root.group_id === "group-1"
+    && Object.keys(saved.groups).length === 1
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,queue-1"
+    && noEmptyNonFinalGroup(saved)
+  ));
+  expect(fatalDragErrors()).toEqual([]);
+});
+
+test("shows an accurate half-pane edge preview and splits with a real pointer drop", async ({ page }) => {
+  const fatalDragErrors = installDragErrorMonitor(page);
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const ipc = await bootWorkbench(page, makeWorkbenchDocument({
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id, queue.surface_id],
+        active_surface_id: queue.surface_id,
+      },
+    },
+    surfaces: [dashboard, queue],
+  }));
+
+  const targetGroup = workbenchGroup(page, "group-1");
+  const contentTarget = targetGroup.locator(":scope > .dv-content-container");
+  const queueTab = surfaceTab(page, "queue");
+  const [, targetBounds, contentBounds] = await waitForStableBoundingBoxes(
+    page,
+    [queueTab, targetGroup, contentTarget],
+  );
+  const screenshotPath = path.resolve(
+    "e2e/screenshots/workbench-drag-drop/2026-07-14/edge-preview.png",
+  );
+
+  await dragSurfaceTab(page, queueTab, {
+    x: contentBounds.x + contentBounds.width - 6,
+    y: contentBounds.y + contentBounds.height * 0.6,
+  }, async () => {
+    const selection = page.locator(".dv-drop-target-selection:visible");
+    await expect(selection).toHaveCount(1);
+    const [selectionBounds, actualContentBounds] = await waitForStableBoundingBoxes(
+      page,
+      [selection, contentTarget],
+    );
+    const tolerance = 5;
+    expect(selectionBounds.x).toBeGreaterThanOrEqual(actualContentBounds.x - tolerance);
+    expect(selectionBounds.y).toBeGreaterThanOrEqual(actualContentBounds.y - tolerance);
+    expect(selectionBounds.x + selectionBounds.width)
+      .toBeLessThanOrEqual(actualContentBounds.x + actualContentBounds.width + tolerance);
+    expect(selectionBounds.y + selectionBounds.height)
+      .toBeLessThanOrEqual(actualContentBounds.y + actualContentBounds.height + tolerance);
+    expect(Math.abs(selectionBounds.width - actualContentBounds.width / 2))
+      .toBeLessThanOrEqual(tolerance);
+    expect(Math.abs(selectionBounds.height - actualContentBounds.height))
+      .toBeLessThanOrEqual(tolerance);
+    expect(Math.abs(selectionBounds.x - (actualContentBounds.x + actualContentBounds.width / 2)))
+      .toBeLessThanOrEqual(tolerance);
+    expect(selectionBounds.width).toBeGreaterThan(actualContentBounds.width * 0.4);
+    await page.screenshot({ path: screenshotPath, animations: "disabled" });
+  });
+
+  await expect(page.locator(".dv-drop-target-selection:visible")).toHaveCount(0);
+  await expect(page.getByTestId("workbench-group")).toHaveCount(2);
+  const dashboardOwner = surfaceOwner(page, "dashboard-1");
+  const queueOwner = surfaceOwner(page, "queue-1");
+  const [dashboardGroupId, queueGroupId] = await Promise.all([
+    dashboardOwner.getAttribute("data-group-id"),
+    queueOwner.getAttribute("data-group-id"),
+  ]);
+  expect(dashboardGroupId).toBeTruthy();
+  expect(queueGroupId).toBeTruthy();
+  expect(queueGroupId).not.toBe(dashboardGroupId);
+  const [dashboardBounds, queueBounds] = await Promise.all([
+    dashboardOwner.boundingBox(),
+    queueOwner.boundingBox(),
+  ]);
+  expect(dashboardBounds).not.toBeNull();
+  expect(queueBounds).not.toBeNull();
+  for (const bounds of [dashboardBounds!, queueBounds!]) {
+    expect(bounds.width).toBeGreaterThan(targetBounds.width * 0.4);
+    expect(bounds.width).toBeLessThan(targetBounds.width * 0.6);
+    expect(Math.abs(bounds.height - targetBounds.height)).toBeLessThanOrEqual(4);
+  }
+  const finalLeft = Math.min(dashboardBounds!.x, queueBounds!.x);
+  const finalRight = Math.max(
+    dashboardBounds!.x + dashboardBounds!.width,
+    queueBounds!.x + queueBounds!.width,
+  );
+  expect(Math.abs(finalLeft - targetBounds.x)).toBeLessThanOrEqual(4);
+  expect(Math.abs(finalRight - (targetBounds.x + targetBounds.width))).toBeLessThanOrEqual(4);
+  await expectPersistedTopology(ipc, (saved) => {
+    if (saved.root.kind !== "split" || saved.root.direction !== "horizontal") return false;
+    const dashboardGroup = Object.values(saved.groups)
+      .find((group) => group.surface_ids.includes("dashboard-1"));
+    const queueGroup = Object.values(saved.groups)
+      .find((group) => group.surface_ids.includes("queue-1"));
+    return Object.keys(saved.groups).length === 2
+      && dashboardGroup !== undefined
+      && queueGroup !== undefined
+      && dashboardGroup.group_id !== queueGroup.group_id
+      && Math.abs(saved.root.ratio - 0.5) <= 0.02
+      && noEmptyNonFinalGroup(saved);
+  });
+  expect(fatalDragErrors()).toEqual([]);
 });
 
 test("splits, moves, zooms, joins, closes, and reopens through semantic controls", async ({ page }) => {
