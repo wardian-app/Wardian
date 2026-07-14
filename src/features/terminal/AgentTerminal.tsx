@@ -77,6 +77,9 @@ type TerminalLinkContextRef = {
 type TerminalRendererEntry = {
   resizeTimeout: ReturnType<typeof setTimeout> | null;
   fitTimeout: ReturnType<typeof setTimeout> | null;
+  retired: boolean;
+  inFlightOperations: number;
+  physicallyDisposed: boolean;
   term: Terminal;
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
@@ -905,7 +908,6 @@ function scrollTerminalFromWheel(
   recordWheel(sessionId, "handled");
   event.preventDefault();
   event.stopPropagation();
-  term.refresh(0, Math.max(term.rows - 1, 0));
   return true;
 }
 
@@ -973,7 +975,7 @@ function disposeTerminalSession(sessionId: string) {
   entry.terminalClearedUnlisten?.();
   cancelRendererDisposal(entry);
   if (entry.renderer) {
-    disposeRenderer(entry.renderer, sessionId);
+    retireRenderer(entry.renderer, sessionId);
     entry.renderer = null;
   }
   entry.parserSerializeAddon.dispose();
@@ -982,15 +984,63 @@ function disposeTerminalSession(sessionId: string) {
   terminalSessionMap.delete(sessionId);
 }
 
-function disposeRenderer(renderer: TerminalRendererEntry, sessionId: string) {
+function retireRenderer(renderer: TerminalRendererEntry, sessionId: string) {
+  if (renderer.retired) {
+    return;
+  }
+  renderer.retired = true;
   clearRendererTimers(renderer);
   webglPool.delete(sessionId);
   removeSnapshotOverlay(renderer);
-  renderer.serializeAddon.dispose();
   disposeWebglAddonAndReleaseContext(renderer);
-  renderer.term.dispose();
+  // Ownership ends at retirement even when an xterm callback still holds the
+  // physical renderer alive. A replacement can claim the released budgets
+  // without making the pending callback operate on a disposed terminal.
   terminalRendererBudget.release("xterm", sessionId);
   terminalRendererBudget.release("webgl", sessionId);
+  finalizeRendererDisposal(renderer);
+}
+
+function finalizeRendererDisposal(renderer: TerminalRendererEntry) {
+  if (
+    !renderer.retired ||
+    renderer.inFlightOperations > 0 ||
+    renderer.physicallyDisposed
+  ) {
+    return;
+  }
+  renderer.physicallyDisposed = true;
+  renderer.serializeAddon.dispose();
+  renderer.term.dispose();
+}
+
+function rendererRemainsCurrent(
+  entry: TerminalSessionEntry,
+  renderer: TerminalRendererEntry,
+) {
+  return !entry.disposed && !renderer.retired && entry.renderer === renderer;
+}
+
+// Lease a captured renderer across one async operation. The boolean tells the
+// caller whether synchronous refresh/scroll follow-up is still safe; retirement
+// drains the lease before physically disposing xterm.
+async function runRendererOperation(
+  entry: TerminalSessionEntry,
+  renderer: TerminalRendererEntry,
+  operation: (renderer: TerminalRendererEntry) => unknown | Promise<unknown>,
+) {
+  if (!rendererRemainsCurrent(entry, renderer)) {
+    return false;
+  }
+
+  renderer.inFlightOperations += 1;
+  try {
+    await operation(renderer);
+    return rendererRemainsCurrent(entry, renderer);
+  } finally {
+    renderer.inFlightOperations -= 1;
+    finalizeRendererDisposal(renderer);
+  }
 }
 
 // @xterm/addon-webgl removes its canvas on dispose but never calls
@@ -1576,11 +1626,12 @@ async function writeTerminalOutputBatch(
   // would feel unscrollable until the provider went quiet (observed live with
   // Claude). scrollRendererToBottomAfterWrite re-checks against this baseline
   // and skips the snap when the user scrolled away mid-batch.
-  const rendererBottomBeforeWrite = entry.renderer
+  const renderer = entry.renderer;
+  const rendererBottomBeforeWrite = renderer
     ? {
         atBottom:
-          entry.renderer.term.buffer.active.viewportY >= entry.renderer.term.buffer.active.baseY,
-        baseY: entry.renderer.term.buffer.active.baseY,
+          renderer.term.buffer.active.viewportY >= renderer.term.buffer.active.baseY,
+        baseY: renderer.term.buffer.active.baseY,
       }
     : null;
   entry.recentNormalizedWritePreviews.push(
@@ -1598,7 +1649,6 @@ async function writeTerminalOutputBatch(
   }
   let scrollbackData = "";
   const viewportData = batchedWrite;
-  const renderer = entry.renderer;
   if (
     isProviderViewportRedraw(entry.provider, viewportData) &&
     supportsViewportRedrawInPlace(entry.parser) &&
@@ -1612,7 +1662,9 @@ async function writeTerminalOutputBatch(
     if (scrollbackData) {
       await writeTerminalControl(entry.parser, scrollbackData);
       if (renderer) {
-        await writeTerminalControl(renderer.term, scrollbackData);
+        await runRendererOperation(entry, renderer, (currentRenderer) =>
+          writeTerminalControl(currentRenderer.term, scrollbackData),
+        );
       }
     }
 
@@ -1620,24 +1672,28 @@ async function writeTerminalOutputBatch(
       preserveExistingViewport: false,
     });
     if (renderer) {
-      await applyViewportRedrawInPlace(renderer.term, viewportData, {
-        preserveExistingViewport: false,
-      });
-      renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
-      if (!entry.disposed) {
+      const remainsCurrent = await runRendererOperation(entry, renderer, (currentRenderer) =>
+        applyViewportRedrawInPlace(currentRenderer.term, viewportData, {
+          preserveExistingViewport: false,
+        }),
+      );
+      if (remainsCurrent) {
+        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
         scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
       }
     }
     return;
   }
   await writeTerminalControl(entry.parser, viewportData);
-  if (entry.renderer) {
-    // A frozen snapshot must never mask live output: drop it and let the DOM
-    // renderer underneath show the stream until the terminal re-promotes.
-    removeSnapshotOverlay(entry.renderer);
-    await writeTerminalControl(entry.renderer.term, viewportData);
-    if (!entry.disposed) {
-      scrollRendererToBottomAfterWrite(entry.renderer, rendererBottomBeforeWrite);
+  if (renderer) {
+    const remainsCurrent = await runRendererOperation(entry, renderer, async (currentRenderer) => {
+      // A frozen snapshot must never mask live output: drop it and let the DOM
+      // renderer underneath show the stream until the terminal re-promotes.
+      removeSnapshotOverlay(currentRenderer);
+      await writeTerminalControl(currentRenderer.term, viewportData);
+    });
+    if (remainsCurrent) {
+      scrollRendererToBottomAfterWrite(renderer, rendererBottomBeforeWrite);
     }
   }
   // NOTE: Claude/Gemini resize repaints scroll part of the pre-repaint
@@ -1671,6 +1727,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
 ) {
   const generation = entry.generation;
   try {
+    const renderer = entry.renderer;
     const termTheme = entry.currentTheme ?? DARK_TERM_THEME;
     const background = String(termTheme.background ?? DARK_TERM_THEME.background).replace("#", "");
     const foreground = String(termTheme.foreground ?? DARK_TERM_THEME.foreground).replace("#", "");
@@ -1683,7 +1740,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
         ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
         : "eb/eb/eb";
     const serializedState =
-      entry.renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
+      renderer?.serializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES }) ||
       entry.parserSerializeAddon.serialize({ scrollback: TERMINAL_SCROLLBACK_LINES });
     if (serializedState) {
       const themedState = normalizeCodexComposerBackgroundForTheme(serializedState, {
@@ -1698,14 +1755,26 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       });
       resetTerminalOutputBuffers(entry);
       await writeTerminalControl(entry.parser, themedState);
-      if (entry.renderer && !entry.disposed) {
-        await writeTerminalControl(entry.renderer.term, themedState);
-        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      const rendererCurrentAfterTheme = renderer
+        ? await runRendererOperation(entry, renderer, (currentRenderer) =>
+            writeTerminalControl(currentRenderer.term, themedState),
+          )
+        : false;
+      if (rendererCurrentAfterTheme && renderer) {
+        renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
       }
-      const rowRepaint = codexVisibleComposerBlockRepaint(entry);
-      if (rowRepaint && entry.renderer && !entry.disposed) {
-        await writeTerminalControl(entry.renderer.term, rowRepaint);
-        entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+      const rowRepaint = rendererCurrentAfterTheme
+        ? codexVisibleComposerBlockRepaint(entry)
+        : null;
+      if (rowRepaint && renderer) {
+        const rendererCurrentAfterRepaint = await runRendererOperation(
+          entry,
+          renderer,
+          (currentRenderer) => writeTerminalControl(currentRenderer.term, rowRepaint),
+        );
+        if (rendererCurrentAfterRepaint) {
+          renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
+        }
       }
       return;
     }
@@ -1726,13 +1795,19 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
       resetBeforeWrite: true,
       recordOutput: false,
     });
-    if (entry.renderer && !entry.disposed) {
-      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    const previewRenderer = entry.renderer;
+    if (previewRenderer && rendererRemainsCurrent(entry, previewRenderer)) {
+      previewRenderer.term.refresh(0, Math.max(previewRenderer.term.rows - 1, 0));
     }
     const rowRepaint = codexVisibleComposerBlockRepaint(entry);
-    if (rowRepaint && entry.renderer && !entry.disposed) {
-      await writeTerminalControl(entry.renderer.term, rowRepaint);
-      entry.renderer.term.refresh(0, Math.max(entry.renderer.term.rows - 1, 0));
+    if (
+      rowRepaint &&
+      previewRenderer &&
+      await runRendererOperation(entry, previewRenderer, (currentRenderer) =>
+        writeTerminalControl(currentRenderer.term, rowRepaint),
+      )
+    ) {
+      previewRenderer.term.refresh(0, Math.max(previewRenderer.term.rows - 1, 0));
     }
   } catch (error) {
     console.warn("Codex terminal theme replay failed:", error);
@@ -2127,6 +2202,9 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   const renderer: TerminalRendererEntry = {
     resizeTimeout: null,
     fitTimeout: null,
+    retired: false,
+    inFlightOperations: 0,
+    physicallyDisposed: false,
     term,
     fitAddon,
     serializeAddon,
@@ -2243,7 +2321,7 @@ function mountRenderer(
       }
       const renderer = current.renderer;
       current.renderer = null;
-      disposeRenderer(renderer, terminalKey);
+      retireRenderer(renderer, terminalKey);
       const presentation = current.presentationState;
       if (presentation) {
         current.presentationState = {
@@ -2471,7 +2549,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry?.renderer) {
         const renderer = entry.renderer;
         entry.renderer = null;
-        disposeRenderer(renderer, terminalKey);
+        retireRenderer(renderer, terminalKey);
         entry.lastMeasuredHostSize = null;
       }
       xtermRef.current = null;
@@ -2540,7 +2618,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       const restoringRenderer = entry.renderer;
       if (restoringRenderer) {
         entry.renderer = null;
-        disposeRenderer(restoringRenderer, terminalKey);
+        retireRenderer(restoringRenderer, terminalKey);
       }
       xtermRef.current = null;
       fitAddonRef.current = null;
@@ -2698,7 +2776,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (existing?.renderer) {
         const renderer = existing.renderer;
         existing.renderer = null;
-        disposeRenderer(renderer, terminalKey);
+        retireRenderer(renderer, terminalKey);
         existing.lastMeasuredHostSize = null;
       }
       rendererEvictedRef.current = false;
@@ -3079,7 +3157,7 @@ export const AgentTerminal = memo(function AgentTerminal({
           if (entry.renderer) {
             const renderer = entry.renderer;
             entry.renderer = null;
-            disposeRenderer(renderer, terminalKey);
+            retireRenderer(renderer, terminalKey);
             entry.lastMeasuredHostSize = null;
           }
           rendererEvictedRef.current = false;

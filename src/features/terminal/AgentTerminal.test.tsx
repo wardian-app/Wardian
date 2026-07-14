@@ -466,6 +466,95 @@ describe("AgentTerminal scrollback", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("unregister_terminal_presentation", expect.anything());
   });
 
+  it("settles an in-flight broker snapshot write before disposing its retired renderer", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-snapshot-retirement";
+      if (command === "register_terminal_presentation") {
+        return registrationGate.promise;
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const view = render(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-snapshot-retirement"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "register_terminal_presentation",
+        expect.anything(),
+      ));
+
+      const renderer = getLatestTerminalInstance();
+      const lifecycle: string[] = [];
+      let settleRendererWrite: (() => void) | undefined;
+      renderer.write.mockImplementation((data: string, callback?: () => void) => {
+        if (data.includes("delayed broker snapshot")) {
+          lifecycle.push("write-started");
+          settleRendererWrite = () => {
+            lifecycle.push("write-settled");
+            callback?.();
+          };
+          return;
+        }
+        callback?.();
+      });
+      renderer.dispose.mockImplementation(() => lifecycle.push("disposed"));
+
+      const registration = modernRegistrationResult("pane-snapshot-retirement");
+      registration.initial_snapshot = {
+        ...modernSnapshot(),
+        visible_grid: "delayed broker snapshot",
+      };
+      await act(async () => {
+        registrationGate.resolve(registration);
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(settleRendererWrite).toBeTypeOf("function"));
+
+      view.rerender(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="pane-snapshot-retirement"
+          visibility="hidden"
+          renderState="suspended"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+
+      await act(async () => {
+        settleRendererWrite?.();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(renderer.dispose).toHaveBeenCalledTimes(1));
+
+      expect(screen.queryByText("Terminal Initialization Fatal Error:")).not.toBeInTheDocument();
+      expect(lifecycle).toEqual(["write-started", "write-settled", "disposed"]);
+      expect(consoleError).not.toHaveBeenCalledWith(
+        "AgentTerminal Init Error:",
+        expect.anything(),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("does not refit, resize, or reset the renderer for an ordinary broker output update", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     let readCount = 0;
@@ -2576,7 +2665,7 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.scrollLines.mock.calls[0][0]).toBeLessThan(0);
     expect(instance.buffer.active.viewportY).toBeLessThan(27);
     expect(parser.scrollToLine).toHaveBeenCalledWith(instance.buffer.active.viewportY);
-    expect(instance.refresh).toHaveBeenCalledWith(0, 23);
+    expect(instance.refresh).not.toHaveBeenCalled();
   });
 
   it("forwards codex enter as a plain carriage return", async () => {
