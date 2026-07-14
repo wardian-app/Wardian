@@ -4,7 +4,11 @@
 
 <img src="public/icon.png" width="128" alt="Wardian Logo" />
 
-**A modular, local-first desktop habitat for agents, workflows, and reusable context.**
+**Where local agent work becomes visible, durable, and malleable.**
+
+Run real CLI agents in real workspaces, keep their sessions and evidence
+visible, and turn successful work into reusable prompts, skills, classes,
+workflows, and project context.
 
 [![tests](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml/badge.svg)](https://github.com/wardian-app/Wardian/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/wardian-app/Wardian/branch/main/graph/badge.svg)](https://codecov.io/gh/wardian-app/Wardian)
@@ -128,23 +132,23 @@ Wardian supports five provider CLIs today and adapts each runtime into the same 
 
 ## Why Wardian?
 
-Most agent tools still live primarily in terminals, config files, or headless
-framework code. Wardian is built around a different center of gravity: a
-local-first Habitat where humans can see, steer, and reshape many real local
-CLI agents without losing the terminal truth underneath.
+Most agent work still begins and ends as disposable terminal sessions. Wardian
+gives that work a durable local home: run the CLI agents you already use, see
+what happened and what needs attention, and keep the useful parts as reusable
+practice rather than repeating them from scratch.
 
 - **GUI-first, terminal-real.** Wardian gives each managed provider a real PTY
   while projecting status, telemetry, output, queue evidence, workflows, and
   source control into a desktop interface.
-- **Persistent agent habitat.** Agents have durable roster identity, class,
-  provider, workspace, scoped skills, worktree state, and completion history
-  instead of being disposable terminal tabs.
+- **Durable agent work.** Agents have durable roster identity, class, provider,
+  workspace, scoped skills, worktree state, and completion history instead of
+  being disposable terminal tabs.
 - **Coordinate without babysitting terminals.** Send prompts, structured asks,
   broadcasts, lifecycle commands, and workflow runs through shared app and CLI
   control surfaces.
-- **Keep finished work visible.** Queue and workflow evidence preserve completed
-  agent output so results do not disappear into scrollback.
-- **Turn repetition into reusable capability.** Save prompts, tune classes,
+- **Keep finished work visible.** Queue and workflow evidence preserve outcomes
+  and action-needed work so results do not disappear into scrollback.
+- **Turn what works into reusable practice.** Save prompts, tune classes,
   deploy skills, schedule workflows, and promote useful evidence into durable
   context over time.
 - **Stay local and inspectable.** Wardian adapts real CLI providers, real
@@ -218,9 +222,12 @@ Wardian leverages native OS capabilities for high-performance terminal emulation
 
 ## Product Direction
 
-Wardian is evolving toward a malleable home for your agents: a local environment where agent capabilities, workflows, evidence, and project context can be inspected, rearranged, and extended over time.
+Wardian is evolving toward a malleable home for agent work: a local environment
+where agent capabilities, workflows, evidence, and project context can be
+inspected, rearranged, and extended over time.
 
 - **Runtime reliability and provider fidelity**: keep real PTY behavior, provider-specific delivery, transcript capture, and cross-platform process supervision stable as provider CLIs change.
+- **Malleable workbench**: evolve fixed pages into restorable work surfaces so an agent session, Queue, Library, workflow, and project files can stay visible together without confusing layout with runtime state.
 - **Reusable context and capabilities**: continue tightening the Library around prompts, skills, classes, workflow blueprints, MCP configuration, and inspectable filesystem-backed artifacts.
 - **Coordination surfaces**: improve Graph topology, teams, watchlists, Queue evidence, structured asks/replies, and CLI automation so multi-agent work stays visible and bounded.
 - **Workflow operations**: harden workflow authoring, scheduling, run observation, history, and failure evidence for repeatable local automation.

@@ -3,6 +3,15 @@
 - **Status:** Proposed
 - **Date:** 2026-06-02
 
+## Sources
+
+- [Malleable Software](https://www.inkandswitch.com/essay/malleable-software/)
+  is the source for the gentle tailoring slope, composition over shared data,
+  in-place adaptation, and communal creation principles in this spec.
+- [Entity-Oriented Agent Semantics](./2026-07-14-entity-oriented-agent-semantics.md)
+  defines the durable operational entities and protocol relationships that a
+  Garden scene can reference without owning.
+
 ## Context and Problem Statement
 
 Wardian is already moving toward malleable software: agents, classes, skills,
@@ -176,6 +185,29 @@ or workflow run evidence. Others are Garden-local, such as a user drawing a
 planning relationship between a memory and a future workflow. The persistence
 format should distinguish canonical edges from Garden-local annotations.
 
+## Entity-Oriented Tailoring
+
+Garden is a low-friction part of Wardian's tailoring slope: users can arrange,
+filter, annotate, and inspect durable entities before changing any operational
+record. A Garden node is a reference to an entity; it is not a second agent,
+workflow, skill, or evidence record.
+
+This distinction is especially important for relationships:
+
+| Garden action | Meaning |
+| --- | --- |
+| Put a reviewer beside an implementation workflow. | Local planning and attention. |
+| Draw a note that a skill may help an agent. | A hypothesis or local annotation. |
+| Deploy the skill from the node action. | A canonical Library mutation after the deployment succeeds. |
+| Bind the reviewer to an approval node. | A canonical workflow protocol mutation. |
+
+The Garden should expose promotion paths, not silently reinterpret local scene
+state as runtime behavior. For example, a local note can offer **Create prompt**
+or **Draft workflow change**; it does not become a prompt or protocol until the
+user reviews and accepts the owning Library or workflow mutation. This preserves
+the gentle slope from arrangement to composition while keeping Garden a lens
+over shared data.
+
 ## First Product Slice
 
 The first Garden implementation should feel like a living command map rather
@@ -203,7 +235,8 @@ than a general-purpose visual programming environment.
 
 These scenes are useful even before deeper programmability exists. They also
 create the gentle slope: users start by arranging and annotating, then graduate
-to small canonical actions, then eventually to generated or user-authored tools.
+to small canonical actions, promotion into Library assets and workflows, then
+eventually to generated or user-authored tools.
 
 ## Deferred Scope
 
