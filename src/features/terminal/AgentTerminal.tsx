@@ -2514,14 +2514,8 @@ export const AgentTerminal = memo(function AgentTerminal({
       return false;
     }
 
-    // A renderer reused after leaving the viewport may still have the scaled
-    // snapshot canvas captured during WebGL demotion. Promote while hidden,
-    // discard that stale still even when WebGL is unavailable, then re-fit
-    // against the final renderer metrics before exposing any pixels.
-    if (!renderer.webglAttempted || renderer.webglActivatedOnce) {
-      renderer.webglAttempted = true;
-      promoteSessionToWebgl(terminalKey);
-    }
+    // Renderer reveal prepares DOM geometry only. The terminal's physical
+    // IntersectionObserver is the sole authority for WebGL promotion.
     if (entry.renderer !== renderer) {
       return false;
     }
@@ -3349,14 +3343,6 @@ export const AgentTerminal = memo(function AgentTerminal({
       clearTimeout(timer);
     };
   }, [terminalKey, isMaximized, performFit]);
-
-  useEffect(() => {
-    // A maximized terminal is the one the user is looking at; guarantee it a
-    // WebGL context regardless of pool recency.
-    if (isMaximized) {
-      promoteSessionToWebgl(terminalKey);
-    }
-  }, [terminalKey, isMaximized]);
 
   useEffect(() => {
     const term = xtermRef.current;

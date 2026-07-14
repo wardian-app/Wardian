@@ -22,6 +22,7 @@ vi.mock("../../../views/AgentsOverviewView", () => ({
           props.onFocusedAgentChange("agent-2");
           props.onModeChange("single");
         }}>Maximize Beta</button>
+        <button type="button" onClick={props.onExitSingle}>Exit Single</button>
       </div>
     );
   },
@@ -34,6 +35,7 @@ const agents: AgentConfig[] = [
 
 const state: AgentsOverviewSurfaceState = {
   mode: "auto",
+  last_multi_agent_mode: "auto",
   focused_agent_id: null,
   search_query: "",
   status_filter: [],
@@ -87,11 +89,36 @@ describe("AgentsOverviewSurface", () => {
       focused_agent_id: "agent-2",
     })).toEqual({
       mode: "single",
+      last_multi_agent_mode: "auto",
       focused_agent_id: "agent-2",
       search_query: "",
       status_filter: [],
     });
     expect(normalizeAgentsOverviewSurfaceState(null)).toEqual(state);
+  });
+
+  it("persists the last multi-agent mode and restores it when explicit Single exits", () => {
+    const onStateChange = vi.fn();
+    render(<AgentsOverviewSurface {...surfaceProps({
+      state: { ...state, mode: "grid", last_multi_agent_mode: "grid" },
+      on_state_change: onStateChange,
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Maximize Beta" }));
+    expect(onStateChange).toHaveBeenLastCalledWith({
+      ...state,
+      mode: "single",
+      last_multi_agent_mode: "grid",
+      focused_agent_id: "agent-2",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit Single" }));
+    expect(onStateChange).toHaveBeenLastCalledWith({
+      ...state,
+      mode: "grid",
+      last_multi_agent_mode: "grid",
+      focused_agent_id: "agent-2",
+    });
   });
 
   it("adapts persisted state and surface identity to the view", () => {
@@ -113,12 +140,17 @@ describe("AgentsOverviewSurface", () => {
     render(<AgentsOverviewSurface {...surfaceProps({ on_state_change: onStateChange })} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Grid" }));
-    expect(onStateChange).toHaveBeenCalledWith({ ...state, mode: "grid" });
+    expect(onStateChange).toHaveBeenCalledWith({
+      ...state,
+      mode: "grid",
+      last_multi_agent_mode: "grid",
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Focus Beta" }));
     expect(onStateChange).toHaveBeenCalledWith({
       ...state,
       mode: "grid",
+      last_multi_agent_mode: "grid",
       focused_agent_id: "agent-2",
     });
 
@@ -128,6 +160,7 @@ describe("AgentsOverviewSurface", () => {
     expect(onStateChange).toHaveBeenCalledWith({
       ...state,
       mode: "grid",
+      last_multi_agent_mode: "grid",
       focused_agent_id: "agent-2",
       search_query: "alp",
     });

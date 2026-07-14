@@ -126,6 +126,7 @@ function gridProps(
     onMouseDown: () => {},
     onCardClick: () => {},
     onModeChange: () => {},
+    onExitSingle: () => {},
     onFocusedAgentChange: () => {},
     onDelete: options.onDelete ?? (() => {}),
     onRename: () => {},
@@ -166,7 +167,7 @@ beforeEach(() => {
 });
 
 describe('AgentsOverviewView maximize behavior', () => {
-  it('mounts terminal renderers only for cards near the Agents scroll viewport', async () => {
+  it('keeps every terminal resident across viewport exit and re-entry at or below capacity', async () => {
     const originalIntersectionObserver = globalThis.IntersectionObserver;
     let observerCallback: IntersectionObserverCallback | null = null;
     const observedCards = new Map<string, Element>();
@@ -174,18 +175,75 @@ describe('AgentsOverviewView maximize behavior', () => {
       root = null;
       rootMargin = '';
       thresholds = [];
-      private readonly callback: IntersectionObserverCallback;
       constructor(callback: IntersectionObserverCallback) {
-        this.callback = callback;
         observerCallback = callback;
       }
       observe(target: Element) {
         const agentId = (target as HTMLElement).dataset.agentGridCardId;
         if (agentId) observedCards.set(agentId, target);
-        this.callback([{
-          isIntersecting: true,
-          target,
-        } as IntersectionObserverEntry], this);
+      }
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    } as unknown as typeof IntersectionObserver;
+
+    try {
+      renderGrid(null, agents);
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(latestProps.get('agent-1')).toMatchObject({ renderState: 'mounted' });
+        expect(latestProps.get('agent-2')).toMatchObject({ renderState: 'mounted' });
+      });
+
+      const firstCard = observedCards.get('agent-1');
+      if (!observerCallback || !firstCard) throw new Error('expected viewport observer');
+      act(() => observerCallback!([{
+        isIntersecting: false,
+        target: firstCard,
+      } as IntersectionObserverEntry], {} as IntersectionObserver));
+      act(() => observerCallback!([{
+        isIntersecting: true,
+        target: firstCard,
+      } as IntersectionObserverEntry], {} as IntersectionObserver));
+
+      const latestProps = new Map(
+        terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+      );
+      expect(latestProps.get('agent-1')).toMatchObject({ renderState: 'mounted' });
+      expect(latestProps.get('agent-2')).toMatchObject({ renderState: 'mounted' });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
+  it('evicts a non-near resident only when admitting an approaching card above capacity', async () => {
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 900,
+      height: 600,
+      top: 0,
+      left: 0,
+      right: 900,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    let observerCallback: IntersectionObserverCallback | null = null;
+    const observedCards = new Map<string, Element>();
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      root = null;
+      rootMargin = '';
+      thresholds = [];
+      constructor(callback: IntersectionObserverCallback) {
+        observerCallback = callback;
+      }
+      observe(target: Element) {
+        const agentId = (target as HTMLElement).dataset.agentGridCardId;
+        if (agentId) observedCards.set(agentId, target);
       }
       unobserve() {}
       disconnect() {}
@@ -221,11 +279,18 @@ describe('AgentsOverviewView maximize behavior', () => {
       });
 
       const firstCard = observedCards.get('agent-1');
-      if (!observerCallback || !firstCard) throw new Error('expected viewport observer');
-      act(() => observerCallback!([{
-        isIntersecting: false,
-        target: firstCard,
-      } as IntersectionObserverEntry], {} as IntersectionObserver));
+      const approachingCard = observedCards.get('agent-25');
+      if (!observerCallback || !firstCard || !approachingCard) throw new Error('expected viewport observer');
+      act(() => observerCallback!([
+        {
+          isIntersecting: false,
+          target: firstCard,
+        } as IntersectionObserverEntry,
+        {
+          isIntersecting: true,
+          target: approachingCard,
+        } as IntersectionObserverEntry,
+      ], {} as IntersectionObserver));
 
       await waitFor(() => {
         const latestProps = new Map(
@@ -236,6 +301,7 @@ describe('AgentsOverviewView maximize behavior', () => {
       });
     } finally {
       globalThis.IntersectionObserver = originalIntersectionObserver;
+      rectSpy.mockRestore();
     }
   });
 
@@ -352,6 +418,52 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(card?.className).not.toContain('fixed');
   });
 
+  it('restores explicit Single through the surface callback', () => {
+    const onExitSingle = vi.fn();
+    render(<AgentsOverviewView {...gridProps('agent-1')} onExitSingle={onExitSingle} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize Alpha' }));
+
+    expect(onExitSingle).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not present responsive Auto Single as an explicit maximized card', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    vi.useFakeTimers();
+
+    try {
+      const props = { ...gridProps(null, [agents[0]]), mode: 'auto' as const };
+      render(<AgentsOverviewView {...props} />);
+      const container = screen.getByTestId('agents-overview-container');
+      act(() => {
+        resizeCallback?.([{
+          target: container,
+          contentRect: { width: 800, height: 600 } as DOMRectReadOnly,
+        } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+        vi.advanceTimersByTime(120);
+      });
+
+      expect(screen.queryByRole('button', { name: 'Minimize Alpha' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Maximize Alpha' })).toBeInTheDocument();
+      expect(terminalRenderSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        sessionId: 'agent-1',
+        isMaximized: false,
+      }));
+    } finally {
+      vi.useRealTimers();
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('does not animate terminal card geometry during maximize restore', () => {
     renderGrid(null);
 
@@ -421,6 +533,7 @@ describe('AgentsOverviewView maximize behavior', () => {
       onMouseDown: vi.fn(),
       onCardClick: vi.fn(),
       onModeChange: vi.fn(),
+      onExitSingle: vi.fn(),
       onFocusedAgentChange: vi.fn(),
       onDelete: vi.fn(),
       onRename: vi.fn(),

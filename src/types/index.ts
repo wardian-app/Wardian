@@ -296,9 +296,11 @@ export interface GridLayout {
 }
 
 export type AgentsOverviewMode = "auto" | "grid" | "single";
+export type AgentsOverviewMultiAgentMode = Exclude<AgentsOverviewMode, "single">;
 
 export type AgentsOverviewSurfaceState = {
     mode: AgentsOverviewMode;
+    last_multi_agent_mode: AgentsOverviewMultiAgentMode;
     focused_agent_id: string | null;
     search_query: string;
     status_filter: string[];

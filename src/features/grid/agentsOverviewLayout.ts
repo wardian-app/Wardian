@@ -27,6 +27,8 @@ export interface AgentsOverviewGridCandidate {
   emptyCells: number;
   orientation: AgentsOverviewOrientation;
   meetsHardFloor: boolean;
+  /** Maximum number of floor-sized cards simultaneously visible in the viewport. */
+  viewportCapacity: number;
   score: number;
 }
 
@@ -134,6 +136,10 @@ function evaluateCandidate(
     return cardWidth >= floor.width && cardHeight >= floor.height;
   });
   const minimumCardArea = cardWidth * cardHeight;
+  const floor = requiredFloor(agents);
+  const viewportRows = floor.height > 0
+    ? Math.max(0, Math.floor((height + safeGap) / (floor.height + safeGap)))
+    : rows;
 
   return {
     columns: safeColumns,
@@ -144,6 +150,7 @@ function evaluateCandidate(
     emptyCells: (safeColumns * rows) - agents.length,
     orientation: orientationFor(safeColumns, rows),
     meetsHardFloor,
+    viewportCapacity: Math.min(agents.length, safeColumns * viewportRows),
     // Candidate score is deliberately a continuous usable-area measure. Hard-floor,
     // empty-cell, and orientation policy remain explicit comparator dimensions.
     score: minimumCardArea,
@@ -262,6 +269,7 @@ function gridResult(
   focusedAgentId: string,
   candidate: AgentsOverviewGridCandidate,
   gap: number,
+  containerSize: AgentsOverviewContainerSize,
 ): AgentsOverviewLayoutResult {
   const strictFloor = requiredFloor(agents);
   const explicitGrid = mode === "grid";
@@ -282,9 +290,53 @@ function gridResult(
     cardHeight,
     contentWidth,
     contentHeight,
-    requiresScroll: explicitGrid && !candidate.meetsHardFloor,
+    requiresScroll: contentWidth > finiteNonNegative(containerSize.width)
+      || contentHeight > finiteNonNegative(containerSize.height),
     candidate,
   };
+}
+
+function evaluateAutoCandidate(
+  agents: readonly AgentsOverviewLayoutAgent[],
+  containerSize: AgentsOverviewContainerSize,
+  columns: number,
+  gap: number,
+): AgentsOverviewGridCandidate | null {
+  const floor = requiredFloor(agents);
+  const width = finiteNonNegative(containerSize.width);
+  const height = finiteNonNegative(containerSize.height);
+  const viewportRows = Math.floor((height + gap) / (floor.height + gap));
+  if (viewportRows < 1) return null;
+
+  const rows = Math.ceil(agents.length / columns);
+  const simultaneousRows = Math.min(rows, viewportRows);
+  const cardWidth = (width - (Math.max(0, columns - 1) * gap)) / columns;
+  const cardHeight = (height - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows;
+  if (cardWidth < floor.width || cardHeight < floor.height) return null;
+
+  return {
+    columns,
+    rows,
+    cardWidth,
+    cardHeight,
+    minimumCardArea: cardWidth * cardHeight,
+    emptyCells: (columns * rows) - agents.length,
+    orientation: orientationFor(columns, rows),
+    meetsHardFloor: true,
+    viewportCapacity: Math.min(agents.length, columns * viewportRows),
+    score: cardWidth * cardHeight,
+  };
+}
+
+function compareAutoCandidates(
+  left: AgentsOverviewGridCandidate,
+  right: AgentsOverviewGridCandidate,
+  previousOrientation?: AgentsOverviewOrientation | null,
+): number {
+  if (left.viewportCapacity !== right.viewportCapacity) {
+    return right.viewportCapacity - left.viewportCapacity;
+  }
+  return compareAgentsOverviewCandidates(left, right, previousOrientation);
 }
 
 function chooseAutoCandidate(
@@ -293,17 +345,21 @@ function chooseAutoCandidate(
   gap: number,
   previousLayout: AgentsOverviewLayoutResult | null | undefined,
 ): AgentsOverviewGridCandidate | null {
+  if (agents.length <= 1) return null;
   const previousOrientation = previousLayout?.candidate?.orientation;
-  // Auto has only two useful presentations for multiple agents: a broad grid
-  // or the focused singleton. A one-column multi-agent grid recreates the
-  // cramped stacked-card failure that Single is meant to avoid.
-  const candidates = generateAgentsOverviewCandidates({ agents, containerSize, gap })
-    .filter((candidate) => agents.length === 1 || candidate.columns >= 2);
-  const best = selectBestAgentsOverviewCandidate(
-    candidates,
-    previousOrientation,
+  const floor = requiredFloor(agents);
+  const maxColumns = Math.min(
+    agents.length,
+    Math.floor((finiteNonNegative(containerSize.width) + gap) / (floor.width + gap)),
   );
-  if (!best?.meetsHardFloor) return null;
+  if (maxColumns < 2) return null;
+
+  const candidates = Array.from({ length: maxColumns - 1 }, (_, index) => index + 2)
+    .map((columns) => evaluateAutoCandidate(agents, containerSize, columns, gap))
+    .filter((candidate): candidate is AgentsOverviewGridCandidate => candidate !== null);
+  const best = [...candidates].sort((left, right) =>
+    compareAutoCandidates(left, right, previousOrientation))[0] ?? null;
+  if (!best) return null;
 
   if (
     previousLayout?.requestedMode !== "auto"
@@ -314,14 +370,15 @@ function chooseAutoCandidate(
     return best;
   }
 
-  const current = evaluateCandidate(
+  const current = evaluateAutoCandidate(
     agents,
     containerSize,
     previousLayout.candidate.columns,
     gap,
   );
-  if (!current.meetsHardFloor) return best;
+  if (!current) return best;
   if (current.columns === best.columns && current.rows === best.rows) return current;
+  if (current.viewportCapacity !== best.viewportCapacity) return best;
 
   const improvement = current.score > 0 ? (best.score - current.score) / current.score : Number.POSITIVE_INFINITY;
   return improvement >= AGENTS_OVERVIEW_SCORE_IMPROVEMENT_THRESHOLD ? best : current;
@@ -357,5 +414,5 @@ export function resolveAgentsOverviewLayout(
     return singleResult(input.mode, orderedAgentIds, focusedAgentId, input.containerSize);
   }
 
-  return gridResult(input.mode, agents, focusedAgentId, candidate, gap);
+  return gridResult(input.mode, agents, focusedAgentId, candidate, gap, input.containerSize);
 }

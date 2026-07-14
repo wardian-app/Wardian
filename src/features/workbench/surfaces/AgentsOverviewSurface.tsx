@@ -2,6 +2,7 @@ import { useMemo, useRef } from "react";
 
 import type {
   AgentConfig,
+  AgentsOverviewMultiAgentMode,
   AgentsOverviewMode,
   AgentsOverviewSurfaceState,
   TerminalVisibility,
@@ -16,6 +17,7 @@ type ManagedViewProps =
   | "focusedAgentId"
   | "mode"
   | "onFocusedAgentChange"
+  | "onExitSingle"
   | "onModeChange"
   | "surfaceId";
 
@@ -30,6 +32,7 @@ export interface AgentsOverviewSurfaceProps
 
 const DEFAULT_STATE: AgentsOverviewSurfaceState = {
   mode: "auto",
+  last_multi_agent_mode: "auto",
   focused_agent_id: null,
   search_query: "",
   status_filter: [],
@@ -43,8 +46,16 @@ export function normalizeAgentsOverviewSurfaceState(value: unknown): AgentsOverv
   const mode = rawMode === "grid" || rawMode === "single" || rawMode === "auto"
     ? rawMode
     : DEFAULT_STATE.mode;
+  const rawLastMultiAgentMode = candidate.last_multi_agent_mode;
+  const last_multi_agent_mode: AgentsOverviewMultiAgentMode =
+    rawLastMultiAgentMode === "auto" || rawLastMultiAgentMode === "grid"
+      ? rawLastMultiAgentMode
+      : mode === "grid"
+        ? "grid"
+        : "auto";
   return {
     mode,
+    last_multi_agent_mode,
     focused_agent_id: typeof candidate.focused_agent_id === "string"
       ? candidate.focused_agent_id
       : null,
@@ -116,8 +127,19 @@ export function AgentsOverviewSurface({
   };
   const updateMode = (mode: AgentsOverviewMode) => {
     if (mode === stateRef.current.mode) return;
-    updateState({ mode });
+    if (mode === "single") {
+      const previousMode = stateRef.current.mode;
+      updateState({
+        mode,
+        last_multi_agent_mode: previousMode === "auto" || previousMode === "grid"
+          ? previousMode
+          : stateRef.current.last_multi_agent_mode,
+      });
+      return;
+    }
+    updateState({ mode, last_multi_agent_mode: mode });
   };
+  const exitSingle = () => updateState({ mode: stateRef.current.last_multi_agent_mode });
   const updateFocusedAgent = (focused_agent_id: string | null) => {
     if (focused_agent_id === stateRef.current.focused_agent_id) return;
     updateState({ focused_agent_id });
@@ -161,6 +183,7 @@ export function AgentsOverviewSurface({
           focusedAgentId={state.focused_agent_id}
           mode={state.mode}
           onFocusedAgentChange={updateFocusedAgent}
+          onExitSingle={exitSingle}
           onModeChange={updateMode}
           surfaceId={surface_id}
           surfaceVisibility={visibility}

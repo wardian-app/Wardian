@@ -22,6 +22,19 @@ describe("core workbench surface registry", () => {
       surface_type: "agents-overview",
       state: registry.default_state("agents-overview"),
     })).title).toBe("Agents");
+    expect(registry.default_state("agents-overview")).toMatchObject({
+      mode: "auto",
+      last_multi_agent_mode: "auto",
+    });
+    expect(registry.get("agents-overview")?.restore_state({
+      mode: "grid",
+      focused_agent_id: null,
+      search_query: "",
+      status_filter: [],
+    }, 1)).toMatchObject({
+      ok: true,
+      state: { mode: "grid", last_multi_agent_mode: "grid" },
+    });
 
     expect(["dashboard", "queue", "graph", "garden", "library", "workflows"].map((type) => {
       const definition = registry.get(type);

@@ -66,6 +66,23 @@ describe("Agents layout", () => {
     expect(result.visibleAgentIds).toEqual(["agent-2"]);
   });
 
+  it("uses viewport capacity and vertical overflow for a large Auto roster", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(12),
+      containerSize: { width: 1600, height: 900 },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(3);
+    expect(result.rows).toBe(4);
+    expect(result.cardWidth).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.width);
+    expect(result.cardHeight).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.height);
+    expect(result.requiresScroll).toBe(true);
+    expect(result.contentHeight).toBeGreaterThan(900);
+  });
+
   it("never resolves Auto to a one-column multi-agent grid", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",

@@ -2554,6 +2554,39 @@ describe("AgentTerminal scrollback", () => {
     );
   });
 
+  it("waits for physical intersection before promoting a revealed renderer to WebGL", async () => {
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+    let intersectionCallback: IntersectionObserverCallback | undefined;
+    globalThis.IntersectionObserver = class IntersectionObserver {
+      root = null;
+      rootMargin = "";
+      thresholds = [];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+    } as unknown as typeof IntersectionObserver;
+
+    try {
+      render(<AgentTerminal sessionId="physical-webgl" theme="dark" />);
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalled());
+      expect(mockWebglAddon).not.toHaveBeenCalled();
+
+      const host = screen.getByTestId("agent-terminal-host");
+      act(() => intersectionCallback?.([{
+        isIntersecting: true,
+        target: host,
+      } as unknown as IntersectionObserverEntry], {} as IntersectionObserver));
+
+      await waitFor(() => expect(mockWebglAddon).toHaveBeenCalledTimes(1));
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
   it("captures readable terminal output for queue summaries", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {

@@ -54,6 +54,7 @@ export interface AgentsOverviewViewProps {
   theme: "dark" | "light" | "system";
   onCardClick: (e: React.MouseEvent, id: string) => void;
   onModeChange: (mode: AgentsOverviewMode) => void;
+  onExitSingle: () => void;
   onFocusedAgentChange: (id: string | null) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -151,6 +152,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   theme,
   onCardClick,
   onModeChange,
+  onExitSingle,
   onFocusedAgentChange,
   onDelete,
   onRename,
@@ -234,7 +236,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     autoLayoutMeasured ? overviewLayout.visibleAgentIds : [],
   );
   const visibleAgents = renderableAgents.filter((agent) => visibleAgentIds.has(agent.session_id.toString()));
-  const isMaximized = overviewLayout.presentationMode === "single";
+  const isMaximized = mode === "single" && overviewLayout.presentationMode === "single";
   // User-forced stacking remains an explicit Grid affordance; Auto is always container-derived.
   const renderStacked = mode === "grid" && gridStacked && resizeType !== 'stack-exit';
   const persistedColumnCount = Math.max(
@@ -256,18 +258,23 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     : 0;
   const visibleAgentIdKey = visibleAgents.map((agent) => agent.session_id.toString()).join('\0');
   const renderableAgentIdKey = renderableAgents.map((agent) => agent.session_id.toString()).join('\0');
-  const [viewportAgentIds, setViewportAgentIds] = useState<Set<string>>(() => new Set());
+  const [residentAgentIds, setResidentAgentIds] = useState<Set<string>>(() => new Set());
 
   useLayoutEffect(() => {
     const root = containerRef.current;
     const grid = gridRef.current;
     const logicalIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
     if (!root || !grid || surfaceVisibility !== "visible") {
-      setViewportAgentIds(new Set());
+      setResidentAgentIds(new Set());
       return;
     }
+    const orderedLogicalIds = Array.from(logicalIds);
+    const allAgentsResident = orderedLogicalIds.length <= MAX_XTERM_RENDERERS;
+    if (allAgentsResident) {
+      setResidentAgentIds(new Set(orderedLogicalIds));
+    }
     if (typeof IntersectionObserver === "undefined") {
-      setViewportAgentIds(new Set(Array.from(logicalIds).slice(0, MAX_XTERM_RENDERERS)));
+      setResidentAgentIds(new Set(orderedLogicalIds.slice(0, MAX_XTERM_RENDERERS)));
       return;
     }
 
@@ -290,33 +297,43 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
         .filter(Boolean),
     );
     const nearViewportAgentIds = new Set(initiallyNearViewport);
-    const publishMountedAgentIds = () => {
-      const next = new Set(
-        observedCards
-          .map((card) => card.dataset.agentGridCardId ?? "")
-          .filter((agentId) => nearViewportAgentIds.has(agentId))
-          .slice(0, MAX_XTERM_RENDERERS),
-      );
-      setViewportAgentIds((current) => {
-        if (
-          current.size === next.size
-          && Array.from(current).every((agentId) => next.has(agentId))
-        ) {
-          return current;
+    if (!allAgentsResident) {
+      setResidentAgentIds((current) => {
+        const retained = new Set(Array.from(current).filter((agentId) => logicalIds.has(agentId)));
+        for (const agentId of initiallyNearViewport) {
+          if (retained.size >= MAX_XTERM_RENDERERS) break;
+          retained.add(agentId);
         }
-        return next;
+        return retained;
       });
-    };
-    publishMountedAgentIds();
+    }
 
     const observer = new IntersectionObserver((entries) => {
+      const approachingAgentIds: string[] = [];
       for (const entry of entries) {
         const agentId = (entry.target as HTMLElement).dataset.agentGridCardId;
         if (!agentId || !logicalIds.has(agentId)) continue;
-        if (entry.isIntersecting) nearViewportAgentIds.add(agentId);
-        else nearViewportAgentIds.delete(agentId);
+        if (entry.isIntersecting) {
+          nearViewportAgentIds.add(agentId);
+          approachingAgentIds.push(agentId);
+        } else {
+          nearViewportAgentIds.delete(agentId);
+        }
       }
-      publishMountedAgentIds();
+      if (allAgentsResident || approachingAgentIds.length === 0) return;
+      setResidentAgentIds((current) => {
+        const next = new Set(Array.from(current).filter((agentId) => logicalIds.has(agentId)));
+        for (const approachingAgentId of approachingAgentIds) {
+          if (next.has(approachingAgentId)) continue;
+          if (next.size >= MAX_XTERM_RENDERERS) {
+            const victim = Array.from(next).find((agentId) => !nearViewportAgentIds.has(agentId));
+            if (!victim) continue;
+            next.delete(victim);
+          }
+          next.add(approachingAgentId);
+        }
+        return next;
+      });
     }, {
       root,
       rootMargin: `${verticalMargin}px 0px`,
@@ -402,7 +419,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
         const isAgentVisible = surfaceVisibility === "visible" && visibleAgentIds.has(agentId);
-        const isAgentRendererActive = isAgentVisible && viewportAgentIds.has(agentId);
+        const isAgentRendererActive = isAgentVisible && residentAgentIds.has(agentId);
         const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
@@ -496,7 +513,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                  {isAgentMaximized ? (
                    <button 
                      aria-label={`Minimize ${agent.session_name}`}
-                     onClick={(e) => { e.stopPropagation(); onModeChange("auto"); }}
+                     onClick={(e) => { e.stopPropagation(); onExitSingle(); }}
                      className="bg-wardian-card-bg-muted hover:bg-wardian-card-bg-muted/80 text-primary h-6 px-2 rounded text-[10px] font-bold transition-all flex items-center gap-1"
                    >
                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
