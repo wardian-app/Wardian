@@ -439,13 +439,13 @@ describe("WorkbenchHost", () => {
         index: 0,
       },
     ]);
-    expect(result.root).toEqual({
-      kind: "split",
-      node_id: "node-new-2",
-      direction: "horizontal",
-      ratio: 0.5,
-      first: { kind: "group", group_id: "group-new-1" },
-      second: { kind: "group", group_id: "group-1" },
+    expect(result.root).toEqual({ kind: "group", group_id: "group-new-1" });
+    expect(result.groups).toEqual({
+      "group-new-1": {
+        group_id: "group-new-1",
+        surface_ids: ["surface-1"],
+        active_surface_id: "surface-1",
+      },
     });
   });
 });

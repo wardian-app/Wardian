@@ -145,7 +145,17 @@ describe("useWorkbenchCommands", () => {
       }]);
     });
     await act(() => commandRouter.execute("workbench.move_tab_previous_group"));
-    expect(store.getState().document.groups["group-2"].surface_ids).toHaveLength(0);
+    const movedDocument = store.getState().document;
+    expect(movedDocument.groups["group-2"]).toBeUndefined();
+    expect(Object.keys(movedDocument.groups).sort()).toEqual(["group-1", "group-command-1"]);
+    expect(movedDocument.root).toEqual({
+      kind: "split",
+      node_id: "split-1",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-command-1" },
+    });
 
     await act(() => commandRouter.execute("workbench.close_surface"));
     expect(store.getState().document.recently_closed).toHaveLength(1);

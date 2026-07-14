@@ -899,6 +899,36 @@ export function applyWorkbenchCommand(
       const surfaceIds = group.surface_ids.filter((surfaceId) => surfaceId !== command.surface_id);
       const surfaces = { ...document.surfaces };
       delete surfaces[command.surface_id];
+      const recentlyClosed = [
+        {
+          surface,
+          previous_group_id: location.groupId,
+          previous_index: location.index,
+        },
+        ...document.recently_closed,
+      ].slice(0, MAX_RECENTLY_CLOSED_SURFACES);
+      if (surfaceIds.length === 0 && Object.keys(document.groups).length > 1) {
+        const siblingSubtree = siblingSubtreeForGroup(document.root, location.groupId);
+        if (!siblingSubtree) {
+          return commandRejected(document, "group has no sibling subtree");
+        }
+        const removed = removeGroupLeaf(document.root, location.groupId);
+        if (!removed.removed || removed.node === null) {
+          return commandRejected(document, "group is not present in the tree");
+        }
+        const groups = { ...document.groups };
+        delete groups[location.groupId];
+        return acceptedCandidate(document, {
+          ...document,
+          root: removed.node,
+          groups,
+          surfaces,
+          active_group_id: document.active_group_id === location.groupId
+            ? leftmostGroupId(siblingSubtree)
+            : document.active_group_id,
+          recently_closed: recentlyClosed,
+        });
+      }
       const activeSurfaceId = group.active_surface_id === command.surface_id
         ? nextActiveSurface(surfaceIds, location.index)
         : group.active_surface_id;
@@ -913,14 +943,7 @@ export function applyWorkbenchCommand(
           },
         },
         surfaces,
-        recently_closed: [
-          {
-            surface,
-            previous_group_id: location.groupId,
-            previous_index: location.index,
-          },
-          ...document.recently_closed,
-        ].slice(0, MAX_RECENTLY_CLOSED_SURFACES),
+        recently_closed: recentlyClosed,
       });
     }
 

@@ -426,6 +426,127 @@ describe("workbench model", () => {
     expect(document.recently_closed).toEqual([]);
   });
 
+  it("collapses an active group closed through its final surface and reopens in the sibling subtree", () => {
+    let document = makeSingleGroupDocument([makeSurface("surface-1")]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-root",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-2",
+      new_group_id: "group-3",
+      node_id: "split-sibling",
+      direction: "vertical",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "focus_surface",
+      surface_id: "surface-1",
+    }));
+    const beforeClose = document;
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "close_surface",
+      surface_id: "surface-1",
+    }));
+
+    expect(document.root).toEqual({
+      kind: "split",
+      node_id: "split-sibling",
+      direction: "vertical",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-2" },
+      second: { kind: "group", group_id: "group-3" },
+    });
+    expect(Object.keys(document.groups)).toEqual(["group-2", "group-3"]);
+    expect(document.active_group_id).toBe("group-2");
+    expect(document.surfaces["surface-1"]).toBeUndefined();
+    expect(document.recently_closed[0]).toMatchObject({
+      previous_group_id: "group-1",
+      previous_index: 0,
+      surface: { surface_id: "surface-1" },
+    });
+    expect(beforeClose.root).toEqual({
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: expect.any(Object),
+    });
+    expect(beforeClose.groups["group-1"].surface_ids).toEqual(["surface-1"]);
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "reopen_closed_surface",
+    }));
+    expect(document.groups["group-1"]).toBeUndefined();
+    expect(document.groups["group-2"].surface_ids).toEqual(["surface-1"]);
+    expect(document.groups["group-2"].active_surface_id).toBe("surface-1");
+    expect(document.active_group_id).toBe("group-2");
+  });
+
+  it("preserves a surviving active group when closing the final surface in an inactive group", () => {
+    let document = makeSingleGroupDocument([makeSurface("surface-1")]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-root",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-2",
+      new_group_id: "group-3",
+      node_id: "split-sibling",
+      direction: "vertical",
+      placement: "after",
+    }));
+    expect(document.active_group_id).toBe("group-3");
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "close_surface",
+      surface_id: "surface-1",
+    }));
+
+    expect(document.groups["group-1"]).toBeUndefined();
+    expect(document.active_group_id).toBe("group-3");
+    expect(document.root).toEqual({
+      kind: "split",
+      node_id: "split-sibling",
+      direction: "vertical",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-2" },
+      second: { kind: "group", group_id: "group-3" },
+    });
+  });
+
+  it("keeps the final group as an empty Home host after closing its final surface", () => {
+    const document = acceptedDocument(applyWorkbenchCommand(
+      makeSingleGroupDocument([makeSurface("surface-1")]),
+      { type: "close_surface", surface_id: "surface-1" },
+    ));
+
+    expect(document.root).toEqual({ kind: "group", group_id: "group-1" });
+    expect(Object.keys(document.groups)).toEqual(["group-1"]);
+    expect(document.groups["group-1"]).toEqual({
+      group_id: "group-1",
+      surface_ids: [],
+      active_surface_id: null,
+    });
+    expect(document.active_group_id).toBe("group-1");
+    expect(document.recently_closed[0]).toMatchObject({
+      previous_group_id: "group-1",
+      previous_index: 0,
+    });
+  });
+
   it("caps recently closed at 20 and deterministically resolves reopen ID collisions", () => {
     const surfaces = Array.from({ length: 22 }, (_, index) => makeSurface(`surface-${index}`));
     let document = makeSingleGroupDocument(surfaces);
