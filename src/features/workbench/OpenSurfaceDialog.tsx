@@ -101,6 +101,12 @@ export function OpenSurfaceDialog({
 
   if (!open) return null;
 
+  const focusableElements = (): HTMLElement[] => Array.from(
+    dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [],
+  );
+
   const requestFor = (surfaceType: string): OpenSurfaceRequest => ({
     surface_type: surfaceType,
     group_id,
@@ -151,6 +157,20 @@ export function OpenSurfaceDialog({
           if (event.key === "Escape") {
             event.preventDefault();
             requestClose();
+            return;
+          }
+          if (event.key === "Tab") {
+            const focusable = focusableElements();
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (!first || !last) return;
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
             return;
           }
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {

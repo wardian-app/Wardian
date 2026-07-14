@@ -235,4 +235,37 @@ describe("OpenSurfaceDialog", () => {
     expect(trigger).toHaveFocus();
     trigger.remove();
   });
+
+  it("traps Tab focus inside the searchable dialog", () => {
+    const fixture = createNavigationFixture();
+    render(
+      <>
+        <button type="button">Underlying terminal control</button>
+        <OpenSurfaceDialog
+          open
+          group_id="group-1"
+          navigation={fixture.navigation}
+          registry={fixture.registry}
+          on_close={() => {}}
+        />
+      </>,
+    );
+
+    const input = screen.getByRole("combobox", { name: "Open a surface" });
+    const options = within(
+      screen.getByRole("listbox", { name: "Available surfaces" }),
+    ).getAllByRole("option");
+    const last = options[options.length - 1];
+    if (!last) throw new Error("searchable dialog has no final option");
+
+    last.focus();
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(false);
+    expect(input).toHaveFocus();
+
+    input.focus();
+    expect(fireEvent.keyDown(input, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(last).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Underlying terminal control" }))
+      .not.toHaveFocus();
+  });
 });
