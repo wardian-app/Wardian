@@ -26,6 +26,7 @@ import type { WorkbenchNewTabAction } from "../../types/settings";
 import {
   DockviewLayoutAdapter,
   type WorkbenchPanelRendererPolicy,
+  type WorkbenchSurfaceIcon,
   type WorkbenchSurfaceRenderer,
   type WorkbenchSurfaceTitle,
 } from "./DockviewLayoutAdapter";
@@ -188,6 +189,10 @@ export function WorkbenchHost({
     (surface) => registry.presentation(surface).title,
     [registry],
   );
+  const surfaceIcon = useCallback<WorkbenchSurfaceIcon>(
+    (surface) => registry.presentation(surface).icon,
+    [registry],
+  );
   const rendererPolicy = useCallback<WorkbenchPanelRendererPolicy>((surface) => (
       registry.get(surface.surface_type)?.render_policy === "recreate_from_state"
         ? "onlyWhenVisible" as const
@@ -212,6 +217,7 @@ export function WorkbenchHost({
         zoomed_group_id={state.zoomed_group_id}
         render_surface={renderSurface}
         surface_title={titleSurface}
+        surface_icon={surfaceIcon}
         renderer_policy={rendererPolicy}
         render_home={(groupId) => (
           <HomeSurface

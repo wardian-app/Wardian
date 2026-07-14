@@ -14,6 +14,7 @@ describe("WorkbenchTab", () => {
         <WorkbenchTab
           surface={surface}
           title="Agents Overview"
+          icon="graph"
           group_id="group-1"
           on_pointer_drag_start={onPointerDragStart}
           on_pointer_drag_end={onPointerDragEnd}
@@ -21,7 +22,7 @@ describe("WorkbenchTab", () => {
       </div>,
     );
     const tab = screen.getByRole("tab", { name: "Agents Overview" });
-    expect(tab.querySelector('[data-surface-icon="agents-overview"]')).toBeInTheDocument();
+    expect(tab.querySelector('[data-surface-icon="graph"]')).toHaveClass("lucide-network");
 
     fireEvent.pointerDown(tab, { pointerId: 7 });
     expect(onPointerDragStart).toHaveBeenCalledWith({

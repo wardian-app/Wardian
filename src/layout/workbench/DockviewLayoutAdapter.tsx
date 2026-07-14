@@ -61,12 +61,17 @@ export type WorkbenchSurfaceTitle = (
   surface: DeepReadonly<WorkbenchSurfaceV1>,
 ) => string;
 
+export type WorkbenchSurfaceIcon = (
+  surface: DeepReadonly<WorkbenchSurfaceV1>,
+) => string;
+
 export type DockviewLayoutAdapterProps = {
   document: ReadonlyWorkbenchDocumentV1;
   safe_mode?: boolean;
   zoomed_group_id?: string | null;
   render_surface?: WorkbenchSurfaceRenderer;
   surface_title?: WorkbenchSurfaceTitle;
+  surface_icon?: WorkbenchSurfaceIcon;
   renderer_policy?: WorkbenchPanelRendererPolicy;
   on_command?: (command: WorkbenchCommand) => boolean;
   on_open_surface?: (groupId: string) => void;
@@ -101,6 +106,7 @@ type AdapterRuntime = Pick<
 > & {
   render_surface?: WorkbenchSurfaceRenderer;
   surface_title?: WorkbenchSurfaceTitle;
+  surface_icon?: WorkbenchSurfaceIcon;
   zoomed_group_id: string | null;
   on_close_surface: (surfaceId: string) => void;
   on_pointer_drag_start: (identity: WorkbenchPointerDragIdentity) => void;
@@ -551,6 +557,7 @@ function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<Workbench
     <WorkbenchTab
       surface={params.surface}
       title={runtime.surface_title?.(params.surface) ?? params.title}
+      icon={runtime.surface_icon?.(params.surface) ?? params.surface.surface_type}
       group_id={groupId}
       pane_targets={workbenchPaneTargets(runtime.document.root, groupId)}
       on_close={() => runtime.on_close_surface(params.surface.surface_id)}
@@ -824,6 +831,7 @@ function SafeWorkbenchLayout({
   zoomed_group_id = null,
   render_surface,
   surface_title,
+  surface_icon,
   on_command,
   on_open_surface,
   on_toggle_zoom,
@@ -877,6 +885,7 @@ function SafeWorkbenchLayout({
                 <WorkbenchTab
                   surface={surface}
                   title={surface_title?.(surface) ?? surfaceTitle(surface)}
+                  icon={surface_icon?.(surface) ?? surface.surface_type}
                   group_id={group.group_id}
                   pane_targets={workbenchPaneTargets(document.root, group.group_id)}
                   on_close={() => on_close_surface?.(surface.surface_id)}
@@ -952,6 +961,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     zoomed_group_id = null,
     render_surface,
     surface_title,
+    surface_icon,
     renderer_policy = defaultRendererPolicy,
     on_command,
   } = props;
@@ -1056,6 +1066,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     document,
     render_surface,
     surface_title,
+    surface_icon,
     on_open_surface: props.on_open_surface,
     on_toggle_zoom: props.on_toggle_zoom,
     on_split_group: props.on_split_group,
@@ -1095,6 +1106,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     props.on_toggle_zoom,
     props.render_home,
     requestSurfaceClose,
+    surface_icon,
     surface_title,
     zoomed_group_id,
   ]);

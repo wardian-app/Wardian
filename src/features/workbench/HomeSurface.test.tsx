@@ -71,7 +71,7 @@ describe("HomeSurface", () => {
     extensibleRegistry.register({
       ...dashboard,
       type: "extension-tool",
-      icon: "extension-tool",
+      icon: "graph",
       title: () => "Extension Tool",
     });
     const onSelectSurface = vi.fn();
@@ -85,9 +85,12 @@ describe("HomeSurface", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", {
+    const extension = screen.getByRole("button", {
       name: "Extension Tool: Open the Extension Tool surface.",
-    }));
+    });
+    expect(extension.querySelector('[data-surface-icon="graph"]'))
+      .toHaveClass("lucide-network");
+    fireEvent.click(extension);
     expect(onSelectSurface).toHaveBeenCalledWith("extension-tool", "group-empty");
   });
 });

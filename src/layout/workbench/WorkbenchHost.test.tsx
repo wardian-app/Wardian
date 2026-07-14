@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { createCoreWorkbenchSurfaceRegistry } from "../../features/workbench/coreSurfaceRegistry";
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
 import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
@@ -45,6 +46,37 @@ function makeTwoPaneDocument() {
 }
 
 describe("WorkbenchHost", () => {
+  it("renders the registry presentation icon when its token differs from the surface type", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    registry.register({
+      type: "extension-tool",
+      icon: "graph",
+      title: () => "Extension Tool",
+      render_policy: "recreate_from_state",
+      open_policy: "singleton",
+      runtime_policy: "view_only",
+      close_policy: "close_view",
+      state_schema_version: 1,
+      max_state_bytes: 1024,
+      default_state: () => ({}),
+      serialize_state: (state) => state,
+      restore_state: (_value, version) => version === 1
+        ? { ok: true, state: {} }
+        : { ok: false, error: "unsupported version" },
+      commands: [],
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("extension-1", { surface_type: "extension-tool", state: {} }),
+      ]),
+    });
+
+    render(<WorkbenchHost store={store} registry={registry} navigation={makeNavigation()} />);
+
+    const tab = await screen.findByRole("tab", { name: "Extension Tool" });
+    expect(tab.querySelector('[data-surface-icon="graph"]')).toHaveClass("lucide-network");
+  });
+
   it("opens the visual chooser by default and creates a surface only after selection", async () => {
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([

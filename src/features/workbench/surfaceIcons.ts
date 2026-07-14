@@ -26,7 +26,7 @@ const SURFACE_ICONS: Readonly<Record<string, LucideIcon>> = {
   browser: Globe2,
 };
 
-/** Resolves a compact visual identifier for core and contributed surface types. */
-export function surfaceIconForType(surfaceType: string): LucideIcon {
-  return SURFACE_ICONS[surfaceType] ?? AppWindow;
+/** Resolves a compact visual identifier from a surface definition's icon token. */
+export function surfaceIconForToken(icon: string): LucideIcon {
+  return SURFACE_ICONS[icon] ?? AppWindow;
 }

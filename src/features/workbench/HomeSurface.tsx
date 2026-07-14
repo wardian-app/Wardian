@@ -3,7 +3,7 @@ import {
   CORE_SURFACE_CONTRIBUTIONS,
 } from "./coreSurfaceRegistry";
 import type { WorkbenchSurfaceRegistry } from "./surfaceRegistry";
-import { surfaceIconForType } from "./surfaceIcons";
+import { surfaceIconForToken } from "./surfaceIcons";
 
 export type HomeSurfaceProps = {
   group_id: string;
@@ -16,6 +16,7 @@ export type HomeSurfaceProps = {
 
 type LauncherChoice = {
   surface_type: string;
+  icon: string;
   title: string;
   description: string;
 };
@@ -33,6 +34,7 @@ function selectableContributions(
       const title = contribution?.title ?? titleForType(definition.type);
       return {
         surface_type: definition.type,
+        icon: definition.icon,
         title,
         description: contribution?.description ?? `Open the ${title} surface.`,
       };
@@ -72,7 +74,7 @@ export function HomeSurface({
           role="group"
         >
           {choices.map((choice) => {
-            const Icon = surfaceIconForType(choice.surface_type);
+            const Icon = surfaceIconForToken(choice.icon);
             return (
               <button
                 aria-label={`${choice.title}: ${choice.description}`}
@@ -83,7 +85,11 @@ export function HomeSurface({
                 onClick={() => on_select_surface(choice.surface_type, group_id)}
               >
                 <span className="wardian-workbench-home__icon" aria-hidden="true">
-                  <Icon size={21} strokeWidth={1.7} />
+                  <Icon
+                    data-surface-icon={choice.icon}
+                    size={21}
+                    strokeWidth={1.7}
+                  />
                 </span>
                 <span className="wardian-workbench-home__copy">
                   <strong>{choice.title}</strong>
