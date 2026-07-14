@@ -508,6 +508,79 @@ test("moves a sole source tab to another pane center and collapses the source pa
   expect(fatalDragErrors()).toEqual([]);
 });
 
+test("rejects an impossible narrow edge split while retaining center movement", async ({ page }) => {
+  const fatalDragErrors = installDragErrorMonitor(page);
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const graph = makeWorkbenchSurface("graph-1", "graph");
+  const ipc = await bootWorkbench(page, makeWorkbenchDocument({
+    root: {
+      kind: "split",
+      node_id: "split-1",
+      direction: "horizontal",
+      ratio: 0.1,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    },
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id],
+        active_surface_id: dashboard.surface_id,
+      },
+      "group-2": {
+        group_id: "group-2",
+        surface_ids: [queue.surface_id, graph.surface_id],
+        active_surface_id: queue.surface_id,
+      },
+    },
+    surfaces: [dashboard, queue, graph],
+    active_group_id: "group-2",
+  }));
+
+  const targetGroup = workbenchGroup(page, "group-1");
+  const contentTarget = targetGroup.locator(":scope > .dv-content-container");
+  const queueTab = surfaceTab(page, "queue");
+  const [, targetBounds, contentBounds] = await waitForStableBoundingBoxes(
+    page,
+    [queueTab, targetGroup, contentTarget],
+  );
+  expect(targetBounds.width).toBeLessThan(200);
+
+  await dragSurfaceTab(page, queueTab, {
+    x: contentBounds.x + contentBounds.width - 4,
+    y: contentBounds.y + contentBounds.height * 0.6,
+  }, async () => {
+    await expect(page.locator(".dv-drop-target-selection:visible")).toHaveCount(0);
+  });
+
+  await expect(page.getByTestId("workbench-group")).toHaveCount(2);
+  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-2");
+  await expectPersistedTopology(ipc, (saved) => (
+    saved.root.kind === "split"
+    && Object.keys(saved.groups).length === 2
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1"
+    && saved.groups["group-2"]?.surface_ids.join(",") === "queue-1,graph-1"
+  ));
+
+  const [, centerBounds] = await waitForStableBoundingBoxes(page, [queueTab, contentTarget]);
+  await dragSurfaceTab(page, queueTab, {
+    x: centerBounds.x + centerBounds.width / 2,
+    y: centerBounds.y + centerBounds.height * 0.6,
+  });
+
+  await expect(page.getByTestId("workbench-group")).toHaveCount(2);
+  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-1");
+  await expectPersistedTopology(ipc, (saved) => (
+    saved.root.kind === "split"
+    && Object.keys(saved.groups).length === 2
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,queue-1"
+    && saved.groups["group-2"]?.surface_ids.join(",") === "graph-1"
+    && noEmptyNonFinalGroup(saved)
+  ));
+  expect(fatalDragErrors()).toEqual([]);
+});
+
 test("keeps a sole-tab self-edge preview center-only without creating a group", async ({ page }) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");

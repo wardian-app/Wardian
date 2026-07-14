@@ -17,6 +17,7 @@ import {
   type DropOverlayModelParams,
   type DockviewReadyEvent,
   type DockviewWillDropEvent,
+  type DockviewWillShowOverlayLocationEvent,
   type DroptargetOverlayModel,
   type IDockviewHeaderActionsProps,
   type IDockviewPanelHeaderProps,
@@ -133,11 +134,19 @@ const KEEP_ALIVE_SURFACE_TYPES = new Set([
   "workflows",
 ]);
 const SPLIT_RATIO_FEEDBACK_EPSILON = 0.005;
+/** Matches Dockview's group floor while making Wardian's split contract explicit. */
+export const WORKBENCH_PANE_MINIMUM_WIDTH = 100;
+/** Matches Dockview's group floor while making Wardian's split contract explicit. */
+export const WORKBENCH_PANE_MINIMUM_HEIGHT = 100;
+const WORKBENCH_PANE_CONSTRAINTS = Object.freeze({
+  minimumWidth: WORKBENCH_PANE_MINIMUM_WIDTH,
+  minimumHeight: WORKBENCH_PANE_MINIMUM_HEIGHT,
+});
 const WORKBENCH_DOCKVIEW_DROP_OVERLAY: DroptargetOverlayModel = {
   size: { type: "percentage", value: 50 },
   activationSize: { type: "percentage", value: 20 },
-  smallWidthBoundary: 0,
-  smallHeightBoundary: 0,
+  smallWidthBoundary: WORKBENCH_PANE_MINIMUM_WIDTH * 2,
+  smallHeightBoundary: WORKBENCH_PANE_MINIMUM_HEIGHT * 2,
 };
 const WORKBENCH_DOCKVIEW_CENTER_ONLY_OVERLAY: DroptargetOverlayModel = {
   ...WORKBENCH_DOCKVIEW_DROP_OVERLAY,
@@ -152,6 +161,36 @@ export type WorkbenchRectangle = {
   width: number;
   height: number;
 };
+
+export type WorkbenchDropPosition = "top" | "bottom" | "left" | "right" | "center";
+
+/**
+ * Admits a 50/50 split only when both resulting panes can satisfy Wardian's
+ * explicit Dockview group floor. Center moves never create panes and stay valid.
+ */
+export function canSplitWorkbenchPane(
+  bounds: WorkbenchRectangle | undefined,
+  position: WorkbenchDropPosition,
+): boolean {
+  if (position === "center") return true;
+  if (!bounds) return false;
+  if (position === "left" || position === "right") {
+    return Number.isFinite(bounds.width)
+      && bounds.width >= WORKBENCH_PANE_MINIMUM_WIDTH * 2;
+  }
+  return Number.isFinite(bounds.height)
+    && bounds.height >= WORKBENCH_PANE_MINIMUM_HEIGHT * 2;
+}
+
+/** Prevents Dockview from promising an edge preview its destination cannot hold. */
+export function handleWorkbenchDockviewOverlayAdmission(
+  event: DockviewWillShowOverlayLocationEvent,
+): void {
+  if (event.position === "center") return;
+  if (!canSplitWorkbenchPane(event.group?.api.boundingBox, event.position)) {
+    event.preventDefault();
+  }
+}
 
 export type DockviewGroupPlacement = {
   group_id: string;
@@ -443,6 +482,7 @@ export function routeWorkbenchDockviewDrop(
     event.position !== "center"
     && isSoleTabSelfDrop(document, surfaceId, targetGroupId)
   ) return;
+  if (!canSplitWorkbenchPane(event.group?.api.boundingBox, event.position)) return;
   onSurfaceDrop?.(surfaceId, targetGroupId, event.position);
 }
 
@@ -648,8 +688,13 @@ function ensureGroups(
           id: placement.group_id,
           referenceGroup,
           direction: placement.direction,
+          constraints: WORKBENCH_PANE_CONSTRAINTS,
         })
-        : api.addGroup({ id: placement.group_id, direction: "right" });
+        : api.addGroup({
+          id: placement.group_id,
+          direction: "right",
+          constraints: WORKBENCH_PANE_CONSTRAINTS,
+        });
       if (added) groups.set(placement.group_id, added);
       continue;
     }
@@ -1287,6 +1332,9 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       )) return;
       requestCanonicalReconcile();
     });
+    const overlayDisposable = api.onWillShowOverlay(
+      handleWorkbenchDockviewOverlayAdmission,
+    );
     return () => {
       if (activationRetryTimer !== null) window.clearTimeout(activationRetryTimer);
       moveDisposable.dispose();
@@ -1294,6 +1342,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       activeGroupDisposable.dispose();
       layoutDisposable.dispose();
       removeDisposable.dispose();
+      overlayDisposable.dispose();
     };
   }, [api, emitCommand, requestCanonicalReconcile, safe_mode]);
 

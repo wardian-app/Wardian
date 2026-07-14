@@ -48,6 +48,7 @@ type HarnessProps = {
   on_command_palette?: () => void;
   on_focus_left_dock?: () => void;
   on_focus_right_dock?: () => void;
+  can_split_group?: (groupId: string, direction: "horizontal" | "vertical") => boolean;
 };
 
 function CommandHarness({ store, on_router, ...callbacks }: HarnessProps) {
@@ -87,6 +88,26 @@ function CommandHarness({ store, on_router, ...callbacks }: HarnessProps) {
 }
 
 describe("useWorkbenchCommands", () => {
+  it("disables keyboard and palette splits rejected by destination geometry", async () => {
+    const store = createWorkbenchStore({ initial_document: makeCommandDocument() });
+    let router: WorkbenchCommandRouter | null = null;
+    const canSplitGroup = vi.fn(() => false);
+    render(
+      <CommandHarness
+        store={store}
+        on_router={(next) => { router = next; }}
+        can_split_group={canSplitGroup}
+      />,
+    );
+    const commandRouter = router as unknown as WorkbenchCommandRouter;
+    const groupCount = Object.keys(store.getState().document.groups).length;
+
+    expect(commandRouter.is_enabled("workbench.split_right")).toBe(false);
+    await expect(commandRouter.execute("workbench.split_right")).resolves.toBe(false);
+    expect(canSplitGroup).toHaveBeenCalledWith("group-2", "horizontal");
+    expect(Object.keys(store.getState().document.groups)).toHaveLength(groupCount);
+  });
+
   it("captures deterministic F6/tab traversal while suppressing editable and terminal shortcuts", async () => {
     const store = createWorkbenchStore({ initial_document: makeCommandDocument() });
     const onRouter = vi.fn();

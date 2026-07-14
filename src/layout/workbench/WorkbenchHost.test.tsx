@@ -252,6 +252,50 @@ describe("WorkbenchHost", () => {
     expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
   });
 
+  it("rejects pane-menu, tab-menu, and keyboard splits against the same narrow pane", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([surface]) });
+    render(<WorkbenchHost store={store} />);
+    const group = await screen.findByTestId("workbench-group");
+    const groupBounds = vi.spyOn(group, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 199,
+      bottom: 199,
+      x: 0,
+      y: 0,
+      width: 199,
+      height: 199,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.click(within(group).getByRole("button", { name: "Pane actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Split pane right" }));
+    expect(Object.keys(store.getState().document.groups)).toHaveLength(1);
+
+    const tab = within(group).getByRole("tab", { name: /agents-overview/i });
+    fireEvent.contextMenu(tab, { clientX: 40, clientY: 20 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Split tab down" }));
+    expect(Object.keys(store.getState().document.groups)).toHaveLength(1);
+
+    fireEvent.keyDown(tab, { key: "ArrowRight", ctrlKey: true, altKey: true });
+    expect(Object.keys(store.getState().document.groups)).toHaveLength(1);
+
+    groupBounds.mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 200,
+      toJSON: () => ({}),
+    });
+    fireEvent.keyDown(tab, { key: "ArrowRight", ctrlKey: true, altKey: true });
+    await waitFor(() => expect(Object.keys(store.getState().document.groups)).toHaveLength(2));
+  });
+
   it("keeps group zoom runtime-only", () => {
     const initialDocument = makeSingleGroupDocument();
     const store = createWorkbenchStore({ initial_document: initialDocument });

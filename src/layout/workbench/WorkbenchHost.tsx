@@ -23,6 +23,7 @@ import { useWorkbenchCommands } from "../../features/workbench/useWorkbenchComma
 import type { WorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import type { WorkbenchNewTabAction } from "../../types/settings";
 import {
+  canSplitWorkbenchPane,
   DockviewLayoutAdapter,
   type WorkbenchPanelRendererPolicy,
   type WorkbenchSurfaceIcon,
@@ -47,6 +48,20 @@ export type WorkbenchHostProps = {
 };
 
 type WorkbenchDropPosition = "top" | "bottom" | "left" | "right" | "center";
+
+/** Applies the shared split predicate to a canonical pane's current DOM geometry. */
+export function canSplitWorkbenchGroup(
+  root: HTMLElement | null,
+  groupId: string,
+  direction: "horizontal" | "vertical",
+): boolean {
+  const group = [...(root?.querySelectorAll<HTMLElement>('[data-testid="workbench-group"]') ?? [])]
+    .find((candidate) => candidate.dataset.groupId === groupId);
+  return canSplitWorkbenchPane(
+    group?.getBoundingClientRect(),
+    direction === "horizontal" ? "right" : "bottom",
+  );
+}
 
 function defaultCreateId(kind: WorkbenchIdKind): string {
   return `${kind}-${globalThis.crypto.randomUUID()}`;
@@ -116,6 +131,10 @@ export function WorkbenchHost({
     store.getInitialState,
   );
   const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
+  const canSplitGroup = useCallback((
+    groupId: string,
+    direction: "horizontal" | "vertical",
+  ): boolean => canSplitWorkbenchGroup(rootRef.current, groupId, direction), []);
 
   const openNewTabLauncher = useCallback((groupId: string) => {
     if (new_tab_action === "home") {
@@ -169,6 +188,7 @@ export function WorkbenchHost({
     on_focus_left_dock,
     on_focus_right_dock,
     create_id,
+    can_split_group: canSplitGroup,
   });
   const activateGroup = useCallback((groupId: string): boolean => {
     const document = store.getState().document;
@@ -273,6 +293,7 @@ export function WorkbenchHost({
           void commands.execute("workbench.toggle_group_zoom");
         }}
         on_split_group={(groupId, direction) => {
+          if (!canSplitGroup(groupId, direction)) return;
           if (!activateGroup(groupId)) return;
           void commands.execute(
             direction === "horizontal" ? "workbench.split_right" : "workbench.split_down",
@@ -288,6 +309,10 @@ export function WorkbenchHost({
           }]);
         }}
         on_surface_drop={(surfaceId, targetGroupId, position) => {
+          if (position !== "center" && !canSplitGroup(
+            targetGroupId,
+            position === "left" || position === "right" ? "horizontal" : "vertical",
+          )) return;
           store.getState().apply_commands(workbenchEdgeDropCommands(
             surfaceId,
             targetGroupId,

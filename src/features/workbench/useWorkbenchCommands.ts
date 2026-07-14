@@ -47,6 +47,7 @@ export type UseWorkbenchCommandsOptions = {
   on_command_palette?: () => void;
   on_focus_left_dock?: () => void;
   on_focus_right_dock?: () => void;
+  can_split_group?: (groupId: string, direction: "horizontal" | "vertical") => boolean;
 };
 
 export const WORKBENCH_COMMAND_ACTIONS: readonly WorkbenchCommandAction[] = Object.freeze([
@@ -164,6 +165,10 @@ export function useWorkbenchCommands(
       case "workbench.move_tab_next_group":
       case "workbench.move_tab_previous_group":
         return activeGroup.active_surface_id !== null && groupCount > 1;
+      case "workbench.split_right":
+        return current.can_split_group?.(activeGroup.group_id, "horizontal") ?? true;
+      case "workbench.split_down":
+        return current.can_split_group?.(activeGroup.group_id, "vertical") ?? true;
       case "workbench.close_surface":
         return activeGroup.active_surface_id !== null;
       case "workbench.reopen_closed_surface":

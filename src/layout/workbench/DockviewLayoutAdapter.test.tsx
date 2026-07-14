@@ -5,9 +5,11 @@ import type { WorkbenchDocumentV1 } from "../../types";
 import { applyWorkbenchCommand, type WorkbenchCommand } from "../../features/workbench/workbenchModel";
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
 import {
+  canSplitWorkbenchPane,
   deriveWorkbenchSplitRatios,
   dispatchWorkbenchAdapterCommand,
   DockviewLayoutAdapter,
+  handleWorkbenchDockviewOverlayAdmission,
   isCanonicalWorkbenchGroupDestination,
   normalizedWorkbenchGeometry,
   planDockviewGroupPlacements,
@@ -20,11 +22,14 @@ import {
   workbenchGroupTouchesTopEdge,
   workbenchPaneTargets,
   workbenchSplitRatioCommands,
+  WORKBENCH_PANE_MINIMUM_HEIGHT,
+  WORKBENCH_PANE_MINIMUM_WIDTH,
 } from "./DockviewLayoutAdapter";
 import {
   DockviewApi,
   type DockviewGroupPanel,
   type DockviewWillDropEvent,
+  type DockviewWillShowOverlayLocationEvent,
 } from "dockview-react";
 
 function apply(document: WorkbenchDocumentV1, command: WorkbenchCommand): WorkbenchDocumentV1 {
@@ -87,6 +92,107 @@ function makeMixedDepthThreeDocument(): WorkbenchDocumentV1 {
 }
 
 describe("DockviewLayoutAdapter", () => {
+  it("admits edge splits only when both half-panes meet the Wardian minimum", () => {
+    const horizontalBoundary = WORKBENCH_PANE_MINIMUM_WIDTH * 2;
+    const verticalBoundary = WORKBENCH_PANE_MINIMUM_HEIGHT * 2;
+
+    expect(canSplitWorkbenchPane(
+      { left: 0, top: 0, width: horizontalBoundary - 1, height: verticalBoundary },
+      "left",
+    )).toBe(false);
+    expect(canSplitWorkbenchPane(
+      { left: 0, top: 0, width: horizontalBoundary, height: verticalBoundary },
+      "right",
+    )).toBe(true);
+    expect(canSplitWorkbenchPane(
+      { left: 0, top: 0, width: horizontalBoundary, height: verticalBoundary - 1 },
+      "top",
+    )).toBe(false);
+    expect(canSplitWorkbenchPane(
+      { left: 0, top: 0, width: horizontalBoundary, height: verticalBoundary },
+      "bottom",
+    )).toBe(true);
+    expect(canSplitWorkbenchPane(
+      { left: 0, top: 0, width: 0, height: 0 },
+      "center",
+    )).toBe(true);
+  });
+
+  it("suppresses only edge overlays that the live destination cannot hold", () => {
+    const preventNarrow = vi.fn();
+    handleWorkbenchDockviewOverlayAdmission({
+      position: "left",
+      preventDefault: preventNarrow,
+      group: {
+        api: { boundingBox: { left: 0, top: 0, width: 199, height: 400 } },
+      },
+    } as unknown as DockviewWillShowOverlayLocationEvent);
+    expect(preventNarrow).toHaveBeenCalledOnce();
+
+    const preventViable = vi.fn();
+    handleWorkbenchDockviewOverlayAdmission({
+      position: "right",
+      preventDefault: preventViable,
+      group: {
+        api: { boundingBox: { left: 0, top: 0, width: 200, height: 400 } },
+      },
+    } as unknown as DockviewWillShowOverlayLocationEvent);
+    expect(preventViable).not.toHaveBeenCalled();
+
+    const preventCenter = vi.fn();
+    handleWorkbenchDockviewOverlayAdmission({
+      position: "center",
+      preventDefault: preventCenter,
+      group: undefined,
+    } as unknown as DockviewWillShowOverlayLocationEvent);
+    expect(preventCenter).not.toHaveBeenCalled();
+  });
+
+  it("subscribes overlay admission with the ready API and disposes it on teardown", async () => {
+    type OverlayListener = Parameters<DockviewApi["onWillShowOverlay"]>[0];
+    const overlayDescriptor = Object.getOwnPropertyDescriptor(
+      DockviewApi.prototype,
+      "onWillShowOverlay",
+    );
+    if (!overlayDescriptor?.get) throw new Error("expected DockviewApi overlay event getter");
+    let overlayListener: OverlayListener | undefined;
+    const dispose = vi.fn();
+    Object.defineProperty(DockviewApi.prototype, "onWillShowOverlay", {
+      ...overlayDescriptor,
+      get(this: DockviewApi) {
+        const subscribe = overlayDescriptor.get?.call(this) as DockviewApi["onWillShowOverlay"];
+        return ((listener: OverlayListener) => {
+          overlayListener = listener;
+          const disposable = subscribe(listener);
+          return {
+            dispose: () => {
+              dispose();
+              disposable.dispose();
+            },
+          };
+        }) as DockviewApi["onWillShowOverlay"];
+      },
+    });
+
+    try {
+      const view = render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} />);
+      await waitFor(() => expect(overlayListener).toBeDefined());
+      const preventDefault = vi.fn();
+      overlayListener?.({
+        position: "bottom",
+        preventDefault,
+        group: {
+          api: { boundingBox: { left: 0, top: 0, width: 400, height: 199 } },
+        },
+      } as unknown as Parameters<OverlayListener>[0]);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      view.unmount();
+      expect(dispose).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(DockviewApi.prototype, "onWillShowOverlay", overlayDescriptor);
+    }
+  });
+
   it("projects exact Wardian IDs and DOM metadata without a renderer serialization source", async () => {
     render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} />);
 
@@ -111,6 +217,32 @@ describe("DockviewLayoutAdapter", () => {
       "data-surface-id",
       "surface-1",
     );
+  });
+
+  it("creates every canonical Dockview group with Wardian pane constraints", async () => {
+    const addGroup = DockviewApi.prototype.addGroup;
+    const addGroupSpy = vi.spyOn(DockviewApi.prototype, "addGroup")
+      .mockImplementation(function addConstrainedGroup(
+        this: DockviewApi,
+        options?: Parameters<DockviewApi["addGroup"]>[0],
+      ) {
+        return addGroup.call(this, options);
+      });
+    try {
+      render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} />);
+      await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(2));
+      expect(addGroupSpy).toHaveBeenCalledTimes(2);
+      for (const [options] of addGroupSpy.mock.calls) {
+        expect(options).toMatchObject({
+          constraints: {
+            minimumWidth: WORKBENCH_PANE_MINIMUM_WIDTH,
+            minimumHeight: WORKBENCH_PANE_MINIMUM_HEIGHT,
+          },
+        });
+      }
+    } finally {
+      addGroupSpy.mockRestore();
+    }
   });
 
   it("recreates a canonical empty group after Dockview removes its final panel", async () => {
@@ -571,12 +703,13 @@ describe("DockviewLayoutAdapter", () => {
     const makeDrop = (
       position: "center" | "left",
       preventDefault: () => void,
+      bounds = { left: 0, top: 0, width: 400, height: 400 },
     ): DockviewWillDropEvent => ({
       position,
       preventDefault,
       getData: () => ({ panelId: "surface-1" }),
       panel: undefined,
-      group: { id: "group-2" },
+      group: { id: "group-2", api: { boundingBox: bounds } },
     }) as unknown as DockviewWillDropEvent;
 
     routeWorkbenchDockviewDrop(makeDrop("center", centerPreventDefault), documentModel, onSurfaceDrop);
@@ -597,6 +730,20 @@ describe("DockviewLayoutAdapter", () => {
     routeWorkbenchDockviewDrop(makeDrop("left", edgePreventDefault), documentModel, onSurfaceDrop);
     expect(edgePreventDefault).toHaveBeenCalledOnce();
     expect(onSurfaceDrop).toHaveBeenCalledWith("surface-1", "group-2", "left");
+
+    const impossibleEdgePreventDefault = vi.fn();
+    routeWorkbenchDockviewDrop(
+      makeDrop("left", impossibleEdgePreventDefault, {
+        left: 0,
+        top: 0,
+        width: (WORKBENCH_PANE_MINIMUM_WIDTH * 2) - 1,
+        height: WORKBENCH_PANE_MINIMUM_HEIGHT * 2,
+      }),
+      documentModel,
+      onSurfaceDrop,
+    );
+    expect(impossibleEdgePreventDefault).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenCalledOnce();
 
     const groupPreventDefault = vi.fn();
     routeWorkbenchDockviewDrop({
@@ -629,7 +776,10 @@ describe("DockviewLayoutAdapter", () => {
       preventDefault: soleTabSelfEdgePreventDefault,
       getData: () => ({ panelId: "surface-2" }),
       panel: undefined,
-      group: { id: "group-2" },
+      group: {
+        id: "group-2",
+        api: { boundingBox: { left: 0, top: 0, width: 400, height: 400 } },
+      },
     } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(soleTabSelfEdgePreventDefault).toHaveBeenCalledOnce();
     expect(onSurfaceDrop).toHaveBeenCalledOnce();
@@ -639,8 +789,8 @@ describe("DockviewLayoutAdapter", () => {
     const expected = {
       size: { type: "percentage", value: 50 },
       activationSize: { type: "percentage", value: 20 },
-      smallWidthBoundary: 0,
-      smallHeightBoundary: 0,
+      smallWidthBoundary: WORKBENCH_PANE_MINIMUM_WIDTH * 2,
+      smallHeightBoundary: WORKBENCH_PANE_MINIMUM_HEIGHT * 2,
     };
 
     expect(workbenchDockviewDropOverlayModel({ location: "content" })).toEqual(expected);
