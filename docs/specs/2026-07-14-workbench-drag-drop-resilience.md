@@ -1,7 +1,7 @@
 # Workbench Drag-and-Drop Resilience
 
-**Status:** Approved for implementation  
-**Issue:** #513  
+**Status:** Implemented and browser-verified
+**Issue:** #513
 **PR:** #667
 
 ## Problem
@@ -55,9 +55,9 @@ The field participates in frontend defaults, app-setting overrides, Rust seriali
 
 ## Verification
 
-- Model tests cover cross-pane moves that collapse the emptied source, including nested splits and the final remaining pane.
-- Adapter tests cover missing-group recovery and center/edge routing without fatal exceptions.
-- Host tests cover `+` in both launcher modes and prove Quick Open remains searchable.
-- Browser E2E performs real tab reorder, cross-pane move, sole-tab pane collapse, and edge split; it asserts preview bounds, final group bounds, persisted topology, and no page/console errors.
-- Frontend lint, unit tests, browser E2E, and production build pass. Backend settings changes additionally pass `cargo fmt --check`, `cargo clippy`, `cargo test`, and `cargo check`.
-
+- Model coverage verifies cross-pane moves that collapse an emptied source, including nested splits and preservation of the final pane.
+- Adapter coverage verifies recoverable missing-group projection, serialized drag feedback, and center/edge routing without fatal exceptions.
+- Host and browser coverage verify the default visual `+` chooser, its **Browse all surfaces** handoff, the persisted searchable-list preference, pane capture, and searchable Quick Open in both preference modes.
+- Real-pointer browser coverage verifies in-strip reorder, center moves, sole-tab source collapse, and edge splitting. It polls canonical DOM and saved topology, rejects empty non-final groups, and records page and fatal console errors.
+- The edge-preview test compares Dockview's visible selection with the live content target after both rectangles stabilize across animation frames. It passed three consecutive runs and produced `e2e/screenshots/workbench-drag-drop/2026-07-14/edge-preview.png`.
+- Scoped delivery evidence is recorded in `.superpowers/sdd/workbench-e2e-docs-report.md` for commits `502f483a`, `44dd76e4`, and `a9e972a1`.

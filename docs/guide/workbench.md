@@ -8,7 +8,7 @@ Use the Workbench when you want to keep context in place: an agent terminal besi
 
 ## Open a Surface
 
-An empty tab is a surface launcher. Choose a core surface directly from its icon, title, and description, reopen recent work, or select **Browse all surfaces** for resource-backed choices such as Agent Session.
+An empty pane is a surface launcher. Choose a core surface directly from its icon, title, and description, reopen recent work, or select **Browse all surfaces** for resource-backed choices such as Agent Session.
 
 ![Wardian new-tab surface launcher with core tools](../assets/screenshots/workbench-navigation/surface-launcher.png)
 
@@ -18,7 +18,11 @@ There are three common entry points:
 - Select the **+** button in a pane, or choose a tool in an empty pane's launcher.
 - Press `Ctrl+Shift+P` / `Cmd+Shift+P` for the searchable command palette.
 
-The surface picker is a compact searchable list. Select a surface name to open it in the current pane, or press `Ctrl+Enter` / `Cmd+Enter` on the selected result to open it to the side. There is no separate visible “Open to Side” button in the picker. A surface that is already open as a singleton, such as Dashboard or Queue, is focused instead of duplicated.
+By default, a pane's **+** button opens the visual **Surface chooser**. Choosing a card opens that surface in the pane whose **+** button you selected. Choose **Browse all surfaces** to hand the same pane-local request to the compact searchable list.
+
+To make **+** open the searchable list directly, open **Settings > Appearance**, find **New tab button**, and select **Searchable list**. Select **Surface chooser** to restore the default. This preference changes only **+**: **Quick Open** always opens the searchable list.
+
+In the searchable list, select a surface name to open it in the captured pane, or press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS to open it to the side. There is no separate visible **Open to Side** button in the picker. A surface that is already open as a singleton, such as Dashboard or Queue, is focused instead of duplicated.
 
 The **Agent Session** choice needs one selected agent in the right roster. For a faster agent-specific path, use the roster actions described in [Watchlists](./watchlists.md).
 
@@ -29,13 +33,15 @@ Each pane has its own tab strip and active surface. Top-edge strips form the win
 - Select a tab to bring that surface forward.
 - Drag a tab within its strip to reorder it.
 - Use the close button on the active tab, or reveal it by hovering another tab, to close that presentation.
-- Drag a tab into another pane to move it there.
-- Drop a tab at a pane's edge to create a split and place it there.
+- Drop a tab in the center of another pane to move it there.
+- Drop a tab at a pane's edge to create a 50/50 split. The half-pane preview shows the space the new pane will occupy.
 - Right-click a tab to close it, split it right or down, or move it to an adjacent pane.
 - Open the pane's **…** menu for **Zoom pane** / **Restore pane**, **Split pane right**, **Split pane down**, **Merge into previous pane** / **Merge into next pane**, and **Close pane**. Dirty surfaces ask before they close.
 - Use the command palette or keyboard shortcuts when you prefer not to use a context menu.
 
 **Zoom pane** temporarily expands one pane to the Workbench area. It does not change the saved split tree or maximize the application window. Choose **Restore pane** to return to the multi-pane layout.
+
+When a move or close removes the last tab from a non-final pane, Wardian collapses that pane automatically and expands its sibling into the released space. The final pane is never removed; if its last tab closes, it remains in place and shows the Home surface chooser.
 
 ## Reopen and Reset
 
