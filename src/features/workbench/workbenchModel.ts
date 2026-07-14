@@ -1030,6 +1030,25 @@ export function applyWorkbenchCommand(
       const sourceSurfaceIds = source.surface_ids.filter((surfaceId) => surfaceId !== command.surface_id);
       const targetSurfaceIds = [...target.surface_ids];
       targetSurfaceIds.splice(command.index, 0, command.surface_id);
+      if (sourceSurfaceIds.length === 0 && Object.keys(document.groups).length > 1) {
+        const removed = removeGroupLeaf(document.root, location.groupId);
+        if (!removed.removed || removed.node === null) {
+          return commandRejected(document, "source group is not present in the tree");
+        }
+        const groups = { ...document.groups };
+        delete groups[location.groupId];
+        groups[command.group_id] = {
+          ...target,
+          surface_ids: targetSurfaceIds,
+          active_surface_id: command.surface_id,
+        };
+        return acceptedCandidate(document, {
+          ...document,
+          root: removed.node,
+          groups,
+          active_group_id: command.group_id,
+        });
+      }
       return acceptedCandidate(document, {
         ...document,
         groups: {

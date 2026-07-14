@@ -538,6 +538,164 @@ describe("workbench model", () => {
     expect(rejected.document).toBe(document);
   });
 
+  it("collapses an empty source group when its sole surface moves to a sibling", () => {
+    let document = makeSingleGroupDocument([makeSurface("surface-1")]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-1",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    const surfaceRecord = document.surfaces["surface-1"];
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-2",
+      index: 0,
+    }));
+
+    expect(document.root).toEqual({ kind: "group", group_id: "group-2" });
+    expect(document.groups["group-1"]).toBeUndefined();
+    expect(document.groups["group-2"]).toEqual({
+      group_id: "group-2",
+      surface_ids: ["surface-1"],
+      active_surface_id: "surface-1",
+    });
+    expect(document.active_group_id).toBe("group-2");
+    expect(document.surfaces["surface-1"]).toBe(surfaceRecord);
+  });
+
+  it("collapses a nested empty source without changing unaffected topology or ratios", () => {
+    let document = makeSingleGroupDocument([makeSurface("surface-1")]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-root",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "set_split_ratio",
+      node_id: "split-root",
+      ratio: 0.3,
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-3",
+      node_id: "split-nested",
+      direction: "vertical",
+      placement: "after",
+    }));
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "set_split_ratio",
+      node_id: "split-nested",
+      ratio: 0.7,
+    }));
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-2",
+      index: 0,
+    }));
+
+    expect(document.root).toEqual({
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.3,
+      first: { kind: "group", group_id: "group-3" },
+      second: { kind: "group", group_id: "group-2" },
+    });
+    expect(document.groups["group-1"]).toBeUndefined();
+    expect(document.groups["group-3"]).toEqual({
+      group_id: "group-3",
+      surface_ids: [],
+      active_surface_id: null,
+    });
+    expect(Object.keys(document.surfaces)).toEqual(["surface-1"]);
+    expect(document.active_group_id).toBe("group-2");
+  });
+
+  it("never collapses a source group during same-group reorder", () => {
+    let document = makeSingleGroupDocument([
+      makeSurface("surface-1"),
+      makeSurface("surface-2"),
+    ]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-1",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    const root = document.root;
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-1",
+      index: 2,
+    }));
+
+    expect(document.root).toBe(root);
+    expect(document.groups["group-1"].surface_ids).toEqual(["surface-2", "surface-1"]);
+    expect(document.groups["group-2"]).toBeDefined();
+  });
+
+  it("retains a multi-tab source group after a cross-group move", () => {
+    let document = makeSingleGroupDocument([
+      makeSurface("surface-1"),
+      makeSurface("surface-2"),
+    ]);
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "split_group",
+      group_id: "group-1",
+      new_group_id: "group-2",
+      node_id: "split-1",
+      direction: "horizontal",
+      placement: "after",
+    }));
+    const root = document.root;
+
+    document = acceptedDocument(applyWorkbenchCommand(document, {
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-2",
+      index: 0,
+    }));
+
+    expect(document.root).toBe(root);
+    expect(document.groups["group-1"].surface_ids).toEqual(["surface-2"]);
+    expect(document.groups["group-2"].surface_ids).toEqual(["surface-1"]);
+    expect(Object.keys(document.surfaces).sort()).toEqual(["surface-1", "surface-2"]);
+  });
+
+  it("preserves the final group when moving its sole surface", () => {
+    const original = makeSingleGroupDocument([makeSurface("surface-1")]);
+
+    const document = acceptedDocument(applyWorkbenchCommand(original, {
+      type: "move_surface",
+      surface_id: "surface-1",
+      group_id: "group-1",
+      index: 1,
+    }));
+
+    expect(document.root).toEqual({ kind: "group", group_id: "group-1" });
+    expect(Object.keys(document.groups)).toEqual(["group-1"]);
+    expect(document.groups["group-1"]).toEqual({
+      group_id: "group-1",
+      surface_ids: ["surface-1"],
+      active_surface_id: "surface-1",
+    });
+  });
+
   it("enforces active-tab membership and clamps only finite split ratios", () => {
     let document = makeSingleGroupDocument([makeSurface("surface-1")]);
     const nullActive = applyWorkbenchCommand(document, {
