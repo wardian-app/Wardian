@@ -20,6 +20,7 @@ export type WorkbenchCommand =
   | { type: "discard_surface"; surface_id: string }
   | { type: "replace_surface"; surface: WorkbenchSurfaceV1 }
   | { type: "reopen_closed_surface" }
+  | { type: "reopen_closed_in_placeholder"; surface_id: string }
   | {
       type: "split_group";
       group_id: string;
@@ -997,6 +998,50 @@ export function applyWorkbenchCommand(
         },
         surfaces: { ...document.surfaces, [surfaceId]: surface },
         active_group_id: groupId,
+        recently_closed: document.recently_closed.slice(1),
+      });
+    }
+
+    case "reopen_closed_in_placeholder": {
+      const location = groupContainingSurface(document, command.surface_id);
+      const placeholder = document.surfaces[command.surface_id];
+      if (!location || !placeholder) {
+        return commandRejected(document, "surface does not exist", "$.command.surface_id");
+      }
+      if (placeholder.surface_type !== "new-tab") {
+        return commandRejected(
+          document,
+          "surface is not a New Tab placeholder",
+          "$.command.surface_id",
+        );
+      }
+      const closed = document.recently_closed[0];
+      if (!closed) return commandRejected(document, "there is no recently closed surface");
+
+      const reopenedId = hasOwn(document.surfaces, closed.surface.surface_id)
+        ? reopenedSurfaceId(document, closed.surface.surface_id)
+        : closed.surface.surface_id;
+      const reopenedSurface = reopenedId === closed.surface.surface_id
+        ? closed.surface
+        : { ...closed.surface, surface_id: reopenedId };
+      const group = document.groups[location.groupId];
+      const surfaceIds = [...group.surface_ids];
+      surfaceIds[location.index] = reopenedId;
+      const surfaces = { ...document.surfaces };
+      delete surfaces[command.surface_id];
+      surfaces[reopenedId] = reopenedSurface;
+      return acceptedCandidate(document, {
+        ...document,
+        groups: {
+          ...document.groups,
+          [location.groupId]: {
+            ...group,
+            surface_ids: surfaceIds,
+            active_surface_id: reopenedId,
+          },
+        },
+        surfaces,
+        active_group_id: location.groupId,
         recently_closed: document.recently_closed.slice(1),
       });
     }

@@ -207,6 +207,42 @@ describe("WorkbenchHost", () => {
     expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["surface-1"]);
   });
 
+  it("supplies measured pane admission to owned navigation for Open to Side", async () => {
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("surface-1", { surface_type: "dashboard" }),
+      ]),
+    });
+    const createId = vi.fn(() => "must-not-be-created");
+
+    render(
+      <WorkbenchHost
+        store={store}
+        create_id={createId}
+        new_tab_action="palette"
+      />,
+    );
+    const group = await screen.findByTestId("workbench-group");
+    vi.spyOn(group, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 199,
+      bottom: 500,
+      x: 0,
+      y: 0,
+      width: 199,
+      height: 500,
+      toJSON: () => ({}),
+    });
+    fireEvent.click(within(group).getByRole("button", { name: "Open Surface" }));
+    fireEvent.click(screen.getByRole("option", { name: "Queue" }), { ctrlKey: true });
+
+    expect(Object.keys(store.getState().document.groups)).toEqual(["group-1"]);
+    expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["surface-1"]);
+    expect(createId).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
+  });
+
   it("opens and replaces an inline New Tab in the inactive pane whose plus was clicked", async () => {
     const store = createWorkbenchStore({ initial_document: makeTwoPaneDocument() });
 

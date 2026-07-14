@@ -9,7 +9,9 @@ import {
   createCoreWorkbenchSurfaceRegistry,
 } from "./OpenSurfaceDialog";
 
-function createNavigationFixture() {
+function createNavigationFixture(
+  can_split_group?: (groupId: string, direction: "horizontal" | "vertical") => boolean,
+) {
   const store = createWorkbenchStore();
   const registry = createCoreWorkbenchSurfaceRegistry();
   let id = 0;
@@ -17,6 +19,7 @@ function createNavigationFixture() {
     registry,
     store,
     create_id: (kind) => `${kind}-${++id}`,
+    ...(can_split_group ? { can_split_group } : {}),
   });
   return { navigation, registry, store };
 }
@@ -126,6 +129,29 @@ describe("OpenSurfaceDialog", () => {
     });
     expect(Object.values(fixture.store.getState().document.surfaces)).toHaveLength(1);
     expect(Object.keys(fixture.store.getState().document.groups)).toHaveLength(1);
+  });
+
+  it("keeps the dialog open when the shared boundary rejects Open to Side", () => {
+    const canSplitGroup = vi.fn(() => false);
+    const fixture = createNavigationFixture(canSplitGroup);
+    const onClose = vi.fn();
+    render(
+      <OpenSurfaceDialog
+        open
+        group_id="group-1"
+        navigation={fixture.navigation}
+        registry={fixture.registry}
+        on_close={onClose}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: "Queue" }), { ctrlKey: true });
+
+    expect(canSplitGroup).toHaveBeenCalledWith("group-1", "horizontal");
+    expect(Object.keys(fixture.store.getState().document.groups)).toEqual(["group-1"]);
+    expect(Object.keys(fixture.store.getState().document.surfaces)).toEqual([]);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Open Surface" })).toBeInTheDocument();
   });
 
   it("enables Agent Session with a resource and exposes recent reopen", () => {

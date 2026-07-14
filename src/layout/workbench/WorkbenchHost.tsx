@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type RefObject,
 } from "react";
 
 import { HomeSurface } from "../../features/workbench/HomeSurface";
@@ -45,6 +46,7 @@ export type WorkbenchHostProps = {
   on_focus_right_dock?: () => void;
   create_id?: (kind: WorkbenchIdKind) => string;
   new_tab_action?: WorkbenchNewTabAction;
+  root_ref?: RefObject<HTMLDivElement | null>;
 };
 
 type WorkbenchDropPosition = "top" | "bottom" | "left" | "right" | "center";
@@ -108,8 +110,10 @@ export function WorkbenchHost({
   on_focus_right_dock,
   create_id,
   new_tab_action = "home",
+  root_ref: suppliedRootRef,
 }: WorkbenchHostProps) {
-  const rootRef = useRef<HTMLDivElement>(null);
+  const ownedRootRef = useRef<HTMLDivElement>(null);
+  const rootRef = suppliedRootRef ?? ownedRootRef;
   const ownedRegistry = useMemo(createCoreWorkbenchSurfaceRegistry, []);
   const registry = suppliedRegistry ?? ownedRegistry;
   const ownedNavigation = useMemo(
@@ -117,8 +121,11 @@ export function WorkbenchHost({
       registry,
       store,
       ...(create_id ? { create_id } : {}),
+      can_split_group: (groupId, direction) => (
+        canSplitWorkbenchGroup(rootRef.current, groupId, direction)
+      ),
     }),
-    [create_id, registry, store],
+    [create_id, registry, rootRef, store],
   );
   const navigation = suppliedNavigation ?? ownedNavigation;
   const [launcherGroupId, setLauncherGroupId] = useState<string | null>(null);

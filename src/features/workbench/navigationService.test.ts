@@ -188,6 +188,46 @@ describe("workbench navigation service", () => {
     expect(store.getState().transaction_version).toBe(beforeVersion + 1);
   });
 
+  it("reopens into the exact placeholder pane without collapsing its sole-tab group", () => {
+    const registry = createSurfaceRegistry([definition("new-tab")]);
+    const left = makeSurface("left", { surface_type: "dashboard" });
+    const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
+    const closed = makeSurface("closed", { surface_type: "queue" });
+    const initial = makeSingleGroupDocument([left]);
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    };
+    initial.groups["group-2"] = {
+      group_id: "group-2",
+      surface_ids: [placeholder.surface_id],
+      active_surface_id: placeholder.surface_id,
+    };
+    initial.surfaces[placeholder.surface_id] = placeholder;
+    initial.active_group_id = "group-2";
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 0,
+    }];
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    navigation.reopen_closed_from_placeholder(placeholder.surface_id);
+
+    const document = store.getState().document;
+    expect(document.root).toEqual(initial.root);
+    expect(Object.keys(document.groups)).toEqual(["group-1", "group-2"]);
+    expect(document.groups["group-2"].surface_ids).toEqual([closed.surface_id]);
+    expect(document.groups["group-2"].active_surface_id).toBe(closed.surface_id);
+    expect(document.active_group_id).toBe("group-2");
+    expect(document.recently_closed).toEqual([]);
+  });
+
   it("preserves the placeholder when an atomic reopen has no closed surface", () => {
     const registry = createSurfaceRegistry([definition("new-tab")]);
     const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
@@ -232,6 +272,60 @@ describe("workbench navigation service", () => {
     expect(document.active_group_id).toBe("group-right");
     expect(document.groups["group-right"].active_surface_id).toBe("surface-right");
     expect(document.revision).toBe(1);
+  });
+
+  it("rejects a measured undersized Open to Side before allocating IDs or commands", () => {
+    const registry = createSurfaceRegistry([definition("notes")]);
+    const initial = makeSingleGroupDocument();
+    initial.root = {
+      kind: "split",
+      node_id: "split-existing",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    };
+    initial.groups["group-2"] = {
+      group_id: "group-2",
+      surface_ids: [],
+      active_surface_id: null,
+    };
+    const store = createWorkbenchStore({ initial_document: initial });
+    const createId = vi.fn(() => "must-not-be-created");
+    const canSplitGroup = vi.fn(() => false);
+    const before = store.getState().document;
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: createId,
+      can_split_group: canSplitGroup,
+    });
+
+    expect(navigation.open_to_side({
+      surface_type: "notes",
+      group_id: "group-2",
+    }, "vertical")).toBeNull();
+    expect(canSplitGroup).toHaveBeenCalledWith("group-2", "vertical");
+    expect(createId).not.toHaveBeenCalled();
+    expect(store.getState().document).toBe(before);
+    expect(store.getState().transaction_version).toBe(0);
+  });
+
+  it("allows viable and unmeasured Open to Side requests through the same boundary", () => {
+    for (const canSplitGroup of [vi.fn(() => true), undefined]) {
+      const registry = createSurfaceRegistry([definition("notes")]);
+      const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument() });
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds(["group-right", "split-root", "surface-right"]),
+        ...(canSplitGroup ? { can_split_group: canSplitGroup } : {}),
+      });
+
+      expect(navigation.open_to_side({ surface_type: "notes" })).toBe("surface-right");
+      expect(Object.keys(store.getState().document.groups)).toHaveLength(2);
+      if (canSplitGroup) expect(canSplitGroup).toHaveBeenCalledWith("group-1", "horizontal");
+    }
   });
 
   it("keeps singleton policy authoritative for Open to Side", () => {

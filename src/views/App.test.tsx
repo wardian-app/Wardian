@@ -658,6 +658,18 @@ describe("Workbench persistence boot integration", () => {
     await screen.findByTestId("agent-session-surface");
 
     fireEvent.contextMenu(betaRow);
+    const activeGroup = screen.getByTestId("workbench-group");
+    vi.spyOn(activeGroup, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+      toJSON: () => ({}),
+    });
     fireEvent.click(within(screen.getByTestId("agent-context-menu"))
       .getByRole("button", { name: "Open to Side" }));
     await waitFor(() => {
@@ -665,6 +677,38 @@ describe("Workbench persistence boot integration", () => {
       expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(2);
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+  });
+
+  it("rejects roster Open to Side when the active pane is measured too narrow", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    const betaRow = await waitFor(() => {
+      const row = screen.getAllByText("Beta")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Beta roster row not found");
+      return row;
+    });
+    const activeGroup = screen.getByTestId("workbench-group");
+    vi.spyOn(activeGroup, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 199,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      width: 199,
+      height: 600,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.contextMenu(betaRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu"))
+      .getByRole("button", { name: "Open to Side" }));
+
+    await waitFor(() => expect(screen.getAllByTestId("workbench-group")).toHaveLength(1));
+    expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
   });
 
   it("routes Queue agent actions to an Agent Session surface", async () => {

@@ -193,7 +193,7 @@ export async function openWorkbenchSurface(
     await selectAgentResource(driver, normalized.resourceKey, timeoutMs);
   }
 
-  await driver.wait(async () => await driver.executeScript(() => {
+  const targetGroupId = await driver.wait(async () => await driver.executeScript(() => {
     const activeGroup = document.querySelector('[data-testid="workbench-group"][data-active="true"]')
       ?? document.querySelector('[data-testid="workbench-group"]');
     const launcher = activeGroup?.querySelector('button[aria-label="Open Surface"]')
@@ -201,22 +201,45 @@ export async function openWorkbenchSurface(
         .find((button) => button.textContent?.trim() === "Open Surface");
     if (!launcher) return false;
     launcher.click();
-    return true;
+    return activeGroup?.getAttribute("data-group-id") ?? false;
   }), timeoutMs);
 
-  // The tab-strip plus opens the visual Home chooser by default. Native
-  // helpers continue through its explicit Browse action so the same code path
-  // can select resource-backed surfaces and preserve open-to-side modifiers.
-  await driver.wait(async () => await driver.executeScript(() => {
+  // The tab-strip plus creates a canonical inline New Tab. Choose its direct
+  // card when possible; resource-backed and Open-to-Side requests continue
+  // through Browse all surfaces because those controls live in the palette.
+  const launcherResult = await driver.wait(async () => await driver.executeScript(
+    (requestedSurfaceType, requestedToSide, requestedGroupId) => {
     const palette = document.querySelector('[role="dialog"][aria-label="Open Surface"]');
-    if (palette) return true;
-    const home = document.querySelector('[role="dialog"][aria-label="Choose a surface"]');
+    if (palette) return "palette";
+    const targetGroup = [...document.querySelectorAll('[data-testid="workbench-group"]')]
+      .find((group) => group.getAttribute("data-group-id") === requestedGroupId);
+    const home = targetGroup?.querySelector(".wardian-workbench-home");
+    if (!home) return false;
+    const direct = [...home.querySelectorAll("button[data-surface-type]")]
+      .find((button) => button.getAttribute("data-surface-type") === requestedSurfaceType);
+    if (!requestedToSide && direct) {
+      direct.click();
+      return "opened";
+    }
     const browse = [...(home?.querySelectorAll("button") ?? [])]
       .find((button) => button.textContent?.trim() === "Browse all surfaces");
     if (!browse) return false;
     browse.click();
-    return true;
-  }), timeoutMs);
+    return "palette";
+    },
+    surfaceType,
+    toSide,
+    targetGroupId,
+  ), timeoutMs);
+
+  if (launcherResult === "opened") {
+    return await focusSurfaceTab(
+      driver,
+      surfaceType,
+      normalized.resourceKey,
+      { timeoutMs, index: normalized.options.index ?? 0 },
+    );
+  }
 
   const dialog = await driver.wait(
     until.elementLocated(By.css('[role="dialog"][aria-label="Open Surface"]')),

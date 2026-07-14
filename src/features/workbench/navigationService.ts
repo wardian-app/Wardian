@@ -14,6 +14,11 @@ export type WorkbenchNavigationOptions = {
   registry: WorkbenchSurfaceRegistry;
   store: WorkbenchStore;
   create_id?: (kind: WorkbenchIdKind) => string;
+  /** Rejects only a split whose destination has been measured below its pane floor. */
+  can_split_group?: (
+    group_id: string,
+    direction: "horizontal" | "vertical",
+  ) => boolean;
   reset_document?: (expected_transaction_version: number) => boolean | Promise<boolean>;
 };
 
@@ -26,7 +31,7 @@ export interface WorkbenchNavigationService {
   open_to_side(
     request: OpenSurfaceRequest,
     direction?: "horizontal" | "vertical",
-  ): string;
+  ): string | null;
   focus(surface_id: string): void;
   rebind_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   reset_surface(surface_id: string): Promise<CloseDecision>;
@@ -183,10 +188,7 @@ export function createWorkbenchNavigationService(
     },
 
     reopen_closed_from_placeholder: (surfaceId) => {
-      apply([
-        { type: "discard_surface", surface_id: surfaceId },
-        { type: "reopen_closed_surface" },
-      ]);
+      apply([{ type: "reopen_closed_in_placeholder", surface_id: surfaceId }]);
     },
 
     open_to_side: (request, direction = "horizontal") => {
@@ -205,6 +207,9 @@ export function createWorkbenchNavigationService(
       const sourceGroupId = request.group_id ?? document.active_group_id;
       if (!(sourceGroupId in document.groups)) {
         throw new Error(`group ${sourceGroupId} does not exist`);
+      }
+      if (options.can_split_group && !options.can_split_group(sourceGroupId, direction)) {
+        return null;
       }
       const groupId = createId("group");
       const nodeId = createId("node");

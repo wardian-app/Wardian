@@ -41,7 +41,10 @@ import { CustomCloneModal } from "../features/agents/CustomCloneModal";
 import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflictDialog";
 import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
 import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
-import { WorkbenchHost } from "../layout/workbench/WorkbenchHost";
+import {
+  canSplitWorkbenchGroup,
+  WorkbenchHost,
+} from "../layout/workbench/WorkbenchHost";
 import { AppShell } from "../layout/AppShell";
 import { AgentResourceContext } from "../features/agents/AgentResourceContext";
 import {
@@ -213,6 +216,7 @@ function App() {
 function AppBody() {
   const confirm = useConfirm();
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
+  const workbenchRootRef = useRef<HTMLDivElement>(null);
   const workbenchPersistence = useWorkbenchPersistence({
     enabled: true,
     adapter: WORKBENCH_PERSISTENCE_ADAPTER,
@@ -230,6 +234,11 @@ function AppBody() {
     () => createWorkbenchNavigationService({
       registry: workbenchRegistry,
       store: workbenchPersistence.store,
+      can_split_group: (groupId, direction) => canSplitWorkbenchGroup(
+        workbenchRootRef.current,
+        groupId,
+        direction,
+      ),
       reset_document: workbenchPersistence.reset,
     }),
     [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
@@ -1353,6 +1362,7 @@ function AppBody() {
               safe_mode={workbenchPersistence.safe_mode}
               registry={workbenchRegistry}
               navigation={workbenchNavigation}
+              root_ref={workbenchRootRef}
               new_tab_action={resolvedWorkbenchNewTabAction}
               on_quick_open={openWorkbenchLauncher}
               resource_key={selectedWorkbenchResourceKey}

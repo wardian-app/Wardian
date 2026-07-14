@@ -128,8 +128,9 @@ export function OpenSurfaceDialog({
 
   const openChoiceToSide = (contribution: CoreSurfaceContribution): void => {
     if (choiceDisabled(contribution, registry, resource_key)) return;
-    navigation.open_to_side(requestFor(contribution.surface_type));
-    requestClose();
+    if (navigation.open_to_side(requestFor(contribution.surface_type)) !== null) {
+      requestClose();
+    }
   };
 
   const activateIndex = (index: number, toSide: boolean): void => {

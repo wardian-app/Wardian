@@ -448,6 +448,89 @@ describe("workbench model", () => {
     expect(document.recently_closed).toEqual([previouslyClosed]);
   });
 
+  it("atomically replaces a sole New Tab pane with the latest closed surface", () => {
+    const left = makeSurface("surface-left", { surface_type: "dashboard" });
+    const placeholder = makeSurface("surface-placeholder", { surface_type: "new-tab", state: {} });
+    const closed = makeSurface("surface-closed", { surface_type: "queue" });
+    const initial = makeSingleGroupDocument([left]);
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "group-1" },
+      second: { kind: "group", group_id: "group-2" },
+    };
+    initial.groups["group-2"] = {
+      group_id: "group-2",
+      surface_ids: [placeholder.surface_id],
+      active_surface_id: placeholder.surface_id,
+    };
+    initial.surfaces[placeholder.surface_id] = placeholder;
+    initial.active_group_id = "group-2";
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 0,
+    }];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "reopen_closed_in_placeholder",
+      surface_id: placeholder.surface_id,
+    }));
+
+    expect(document.root).toEqual(initial.root);
+    expect(Object.keys(document.groups)).toEqual(["group-1", "group-2"]);
+    expect(document.groups["group-2"].surface_ids).toEqual([closed.surface_id]);
+    expect(document.groups["group-2"].active_surface_id).toBe(closed.surface_id);
+    expect(document.surfaces[placeholder.surface_id]).toBeUndefined();
+    expect(document.surfaces[closed.surface_id]).toEqual(closed);
+    expect(document.active_group_id).toBe("group-2");
+    expect(document.recently_closed).toEqual([]);
+  });
+
+  it("rejects placeholder reopen for ordinary surfaces without changing history", () => {
+    const ordinary = makeSurface("surface-dashboard", { surface_type: "dashboard" });
+    const closed = makeSurface("surface-closed", { surface_type: "queue" });
+    const initial = makeSingleGroupDocument([ordinary]);
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 0,
+    }];
+
+    const result = applyWorkbenchCommand(initial, {
+      type: "reopen_closed_in_placeholder",
+      surface_id: ordinary.surface_id,
+    });
+
+    expect(result.accepted).toBe(false);
+    expect(result.document).toBe(initial);
+    expect(initial.recently_closed).toHaveLength(1);
+  });
+
+  it("resolves reopened IDs that collide while retaining the placeholder position", () => {
+    const collision = makeSurface("surface-closed", { state: { open: true } });
+    const placeholder = makeSurface("surface-placeholder", { surface_type: "new-tab", state: {} });
+    const closed = makeSurface("surface-closed", { surface_type: "queue", state: { closed: true } });
+    const initial = makeSingleGroupDocument([collision, placeholder]);
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "missing-group",
+      previous_index: 0,
+    }];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "reopen_closed_in_placeholder",
+      surface_id: placeholder.surface_id,
+    }));
+
+    expect(document.groups["group-1"].surface_ids)
+      .toEqual([collision.surface_id, "surface-closed-reopened"]);
+    expect(document.surfaces["surface-closed-reopened"].state).toEqual({ closed: true });
+    expect(document.recently_closed).toEqual([]);
+  });
+
   it("rejects history-free discard for ordinary surfaces", () => {
     const dashboard = makeSurface("surface-dashboard", { surface_type: "dashboard" });
     const document = makeSingleGroupDocument([dashboard]);

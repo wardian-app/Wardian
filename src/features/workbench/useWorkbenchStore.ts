@@ -190,6 +190,7 @@ function reconcileSurfaceMru(
         touch(command.surface_id);
         break;
       case "reopen_closed_surface":
+      case "reopen_closed_in_placeholder":
         touch(document.groups[document.active_group_id]?.active_surface_id);
         break;
       default:
