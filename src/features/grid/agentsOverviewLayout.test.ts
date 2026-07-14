@@ -83,6 +83,34 @@ describe("Agents layout", () => {
     expect(result.contentHeight).toBeGreaterThan(900);
   });
 
+  it("keeps a two-column Auto grid with one vertically overflowing row below the card floor", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(2),
+      containerSize: { width: 1048, height: 200 },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(2);
+    expect(result.rows).toBe(1);
+    expect(result.cardWidth).toBe(TERMINAL_CARD_FLOOR.width);
+    expect(result.cardHeight).toBe(TERMINAL_CARD_FLOOR.height);
+    expect(result.requiresScroll).toBe(true);
+    expect(result.contentHeight).toBe(TERMINAL_CARD_FLOOR.height);
+  });
+
+  it("still resolves Auto to Single when the pane is one pixel too narrow for two useful cards", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(2),
+      containerSize: { width: 1039, height: 200 },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("single");
+  });
+
   it("never resolves Auto to a one-column multi-agent grid", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",

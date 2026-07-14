@@ -305,14 +305,18 @@ function evaluateAutoCandidate(
   const floor = requiredFloor(agents);
   const width = finiteNonNegative(containerSize.width);
   const height = finiteNonNegative(containerSize.height);
-  const viewportRows = Math.floor((height + gap) / (floor.height + gap));
-  if (viewportRows < 1) return null;
+  // Width determines whether Auto can present a useful multi-agent grid.
+  // A short pane still has one useful row; its floor height overflows vertically.
+  const viewportRows = Math.max(1, Math.floor((height + gap) / (floor.height + gap)));
 
   const rows = Math.ceil(agents.length / columns);
   const simultaneousRows = Math.min(rows, viewportRows);
   const cardWidth = (width - (Math.max(0, columns - 1) * gap)) / columns;
-  const cardHeight = (height - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows;
-  if (cardWidth < floor.width || cardHeight < floor.height) return null;
+  const cardHeight = Math.max(
+    floor.height,
+    (height - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows,
+  );
+  if (cardWidth < floor.width) return null;
 
   return {
     columns,
