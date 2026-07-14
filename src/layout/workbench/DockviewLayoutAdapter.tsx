@@ -13,8 +13,10 @@ import {
 import {
   DockviewReact,
   type DockviewApi,
+  type DropOverlayModelParams,
   type DockviewReadyEvent,
   type DockviewWillDropEvent,
+  type DroptargetOverlayModel,
   type IDockviewHeaderActionsProps,
   type IDockviewPanelHeaderProps,
   type IDockviewPanelProps,
@@ -119,6 +121,12 @@ const KEEP_ALIVE_SURFACE_TYPES = new Set([
   "workflows",
 ]);
 const SPLIT_RATIO_FEEDBACK_EPSILON = 0.005;
+const WORKBENCH_DOCKVIEW_DROP_OVERLAY: DroptargetOverlayModel = {
+  size: { type: "percentage", value: 50 },
+  activationSize: { type: "percentage", value: 20 },
+  smallWidthBoundary: 0,
+  smallHeightBoundary: 0,
+};
 
 export type WorkbenchRectangle = {
   left: number;
@@ -357,9 +365,27 @@ export function workbenchSplitRatioCommands(
   });
 }
 
-/** Leaves center/tab drops to Dockview and routes edge drops to Wardian. */
+/** Uses one accurate half-pane preview for pointer and keyboard group drop targets. */
+export function workbenchDockviewDropOverlayModel(
+  { location }: DropOverlayModelParams,
+): DroptargetOverlayModel | undefined {
+  return location === "content" || location === "header_space" || location === "tab"
+    ? WORKBENCH_DOCKVIEW_DROP_OVERLAY
+    : undefined;
+}
+
+/** Reports whether a transient Dockview destination still exists canonically. */
+export function isCanonicalWorkbenchGroupDestination(
+  document: ReadonlyWorkbenchDocumentV1,
+  groupId: string,
+): boolean {
+  return document.groups[groupId] !== undefined;
+}
+
+/** Leaves valid center/tab drops to Dockview and routes valid edge drops to Wardian. */
 export function routeWorkbenchDockviewDrop(
   event: DockviewWillDropEvent,
+  document: ReadonlyWorkbenchDocumentV1,
   onSurfaceDrop?: DockviewLayoutAdapterProps["on_surface_drop"],
 ): void {
   const transfer = event.getData();
@@ -368,10 +394,15 @@ export function routeWorkbenchDockviewDrop(
     event.preventDefault();
     return;
   }
-  if (event.position === "center" && event.group) return;
+  const targetGroupId = event.group?.id;
+  if (
+    event.position === "center"
+    && targetGroupId
+    && isCanonicalWorkbenchGroupDestination(document, targetGroupId)
+  ) return;
   event.preventDefault();
-  if (!event.group) return;
-  onSurfaceDrop?.(surfaceId, event.group.id, event.position);
+  if (!targetGroupId || !isCanonicalWorkbenchGroupDestination(document, targetGroupId)) return;
+  onSurfaceDrop?.(surfaceId, targetGroupId, event.position);
 }
 
 /** Dispatches a canonical command and requests recovery only on explicit rejection. */
@@ -557,23 +588,22 @@ function ensureGroups(
   api: DockviewApi,
   node: DeepReadonly<WorkbenchNodeV1>,
   repairExisting: boolean,
-): void {
-  const findGroup = (groupId: string) => api.groups.find((group) => group.id === groupId);
+): Map<string, ReturnType<DockviewApi["addGroup"]>> {
+  const groups = new Map(api.groups.map((group) => [group.id, group]));
   for (const placement of planDockviewGroupPlacements(node)) {
-    const existing = findGroup(placement.group_id);
+    const existing = groups.get(placement.group_id);
     const referenceGroup = placement.reference_group_id
-      ? findGroup(placement.reference_group_id)
+      ? groups.get(placement.reference_group_id)
       : undefined;
     if (!existing) {
-      if (referenceGroup && placement.direction) {
-        api.addGroup({
+      const added = referenceGroup && placement.direction
+        ? api.addGroup({
           id: placement.group_id,
           referenceGroup,
           direction: placement.direction,
-        });
-      } else {
-        api.addGroup({ id: placement.group_id, direction: "right" });
-      }
+        })
+        : api.addGroup({ id: placement.group_id, direction: "right" });
+      if (added) groups.set(placement.group_id, added);
       continue;
     }
     if (repairExisting && referenceGroup && placement.direction) {
@@ -584,6 +614,7 @@ function ensureGroups(
       });
     }
   }
+  return groups;
 }
 
 /** Projects canonical ratios using only public group sizing. */
@@ -644,13 +675,21 @@ function reconcileDockview(
   transaction: number,
   zoomedGroupId: string | null,
   repairTopology: boolean,
-): void {
-  ensureGroups(api, document.root, repairTopology);
+):
+  | { status: "projected" }
+  | { status: "deferred"; group_id: string; surface_ids: string[] } {
+  const groups = ensureGroups(api, document.root, repairTopology);
 
   for (const groupId of groupIdsInTreeOrder(document.root)) {
     const modelGroup = document.groups[groupId];
-    const dockviewGroup = api.groups.find((group) => group.id === groupId);
-    if (!dockviewGroup) throw new Error(`Dockview group projection failed: ${groupId}`);
+    const dockviewGroup = groups.get(groupId);
+    if (!dockviewGroup) {
+      return {
+        status: "deferred",
+        group_id: groupId,
+        surface_ids: [...modelGroup.surface_ids],
+      };
+    }
     for (const [index, surfaceId] of modelGroup.surface_ids.entries()) {
       const surface = document.surfaces[surfaceId];
       const params = panelParams(surface, renderSurface, titleSurface);
@@ -725,6 +764,7 @@ function reconcileDockview(
     group.element.dataset.active = String(group.id === document.active_group_id);
     group.element.tabIndex = -1;
   }
+  return { status: "projected" };
 }
 
 function SafeWorkbenchLayout({
@@ -874,6 +914,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   const topologySignatureRef = useRef<string | null>(null);
   const ratioFeedbackScheduledRef = useRef(false);
   const reconcileScheduledRef = useRef(false);
+  const deferredDocumentRef = useRef<ReadonlyWorkbenchDocumentV1 | null>(null);
   const lastApiSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingCloseFocusRef = useRef<{ surface_id: string; group_id: string } | null>(null);
   const documentRef = useRef(document);
@@ -977,7 +1018,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       && topologySignatureRef.current !== nextTopologySignature;
     const releaseProjectionGuard = holdProjectionGuard(projectionGuardRef);
     try {
-      reconcileDockview(
+      const result = reconcileDockview(
         api,
         document,
         renderSurfaceProxy,
@@ -988,6 +1029,18 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         zoomed_group_id,
         repairTopology,
       );
+      if (result.status === "deferred") {
+        if (deferredDocumentRef.current !== document) {
+          deferredDocumentRef.current = document;
+          console.error("Dockview group projection deferred", {
+            group_id: result.group_id,
+            surface_ids: result.surface_ids,
+          });
+          requestCanonicalReconcile();
+        }
+        return;
+      }
+      deferredDocumentRef.current = null;
       topologySignatureRef.current = nextTopologySignature;
       lastApiSizeRef.current = { width: api.width, height: api.height };
     } finally {
@@ -999,6 +1052,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     reconcileNonce,
     renderSurfaceProxy,
     renderer_policy,
+    requestCanonicalReconcile,
     safe_mode,
     surfaceTitleProxy,
     zoomed_group_id,
@@ -1040,10 +1094,15 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       const activation = pendingActivation;
       pendingActivation = null;
       if (!activation) return;
+      if (!isCanonicalWorkbenchGroupDestination(
+        documentRef.current,
+        activation.group_id,
+      )) return;
       emitCommand({ type: "set_active_surface", ...activation });
     };
     const scheduleActivation = (groupId: string, surfaceId: string | null): void => {
       const currentDocument = documentRef.current;
+      if (!isCanonicalWorkbenchGroupDestination(currentDocument, groupId)) return;
       const currentGroup = currentDocument.groups[groupId];
       if (
         currentDocument.active_group_id === groupId
@@ -1061,6 +1120,10 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         expectedMovesRef.current.delete(event.panel.id);
         return;
       }
+      if (!isCanonicalWorkbenchGroupDestination(
+        documentRef.current,
+        event.panel.group.id,
+      )) return;
       if (projectionGuardRef.current > 0) return;
       emitCommand({
         type: "move_surface",
@@ -1128,7 +1191,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   }, [api, emitCommand, requestCanonicalReconcile, safe_mode]);
 
   const handleWillDrop = useCallback((event: DockviewWillDropEvent) => {
-    routeWorkbenchDockviewDrop(event, props.on_surface_drop);
+    routeWorkbenchDockviewDrop(event, documentRef.current, props.on_surface_drop);
   }, [props.on_surface_drop]);
 
   return (
@@ -1150,6 +1213,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
             rightHeaderActionsComponent={DockviewGroupActions}
             watermarkComponent={DockviewEmptyGroup}
             dndStrategy="pointer"
+            dropOverlayModel={workbenchDockviewDropOverlayModel}
             keyboardNavigation
             onReady={handleReady}
             onWillDrop={handleWillDrop}

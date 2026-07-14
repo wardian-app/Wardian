@@ -8,18 +8,24 @@ import {
   deriveWorkbenchSplitRatios,
   dispatchWorkbenchAdapterCommand,
   DockviewLayoutAdapter,
+  isCanonicalWorkbenchGroupDestination,
   normalizedWorkbenchGeometry,
   planDockviewGroupPlacements,
   projectWorkbenchGroupSizes,
   routeWorkbenchDockviewDrop,
   shouldRecoverUnexpectedPanelRemoval,
+  workbenchDockviewDropOverlayModel,
   workbenchGroupOwnsWindowChrome,
   workbenchGroupTouchesLeftEdge,
   workbenchGroupTouchesTopEdge,
   workbenchPaneTargets,
   workbenchSplitRatioCommands,
 } from "./DockviewLayoutAdapter";
-import type { DockviewApi, DockviewWillDropEvent } from "dockview-react";
+import {
+  DockviewApi,
+  type DockviewGroupPanel,
+  type DockviewWillDropEvent,
+} from "dockview-react";
 
 function apply(document: WorkbenchDocumentV1, command: WorkbenchCommand): WorkbenchDocumentV1 {
   const result = applyWorkbenchCommand(document, command);
@@ -130,6 +136,105 @@ describe("DockviewLayoutAdapter", () => {
     expect(within(group).getByRole("heading", { name: "Choose a surface" })).toBeVisible();
     expect(within(group).getByRole("button", { name: "Open Surface" })).toBeVisible();
     expect(within(group).getByRole("button", { name: "Pane actions" })).toBeVisible();
+  });
+
+  it("recovers when the canonical root replaces the sole-tab source group", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const initial = makeSingleGroupDocument([surface]);
+    const replacement: WorkbenchDocumentV1 = {
+      ...initial,
+      root: { kind: "group", group_id: "group-2" },
+      groups: {
+        "group-2": {
+          ...initial.groups["group-1"],
+          group_id: "group-2",
+        },
+      },
+      active_group_id: "group-2",
+    };
+    const onCommand = vi.fn((_command: WorkbenchCommand) => true);
+    const groupsGetter = Object.getOwnPropertyDescriptor(DockviewApi.prototype, "groups")?.get;
+    if (!groupsGetter) throw new Error("expected DockviewApi groups getter");
+    let delayReplacementPublication = false;
+    let delayedReads = 0;
+    const groupsSpy = vi.spyOn(DockviewApi.prototype, "groups", "get")
+      .mockImplementation(function groupsWithDelayedReplacement(this: DockviewApi) {
+        const groups = groupsGetter.call(this);
+        if (!delayReplacementPublication || delayedReads >= 2) return groups;
+        delayedReads += 1;
+        return groups.filter((group: DockviewGroupPanel) => group.id !== "group-2");
+      });
+    const view = render(
+      <DockviewLayoutAdapter document={initial} on_command={onCommand} />,
+    );
+
+    await screen.findByRole("tab", { name: /agents overview/i });
+    onCommand.mockClear();
+    delayReplacementPublication = true;
+    try {
+      expect(() => view.rerender(
+        <DockviewLayoutAdapter document={replacement} on_command={onCommand} />,
+      )).not.toThrow();
+    } finally {
+      groupsSpy.mockRestore();
+    }
+
+    await waitFor(() => expect(screen.getByTestId("workbench-group"))
+      .toHaveAttribute("data-group-id", "group-2"));
+    expect(screen.getByRole("tab", { name: /agents overview/i })).toBeVisible();
+    expect(onCommand.mock.calls.every(([command]) => (
+      !("group_id" in command) || command.group_id === "group-2"
+    ))).toBe(true);
+  });
+
+  it("bounds recovery when a canonical group remains transiently unavailable", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const initial = makeSingleGroupDocument([surface]);
+    const replacement: WorkbenchDocumentV1 = {
+      ...initial,
+      root: { kind: "group", group_id: "group-2" },
+      groups: {
+        "group-2": {
+          ...initial.groups["group-1"],
+          group_id: "group-2",
+        },
+      },
+      active_group_id: "group-2",
+    };
+    const view = render(<DockviewLayoutAdapter document={initial} />);
+    await screen.findByRole("tab", { name: /agents overview/i });
+
+    const groupsGetter = Object.getOwnPropertyDescriptor(DockviewApi.prototype, "groups")?.get;
+    if (!groupsGetter) throw new Error("expected DockviewApi groups getter");
+    const groupsSpy = vi.spyOn(DockviewApi.prototype, "groups", "get")
+      .mockImplementation(function groupsWithoutReplacement(this: DockviewApi) {
+        return groupsGetter.call(this)
+          .filter((group: DockviewGroupPanel) => group.id !== "group-2");
+      });
+    const addGroupSpy = vi.spyOn(DockviewApi.prototype, "addGroup")
+      .mockImplementation(() => undefined as unknown as ReturnType<DockviewApi["addGroup"]>);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      expect(() => view.rerender(<DockviewLayoutAdapter document={replacement} />)).not.toThrow();
+      await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalledOnce());
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
+      expect(addGroupSpy).toHaveBeenCalledTimes(2);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "Dockview group projection deferred",
+        { group_id: "group-2", surface_ids: ["surface-1"] },
+      );
+    } finally {
+      consoleErrorSpy.mockRestore();
+      addGroupSpy.mockRestore();
+      groupsSpy.mockRestore();
+    }
+  });
+
+  it("recognizes only groups in the current canonical document as destinations", () => {
+    const documentModel = makeTwoGroupDocument();
+    expect(isCanonicalWorkbenchGroupDestination(documentModel, "group-2")).toBe(true);
+    expect(isCanonicalWorkbenchGroupDestination(documentModel, "stale-group")).toBe(false);
   });
 
   it("requests recovery only for canonical panels removed outside projection", () => {
@@ -267,6 +372,7 @@ describe("DockviewLayoutAdapter", () => {
   });
 
   it("keeps center/tab drops in Dockview and routes edge drops to canonical handling", () => {
+    const documentModel = makeTwoGroupDocument();
     const onSurfaceDrop = vi.fn();
     const centerPreventDefault = vi.fn();
     const makeDrop = (
@@ -280,7 +386,7 @@ describe("DockviewLayoutAdapter", () => {
       group: { id: "group-2" },
     }) as unknown as DockviewWillDropEvent;
 
-    routeWorkbenchDockviewDrop(makeDrop("center", centerPreventDefault), onSurfaceDrop);
+    routeWorkbenchDockviewDrop(makeDrop("center", centerPreventDefault), documentModel, onSurfaceDrop);
     expect(centerPreventDefault).not.toHaveBeenCalled();
     expect(onSurfaceDrop).not.toHaveBeenCalled();
 
@@ -291,11 +397,11 @@ describe("DockviewLayoutAdapter", () => {
       getData: () => ({ panelId: "surface-1" }),
       panel: undefined,
       group: undefined,
-    } as unknown as DockviewWillDropEvent, onSurfaceDrop);
+    } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(orphanCenterPreventDefault).toHaveBeenCalledOnce();
 
     const edgePreventDefault = vi.fn();
-    routeWorkbenchDockviewDrop(makeDrop("left", edgePreventDefault), onSurfaceDrop);
+    routeWorkbenchDockviewDrop(makeDrop("left", edgePreventDefault), documentModel, onSurfaceDrop);
     expect(edgePreventDefault).toHaveBeenCalledOnce();
     expect(onSurfaceDrop).toHaveBeenCalledWith("surface-1", "group-2", "left");
 
@@ -306,19 +412,54 @@ describe("DockviewLayoutAdapter", () => {
       getData: () => ({ panelId: null }),
       panel: undefined,
       group: { id: "group-2" },
-    } as unknown as DockviewWillDropEvent, onSurfaceDrop);
+    } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(groupPreventDefault).toHaveBeenCalledOnce();
+
+    const staleCenterPreventDefault = vi.fn();
+    routeWorkbenchDockviewDrop({
+      ...makeDrop("center", staleCenterPreventDefault),
+      group: { id: "stale-group" },
+    } as DockviewWillDropEvent, documentModel, onSurfaceDrop);
+    expect(staleCenterPreventDefault).toHaveBeenCalledOnce();
+
+    const staleEdgePreventDefault = vi.fn();
+    routeWorkbenchDockviewDrop({
+      ...makeDrop("left", staleEdgePreventDefault),
+      group: { id: "stale-group" },
+    } as DockviewWillDropEvent, documentModel, onSurfaceDrop);
+    expect(staleEdgePreventDefault).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenCalledOnce();
+  });
+
+  it("uses accurate half-pane overlays for every group drop target", () => {
+    const expected = {
+      size: { type: "percentage", value: 50 },
+      activationSize: { type: "percentage", value: 20 },
+      smallWidthBoundary: 0,
+      smallHeightBoundary: 0,
+    };
+
+    expect(workbenchDockviewDropOverlayModel({ location: "content" })).toEqual(expected);
+    expect(workbenchDockviewDropOverlayModel({ location: "header_space" })).toEqual(expected);
+    expect(workbenchDockviewDropOverlayModel({ location: "tab" })).toEqual(expected);
+    expect(workbenchDockviewDropOverlayModel({ location: "edge" })).toBeUndefined();
   });
 
   it("preserves a keyed panel renderer while the canonical model moves it", async () => {
     const initial = makeTwoGroupDocument();
+    const onCommand = vi.fn((_command: WorkbenchCommand) => true);
     const renderSurface = (surface: { surface_id: string }) => (
       <div data-testid={`renderer-${surface.surface_id}`} />
     );
     const view = render(
-      <DockviewLayoutAdapter document={initial} render_surface={renderSurface} />,
+      <DockviewLayoutAdapter
+        document={initial}
+        render_surface={renderSurface}
+        on_command={onCommand}
+      />,
     );
     const renderer = await screen.findByTestId("renderer-surface-1");
+    onCommand.mockClear();
     const moved = apply(initial, {
       type: "move_surface",
       surface_id: "surface-1",
@@ -327,10 +468,15 @@ describe("DockviewLayoutAdapter", () => {
     });
 
     view.rerender(
-      <DockviewLayoutAdapter document={moved} render_surface={renderSurface} />,
+      <DockviewLayoutAdapter
+        document={moved}
+        render_surface={renderSurface}
+        on_command={onCommand}
+      />,
     );
 
     await waitFor(() => expect(screen.getByTestId("renderer-surface-1")).toBe(renderer));
+    expect(onCommand).not.toHaveBeenCalled();
   });
 
   it("reports canonical active-tab and zoom visibility to retained renderers", async () => {
