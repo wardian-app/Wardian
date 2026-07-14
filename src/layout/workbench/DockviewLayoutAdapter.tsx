@@ -39,7 +39,10 @@ import {
   WorkbenchNewSurfaceAction,
   type WorkbenchPaneTarget,
 } from "./WorkbenchGroupHeader";
-import { WorkbenchTab } from "./WorkbenchTab";
+import {
+  WorkbenchTab,
+  type WorkbenchTabPointerDragIdentity,
+} from "./WorkbenchTab";
 
 export type WorkbenchSurfaceRenderLifecycle = {
   visible: boolean;
@@ -101,7 +104,7 @@ type AdapterRuntime = Pick<
   zoomed_group_id: string | null;
   on_close_surface: (surfaceId: string) => void;
   on_pointer_drag_start: (identity: WorkbenchPointerDragIdentity) => void;
-  on_pointer_drag_end: () => void;
+  on_pointer_drag_end: (identity: WorkbenchPointerDragIdentity) => void;
   on_move_surface: (surfaceId: string, targetGroupId: string) => void;
   on_split_surface: (
     surfaceId: string,
@@ -135,10 +138,7 @@ const WORKBENCH_DOCKVIEW_CENTER_ONLY_OVERLAY: DroptargetOverlayModel = {
   activationSize: { type: "percentage", value: 0 },
 };
 
-export type WorkbenchPointerDragIdentity = {
-  surface_id: string;
-  source_group_id: string;
-};
+export type WorkbenchPointerDragIdentity = WorkbenchTabPointerDragIdentity;
 
 export type WorkbenchRectangle = {
   left: number;
@@ -1013,8 +1013,14 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     pointerTargetGroupIdRef.current = identity.source_group_id;
     setDropOverlayNonce((nonce) => nonce + 1);
   }, []);
-  const endPointerDrag = useCallback((): void => {
-    if (!pointerDragIdentityRef.current && !pointerTargetGroupIdRef.current) return;
+  const endPointerDrag = useCallback((identity: WorkbenchPointerDragIdentity): void => {
+    const activeIdentity = pointerDragIdentityRef.current;
+    if (
+      !activeIdentity
+      || activeIdentity.surface_id !== identity.surface_id
+      || activeIdentity.source_group_id !== identity.source_group_id
+      || activeIdentity.pointer_id !== identity.pointer_id
+    ) return;
     pointerDragIdentityRef.current = null;
     pointerTargetGroupIdRef.current = null;
     setDropOverlayNonce((nonce) => nonce + 1);

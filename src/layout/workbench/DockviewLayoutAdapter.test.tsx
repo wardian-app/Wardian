@@ -392,11 +392,17 @@ describe("DockviewLayoutAdapter", () => {
     diagnostic.mockRestore();
   });
 
-  it("bounds rejection diagnostics to one command context per recovery cycle", () => {
+  it("bounds rejection diagnostics per recovery cycle and re-arms after its microtask", async () => {
     const rejected = vi.fn(() => false);
-    const recover = vi.fn()
-      .mockReturnValueOnce(true)
-      .mockReturnValueOnce(false);
+    let recoveryScheduled = false;
+    const recover = vi.fn(() => {
+      if (recoveryScheduled) return false;
+      recoveryScheduled = true;
+      queueMicrotask(() => {
+        recoveryScheduled = false;
+      });
+      return true;
+    });
     const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const command = { type: "focus_surface", surface_id: "surface-1" } as const;
 
@@ -405,6 +411,10 @@ describe("DockviewLayoutAdapter", () => {
 
     expect(diagnostic).toHaveBeenCalledOnce();
     expect(diagnostic).toHaveBeenCalledWith("Workbench canonical command rejected", { command });
+
+    await Promise.resolve();
+    dispatchWorkbenchAdapterCommand(command, rejected, recover);
+    expect(diagnostic).toHaveBeenCalledTimes(2);
     diagnostic.mockRestore();
   });
 
@@ -609,7 +619,7 @@ describe("DockviewLayoutAdapter", () => {
     expect(workbenchDockviewDropOverlayModel(
       { location: "content" },
       documentModel,
-      { surface_id: "surface-2", source_group_id: "group-2" },
+      { surface_id: "surface-2", source_group_id: "group-2", pointer_id: 7 },
       "group-2",
     )).toEqual({
       ...expected,
@@ -618,7 +628,7 @@ describe("DockviewLayoutAdapter", () => {
     expect(workbenchDockviewDropOverlayModel(
       { location: "content" },
       documentModel,
-      { surface_id: "surface-2", source_group_id: "group-2" },
+      { surface_id: "surface-2", source_group_id: "group-2", pointer_id: 7 },
       "group-1",
     )).toEqual(expected);
   });

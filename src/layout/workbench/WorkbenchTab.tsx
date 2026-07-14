@@ -9,6 +9,12 @@ import {
   type WorkbenchPaneTarget,
 } from "./WorkbenchGroupHeader";
 
+export type WorkbenchTabPointerDragIdentity = {
+  surface_id: string;
+  source_group_id: string;
+  pointer_id: number;
+};
+
 export type WorkbenchTabProps = {
   surface: DeepReadonly<WorkbenchSurfaceV1>;
   title: string;
@@ -17,11 +23,8 @@ export type WorkbenchTabProps = {
   on_close?: () => void;
   on_split?: (direction: "horizontal" | "vertical") => void;
   on_move?: (targetGroupId: string) => void;
-  on_pointer_drag_start?: (identity: {
-    surface_id: string;
-    source_group_id: string;
-  }) => void;
-  on_pointer_drag_end?: () => void;
+  on_pointer_drag_start?: (identity: WorkbenchTabPointerDragIdentity) => void;
+  on_pointer_drag_end?: (identity: WorkbenchTabPointerDragIdentity) => void;
 };
 
 /** Decorates Dockview's owned ARIA tab without introducing a nested tab role. */
@@ -60,23 +63,26 @@ export function WorkbenchTab({
       event.stopPropagation();
       setMenuPosition({ x: event.clientX, y: event.clientY });
     };
-    let pointerActive = false;
-    const clearPointerDrag = (): void => {
-      if (!pointerActive) return;
-      pointerActive = false;
+    let activePointerDrag: WorkbenchTabPointerDragIdentity | null = null;
+    const clearPointerDrag = (event?: PointerEvent): void => {
+      const identity = activePointerDrag;
+      if (!identity || (event && event.pointerId !== identity.pointer_id)) return;
+      activePointerDrag = null;
       window.removeEventListener("pointerup", clearPointerDrag, { capture: true });
       window.removeEventListener("pointercancel", clearPointerDrag, { capture: true });
-      on_pointer_drag_end?.();
+      on_pointer_drag_end?.(identity);
     };
     const handlePointerDown = (event: PointerEvent): void => {
       const target = event.target instanceof Element ? event.target : null;
       if (event.button !== 0 || target?.closest("[data-tab-close]")) return;
       clearPointerDrag();
-      pointerActive = true;
-      on_pointer_drag_start?.({
+      const identity = {
         surface_id: surface.surface_id,
         source_group_id: group_id,
-      });
+        pointer_id: event.pointerId,
+      };
+      activePointerDrag = identity;
+      on_pointer_drag_start?.(identity);
       window.addEventListener("pointerup", clearPointerDrag, { capture: true });
       window.addEventListener("pointercancel", clearPointerDrag, { capture: true });
     };
