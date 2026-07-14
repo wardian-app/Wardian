@@ -138,6 +138,47 @@ describe("DockviewLayoutAdapter", () => {
     expect(within(group).getByRole("button", { name: "Pane actions" })).toBeVisible();
   });
 
+  it("retains a re-added canonical empty group before Dockview republishes it", async () => {
+    const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
+    const initial = makeSingleGroupDocument([surface]);
+    const closed = apply(initial, { type: "close_surface", surface_id: surface.surface_id });
+    const view = render(<DockviewLayoutAdapter document={initial} />);
+    await screen.findByRole("tab", { name: /agents overview/i });
+
+    const groupsGetter = Object.getOwnPropertyDescriptor(DockviewApi.prototype, "groups")?.get;
+    if (!groupsGetter) throw new Error("expected DockviewApi groups getter");
+    const addGroup = DockviewApi.prototype.addGroup;
+    let delayEmptyGroupPublication = false;
+    const groupsSpy = vi.spyOn(DockviewApi.prototype, "groups", "get")
+      .mockImplementation(function groupsWithDelayedEmptyGroup(this: DockviewApi) {
+        const groups = groupsGetter.call(this);
+        return delayEmptyGroupPublication
+          ? groups.filter((group: DockviewGroupPanel) => group.id !== "group-1")
+          : groups;
+      });
+    const addGroupSpy = vi.spyOn(DockviewApi.prototype, "addGroup")
+      .mockImplementation(function addDelayedEmptyGroup(
+        this: DockviewApi,
+        options?: Parameters<DockviewApi["addGroup"]>[0],
+      ) {
+        const group = addGroup.call(this, options);
+        if (group.id === "group-1") delayEmptyGroupPublication = true;
+        return group;
+      });
+
+    try {
+      view.rerender(<DockviewLayoutAdapter document={closed} />);
+      await waitFor(() => expect(screen.getByTestId("workbench-group"))
+        .toHaveAttribute("data-group-id", "group-1"));
+      const group = screen.getByTestId("workbench-group");
+      expect(group).toHaveAttribute("data-active", "true");
+      expect(within(group).getByTestId("workbench-empty-group")).toBeVisible();
+    } finally {
+      addGroupSpy.mockRestore();
+      groupsSpy.mockRestore();
+    }
+  });
+
   it("recovers when the canonical root replaces the sole-tab source group", async () => {
     const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
     const initial = makeSingleGroupDocument([surface]);
@@ -235,6 +276,94 @@ describe("DockviewLayoutAdapter", () => {
     const documentModel = makeTwoGroupDocument();
     expect(isCanonicalWorkbenchGroupDestination(documentModel, "group-2")).toBe(true);
     expect(isCanonicalWorkbenchGroupDestination(documentModel, "stale-group")).toBe(false);
+  });
+
+  it("ignores stale user move and activation callbacks", async () => {
+    type MoveListener = Parameters<DockviewApi["onDidMovePanel"]>[0];
+    type ActivePanelListener = Parameters<DockviewApi["onDidActivePanelChange"]>[0];
+    type ActiveGroupListener = Parameters<DockviewApi["onDidActiveGroupChange"]>[0];
+    const moveDescriptor = Object.getOwnPropertyDescriptor(
+      DockviewApi.prototype,
+      "onDidMovePanel",
+    );
+    const activePanelDescriptor = Object.getOwnPropertyDescriptor(
+      DockviewApi.prototype,
+      "onDidActivePanelChange",
+    );
+    const activeGroupDescriptor = Object.getOwnPropertyDescriptor(
+      DockviewApi.prototype,
+      "onDidActiveGroupChange",
+    );
+    if (!moveDescriptor?.get || !activePanelDescriptor?.get || !activeGroupDescriptor?.get) {
+      throw new Error("expected DockviewApi event getters");
+    }
+    let moveListener: MoveListener | undefined;
+    let activePanelListener: ActivePanelListener | undefined;
+    let activeGroupListener: ActiveGroupListener | undefined;
+    Object.defineProperty(DockviewApi.prototype, "onDidMovePanel", {
+      ...moveDescriptor,
+      get(this: DockviewApi) {
+        const subscribe = moveDescriptor.get?.call(this) as DockviewApi["onDidMovePanel"];
+        return ((listener: MoveListener) => {
+          moveListener = listener;
+          return subscribe(listener);
+        }) as DockviewApi["onDidMovePanel"];
+      },
+    });
+    Object.defineProperty(DockviewApi.prototype, "onDidActivePanelChange", {
+      ...activePanelDescriptor,
+      get(this: DockviewApi) {
+        const subscribe = activePanelDescriptor.get?.call(this) as
+          DockviewApi["onDidActivePanelChange"];
+        return ((listener: ActivePanelListener) => {
+          activePanelListener = listener;
+          return subscribe(listener);
+        }) as DockviewApi["onDidActivePanelChange"];
+      },
+    });
+    Object.defineProperty(DockviewApi.prototype, "onDidActiveGroupChange", {
+      ...activeGroupDescriptor,
+      get(this: DockviewApi) {
+        const subscribe = activeGroupDescriptor.get?.call(this) as
+          DockviewApi["onDidActiveGroupChange"];
+        return ((listener: ActiveGroupListener) => {
+          activeGroupListener = listener;
+          return subscribe(listener);
+        }) as DockviewApi["onDidActiveGroupChange"];
+      },
+    });
+    const onCommand = vi.fn((_command: WorkbenchCommand) => true);
+
+    try {
+      render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} on_command={onCommand} />);
+      await waitFor(() => expect(moveListener).toBeDefined());
+      if (!moveListener || !activePanelListener || !activeGroupListener) {
+        throw new Error("expected adapter event listeners");
+      }
+      onCommand.mockClear();
+      const stalePanel = {
+        id: "surface-1",
+        group: {
+          id: "stale-group",
+          panels: [{ id: "surface-1" }],
+          activePanel: { id: "surface-1" },
+        },
+      };
+
+      moveListener({ panel: stalePanel } as Parameters<MoveListener>[0]);
+      activePanelListener({
+        origin: "user",
+        panel: stalePanel,
+      } as Parameters<ActivePanelListener>[0]);
+      activeGroupListener(stalePanel.group as Parameters<ActiveGroupListener>[0]);
+      await Promise.resolve();
+
+      expect(onCommand).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(DockviewApi.prototype, "onDidActiveGroupChange", activeGroupDescriptor);
+      Object.defineProperty(DockviewApi.prototype, "onDidActivePanelChange", activePanelDescriptor);
+      Object.defineProperty(DockviewApi.prototype, "onDidMovePanel", moveDescriptor);
+    }
   });
 
   it("requests recovery only for canonical panels removed outside projection", () => {

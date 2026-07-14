@@ -621,12 +621,13 @@ function ensureGroups(
 export function projectWorkbenchGroupSizes(
   api: DockviewApi,
   root: DeepReadonly<WorkbenchNodeV1>,
+  groups: Iterable<ReturnType<DockviewApi["addGroup"]>> = api.groups,
 ): void {
   if (!Number.isFinite(api.width) || !Number.isFinite(api.height) || api.width <= 0 || api.height <= 0) {
     return;
   }
   const geometry = normalizedWorkbenchGeometry(root).groups;
-  for (const group of api.groups) {
+  for (const group of groups) {
     const rectangle = geometry[group.id];
     if (!rectangle) continue;
     group.api.setSize({
@@ -734,11 +735,22 @@ function reconcileDockview(
   // canonical Wardian group still exists and must own its empty-surface
   // launcher, header actions, and routing context rather than falling through
   // to Dockview's container-level watermark.
-  ensureGroups(api, document.root, false);
+  const refreshedGroups = ensureGroups(api, document.root, false);
+  const canonicalGroupIds = groupIdsInTreeOrder(document.root);
+  for (const groupId of canonicalGroupIds) {
+    if (!refreshedGroups.has(groupId)) {
+      return {
+        status: "deferred",
+        group_id: groupId,
+        surface_ids: [...document.groups[groupId].surface_ids],
+      };
+    }
+  }
+  const canonicalGroups = canonicalGroupIds.map((groupId) => refreshedGroups.get(groupId)!);
 
-  projectWorkbenchGroupSizes(api, document.root);
+  projectWorkbenchGroupSizes(api, document.root, canonicalGroups);
 
-  for (const groupId of groupIdsInTreeOrder(document.root)) {
+  for (const groupId of canonicalGroupIds) {
     const modelGroup = document.groups[groupId];
     if (modelGroup.active_surface_id) {
       api.getPanel(modelGroup.active_surface_id)?.api.setActive();
@@ -748,17 +760,17 @@ function reconcileDockview(
   if (activeSurfaceId) {
     api.getPanel(activeSurfaceId)?.api.setActive();
   } else {
-    api.groups.find((group) => group.id === document.active_group_id)?.api.setActive();
+    refreshedGroups.get(document.active_group_id)?.api.setActive();
   }
 
   if (zoomedGroupId) {
-    const zoomed = api.groups.find((group) => group.id === zoomedGroupId);
+    const zoomed = refreshedGroups.get(zoomedGroupId);
     if (zoomed && !zoomed.api.isMaximized()) zoomed.api.maximize();
   } else if (api.hasMaximizedGroup()) {
     api.exitMaximizedGroup();
   }
 
-  for (const group of api.groups) {
+  for (const group of canonicalGroups) {
     group.element.dataset.testid = "workbench-group";
     group.element.dataset.groupId = group.id;
     group.element.dataset.active = String(group.id === document.active_group_id);
