@@ -1602,6 +1602,111 @@ describe("AgentTerminal scrollback", () => {
     expect(terminalRendererBudget.size("xterm")).toBe(24);
   });
 
+  it("does not retire a replacement renderer when a stale restore rejects", async () => {
+    const restoreSnapshot = deferred<ReturnType<typeof modernSnapshot>>();
+    let snapshotRequestCount = 0;
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: Record<string, unknown> } | undefined)?.request;
+      const presentationId = String(request?.presentation_id ?? "stale-restore-pane");
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "request_terminal_snapshot") {
+        snapshotRequestCount += 1;
+        return snapshotRequestCount === 1 ? restoreSnapshot.promise : modernSnapshot();
+      }
+      if (command === "update_terminal_presentation") {
+        const result = modernRegistrationResult("stale-restore-pane");
+        return {
+          ...result,
+          presentation: {
+            ...result.presentation,
+            visibility: request?.visibility ?? "visible",
+            render_state: request?.render_state ?? "mounted",
+          },
+        };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("stale-restore-pane").presentation;
+      }
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      return undefined;
+    });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const view = render(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="stale-restore-pane"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "register_terminal_presentation",
+        expect.anything(),
+      ));
+
+      act(() => {
+        for (let index = 0; index < 24; index += 1) {
+          terminalRendererBudget.acquire("xterm", `stale-restore-other-${index}`, () => undefined);
+        }
+        terminalRendererBudget.release("xterm", "stale-restore-other-0");
+      });
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "request_terminal_snapshot",
+        expect.anything(),
+      ));
+      expect(mockTerminal).toHaveBeenCalledTimes(2);
+
+      view.rerender(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="stale-restore-pane"
+          visibility="hidden"
+          renderState="suspended"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+      view.rerender(
+        <AgentTerminal
+          sessionId="modern-agent"
+          presentationId="stale-restore-pane"
+          visibility="visible"
+          renderState="mounted"
+          provider="codex"
+          theme="dark"
+        />,
+      );
+
+      await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(3));
+      const replacement = getLatestTerminalInstance();
+      expect(terminalRendererBudget.has("xterm", "stale-restore-pane")).toBe(true);
+
+      await act(async () => {
+        restoreSnapshot.reject(new Error("stale restore failed"));
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(snapshotRequestCount).toBe(2));
+      expect(consoleError).not.toHaveBeenCalledWith(
+        "Terminal renderer restore failed:",
+        expect.anything(),
+      );
+      expect(replacement.dispose).not.toHaveBeenCalled();
+      expect(terminalRendererBudget.has("xterm", "stale-restore-pane")).toBe(true);
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("cancels an in-flight restore when the presentation becomes hidden", async () => {
     const restoreSnapshot = deferred<ReturnType<typeof modernSnapshot>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
@@ -2003,6 +2108,57 @@ describe("AgentTerminal scrollback", () => {
     // No second xterm was constructed; the original instance was reused.
     expect(mockTerminal).toHaveBeenCalledTimes(1);
     expect(firstInstance.dispose).not.toHaveBeenCalled();
+  });
+
+  it("ignores context loss from a retired WebGL generation after replacement", async () => {
+    const contextLossCallbacks: Array<() => void> = [];
+    mockWebglAddon.mockImplementation(function MockWebglAddon() {
+      return {
+        onContextLoss: vi.fn((callback: () => void) => contextLossCallbacks.push(callback)),
+        clearTextureAtlas: vi.fn(),
+        dispose: vi.fn(),
+      } as any;
+    });
+
+    const view = render(
+      <AgentTerminal sessionId="stale-webgl-loss" provider="codex" theme="dark" />,
+    );
+    await waitFor(() => expect(contextLossCallbacks).toHaveLength(1));
+
+    const retiredTerminal = getLatestTerminalInstance();
+    const retiredAddon = mockWebglAddon.mock.results[0]?.value as { dispose: ReturnType<typeof vi.fn> };
+    view.rerender(
+      <AgentTerminal
+        sessionId="stale-webgl-loss"
+        visibility="hidden"
+        renderState="suspended"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    view.rerender(
+      <AgentTerminal sessionId="stale-webgl-loss" provider="codex" theme="dark" />,
+    );
+
+    await waitFor(() => expect(contextLossCallbacks).toHaveLength(2));
+    const replacementTerminal = getLatestTerminalInstance();
+    expect(replacementTerminal).not.toBe(retiredTerminal);
+    const replacementAddon = mockWebglAddon.mock.results[1]?.value as {
+      dispose: ReturnType<typeof vi.fn>;
+    };
+    const retiredDisposeCalls = retiredAddon.dispose.mock.calls.length;
+    const retiredRefreshCalls = retiredTerminal.refresh.mock.calls.length;
+    replacementTerminal.refresh.mockClear();
+    replacementAddon.dispose.mockClear();
+    expect(terminalRendererBudget.has("webgl", "stale-webgl-loss")).toBe(true);
+
+    act(() => contextLossCallbacks[0]?.());
+
+    expect(retiredAddon.dispose).toHaveBeenCalledTimes(retiredDisposeCalls);
+    expect(retiredTerminal.refresh).toHaveBeenCalledTimes(retiredRefreshCalls);
+    expect(replacementAddon.dispose).not.toHaveBeenCalled();
+    expect(replacementTerminal.refresh).not.toHaveBeenCalled();
+    expect(terminalRendererBudget.has("webgl", "stale-webgl-loss")).toBe(true);
   });
 
   it("disposes the presentation entry once it stays unmounted past the grace window", async () => {

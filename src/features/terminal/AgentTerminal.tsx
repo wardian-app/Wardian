@@ -1189,12 +1189,20 @@ function loadWebglForRenderer(renderer: TerminalRendererEntry, sessionId: string
     // outside the frame callback reads back cleared pixels).
     const webglAddon = new WebglAddon(true);
     webglAddon.onContextLoss(() => {
+      const entry = terminalSessionMap.get(sessionId);
+      if (
+        !entry ||
+        !rendererRemainsCurrent(entry, renderer) ||
+        renderer.webglAddon !== webglAddon
+      ) {
+        return;
+      }
+      // Clear ownership before disposal so a synchronous/repeated loss signal
+      // cannot release a newer lease for this presentation.
+      renderer.webglAddon = null;
       webglAddon.dispose();
       webglPool.delete(sessionId);
       terminalRendererBudget.release("webgl", sessionId);
-      if (renderer.webglAddon === webglAddon) {
-        renderer.webglAddon = null;
-      }
       renderer.term.refresh(0, Math.max(renderer.term.rows - 1, 0));
     });
     renderer.term.loadAddon(webglAddon);
@@ -2585,6 +2593,9 @@ export const AgentTerminal = memo(function AgentTerminal({
     setRendererRestoreError(null);
     markRendererReady(false);
     let brokerWasMounted = false;
+    let restoringRenderer: TerminalRendererEntry | null = null;
+    const restoringRendererRemainsCurrent = () =>
+      restoringRenderer !== null && rendererRemainsCurrent(entry, restoringRenderer);
     const lifecycleAllowsRestore = () => {
       const lifecycle = presentationLifecycleRef.current;
       return lifecycle.visibility === "visible" && lifecycle.renderState === "mounted";
@@ -2613,15 +2624,20 @@ export const AgentTerminal = memo(function AgentTerminal({
       }
     };
     const disposeRestoringRenderer = () => {
-      const restoringRenderer = entry.renderer;
-      if (restoringRenderer) {
-        entry.renderer = null;
-        retireRenderer(restoringRenderer, terminalKey);
+      if (!restoringRenderer || !restoringRendererRemainsCurrent()) {
+        return false;
       }
-      xtermRef.current = null;
-      fitAddonRef.current = null;
+      entry.renderer = null;
+      retireRenderer(restoringRenderer, terminalKey);
+      if (xtermRef.current === restoringRenderer.term) {
+        xtermRef.current = null;
+      }
+      if (fitAddonRef.current === restoringRenderer.fitAddon) {
+        fitAddonRef.current = null;
+      }
       rendererEvictedRef.current = true;
       setRendererEvicted(true);
+      return true;
     };
     try {
       const renderer = mountRenderer(terminalKey, entry, container, { evictExisting: false });
@@ -2634,6 +2650,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
         return;
       }
+      restoringRenderer = renderer;
       renderer.term.options.theme = terminalThemeForProvider(
         effectiveTheme,
         entry.provider ?? provider,
@@ -2645,6 +2662,9 @@ export const AgentTerminal = memo(function AgentTerminal({
         void drainPty(terminalKey);
       } else {
         await entry.terminalClient.requestPresentationSnapshot(presentationId);
+        if (!restoringRendererRemainsCurrent()) {
+          return;
+        }
         if (!lifecycleAllowsRestore()) {
           disposeRestoringRenderer();
           return;
@@ -2658,6 +2678,9 @@ export const AgentTerminal = memo(function AgentTerminal({
           observed_lease_epoch: entry.brokerState?.lease_epoch ?? 0,
         });
         brokerWasMounted = true;
+        if (!restoringRendererRemainsCurrent()) {
+          return;
+        }
         if (result) {
           entry.presentationState = result.presentation;
           entry.brokerState = result.broker_state;
@@ -2666,6 +2689,9 @@ export const AgentTerminal = memo(function AgentTerminal({
             result.broker_state.owner_presentation_id === presentationId
           ) {
             await entry.terminalClient.resyncOwner(presentationId);
+            if (!restoringRendererRemainsCurrent()) {
+              return;
+            }
             if (!lifecycleAllowsRestore()) {
               await suspendBrokerPresentation();
               disposeRestoringRenderer();
@@ -2675,27 +2701,49 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
         if (!lifecycleAllowsRestore()) {
           await suspendBrokerPresentation();
+          if (!restoringRendererRemainsCurrent()) {
+            return;
+          }
           disposeRestoringRenderer();
           return;
         }
       }
 
+      if (!restoringRendererRemainsCurrent()) {
+        return;
+      }
       const fitted = await prepareRendererForReveal(entry, container, {
         allowDuringRestore: true,
       });
+      if (!restoringRendererRemainsCurrent()) {
+        return;
+      }
       if (!fitted) {
         throw new Error("Terminal renderer could not be fitted to its container");
       }
       if (!lifecycleAllowsRestore()) {
         await suspendBrokerPresentation();
+        if (!restoringRendererRemainsCurrent()) {
+          return;
+        }
         disposeRestoringRenderer();
         return;
       }
       rendererEvictedRef.current = false;
       setRendererEvicted(false);
     } catch (error) {
+      if (restoringRenderer && !restoringRendererRemainsCurrent()) {
+        return;
+      }
       await suspendBrokerPresentation();
-      disposeRestoringRenderer();
+      if (restoringRenderer) {
+        if (!disposeRestoringRenderer()) {
+          return;
+        }
+      } else {
+        rendererEvictedRef.current = true;
+        setRendererEvicted(true);
+      }
       setRendererRestoreError(String(error));
       console.error("Terminal renderer restore failed:", error);
     } finally {
