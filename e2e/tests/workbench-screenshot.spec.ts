@@ -100,7 +100,8 @@ test("renders a capture-ready tabs-and-splits workbench", async ({ page }, testI
 });
 
 test("renders a capture-ready new-tab surface launcher", async ({ page }, testInfo) => {
-  const document = makeWorkbenchDocument({ revision: 3, surfaces: [] });
+  const dashboard = makeWorkbenchSurface("dashboard-launcher-evidence", "dashboard");
+  const document = makeWorkbenchDocument({ revision: 3, surfaces: [dashboard] });
   await page.setViewportSize({ width: 1440, height: 900 });
   await installWorkbenchIpcMock(page, {
     load_result: {
@@ -113,6 +114,12 @@ test("renders a capture-ready new-tab surface launcher", async ({ page }, testIn
   });
 
   await page.goto("/");
+  const group = page.getByTestId("workbench-group").filter({
+    has: surfaceTab(page, "dashboard"),
+  });
+  await group.getByLabel("Open Surface", { exact: true }).click();
+  await expect(group.getByRole("tab", { name: "New Tab", exact: true }))
+    .toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: "Choose a surface" })).toBeVisible();
   await expect(page.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
   await expect(page.getByText("Monitor active agents.", { exact: true })).toBeVisible();
