@@ -17,6 +17,11 @@ export type WorkbenchTabProps = {
   on_close?: () => void;
   on_split?: (direction: "horizontal" | "vertical") => void;
   on_move?: (targetGroupId: string) => void;
+  on_pointer_drag_start?: (identity: {
+    surface_id: string;
+    source_group_id: string;
+  }) => void;
+  on_pointer_drag_end?: () => void;
 };
 
 /** Decorates Dockview's owned ARIA tab without introducing a nested tab role. */
@@ -28,6 +33,8 @@ export function WorkbenchTab({
   on_close,
   on_split,
   on_move,
+  on_pointer_drag_start,
+  on_pointer_drag_end,
 }: WorkbenchTabProps) {
   const descriptorRef = useRef<HTMLSpanElement>(null);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
@@ -53,13 +60,44 @@ export function WorkbenchTab({
       event.stopPropagation();
       setMenuPosition({ x: event.clientX, y: event.clientY });
     };
+    let pointerActive = false;
+    const clearPointerDrag = (): void => {
+      if (!pointerActive) return;
+      pointerActive = false;
+      window.removeEventListener("pointerup", clearPointerDrag, { capture: true });
+      window.removeEventListener("pointercancel", clearPointerDrag, { capture: true });
+      on_pointer_drag_end?.();
+    };
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (event.button !== 0 || target?.closest("[data-tab-close]")) return;
+      clearPointerDrag();
+      pointerActive = true;
+      on_pointer_drag_start?.({
+        surface_id: surface.surface_id,
+        source_group_id: group_id,
+      });
+      window.addEventListener("pointerup", clearPointerDrag, { capture: true });
+      window.addEventListener("pointercancel", clearPointerDrag, { capture: true });
+    };
     tab.addEventListener("keydown", handleCloseKey, { capture: true });
     tab.addEventListener("contextmenu", handleContextMenu);
+    tab.addEventListener("pointerdown", handlePointerDown);
     return () => {
+      clearPointerDrag();
       tab.removeEventListener("keydown", handleCloseKey, { capture: true });
       tab.removeEventListener("contextmenu", handleContextMenu);
+      tab.removeEventListener("pointerdown", handlePointerDown);
     };
-  }, [on_close, surface.resource_key, surface.surface_id, surface.surface_type]);
+  }, [
+    group_id,
+    on_close,
+    on_pointer_drag_end,
+    on_pointer_drag_start,
+    surface.resource_key,
+    surface.surface_id,
+    surface.surface_type,
+  ]);
   const menuItems: WorkbenchMenuItem[] = [
     { label: "Close tab", on_select: () => on_close?.() },
     { label: "Split tab right", on_select: () => on_split?.("horizontal") },

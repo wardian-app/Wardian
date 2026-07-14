@@ -376,15 +376,36 @@ describe("DockviewLayoutAdapter", () => {
   it("requests one self-heal only when the canonical writer explicitly rejects", () => {
     const rejected = vi.fn(() => false);
     const accepted = vi.fn(() => true);
-    const recover = vi.fn();
+    const recover = vi.fn(() => true);
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const command = { type: "focus_surface", surface_id: "surface-1" } as const;
 
     expect(dispatchWorkbenchAdapterCommand(command, rejected, recover)).toBe(false);
     expect(recover).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledWith("Workbench canonical command rejected", { command });
     recover.mockClear();
+    diagnostic.mockClear();
     expect(dispatchWorkbenchAdapterCommand(command, accepted, recover)).toBe(true);
     expect(dispatchWorkbenchAdapterCommand(command, undefined, recover)).toBe(false);
     expect(recover).toHaveBeenCalledOnce();
+    expect(diagnostic).not.toHaveBeenCalled();
+    diagnostic.mockRestore();
+  });
+
+  it("bounds rejection diagnostics to one command context per recovery cycle", () => {
+    const rejected = vi.fn(() => false);
+    const recover = vi.fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const command = { type: "focus_surface", surface_id: "surface-1" } as const;
+
+    dispatchWorkbenchAdapterCommand(command, rejected, recover);
+    dispatchWorkbenchAdapterCommand(command, rejected, recover);
+
+    expect(diagnostic).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledWith("Workbench canonical command rejected", { command });
+    diagnostic.mockRestore();
   });
 
   it("seeds both sides before subdividing mixed depth-three canonical trees", () => {
@@ -558,9 +579,20 @@ describe("DockviewLayoutAdapter", () => {
     } as DockviewWillDropEvent, documentModel, onSurfaceDrop);
     expect(staleEdgePreventDefault).toHaveBeenCalledOnce();
     expect(onSurfaceDrop).toHaveBeenCalledOnce();
+
+    const soleTabSelfEdgePreventDefault = vi.fn();
+    routeWorkbenchDockviewDrop({
+      position: "right",
+      preventDefault: soleTabSelfEdgePreventDefault,
+      getData: () => ({ panelId: "surface-2" }),
+      panel: undefined,
+      group: { id: "group-2" },
+    } as unknown as DockviewWillDropEvent, documentModel, onSurfaceDrop);
+    expect(soleTabSelfEdgePreventDefault).toHaveBeenCalledOnce();
+    expect(onSurfaceDrop).toHaveBeenCalledOnce();
   });
 
-  it("uses accurate half-pane overlays for every group drop target", () => {
+  it("uses accurate half-pane overlays except for a sole-tab self target", () => {
     const expected = {
       size: { type: "percentage", value: 50 },
       activationSize: { type: "percentage", value: 20 },
@@ -572,6 +604,23 @@ describe("DockviewLayoutAdapter", () => {
     expect(workbenchDockviewDropOverlayModel({ location: "header_space" })).toEqual(expected);
     expect(workbenchDockviewDropOverlayModel({ location: "tab" })).toEqual(expected);
     expect(workbenchDockviewDropOverlayModel({ location: "edge" })).toBeUndefined();
+
+    const documentModel = makeTwoGroupDocument();
+    expect(workbenchDockviewDropOverlayModel(
+      { location: "content" },
+      documentModel,
+      { surface_id: "surface-2", source_group_id: "group-2" },
+      "group-2",
+    )).toEqual({
+      ...expected,
+      activationSize: { type: "percentage", value: 0 },
+    });
+    expect(workbenchDockviewDropOverlayModel(
+      { location: "content" },
+      documentModel,
+      { surface_id: "surface-2", source_group_id: "group-2" },
+      "group-1",
+    )).toEqual(expected);
   });
 
   it("preserves a keyed panel renderer while the canonical model moves it", async () => {
@@ -841,6 +890,36 @@ describe("DockviewLayoutAdapter", () => {
 
     await waitFor(() => expect(screen.getByTestId("workbench-group")).toHaveFocus());
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("focuses the canonical surviving active tab after closing a collapsing pane", async () => {
+    let documentModel = makeTwoGroupDocument();
+    let view: ReturnType<typeof render>;
+    const onCloseSurface = (surfaceId: string): void => {
+      documentModel = apply(documentModel, { type: "close_surface", surface_id: surfaceId });
+      view.rerender(
+        <DockviewLayoutAdapter
+          document={documentModel}
+          safe_mode
+          on_close_surface={onCloseSurface}
+        />,
+      );
+    };
+    view = render(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        safe_mode
+        on_close_surface={onCloseSurface}
+      />,
+    );
+
+    const closeAction = screen.getByRole("tab", { name: "Agent Session" })
+      .querySelector<HTMLElement>("[data-tab-close]");
+    if (!closeAction) throw new Error("expected pointer close affordance");
+    fireEvent.click(closeAction);
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Agents Overview" })).toHaveFocus());
+    expect(screen.getByTestId("workbench-group")).toHaveAttribute("data-group-id", "group-1");
   });
 
   it("routes tab context actions through close, edge-split, and canonical move boundaries", async () => {

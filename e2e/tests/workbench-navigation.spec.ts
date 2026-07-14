@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import type { WorkbenchDocumentV1 } from "../../src/types";
@@ -505,7 +503,62 @@ test("moves a sole source tab to another pane center and collapses the source pa
   expect(fatalDragErrors()).toEqual([]);
 });
 
-test("shows an accurate half-pane edge preview and splits with a real pointer drop", async ({ page }) => {
+test("keeps a sole-tab self-edge preview center-only without creating a group", async ({ page }) => {
+  const fatalDragErrors = installDragErrorMonitor(page);
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  const ipc = await bootWorkbench(page, makeWorkbenchDocument({
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [dashboard.surface_id],
+        active_surface_id: dashboard.surface_id,
+      },
+    },
+    surfaces: [dashboard],
+  }));
+
+  const targetGroup = workbenchGroup(page, "group-1");
+  const contentTarget = targetGroup.locator(":scope > .dv-content-container");
+  const dashboardTab = surfaceTab(page, "dashboard");
+  const [, targetBounds, contentBounds] = await waitForStableBoundingBoxes(
+    page,
+    [dashboardTab, targetGroup, contentTarget],
+  );
+
+  await dragSurfaceTab(page, dashboardTab, {
+    x: contentBounds.x + contentBounds.width - 6,
+    y: contentBounds.y + contentBounds.height * 0.6,
+  }, async () => {
+    const selection = page.locator(".dv-drop-target-selection:visible");
+    await expect(selection).toHaveCount(1);
+    const [selectionBounds, actualContentBounds] = await waitForStableBoundingBoxes(
+      page,
+      [selection, contentTarget],
+    );
+    const tolerance = 5;
+    expect(Math.abs(selectionBounds.x - actualContentBounds.x)).toBeLessThanOrEqual(tolerance);
+    expect(Math.abs(selectionBounds.width - actualContentBounds.width)).toBeLessThanOrEqual(tolerance);
+    expect(selectionBounds.width).toBeGreaterThan(actualContentBounds.width * 0.9);
+  });
+
+  await expect(page.locator(".dv-drop-target-selection:visible")).toHaveCount(0);
+  await expect(page.getByTestId("workbench-group")).toHaveCount(1);
+  await expect(surfaceOwner(page, "dashboard-1")).toHaveAttribute("data-group-id", "group-1");
+  const finalBounds = await targetGroup.boundingBox();
+  expect(finalBounds).not.toBeNull();
+  expect(Math.abs(finalBounds!.x - targetBounds.x)).toBeLessThanOrEqual(2);
+  expect(Math.abs(finalBounds!.width - targetBounds.width)).toBeLessThanOrEqual(2);
+  await expectPersistedTopology(ipc, (saved) => (
+    saved.root.kind === "group"
+    && saved.root.group_id === "group-1"
+    && Object.keys(saved.groups).length === 1
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1"
+    && noEmptyNonFinalGroup(saved)
+  ));
+  expect(fatalDragErrors()).toEqual([]);
+});
+
+test("shows an accurate half-pane edge preview and splits with a real pointer drop", async ({ page }, testInfo) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   const queue = makeWorkbenchSurface("queue-1", "queue");
@@ -527,9 +580,7 @@ test("shows an accurate half-pane edge preview and splits with a real pointer dr
     page,
     [queueTab, targetGroup, contentTarget],
   );
-  const screenshotPath = path.resolve(
-    "e2e/screenshots/workbench-drag-drop/2026-07-14/edge-preview.png",
-  );
+  const screenshotPath = testInfo.outputPath("edge-preview.png");
 
   await dragSurfaceTab(page, queueTab, {
     x: contentBounds.x + contentBounds.width - 6,

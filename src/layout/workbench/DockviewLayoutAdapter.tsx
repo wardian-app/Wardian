@@ -8,6 +8,7 @@ import {
   useState,
   type CSSProperties,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -99,6 +100,8 @@ type AdapterRuntime = Pick<
   surface_title?: WorkbenchSurfaceTitle;
   zoomed_group_id: string | null;
   on_close_surface: (surfaceId: string) => void;
+  on_pointer_drag_start: (identity: WorkbenchPointerDragIdentity) => void;
+  on_pointer_drag_end: () => void;
   on_move_surface: (surfaceId: string, targetGroupId: string) => void;
   on_split_surface: (
     surfaceId: string,
@@ -126,6 +129,15 @@ const WORKBENCH_DOCKVIEW_DROP_OVERLAY: DroptargetOverlayModel = {
   activationSize: { type: "percentage", value: 20 },
   smallWidthBoundary: 0,
   smallHeightBoundary: 0,
+};
+const WORKBENCH_DOCKVIEW_CENTER_ONLY_OVERLAY: DroptargetOverlayModel = {
+  ...WORKBENCH_DOCKVIEW_DROP_OVERLAY,
+  activationSize: { type: "percentage", value: 0 },
+};
+
+export type WorkbenchPointerDragIdentity = {
+  surface_id: string;
+  source_group_id: string;
 };
 
 export type WorkbenchRectangle = {
@@ -365,13 +377,32 @@ export function workbenchSplitRatioCommands(
   });
 }
 
-/** Uses one accurate half-pane preview for pointer and keyboard group drop targets. */
+/** Reports whether an edge drop would split a sole tab back into its own group. */
+export function isSoleTabSelfDrop(
+  document: ReadonlyWorkbenchDocumentV1,
+  surfaceId: string,
+  targetGroupId: string,
+): boolean {
+  const target = document.groups[targetGroupId];
+  return target?.surface_ids.length === 1 && target.surface_ids[0] === surfaceId;
+}
+
+/** Uses accurate half-pane previews, except when a sole tab targets its own content. */
 export function workbenchDockviewDropOverlayModel(
   { location }: DropOverlayModelParams,
+  document?: ReadonlyWorkbenchDocumentV1,
+  dragIdentity?: WorkbenchPointerDragIdentity | null,
+  targetGroupId?: string,
 ): DroptargetOverlayModel | undefined {
-  return location === "content" || location === "header_space" || location === "tab"
-    ? WORKBENCH_DOCKVIEW_DROP_OVERLAY
-    : undefined;
+  if (location !== "content" && location !== "header_space" && location !== "tab") {
+    return undefined;
+  }
+  return document
+    && dragIdentity
+    && targetGroupId === dragIdentity.source_group_id
+    && isSoleTabSelfDrop(document, dragIdentity.surface_id, targetGroupId)
+    ? WORKBENCH_DOCKVIEW_CENTER_ONLY_OVERLAY
+    : WORKBENCH_DOCKVIEW_DROP_OVERLAY;
 }
 
 /** Reports whether a transient Dockview destination still exists canonically. */
@@ -402,6 +433,10 @@ export function routeWorkbenchDockviewDrop(
   ) return;
   event.preventDefault();
   if (!targetGroupId || !isCanonicalWorkbenchGroupDestination(document, targetGroupId)) return;
+  if (
+    event.position !== "center"
+    && isSoleTabSelfDrop(document, surfaceId, targetGroupId)
+  ) return;
   onSurfaceDrop?.(surfaceId, targetGroupId, event.position);
 }
 
@@ -409,11 +444,14 @@ export function routeWorkbenchDockviewDrop(
 export function dispatchWorkbenchAdapterCommand(
   command: WorkbenchCommand,
   onCommand: DockviewLayoutAdapterProps["on_command"],
-  onRejected: () => void,
+  onRejected: () => boolean,
 ): boolean {
   const accepted = onCommand?.(command);
   if (accepted !== true) {
-    onRejected();
+    const recoveryScheduled = onRejected();
+    if (accepted === false && recoveryScheduled) {
+      console.error("Workbench canonical command rejected", { command });
+    }
     return false;
   }
   return true;
@@ -525,6 +563,8 @@ function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<Workbench
         params.surface.surface_id,
         targetGroupId,
       )}
+      on_pointer_drag_start={runtime.on_pointer_drag_start}
+      on_pointer_drag_end={runtime.on_pointer_drag_end}
     />
   );
 }
@@ -917,6 +957,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   } = props;
   const [api, setApi] = useState<DockviewApi | null>(null);
   const [reconcileNonce, setReconcileNonce] = useState(0);
+  const [dropOverlayNonce, setDropOverlayNonce] = useState(0);
   const expectedMovesRef = useRef(new Map<
     string,
     { group_id: string; index: number; transaction: number }
@@ -929,6 +970,8 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
   const deferredDocumentRef = useRef<ReadonlyWorkbenchDocumentV1 | null>(null);
   const lastApiSizeRef = useRef<{ width: number; height: number } | null>(null);
   const pendingCloseFocusRef = useRef<{ surface_id: string; group_id: string } | null>(null);
+  const pointerDragIdentityRef = useRef<WorkbenchPointerDragIdentity | null>(null);
+  const pointerTargetGroupIdRef = useRef<string | null>(null);
   const documentRef = useRef(document);
   const onCommandRef = useRef(on_command);
   const renderSurfaceRef = useRef(render_surface);
@@ -947,13 +990,14 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     [],
   );
 
-  const requestCanonicalReconcile = useCallback(() => {
-    if (reconcileScheduledRef.current) return;
+  const requestCanonicalReconcile = useCallback((): boolean => {
+    if (reconcileScheduledRef.current) return false;
     reconcileScheduledRef.current = true;
     queueMicrotask(() => {
       reconcileScheduledRef.current = false;
       setReconcileNonce((nonce) => nonce + 1);
     });
+    return true;
   }, []);
   const emitCommand = useCallback((command: WorkbenchCommand): boolean => (
     dispatchWorkbenchAdapterCommand(command, onCommandRef.current, requestCanonicalReconcile)
@@ -963,6 +1007,34 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     () => normalizedWorkbenchGeometry(document.root),
     [document.root],
   );
+
+  const beginPointerDrag = useCallback((identity: WorkbenchPointerDragIdentity): void => {
+    pointerDragIdentityRef.current = identity;
+    pointerTargetGroupIdRef.current = identity.source_group_id;
+    setDropOverlayNonce((nonce) => nonce + 1);
+  }, []);
+  const endPointerDrag = useCallback((): void => {
+    if (!pointerDragIdentityRef.current && !pointerTargetGroupIdRef.current) return;
+    pointerDragIdentityRef.current = null;
+    pointerTargetGroupIdRef.current = null;
+    setDropOverlayNonce((nonce) => nonce + 1);
+  }, []);
+  const trackPointerTargetGroup = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!pointerDragIdentityRef.current) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const groupId = target?.closest<HTMLElement>("[data-group-id]")?.dataset.groupId ?? null;
+    if (pointerTargetGroupIdRef.current === groupId) return;
+    pointerTargetGroupIdRef.current = groupId;
+    setDropOverlayNonce((nonce) => nonce + 1);
+  }, []);
+  const dropOverlayModel = useCallback((params: DropOverlayModelParams) => (
+    workbenchDockviewDropOverlayModel(
+      params,
+      documentRef.current,
+      pointerDragIdentityRef.current,
+      params.group?.id ?? pointerTargetGroupIdRef.current ?? undefined,
+    )
+  ), [dropOverlayNonce]);
 
   const requestSurfaceClose = useCallback((surfaceId: string): void => {
     const currentDocument = documentRef.current;
@@ -983,6 +1055,8 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     on_split_group: props.on_split_group,
     on_close_group: props.on_close_group,
     on_close_surface: requestSurfaceClose,
+    on_pointer_drag_start: beginPointerDrag,
+    on_pointer_drag_end: endPointerDrag,
     on_join_group: props.on_join_group,
     render_home: props.render_home,
     zoomed_group_id,
@@ -1003,7 +1077,9 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     },
   }), [
     document,
+    beginPointerDrag,
     emitCommand,
+    endPointerDrag,
     render_surface,
     props.on_close_group,
     props.on_join_group,
@@ -1080,14 +1156,15 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       return;
     }
     pendingCloseFocusRef.current = null;
-    const group = document.groups[pending.group_id];
+    const group = document.groups[pending.group_id]
+      ?? document.groups[document.active_group_id];
     const targetSurfaceId = group?.active_surface_id;
     const targetTab = targetSurfaceId
       ? [...globalThis.document.querySelectorAll<HTMLElement>('[role="tab"][data-surface-id]')]
           .find((tab) => tab.dataset.surfaceId === targetSurfaceId)
       : undefined;
     const targetGroup = [...globalThis.document.querySelectorAll<HTMLElement>('[data-group-id]')]
-      .find((element) => element.dataset.groupId === pending.group_id);
+      .find((element) => element.dataset.groupId === group?.group_id);
     (targetTab ?? targetGroup)?.focus();
   }, [document]);
 
@@ -1213,6 +1290,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
         data-layout-source="wardian-model"
         data-safe-mode={String(safe_mode)}
         data-zoomed-group-id={zoomed_group_id ?? "none"}
+        onPointerMoveCapture={trackPointerTargetGroup}
       >
         {safe_mode ? (
           <SafeWorkbenchLayout {...props} on_close_surface={requestSurfaceClose} />
@@ -1225,7 +1303,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
             rightHeaderActionsComponent={DockviewGroupActions}
             watermarkComponent={DockviewEmptyGroup}
             dndStrategy="pointer"
-            dropOverlayModel={workbenchDockviewDropOverlayModel}
+            dropOverlayModel={dropOverlayModel}
             keyboardNavigation
             onReady={handleReady}
             onWillDrop={handleWillDrop}
