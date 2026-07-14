@@ -957,8 +957,17 @@ export function applyWorkbenchCommand(
     case "close_surface":
       return removeWorkbenchSurface(document, command.surface_id, true);
 
-    case "discard_surface":
+    case "discard_surface": {
+      const surface = document.surfaces[command.surface_id];
+      if (surface && surface.surface_type !== "new-tab") {
+        return commandRejected(
+          document,
+          "only New Tab surfaces can be discarded",
+          "$.command.surface_id",
+        );
+      }
       return removeWorkbenchSurface(document, command.surface_id, false);
+    }
 
     case "reopen_closed_surface": {
       const closed = document.recently_closed[0];

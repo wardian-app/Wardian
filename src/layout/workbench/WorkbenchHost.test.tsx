@@ -132,6 +132,31 @@ describe("WorkbenchHost", () => {
       .not.toBeInTheDocument());
   });
 
+  it("consumes the inline placeholder when Browse all reopens a recently closed surface", async () => {
+    const dashboard = makeSurface("surface-1", { surface_type: "dashboard" });
+    const closedQueue = makeSurface("queue-closed", { surface_type: "queue" });
+    const initial = makeSingleGroupDocument([dashboard]);
+    initial.recently_closed = [{
+      surface: closedQueue,
+      previous_group_id: "group-1",
+      previous_index: 1,
+    }];
+    const store = createWorkbenchStore({ initial_document: initial });
+
+    render(<WorkbenchHost store={store} create_id={() => "new-tab-1"} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open Surface" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse all surfaces" }));
+    fireEvent.click(screen.getByRole("option", { name: "Reopen Queue" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Open Surface" }))
+      .not.toBeInTheDocument());
+    expect(store.getState().document.groups["group-1"].surface_ids)
+      .toEqual(["surface-1", "queue-closed"]);
+    expect(store.getState().document.surfaces["new-tab-1"]).toBeUndefined();
+    expect(store.getState().document.surfaces["queue-closed"]).toEqual(closedQueue);
+    expect(store.getState().document.recently_closed).toEqual([]);
+  });
+
   it("opens the searchable list directly when the new tab preference is palette", async () => {
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([

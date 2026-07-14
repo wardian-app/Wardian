@@ -162,6 +162,49 @@ describe("workbench navigation service", () => {
     expect(document.recently_closed).toEqual([]);
   });
 
+  it("atomically consumes a New Tab placeholder before reopening a closed surface", () => {
+    const registry = createSurfaceRegistry([definition("new-tab")]);
+    const dashboard = makeSurface("dashboard-1", { surface_type: "dashboard" });
+    const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
+    const queue = makeSurface("queue-closed", { surface_type: "queue" });
+    const initial = makeSingleGroupDocument([dashboard, placeholder]);
+    initial.recently_closed = [{
+      surface: queue,
+      previous_group_id: "group-1",
+      previous_index: 1,
+    }];
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+    const beforeVersion = store.getState().transaction_version;
+
+    navigation.reopen_closed_from_placeholder("placeholder");
+
+    const document = store.getState().document;
+    expect(document.groups["group-1"].surface_ids).toEqual(["dashboard-1", "queue-closed"]);
+    expect(document.groups["group-1"].active_surface_id).toBe("queue-closed");
+    expect(document.surfaces.placeholder).toBeUndefined();
+    expect(document.surfaces["queue-closed"]).toEqual(queue);
+    expect(document.recently_closed).toEqual([]);
+    expect(store.getState().transaction_version).toBe(beforeVersion + 1);
+  });
+
+  it("preserves the placeholder when an atomic reopen has no closed surface", () => {
+    const registry = createSurfaceRegistry([definition("new-tab")]);
+    const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
+    const initial = makeSingleGroupDocument([placeholder]);
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+    const beforeVersion = store.getState().transaction_version;
+    const beforeDocument = store.getState().document;
+
+    expect(() => navigation.reopen_closed_from_placeholder("placeholder"))
+      .toThrow("there is no recently closed surface");
+
+    expect(store.getState().document).toBe(beforeDocument);
+    expect(store.getState().document.surfaces.placeholder).toEqual(placeholder);
+    expect(store.getState().transaction_version).toBe(beforeVersion);
+  });
+
   it("opens to the side as one transaction and activates the new group/tab", () => {
     const registry = createSurfaceRegistry([definition("notes")]);
     const store = createWorkbenchStore({

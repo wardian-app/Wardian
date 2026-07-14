@@ -448,6 +448,24 @@ describe("workbench model", () => {
     expect(document.recently_closed).toEqual([previouslyClosed]);
   });
 
+  it("rejects history-free discard for ordinary surfaces", () => {
+    const dashboard = makeSurface("surface-dashboard", { surface_type: "dashboard" });
+    const document = makeSingleGroupDocument([dashboard]);
+
+    const result = applyWorkbenchCommand(document, {
+      type: "discard_surface",
+      surface_id: dashboard.surface_id,
+    });
+
+    expect(result.accepted).toBe(false);
+    expect(result.document).toBe(document);
+    if (result.accepted) throw new Error("ordinary surface discard unexpectedly accepted");
+    expect(result.errors).toContainEqual({
+      path: "$.command.surface_id",
+      message: "only New Tab surfaces can be discarded",
+    });
+  });
+
   it("collapses an active group closed through its final surface and reopens in the sibling subtree", () => {
     let document = makeSingleGroupDocument([makeSurface("surface-1")]);
     document = acceptedDocument(applyWorkbenchCommand(document, {

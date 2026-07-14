@@ -222,10 +222,7 @@ export function WorkbenchHost({
           navigation.open_from_placeholder(surface.surface_id, { surface_type: surfaceType });
         }}
         on_reopen_closed={() => {
-          store.getState().apply_commands([
-            { type: "discard_surface", surface_id: surface.surface_id },
-            { type: "reopen_closed_surface" },
-          ]);
+          navigation.reopen_closed_from_placeholder(surface.surface_id);
         }}
       />
     );

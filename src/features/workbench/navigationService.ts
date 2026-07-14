@@ -21,6 +21,8 @@ export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
   /** Converts an inline New Tab in place, or discards it before focusing a matching singleton. */
   open_from_placeholder(surface_id: string, request: OpenSurfaceRequest): string;
+  /** Atomically consumes an inline New Tab before reopening the latest closed surface. */
+  reopen_closed_from_placeholder(surface_id: string): void;
   open_to_side(
     request: OpenSurfaceRequest,
     direction?: "horizontal" | "vertical",
@@ -178,6 +180,13 @@ export function createWorkbenchNavigationService(
         { type: "focus_surface", surface_id: surfaceId },
       ]);
       return surfaceId;
+    },
+
+    reopen_closed_from_placeholder: (surfaceId) => {
+      apply([
+        { type: "discard_surface", surface_id: surfaceId },
+        { type: "reopen_closed_surface" },
+      ]);
     },
 
     open_to_side: (request, direction = "horizontal") => {

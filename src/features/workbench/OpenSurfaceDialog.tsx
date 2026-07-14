@@ -135,7 +135,11 @@ export function OpenSurfaceDialog({
   const activateIndex = (index: number, toSide: boolean): void => {
     if (showRecent) {
       if (index === 0) {
-        on_reopen_closed?.();
+        if (placeholder_surface_id) {
+          navigation.reopen_closed_from_placeholder(placeholder_surface_id);
+        } else {
+          on_reopen_closed?.();
+        }
         requestClose();
         return;
       }
