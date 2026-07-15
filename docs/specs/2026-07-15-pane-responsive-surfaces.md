@@ -79,3 +79,10 @@ Unit tests cover:
 Browser tests build a real Workbench split document and open each non-agent surface in a partial-width group. They assert that surface roots do not horizontally overflow, primary controls do not overlap, compact drawers remain closable, and canvas-based surfaces receive non-zero pane geometry. Representative screenshots cover Agents Auto, a later Grid gutter while scrolled, and compact Workflows.
 
 Native tests remain reserved for terminal renderer fitting and PTY geometry. The layout algorithm and DOM affordances are proven at unit and browser layers; a native smoke confirms that the changed Agents Auto geometry still fits live terminal renderers without initialization or ownership regressions.
+
+### Implementation evidence
+
+- The half-width browser matrix covers New Tab, Dashboard, Queue, Graph, Garden, Library, and Workflows in a real horizontal Workbench split.
+- The Grid regression scrolls beyond the first rows and verifies the gutter center remains exactly one grid gap above the following card.
+- The native terminal-rendering smoke passes split UTF-8 input, resize, scroll, and outside-xterm parity checks in an isolated Wardian home.
+- Representative states: [compact Workflows](../../e2e/screenshots/pane-responsive-surfaces/2026-07-15/workflows-compact.png) and [Agents Auto preferred geometry](../../e2e/screenshots/pane-responsive-surfaces/2026-07-15/agents-auto-preferred.png).

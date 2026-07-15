@@ -90,7 +90,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
     selectedAgentIds.size === 1 ? unitKey({ kind: "agent", id: [...selectedAgentIds][0] }) : null;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="garden-view flex-1 flex flex-col min-h-0">
       {rendererActive ? <GardenCanvas
         agentUnits={agentUnits}
         workflowUnits={workflowUnits}

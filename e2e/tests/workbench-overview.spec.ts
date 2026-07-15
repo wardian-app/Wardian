@@ -187,3 +187,39 @@ test("restores persisted Single independently of roster targets and falls back w
   await expect(page.locator("#agent-card-agent-alpha")).toBeVisible();
   await expect(visibleAgentCards(page)).toHaveCount(1);
 });
+
+test("keeps later Grid row gutters aligned after scrolling", async ({ page }) => {
+  const agents = [ALPHA_AGENT, BETA_AGENT, ...Array.from({ length: 4 }, (_, index) => ({
+    session_id: `agent-extra-${index + 1}`,
+    session_name: `Extra ${index + 1}`,
+    agent_class: "Coder",
+    folder: `/workspace/extra-${index + 1}`,
+    provider: "mock",
+    is_off: false,
+  }))];
+  await bootOverview(page, {
+    document: overviewDocument("grid"),
+    agents,
+    viewport: { width: 1200, height: 650 },
+  });
+
+  const container = page.getByTestId("agents-overview-container");
+  const grid = page.getByTestId("agent-grid");
+  await expect(visibleAgentCards(page)).toHaveCount(6);
+  const columns = await grid.evaluate((element) =>
+    getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length);
+  const nextRowCard = visibleAgentCards(page).nth(columns * 2);
+  const secondRowGutter = grid.locator('[data-resize-handle="v"]').nth(1);
+
+  await container.evaluate((element) => {
+    element.scrollTop = 760;
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+  const cardBounds = await nextRowCard.boundingBox();
+  const gutterBounds = await secondRowGutter.boundingBox();
+  expect(cardBounds).not.toBeNull();
+  expect(gutterBounds).not.toBeNull();
+  const gutterCenter = gutterBounds!.y + (gutterBounds!.height / 2);
+  expect(Math.abs(cardBounds!.y - gutterCenter - 6)).toBeLessThanOrEqual(1);
+});
