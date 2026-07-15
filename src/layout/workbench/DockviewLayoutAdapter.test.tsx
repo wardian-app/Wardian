@@ -278,7 +278,7 @@ describe("DockviewLayoutAdapter", () => {
     }
   });
 
-  it("reprojects a retained canonical group's tab strip as visible top chrome", async () => {
+  it("repairs a retained group's tab strip after a Dockview-only layout change", async () => {
     const documentModel = makeSingleGroupDocument([
       makeSurface("surface-1", { surface_type: "agents-overview" }),
     ]);
@@ -295,7 +295,7 @@ describe("DockviewLayoutAdapter", () => {
       });
 
     try {
-      const view = render(<DockviewLayoutAdapter document={documentModel} />);
+      render(<DockviewLayoutAdapter document={documentModel} />);
       await screen.findByRole("tab", { name: /agents overview/i });
       if (!projectedGroup) throw new Error("expected canonical Dockview group");
 
@@ -306,9 +306,9 @@ describe("DockviewLayoutAdapter", () => {
       expect(projectedGroup.header.hidden).toBe(true);
       expect(projectedGroup.api.getHeaderPosition()).toBe("bottom");
 
-      view.rerender(
-        <DockviewLayoutAdapter document={structuredClone(documentModel)} />,
-      );
+      act(() => {
+        projectedGroup!.api.setSize({ width: 700, height: 500 });
+      });
 
       await waitFor(() => expect(projectedGroup?.header.hidden).toBe(false));
       expect(projectedGroup.api.getHeaderPosition()).toBe("top");
