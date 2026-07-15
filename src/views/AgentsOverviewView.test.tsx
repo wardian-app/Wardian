@@ -762,6 +762,29 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(root.style.gridAutoRows).toBe('612px');
   });
 
+  it('positions later row gutters from grid padding and accumulated gaps', () => {
+    act(() => {
+      useLayoutStore.getState().setColumnTracks([1]);
+      useLayoutStore.getState().setRowHeight(450);
+    });
+    const thirdAgent = {
+      session_id: 'agent-3',
+      session_name: 'Gamma',
+      agent_class: 'Reviewer',
+      folder: '/workspace',
+      is_off: false,
+    };
+
+    const { container } = renderGrid(null, [...agents, thirdAgent]);
+    const handles = container.querySelectorAll<HTMLElement>('[data-resize-handle="v"]');
+
+    expect(screen.getByTestId('agent-grid').style.gap).toBe('6px');
+    expect(screen.getByTestId('agent-grid').style.padding).toBe('6px');
+    expect(handles).toHaveLength(2);
+    expect(handles[0].style.top).toBe('450px');
+    expect(handles[1].style.top).toBe('906px');
+  });
+
   it('uses a narrower minimum width for chat cards', () => {
     useSettingsStore.getState().setGridCardDisplayMode('chat');
 
@@ -865,6 +888,18 @@ describe('AgentsOverviewView stacked mode', () => {
     const { container } = renderGrid(null, agents);
     const handles = container.querySelectorAll('[data-resize-handle="stack-exit"]');
     expect(handles.length).toBe(agents.length);
+  });
+
+  it('positions stacked exit handles from each padded row origin', () => {
+    act(() => {
+      useLayoutStore.getState().setGridStacked(true);
+      useLayoutStore.getState().setRowHeight(450);
+    });
+    const { container } = renderGrid(null, agents);
+    const handles = container.querySelectorAll<HTMLElement>('[data-resize-handle="stack-exit"]');
+
+    expect(handles[0].style.top).toBe('6px');
+    expect(handles[1].style.top).toBe('462px');
   });
 
   it('hides inter-column gutters when gridStacked is true', () => {

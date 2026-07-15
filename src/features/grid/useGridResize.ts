@@ -1,5 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useLayoutStore } from '../../store/useLayoutStore';
+import {
+  DEFAULT_AGENTS_OVERVIEW_GAP,
+  agentsOverviewGridRowBoundary,
+} from './agentsOverviewLayout';
 
 const SNAP_WEIGHTS = [0.333, 0.5, 0.666];
 const SNAP_THRESHOLD = 0.02; // 2% threshold for magnetic snapping
@@ -78,21 +82,25 @@ export const useGridResize = (containerRef: React.RefObject<HTMLDivElement | nul
       const mouseY = e.clientY - rect.top;
       const SNAP_HEIGHTS = [300, 450, 600, 800];
       const HEIGHT_SNAP_THRESHOLD = 20;
+      const rowIdx = resizing.index;
+      const completedGapWidth = rowIdx * DEFAULT_AGENTS_OVERVIEW_GAP;
+      const rawHeight = (
+        mouseY
+        - DEFAULT_AGENTS_OVERVIEW_GAP
+        - completedGapWidth
+      ) / (rowIdx + 1);
 
-      let finalY = mouseY;
+      let rowHeight = rawHeight;
       for (const snap of SNAP_HEIGHTS) {
-        if (Math.abs(mouseY - snap) < HEIGHT_SNAP_THRESHOLD) {
-          finalY = snap;
+        if (Math.abs(rawHeight - snap) < HEIGHT_SNAP_THRESHOLD) {
+          rowHeight = snap;
           break;
         }
       }
 
-      setGuidePos(finalY);
-
-      const rowIdx = resizing.index;
-      const calculatedHeight = finalY / (rowIdx + 1);
-
-      setRowHeight(Math.max(300, calculatedHeight));
+      const nextRowHeight = Math.max(300, rowHeight);
+      setGuidePos(agentsOverviewGridRowBoundary(rowIdx, nextRowHeight));
+      setRowHeight(nextRowHeight);
     }
   }, [resizing, containerRef, layout.column_tracks, setColumnTracks, setRowHeight]);
 

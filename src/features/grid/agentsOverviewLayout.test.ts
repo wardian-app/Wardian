@@ -5,8 +5,11 @@ import {
   AGENTS_OVERVIEW_RESIZE_DEBOUNCE_MS,
   CHAT_CARD_FLOOR,
   CHAT_CARD_PREFERRED,
+  DEFAULT_AGENTS_OVERVIEW_GAP,
   TERMINAL_CARD_FLOOR,
   TERMINAL_CARD_PREFERRED,
+  agentsOverviewGridRowBoundary,
+  agentsOverviewGridRowOrigin,
   generateAgentsOverviewCandidates,
   resolveAgentsOverviewLayout,
   selectBestAgentsOverviewCandidate,
@@ -27,6 +30,15 @@ const chatAgents = (count: number): AgentsOverviewLayoutAgent[] =>
   }));
 
 describe("Agents layout", () => {
+  it("uses one exact padding and gap source for persisted Grid row geometry", () => {
+    expect(DEFAULT_AGENTS_OVERVIEW_GAP).toBe(6);
+    expect(agentsOverviewGridRowOrigin(0, 450)).toBe(6);
+    expect(agentsOverviewGridRowOrigin(1, 450)).toBe(462);
+    expect(agentsOverviewGridRowOrigin(2, 450)).toBe(918);
+    expect(agentsOverviewGridRowBoundary(0, 450)).toBe(456);
+    expect(agentsOverviewGridRowBoundary(1, 450)).toBe(912);
+  });
+
   it("scores all column candidates and breaks area ties by empty cells", () => {
     const candidates = generateAgentsOverviewCandidates({
       agents: terminalAgents(5),

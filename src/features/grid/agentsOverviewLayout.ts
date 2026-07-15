@@ -91,7 +91,25 @@ export const CHAT_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.fre
 export const AGENTS_OVERVIEW_CARD_CHROME_HEIGHT = 52;
 export const AGENTS_OVERVIEW_RESIZE_DEBOUNCE_MS = 120;
 export const AGENTS_OVERVIEW_SCORE_IMPROVEMENT_THRESHOLD = 0.1;
-export const DEFAULT_AGENTS_OVERVIEW_GAP = 8;
+export const DEFAULT_AGENTS_OVERVIEW_GAP = 6;
+
+/** Top offset of a persisted Grid row inside its padded grid content. */
+export function agentsOverviewGridRowOrigin(
+  rowIndex: number,
+  rowHeight: number,
+  gap = DEFAULT_AGENTS_OVERVIEW_GAP,
+): number {
+  return gap + (Math.max(0, rowIndex) * (rowHeight + gap));
+}
+
+/** Bottom boundary of a persisted Grid row inside its padded grid content. */
+export function agentsOverviewGridRowBoundary(
+  rowIndex: number,
+  rowHeight: number,
+  gap = DEFAULT_AGENTS_OVERVIEW_GAP,
+): number {
+  return agentsOverviewGridRowOrigin(rowIndex, rowHeight, gap) + rowHeight;
+}
 
 const FLOAT_COMPARISON_EPSILON = 0.0001;
 

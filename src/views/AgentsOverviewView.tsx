@@ -11,7 +11,10 @@ import { useAgentsOverviewLayout } from "../features/grid/useAgentsOverviewLayou
 import { MAX_XTERM_RENDERERS } from "../features/terminal/terminalRendererBudget";
 import {
   CHAT_CARD_FLOOR,
+  DEFAULT_AGENTS_OVERVIEW_GAP,
   TERMINAL_CARD_FLOOR,
+  agentsOverviewGridRowBoundary,
+  agentsOverviewGridRowOrigin,
 } from "../features/grid/agentsOverviewLayout";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 
@@ -392,9 +395,9 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       : mode === "grid"
         ? `${manualLayout.row_height}px`
         : `${overviewLayout.cardHeight}px`,
-    gap: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
+    gap: (isMaximized || renderStacked) ? '0' : `${DEFAULT_AGENTS_OVERVIEW_GAP}px`,
     background: 'transparent',
-    padding: (isMaximized || renderStacked) ? '0' : 'var(--density-grid-gap)',
+    padding: (isMaximized || renderStacked) ? '0' : `${DEFAULT_AGENTS_OVERVIEW_GAP}px`,
     height: isMaximized ? '100%' : mode === "grid" ? 'auto' : '100%',
     minWidth: gridMinWidth,
   };
@@ -587,7 +590,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                   data-resize-handle="stack-exit"
                   className="absolute right-0 z-30 group/gutter flex justify-center"
                   style={{
-                    top: `calc(${idx} * ${manualLayout.row_height}px)`,
+                    top: `${agentsOverviewGridRowOrigin(idx, manualLayout.row_height)}px`,
                     height: `${manualLayout.row_height}px`,
                     width: '12px',
                     cursor: 'col-resize',
@@ -608,14 +611,15 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
           {/* Vertical Gutters (Column Resizing) */}
           {!gridStacked && visibleColumnTracks.slice(0, -1).map((_weight, i) => {
             const leftWeight = visibleColumnTracks.slice(0, i + 1).reduce((a, b) => a + b, 0);
-            const totalSpacing = 16 + (visibleColumnTracks.length - 1) * 8;
+            const totalSpacing = (2 * DEFAULT_AGENTS_OVERVIEW_GAP)
+              + (visibleColumnTracks.length - 1) * DEFAULT_AGENTS_OVERVIEW_GAP;
             return (
               <div
                 key={`gutter-h-${i}`}
                 data-resize-handle="h"
                 className="absolute top-0 bottom-0 z-30 group/gutter flex justify-center"
                 style={{
-                  left: `calc(8px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * 8}px + 4px - 6px)`,
+                  left: `calc(${DEFAULT_AGENTS_OVERVIEW_GAP}px + ${leftWeight} * (100% - ${totalSpacing}px) + ${i * DEFAULT_AGENTS_OVERVIEW_GAP}px + ${DEFAULT_AGENTS_OVERVIEW_GAP / 2}px - 6px)`,
                   width: '12px',
                   cursor: 'col-resize'
                 }}
@@ -634,9 +638,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
               data-resize-handle="v"
               className="absolute left-0 right-0 z-30 group/gutter flex items-center"
               style={{ 
-                top: mode === "grid"
-                  ? `calc(${(i + 1) * manualLayout.row_height}px - 6px)`
-                  : `calc(var(--density-grid-gap) + ${(i + 1) * overviewLayout.cardHeight}px + ${i} * var(--density-grid-gap) - 3px)`,
+                top: `${agentsOverviewGridRowBoundary(i, manualLayout.row_height) - 6}px`,
                 height: '12px',
                 cursor: 'row-resize'
               }}
