@@ -76,6 +76,7 @@ export class TerminalSessionClient {
   #brokerState: TerminalBrokerState | null = null;
   #replacementOwnerCandidate: string | null = null;
   #lastOwnerPresentationId: string | null = null;
+  #runtimeTransitionPending = false;
   #runtimeGeneration = 0;
   #cursor = 0;
   #subscription: Promise<TerminalEventSubscriptionResult> | null = null;
@@ -176,7 +177,7 @@ export class TerminalSessionClient {
         ...binding.registration,
         ...update,
       };
-      if (!this.#brokerState) {
+      if (!this.#brokerState || this.#runtimeTransitionPending) {
         return null;
       }
       let result: TerminalPresentationUpdateResult;
@@ -253,6 +254,9 @@ export class TerminalSessionClient {
   ) {
     const binding = this.#requiredPresentation(presentationId);
     return this.#serialize(async () => {
+      if (this.#runtimeTransitionPending) {
+        return null;
+      }
       const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
         request: { session_id: this.sessionId },
       });
@@ -470,14 +474,21 @@ export class TerminalSessionClient {
               notification.runtime_generation === this.#runtimeGeneration &&
               (notification.lifecycle === "runtime_paused" ||
                 notification.lifecycle === "runtime_replaced") &&
-              this.#brokerState?.owner_presentation_id
+              !this.#runtimeTransitionPending
             ) {
-              this.#replacementOwnerCandidate = this.#brokerState.owner_presentation_id;
+              this.#replacementOwnerCandidate = this.#brokerState?.owner_presentation_id
+                ?? this.#lastOwnerPresentationId;
+              this.#runtimeTransitionPending = true;
+              // The paused actor and its presentation registry are no longer a
+              // valid IPC target. The next generation will establish a fresh
+              // consumer after each local presentation re-registers.
+              this.#subscription = null;
             }
             for (const binding of this.#presentations.values()) {
               binding.callbacks.onLifecycle?.(notification);
             }
             if (notification.runtime_generation > this.#runtimeGeneration) {
+              this.#runtimeTransitionPending = true;
               const previousOwnerPresentationId = this.#replacementOwnerCandidate
                 ?? this.#brokerState?.owner_presentation_id
                 ?? this.#lastOwnerPresentationId
@@ -503,6 +514,7 @@ export class TerminalSessionClient {
   }
 
   async #retryRegistrationsForGeneration(previousOwnerPresentationId: string | null = null) {
+    let recoveredPresentations = 0;
     for (const [presentationId, binding] of this.#presentations) {
       try {
         const result = await invoke<TerminalPresentationRegistrationResult>(
@@ -516,6 +528,7 @@ export class TerminalSessionClient {
         this.#setBrokerState(result.broker_state);
         await this.#applySnapshot(binding, result.initial_snapshot);
         binding.callbacks.onRegistrationRecovered?.(result);
+        recoveredPresentations += 1;
       } catch {
         // A later lifecycle notification or explicit remount retries again.
       }
@@ -525,11 +538,15 @@ export class TerminalSessionClient {
       await this.#restorePreviousOwner(previousOwnerPresentationId);
       this.queueDrain();
     }
+    if (recoveredPresentations === this.#presentations.size) {
+      this.#runtimeTransitionPending = false;
+    }
   }
 
   async #recoverPresentation(
     binding: PresentationBinding,
   ) {
+    this.#runtimeTransitionPending = true;
     const previousGeneration = this.#runtimeGeneration;
     const result = await invoke<TerminalPresentationRegistrationResult>(
       "register_terminal_presentation",
@@ -544,6 +561,7 @@ export class TerminalSessionClient {
     await this.#ensureSubscription(result.broker_state.runtime_generation);
     binding.callbacks.onRegistrationRecovered?.(result);
     await this.#restorePreviousOwner(this.#lastOwnerPresentationId);
+    this.#runtimeTransitionPending = false;
     return result;
   }
 

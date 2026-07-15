@@ -66,6 +66,12 @@ epoch, revokes owners and pending activation, resets parser/replay state, and
 requires fresh presentation synchronization. A reused session ID therefore
 cannot let a stale renderer write to a replacement PTY.
 
+The desktop client treats `runtime_paused` as the beginning of that transition.
+It stops issuing presentation updates and snapshot requests to the paused
+generation, remembers the current owner, and waits for the replacement
+generation before re-registering. A `PresentationNotFound` retry is only a
+fallback for missed or racy lifecycle delivery, not the normal clear flow.
+
 After synchronization, a client may restore the exact presentation that owned
 the immediately preceding generation through the ordinary two-phase activation
 protocol. Restoration is allowed only while that presentation is still

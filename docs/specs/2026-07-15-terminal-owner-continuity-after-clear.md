@@ -15,11 +15,14 @@ until another explicit activation gesture happened to run.
 
 ## Decision
 
-`TerminalSessionClient` remembers the owner from the immediately preceding
-runtime generation while processing a replacement lifecycle notification. It
-first re-registers presentations, applies replacement snapshots, and restores
-the desktop event subscription. It may then run the normal two-phase activation
-protocol for the previous owner when all of these remain true:
+`TerminalSessionClient` treats the current generation's `runtime_paused`
+lifecycle notification as the start of replacement, before clear removes the
+old presentation registry. It remembers the owner and suppresses presentation
+updates and snapshot requests against that stale generation. When the broker
+announces the replacement generation, the client first re-registers
+presentations, applies replacement snapshots, and restores the desktop event
+subscription. It may then run the normal two-phase activation protocol for the
+previous owner when all of these remain true:
 
 - the same presentation is still registered;
 - it is visible and mounted;
@@ -32,6 +35,9 @@ presentation merely because it re-registered first. A hidden, suspended,
 read-only, removed, or superseded owner remains unowned until a user explicitly
 activates an eligible presentation.
 
+`PresentationNotFound` recovery remains a defensive fallback for a missed or
+racy lifecycle notification. It is not the expected clear path.
+
 ## Verification
 
 - A presentation that owns generation 1 is re-registered for generation 2,
@@ -39,6 +45,8 @@ activates an eligible presentation.
   lease epoch.
 - A replacement that already has an owner is not taken over.
 - A removed or ineligible previous owner is not restored.
+- A paused-generation presentation update and snapshot request issue no stale
+  IPC before replacement registration completes.
 - Existing explicit click and keyboard activation behavior remains unchanged.
 - Native runtime coverage proves input before clear and verifies that the
   replacement presentation remounts without an initialization fatal error.
