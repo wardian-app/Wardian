@@ -78,13 +78,13 @@ export const CHAT_CARD_FLOOR: Readonly<AgentsOverviewCardFloor> = Object.freeze(
 
 /** Preferred working bounds for a terminal card before Auto begins compressing. */
 export const TERMINAL_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
-  width: 520,
+  width: 720,
   height: 450,
 });
 
 /** Preferred working bounds for a chat card before Auto begins compressing. */
 export const CHAT_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
-  width: 360,
+  width: 520,
   height: 450,
 });
 
@@ -440,10 +440,13 @@ function chooseAutoCandidate(
 ): AgentsOverviewGridCandidate | null {
   if (agents.length <= 1) return null;
   const previousOrientation = previousLayout?.candidate?.orientation;
-  const floor = requiredFloor(agents);
+  const preferred = requiredPreferredSize(agents);
   const maxColumns = Math.min(
     agents.length,
-    Math.floor((finiteNonNegative(containerSize.width) + gap) / (floor.width + gap)),
+    Math.max(
+      1,
+      Math.floor((finiteNonNegative(containerSize.width) + gap) / (preferred.width + gap)),
+    ),
   );
   const candidateColumns = maxColumns < 2
     ? [1]

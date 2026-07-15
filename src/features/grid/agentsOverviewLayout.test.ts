@@ -98,8 +98,8 @@ describe("Agents layout", () => {
     });
 
     expect(result.presentationMode).toBe("grid");
-    expect(result.columns).toBe(3);
-    expect(result.rows).toBe(4);
+    expect(result.columns).toBe(2);
+    expect(result.rows).toBe(6);
     expect(result.cardWidth).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.width);
     expect(result.cardHeight).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.height);
     expect(result.requiresScroll).toBe(true);
@@ -114,7 +114,7 @@ describe("Agents layout", () => {
       gap: 6,
     });
 
-    expect(TERMINAL_CARD_PREFERRED).toEqual({ width: 520, height: 450 });
+    expect(TERMINAL_CARD_PREFERRED).toEqual({ width: 720, height: 450 });
     expect(result.presentationMode).toBe("grid");
     expect(result.columns).toBe(1);
     expect(result.cardHeight).toBe(TERMINAL_CARD_PREFERRED.height);
@@ -155,12 +155,29 @@ describe("Agents layout", () => {
       gap: 6,
     });
 
-    expect(CHAT_CARD_PREFERRED).toEqual({ width: 360, height: 450 });
+    expect(CHAT_CARD_PREFERRED).toEqual({ width: 520, height: 450 });
     expect(result.cardHeight).toBe(CHAT_CARD_PREFERRED.height);
     expect(result.cardHeight).toBeGreaterThan(CHAT_CARD_FLOOR.height);
   });
 
-  it("keeps a two-column Auto grid with one vertically overflowing row below the card floor", () => {
+  it("keeps a preferred-width two-column Auto grid with one vertically overflowing row", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(2),
+      containerSize: { width: 1448, height: 200 },
+      gap: 8,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(2);
+    expect(result.rows).toBe(1);
+    expect(result.cardWidth).toBe(TERMINAL_CARD_PREFERRED.width);
+    expect(result.cardHeight).toBe(TERMINAL_CARD_FLOOR.height);
+    expect(result.requiresScroll).toBe(true);
+    expect(result.contentHeight).toBe(TERMINAL_CARD_FLOOR.height);
+  });
+
+  it("keeps one Auto column when only two hard-floor cards would fit", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(2),
@@ -169,32 +186,15 @@ describe("Agents layout", () => {
     });
 
     expect(result.presentationMode).toBe("grid");
-    expect(result.columns).toBe(2);
-    expect(result.rows).toBe(1);
-    expect(result.cardWidth).toBe(TERMINAL_CARD_FLOOR.width);
-    expect(result.cardHeight).toBe(TERMINAL_CARD_FLOOR.height);
-    expect(result.requiresScroll).toBe(true);
-    expect(result.contentHeight).toBe(TERMINAL_CARD_FLOOR.height);
-  });
-
-  it("stacks Auto when the pane is one pixel too narrow for two useful cards", () => {
-    const result = resolveAgentsOverviewLayout({
-      mode: "auto",
-      agents: terminalAgents(2),
-      containerSize: { width: 1039, height: 200 },
-      gap: 8,
-    });
-
-    expect(result.presentationMode).toBe("grid");
     expect(result.columns).toBe(1);
     expect(result.visibleAgentIds).toEqual(["agent-1", "agent-2"]);
   });
 
-  it("uses multiple Auto columns whenever two floor-sized cards fit", () => {
+  it("uses multiple Auto columns when two preferred-width cards fit", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(4),
-      containerSize: { width: 1048, height: 2200 },
+      containerSize: { width: 1448, height: 2200 },
       gap: 8,
     });
 
@@ -203,18 +203,18 @@ describe("Agents layout", () => {
     expect(result.visibleAgentIds).toHaveLength(4);
   });
 
-  it("does not preserve a one-column Auto grid after two floor-sized columns fit", () => {
+  it("does not preserve a one-column Auto grid after two preferred-width columns fit", () => {
     const agents = terminalAgents(4);
     const legacyLayout = resolveAgentsOverviewLayout({
       mode: "grid",
       agents,
-      containerSize: { width: 1048, height: 2200 },
+      containerSize: { width: 1448, height: 2200 },
       gap: 8,
     });
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1048, height: 2200 },
+      containerSize: { width: 1448, height: 2200 },
       previousLayout: { ...legacyLayout, requestedMode: "auto" },
       gap: 8,
     });
@@ -260,7 +260,7 @@ describe("Agents layout", () => {
       containerSize: { width: 1600, height: 1600 },
       gap: 8,
     });
-    expect(previous.candidate?.columns).toBe(3);
+    expect(previous.candidate?.columns).toBe(2);
 
     const resized = resolveAgentsOverviewLayout({
       mode: "auto",
@@ -278,13 +278,13 @@ describe("Agents layout", () => {
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1575, height: 950 },
+      containerSize: { width: 2175, height: 950 },
       gap: 8,
     });
     const widened = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1576, height: 950 },
+      containerSize: { width: 2176, height: 950 },
       previousLayout: previous,
       gap: 8,
     });
@@ -293,12 +293,12 @@ describe("Agents layout", () => {
     expect(widened.candidate?.columns).toBe(3);
   });
 
-  it("stacks Auto immediately after a two-column hard-floor crossing", () => {
+  it("stacks Auto immediately after a two-column preferred-width crossing", () => {
     const agents = terminalAgents(2);
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1048, height: 280 },
+      containerSize: { width: 1448, height: 280 },
       gap: 8,
     });
     expect(previous.presentationMode).toBe("grid");
@@ -306,7 +306,7 @@ describe("Agents layout", () => {
     const narrowed = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1039, height: 280 },
+      containerSize: { width: 1447, height: 280 },
       previousLayout: previous,
       gap: 8,
     });
@@ -323,7 +323,7 @@ describe("Agents layout", () => {
         { id: "chat-1", cardMode: "chat" },
         { id: "chat-2", cardMode: "chat" },
       ],
-      containerSize: { width: (CHAT_CARD_FLOOR.width * 2) + 8, height: CHAT_CARD_FLOOR.height },
+      containerSize: { width: (CHAT_CARD_PREFERRED.width * 2) + 8, height: CHAT_CARD_FLOOR.height },
       gap: 8,
     });
     const mixed = resolveAgentsOverviewLayout({
@@ -332,7 +332,7 @@ describe("Agents layout", () => {
         { id: "terminal", cardMode: "terminal" },
         { id: "chat", cardMode: "chat" },
       ],
-      containerSize: { width: (CHAT_CARD_FLOOR.width * 2) + 8, height: CHAT_CARD_FLOOR.height },
+      containerSize: { width: (CHAT_CARD_PREFERRED.width * 2) + 8, height: CHAT_CARD_FLOOR.height },
       gap: 8,
     });
 

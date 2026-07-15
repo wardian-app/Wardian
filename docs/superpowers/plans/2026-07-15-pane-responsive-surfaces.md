@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- Terminal preferred size is 520 x 450px; terminal hard floor remains 520 x 280px.
-- Chat preferred size is 360 x 450px; chat hard floor remains 360 x 280px.
+- Terminal preferred size is 720 x 450px; terminal hard floor remains 520 x 280px.
+- Chat preferred size is 520 x 450px; chat hard floor remains 360 x 280px.
 - Explicit Single is the only Agents mode that hides the rest of the roster.
 - Responsive decisions use the live Dockview pane width, not `window.innerWidth` or viewport media queries.
 - Use Wardian theme variables/classes; add no hardcoded Tailwind palette colors.
@@ -60,8 +60,8 @@ Expected: the 950px case reports roughly 311px card height instead of the prefer
 Add preferred constants and select the visible row count nearest the preferred height while clamping it to the number of hard-floor rows that fit:
 
 ```ts
-export const TERMINAL_CARD_PREFERRED = Object.freeze({ width: 520, height: 450 });
-export const CHAT_CARD_PREFERRED = Object.freeze({ width: 360, height: 450 });
+export const TERMINAL_CARD_PREFERRED = Object.freeze({ width: 720, height: 450 });
+export const CHAT_CARD_PREFERRED = Object.freeze({ width: 520, height: 450 });
 
 function preferredViewportRows(height: number, preferredHeight: number, floorHeight: number, gap: number): number {
   const innerHeight = Math.max(0, height - (2 * gap));
