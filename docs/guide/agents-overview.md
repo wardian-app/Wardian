@@ -18,7 +18,7 @@ The surface header provides three modes:
 - **Grid** keeps multiple visible cards and enables direct grid sizing and ordering controls. The layout can scroll when the available area is smaller than the cards' usable floor.
 - **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it. **Minimize** restores the last explicit multi-agent mode, Auto or Grid, and reveals the roster again.
 
-Auto derives its layout from the current surface dimensions and preserves useful card floors while extra rows scroll. It does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
+Auto derives its layout from the current surface dimensions and targets comfortable working cards before adding rows or columns. Terminal cards prefer about 720 x 450px and Chat cards prefer about 520 x 450px; smaller hard floors are reserved for genuinely constrained panes. Extra rows scroll. Auto does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
 
 ## Terminal and Chat Cards
 
@@ -40,7 +40,7 @@ In Terminal mode, click inside the terminal before typing. When the same agent t
 - Right-click the background and choose **Reset Grid Layout** to discard the manual Grid arrangement without resetting the whole Workbench.
 - Use the card menu for agent lifecycle actions. These actions affect the runtime; closing the Agents tab does not.
 
-Auto chooses the broadest useful grid the pane width can support and permits vertical overflow. Below the two-card threshold it switches to a one-column roster without hiding agents. Grid always honors the user's chosen tracks and row sizing instead of silently changing the user's arrangement.
+Auto adds columns only when the pane can support their preferred working width and permits vertical overflow. Below that threshold it switches to a one-column roster without hiding agents. Grid always honors the user's chosen tracks and row sizing instead of silently changing the user's arrangement.
 
 ## Important Boundaries
 
