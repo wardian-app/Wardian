@@ -233,8 +233,8 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
   return (
     <div data-testid="workflows-view" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)] text-primary">
-      <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div className="workflows-toolbar flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3">
+        <div className="workflows-toolbar__primary flex min-w-0 flex-1 items-center gap-2">
           <BlueprintSelector selectedPath={blueprintPath} onOpen={(path) => void openBlueprint(path)} onNew={newBlueprint} />
           <div className="flex rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-0.5" aria-label="Workflow mode">
             {(['edit', 'observe', 'monitor'] as const).map((value) => (
@@ -266,7 +266,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
             </div>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="workflows-toolbar__actions flex shrink-0 items-center gap-2">
           {mode === 'edit' ? (
             <button
               type="button"
@@ -317,8 +317,8 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
         </div>
       </div>
 
-      <div className={`grid min-h-0 flex-1 ${drawerOpen ? 'grid-cols-[minmax(0,1fr)_280px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <main className="h-full min-h-0 overflow-hidden p-3">
+      <div className="workflows-body grid min-h-0 flex-1" data-drawer-open={drawerOpen ? 'true' : 'false'}>
+        <main className="workflows-main h-full min-h-0 overflow-hidden p-3">
           {mode === 'edit' ? (
             <WorkflowEditMode theme={theme} addNodeRequest={addNodeRequest} />
           ) : mode === 'observe' ? (
@@ -331,7 +331,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           )}
         </main>
         {drawerOpen && (
-          <aside className="min-h-0 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
+          <aside className="workflows-run-drawer min-h-0 overflow-y-auto border-l border-wardian-border bg-[var(--color-wardian-card)] p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-bold text-[var(--color-wardian-text)]">Runs</h2>
@@ -359,7 +359,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
       </div>
 
       {launchOpen && (blueprintPath || editSchedule) && (
-        <div className="absolute inset-0 z-20 flex items-start justify-center overflow-hidden bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_25%)] p-8">
+        <div className="workflows-launch-overlay absolute inset-0 z-20 flex items-start justify-center overflow-hidden bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_25%)] p-8">
           <RunLaunchDialog
             path={editSchedulePath ?? blueprintPath ?? ''}
             blueprintId={editSchedule?.blueprint_id ?? activeBlueprintId ?? undefined}
@@ -521,8 +521,8 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
 
   return (
     <div data-testid="workflows-edit-mode" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)]">
-      <div className={`grid h-full min-h-0 flex-1 ${selectedNode ? 'grid-cols-[minmax(0,1fr)_320px]' : 'grid-cols-[minmax(0,1fr)]'}`}>
-        <section className="relative min-h-0">
+      <div className="workflows-edit-body grid h-full min-h-0 flex-1" data-inspector-open={selectedNode ? 'true' : 'false'}>
+        <section className="workflows-canvas relative min-h-0">
           <BuilderCanvas
             blueprint={activeBlueprint}
             diagnostics={diagnostics}
@@ -568,7 +568,7 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
           ) : null}
         </section>
         {selectedNode ? (
-          <aside data-testid="workflow-inspector" className="flex min-h-0 flex-col overflow-hidden border-l border-wardian-border bg-[var(--color-wardian-card)]">
+          <aside data-testid="workflow-inspector" className="workflow-node-inspector flex min-h-0 flex-col overflow-hidden border-l border-wardian-border bg-[var(--color-wardian-card)]">
             <div className="flex shrink-0 items-start justify-between gap-3 border-b border-wardian-border p-3">
               <div className="min-w-0">
                 <div className="truncate text-sm font-bold text-[var(--color-wardian-text)]">
@@ -615,7 +615,7 @@ function WorkflowEditMode({ theme, addNodeRequest }: WorkflowEditModeProps) {
         />
       ) : null}
       {libraryOpen ? (
-        <div className="absolute inset-0 z-30 flex items-start justify-center bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_20%)] p-8">
+        <div className="workflow-node-library-overlay absolute inset-0 z-30 flex items-start justify-center bg-[color-mix(in_srgb,var(--color-wardian-bg),transparent_20%)] p-8">
           <NodeLibrary mode="popover" onAdd={addNodeFromLibrary} onClose={() => setLibraryOpen(false)} />
         </div>
       ) : null}

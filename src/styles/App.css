@@ -1251,6 +1251,121 @@ select option {
   }
 }
 
+/* Workflow chrome uses the pane as its responsive boundary. */
+.workflows-body {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflows-body[data-drawer-open="true"] {
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.workflows-edit-body {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflows-edit-body[data-inspector-open="true"] {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.library-view__back {
+  display: none;
+}
+
+@container wardian-surface (max-width: 760px) {
+  .workflows-toolbar {
+    min-height: 0;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.375rem;
+    padding-block: 0.5rem;
+  }
+
+  .workflows-toolbar__primary {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .workflows-toolbar__primary > input {
+    min-width: min(11rem, 100%);
+    max-width: none;
+  }
+
+  .workflows-toolbar__actions {
+    width: 100%;
+    justify-content: flex-end;
+    overflow-x: auto;
+    padding-bottom: 1px;
+  }
+
+  .workflows-body[data-drawer-open="true"],
+  .workflows-edit-body[data-inspector-open="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflows-run-drawer,
+  .workflow-node-inspector {
+    position: absolute;
+    z-index: 14;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 92cqw);
+    border-left: 1px solid var(--color-wardian-border);
+    background: var(--color-wardian-card);
+    box-shadow: var(--shadow-wardian-card);
+  }
+
+  .workflows-launch-overlay,
+  .workflow-node-library-overlay {
+    padding: 12px;
+  }
+
+  .library-view__body {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .library-view__browse {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .library-view__detail {
+    display: none;
+    width: 100% !important;
+    border-left: 0;
+  }
+
+  .library-view[data-detail-open="true"] .library-view__browse {
+    display: none;
+  }
+
+  .library-view[data-detail-open="true"] .library-view__detail {
+    display: block;
+  }
+
+  .library-view__detail > [data-testid="sidebar-resize-handle"] {
+    display: none;
+  }
+
+  .library-view__back {
+    position: sticky;
+    z-index: 2;
+    top: 0;
+    display: inline-flex;
+    margin: 0.5rem 0.75rem 0;
+    border: 1px solid var(--color-wardian-border);
+    border-radius: 0.25rem;
+    background: var(--color-wardian-card);
+    color: var(--color-wardian-text-muted);
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+  }
+}
+
 /* Dashboard cards respond to their Workbench pane, not the app window. */
 .dashboard-agent-card__content {
   min-width: 0;

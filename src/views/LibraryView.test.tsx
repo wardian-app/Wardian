@@ -36,6 +36,25 @@ describe('LibraryView', () => {
     expect(screen.getByTestId('library-detail')).toBeInTheDocument();
   });
 
+  it('uses browse/detail navigation in compact panes', () => {
+    const select = vi.fn().mockResolvedValue(undefined);
+    useLibraryStore.setState({
+      selection: { section: 'skills', entryRef: 'skills/test' },
+      select,
+    });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-view')).toHaveAttribute('data-detail-open', 'true');
+    expect(screen.getByTestId('library-list')).toHaveClass('library-view__browse');
+    expect(screen.getByTestId('library-detail')).toHaveClass('library-view__detail');
+
+    const back = screen.getByRole('button', { name: 'Back to library list' });
+    expect(back).toHaveClass('library-view__back');
+    fireEvent.click(back);
+    expect(select).toHaveBeenCalledWith(null);
+  });
+
   it('subscribes to library changes on mount', () => {
     const cleanup = vi.fn();
     const subscribeToLibraryChanges = vi.fn(() => cleanup);

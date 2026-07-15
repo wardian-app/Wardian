@@ -262,6 +262,24 @@ describe('WorkflowsView', () => {
     expect(screen.getByRole('button', { name: /saved/i })).toBeDisabled();
   });
 
+  it('exposes pane-responsive toolbar, body, drawer, and inspector regions', async () => {
+    seedBuilderWithConnectedBlueprint();
+    const { container } = render(<WorkflowsView theme="dark" />);
+
+    expect(container.querySelector('.workflows-toolbar')).toBeInTheDocument();
+    expect(container.querySelector('.workflows-toolbar__primary')).toBeInTheDocument();
+    expect(container.querySelector('.workflows-toolbar__actions')).toBeInTheDocument();
+    expect(container.querySelector('.workflows-body')).toBeInTheDocument();
+    expect(container.querySelector('.workflows-edit-body')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show Runs' }));
+    expect(container.querySelector('.workflows-run-drawer')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /select task/i }));
+    expect(screen.getByTestId('workflow-inspector')).toHaveClass('workflow-node-inspector');
+  });
+
+
   it('opens the registry library from an edit canvas right click', async () => {
     seedBuilderWithEmptyBlueprint();
     render(<WorkflowsView theme="dark" />);

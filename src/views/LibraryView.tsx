@@ -30,6 +30,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     const error = useLibraryStore((s) => s.error);
     const activeSection = useLibraryStore((s) => s.activeSection);
     const setActiveSection = useLibraryStore((s) => s.setActiveSection);
+    const selection = useLibraryStore((s) => s.selection);
+    const select = useLibraryStore((s) => s.select);
     const subscribeToLibraryChanges = useLibraryStore((s) => s.subscribeToLibraryChanges);
     const fetchIndex = useLibraryStore((s) => s.fetchIndex);
     const libraryDetailWidth = useLibraryStore((s) => s.libraryDetailWidth);
@@ -91,7 +93,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
 
     return (
-        <div data-testid="library-view" className="flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden">
+        <div
+            data-testid="library-view"
+            data-detail-open={selection ? 'true' : 'false'}
+            className="library-view flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden"
+        >
             {/* A background refetch (e.g. a failed reload after a
                 library-changed event) failed while we still have a stale
                 index to show — surface it non-destructively instead of
@@ -112,20 +118,29 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                     </button>
                 </div>
             )}
-            <div className="flex-1 flex min-h-0">
-                <SectionRail
-                    activeSection={activeSection}
-                    sections={index?.sections ?? null}
-                    onSelect={handleSelectSection}
-                />
-                <div data-testid="library-list" className="flex-1 min-w-[320px] min-h-0 overflow-hidden">
-                    <LibraryList />
+            <div className="library-view__body flex-1 flex min-h-0">
+                <div data-testid="library-list" className="library-view__browse flex flex-1 min-w-[320px] min-h-0 overflow-hidden">
+                    <SectionRail
+                        activeSection={activeSection}
+                        sections={index?.sections ?? null}
+                        onSelect={handleSelectSection}
+                    />
+                    <div className="library-view__list flex-1 min-w-0 min-h-0 overflow-hidden">
+                        <LibraryList />
+                    </div>
                 </div>
                 <div
                     data-testid="library-detail"
-                    className="relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
+                    className="library-view__detail relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
                     style={{ width: `${libraryDetailWidth}px` }}
                 >
+                    <button
+                        type="button"
+                        className="library-view__back"
+                        onClick={() => void select(null)}
+                    >
+                        Back to library list
+                    </button>
                     <SidebarResizeHandle
                         baseWidth={libraryDetailWidth}
                         edge="left"
