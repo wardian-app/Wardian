@@ -520,13 +520,13 @@ describe('WorkflowMonitor', () => {
 
     const row = screen.getByTestId('workflow-activity-row-evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name');
     expect(row.className).toContain(
-      'md:grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]',
+      'grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]',
     );
     const columns = Array.from(row.children);
     expect(columns[0]).toHaveTextContent('Time');
     expect(columns[1]).toHaveTextContent('Evolver Weekly SkillOpt Batch With An Exceptionally Long Display Name');
     expect(columns[2]).toHaveTextContent('No runs yet');
-    expect(columns[5]).toHaveClass('md:justify-self-end');
+    expect(columns[5]).toHaveClass('justify-self-end');
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -745,7 +745,7 @@ describe('WorkflowMonitor', () => {
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
   });
 
-  it('uses a bounded flex scroll pane for monitor history', () => {
+  it('keeps wide activity columns inside one labeled two-axis scroll pane', () => {
     runState.runs = [{
       run_id: 'run-scroll',
       blueprint_id: 'audit',
@@ -758,7 +758,9 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByTestId('workflow-history-scroll')).toHaveClass('flex-1', 'min-h-0', 'overflow-y-auto');
+    expect(screen.getByRole('region', { name: 'Workflow activity' }))
+      .toHaveClass('flex-1', 'min-h-0', 'overflow-auto');
+    expect(screen.getByTestId('workflow-activity-table')).toHaveClass('min-w-[960px]');
   });
 
   it('renders scheduled agent assignments as agent names', async () => {

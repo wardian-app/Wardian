@@ -79,6 +79,10 @@ Monitor shows a unified activity feed for workflow schedules and runs. Use the
 tabs to switch between all activity, items needing attention, running work,
 scheduled work, and history.
 
+In a narrow Workflows pane, the activity table scrolls horizontally while its
+summary and filters stay fixed. This preserves the monitor's operational columns
+without widening the pane or collapsing the surrounding workbench layout.
+
 The top counters call out due-soon schedules and attention states. Schedule
 rows expose the current Monitor actions:
 
