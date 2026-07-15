@@ -248,6 +248,30 @@ test("uses real top-edge tab groups as responsive window chrome", async ({ page 
   expect(separation).toBeLessThanOrEqual(8);
 });
 
+test("keeps the top tab strip stable when its empty chrome drags the window", async ({ page }) => {
+  const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
+  await bootWorkbench(page, makeWorkbenchDocument({ surfaces: [dashboard] }));
+
+  const group = workbenchGroup(page, "group-1");
+  const header = group.locator(":scope > .dv-tabs-and-actions-container");
+  const emptyChrome = header.locator(".dv-void-container");
+  const bounds = await emptyChrome.boundingBox();
+  expect(bounds).not.toBeNull();
+
+  await page.mouse.move(bounds!.x + Math.min(20, bounds!.width / 2), bounds!.y + (bounds!.height / 2));
+  await page.mouse.down();
+  await page.mouse.move(bounds!.x + Math.min(100, bounds!.width - 1), bounds!.y + (bounds!.height / 2), {
+    steps: 5,
+  });
+  await page.mouse.up();
+
+  await expect(header).toBeVisible();
+  await expect(surfaceTab(page, "dashboard")).toHaveAttribute("aria-selected", "true");
+  const after = await header.boundingBox();
+  expect(after?.y).toBe(0);
+  expect(after?.height).toBe(36);
+});
+
 test("keeps the first tab clear of collapsed macOS traffic-light chrome", async ({ browser }) => {
   const context = await browser.newContext({
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",

@@ -8,7 +8,7 @@ Restore Wardian's original useful multi-agent grid while retaining the new workb
 
 Wardian will use the existing undecorated Tauri window, but the React shell will no longer render a separate empty titlebar above Dockview. The workbench occupies the main column from the top of the window, so every Dockview group touching the top edge supplies that segment of the window chrome. Groups created below another group retain their local headers.
 
-The left sidebar controls and right window controls remain stable chrome regions. Dockview continues to own tab DOM, drag and drop, overflow, focus, and ARIA semantics. Empty top-edge header space is a native window drag region; tabs and controls are not. Double-clicking empty top chrome toggles maximize.
+The left sidebar controls and right window controls remain stable chrome regions. Dockview continues to own tab DOM, tab drag and drop, overflow, focus, and ARIA semantics. Empty top-edge header space is exclusively a native window drag region and cannot also initiate Dockview group dragging; lower pane headers remain ordinary local pane controls. The canonical adapter always reprojects group headers as visible, top-positioned tab strips. Tabs and controls are not native drag regions. Double-clicking empty top chrome toggles maximize.
 
 Tabs are compact, flat surfaces. The active tab connects visually to its content; close appears on the active or hovered tab. The New Surface plus action appears immediately after the last visible tab through Dockview's after-tabs action slot. Overflow and pane actions stay at the far edge. The top row remains 36 pixels high.
 

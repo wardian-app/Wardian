@@ -20,8 +20,8 @@ Agents Auto uses separate preferred and minimum card sizes:
 
 | Card mode | Preferred size | Hard floor |
 | --- | --- | --- |
-| Terminal | 720 x 450px | 520 x 280px |
-| Chat | 520 x 450px | 360 x 280px |
+| Terminal | 640 x 450px | 520 x 280px |
+| Chat | 480 x 450px | 360 x 280px |
 
 The 450px preferred height matches the existing manual Grid default. Auto ranks candidate layouts by useful card geometry near the preferred size rather than by the number of cards that can be packed at the hard floor. It adds columns when the pane can support them, keeps the complete filtered roster logically visible, and scrolls additional rows. The hard floor remains a constraint used during genuinely narrow or short layouts, not the default target.
 

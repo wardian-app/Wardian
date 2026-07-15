@@ -9,6 +9,7 @@ import {
   deriveWorkbenchSplitRatios,
   dispatchWorkbenchAdapterCommand,
   DockviewLayoutAdapter,
+  handleWorkbenchDockviewGroupDrag,
   handleWorkbenchDockviewOverlayAdmission,
   isCanonicalWorkbenchGroupDestination,
   normalizedWorkbenchGeometry,
@@ -29,6 +30,7 @@ import {
 import {
   DockviewApi,
   type DockviewGroupPanel,
+  type GroupDragEvent,
   type DockviewWillDropEvent,
   type DockviewWillShowOverlayLocationEvent,
 } from "dockview-react";
@@ -159,6 +161,24 @@ describe("DockviewLayoutAdapter", () => {
     expect(preventUnmeasured).not.toHaveBeenCalled();
   });
 
+  it("reserves top-edge group drag handles for native window dragging", () => {
+    const root = makeMixedDepthThreeDocument().root;
+    const topPreventDefault = vi.fn();
+    const lowerPreventDefault = vi.fn();
+
+    handleWorkbenchDockviewGroupDrag({
+      group: { id: "group-1" },
+      nativeEvent: { preventDefault: topPreventDefault },
+    } as unknown as GroupDragEvent, root, null);
+    handleWorkbenchDockviewGroupDrag({
+      group: { id: "group-3" },
+      nativeEvent: { preventDefault: lowerPreventDefault },
+    } as unknown as GroupDragEvent, root, null);
+
+    expect(topPreventDefault).toHaveBeenCalledOnce();
+    expect(lowerPreventDefault).not.toHaveBeenCalled();
+  });
+
   it("subscribes overlay admission with the ready API and disposes it on teardown", async () => {
     type OverlayListener = Parameters<DockviewApi["onWillShowOverlay"]>[0];
     const overlayDescriptor = Object.getOwnPropertyDescriptor(
@@ -245,12 +265,54 @@ describe("DockviewLayoutAdapter", () => {
       expect(addGroupSpy).toHaveBeenCalledTimes(2);
       for (const [options] of addGroupSpy.mock.calls) {
         expect(options).toMatchObject({
+          hideHeader: false,
+          headerPosition: "top",
           constraints: {
             minimumWidth: WORKBENCH_PANE_MINIMUM_WIDTH,
             minimumHeight: WORKBENCH_PANE_MINIMUM_HEIGHT,
           },
         });
       }
+    } finally {
+      addGroupSpy.mockRestore();
+    }
+  });
+
+  it("reprojects a retained canonical group's tab strip as visible top chrome", async () => {
+    const documentModel = makeSingleGroupDocument([
+      makeSurface("surface-1", { surface_type: "agents-overview" }),
+    ]);
+    const addGroup = DockviewApi.prototype.addGroup;
+    let projectedGroup: DockviewGroupPanel | undefined;
+    const addGroupSpy = vi.spyOn(DockviewApi.prototype, "addGroup")
+      .mockImplementation(function captureGroup(
+        this: DockviewApi,
+        options?: Parameters<DockviewApi["addGroup"]>[0],
+      ) {
+        const group = addGroup.call(this, options);
+        if (group.id === "group-1") projectedGroup = group;
+        return group;
+      });
+
+    try {
+      const view = render(<DockviewLayoutAdapter document={documentModel} />);
+      await screen.findByRole("tab", { name: /agents overview/i });
+      if (!projectedGroup) throw new Error("expected canonical Dockview group");
+
+      act(() => {
+        projectedGroup!.header.hidden = true;
+        projectedGroup!.api.setHeaderPosition("bottom");
+      });
+      expect(projectedGroup.header.hidden).toBe(true);
+      expect(projectedGroup.api.getHeaderPosition()).toBe("bottom");
+
+      view.rerender(
+        <DockviewLayoutAdapter document={structuredClone(documentModel)} />,
+      );
+
+      await waitFor(() => expect(projectedGroup?.header.hidden).toBe(false));
+      expect(projectedGroup.api.getHeaderPosition()).toBe("top");
+      expect(screen.getByRole("tab", { name: /agents overview/i })).toBeVisible();
     } finally {
       addGroupSpy.mockRestore();
     }

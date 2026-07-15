@@ -19,6 +19,7 @@ import {
   type DockviewWillDropEvent,
   type DockviewWillShowOverlayLocationEvent,
   type DroptargetOverlayModel,
+  type GroupDragEvent,
   type IDockviewHeaderActionsProps,
   type IDockviewPanelHeaderProps,
   type IDockviewPanelProps,
@@ -201,6 +202,17 @@ export function handleWorkbenchDockviewOverlayAdmission(
   if (event.position === "center") return;
   if (!canSplitWorkbenchPane(event.group?.api.boundingBox, event.position)) {
     event.preventDefault();
+  }
+}
+
+/** Keeps top-edge native window dragging from also starting a Dockview group drag. */
+export function handleWorkbenchDockviewGroupDrag(
+  event: GroupDragEvent,
+  root: DeepReadonly<WorkbenchNodeV1>,
+  zoomedGroupId: string | null,
+): void {
+  if (workbenchGroupOwnsWindowChrome(root, event.group.id, zoomedGroupId)) {
+    event.nativeEvent.preventDefault();
   }
 }
 
@@ -700,15 +712,25 @@ function ensureGroups(
           id: placement.group_id,
           referenceGroup,
           direction: placement.direction,
+          hideHeader: false,
+          headerPosition: "top",
           constraints: WORKBENCH_PANE_CONSTRAINTS,
         })
         : api.addGroup({
           id: placement.group_id,
           direction: "right",
+          hideHeader: false,
+          headerPosition: "top",
           constraints: WORKBENCH_PANE_CONSTRAINTS,
         });
       if (added) groups.set(placement.group_id, added);
       continue;
+    }
+    // Header chrome is canonical Wardian state. Dockview owns its DOM, but
+    // retained library-local state must not hide or relocate the tab strip.
+    existing.header.hidden = false;
+    if (existing.api.getHeaderPosition() !== "top") {
+      existing.api.setHeaderPosition("top");
     }
     if (repairExisting && referenceGroup && placement.direction) {
       existing.api.moveTo({
@@ -1347,6 +1369,13 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     const overlayDisposable = api.onWillShowOverlay(
       handleWorkbenchDockviewOverlayAdmission,
     );
+    const groupDragDisposable = api.onWillDragGroup((event) => {
+      handleWorkbenchDockviewGroupDrag(
+        event,
+        documentRef.current.root,
+        zoomed_group_id,
+      );
+    });
     return () => {
       if (activationRetryTimer !== null) window.clearTimeout(activationRetryTimer);
       moveDisposable.dispose();
@@ -1355,8 +1384,9 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       layoutDisposable.dispose();
       removeDisposable.dispose();
       overlayDisposable.dispose();
+      groupDragDisposable.dispose();
     };
-  }, [api, emitCommand, requestCanonicalReconcile, safe_mode]);
+  }, [api, emitCommand, requestCanonicalReconcile, safe_mode, zoomed_group_id]);
 
   const handleWillDrop = useCallback((event: DockviewWillDropEvent) => {
     routeWorkbenchDockviewDrop(event, documentRef.current, props.on_surface_drop);

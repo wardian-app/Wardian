@@ -11,7 +11,7 @@ without confusing the restorable layout with agent runtime state.
 
 ## Title Bar
 
-Wardian uses frameless, Obsidian-style top chrome: the topmost Workbench tab groups occupy the center of the window bar rather than sitting beneath a separate titlebar. Side-by-side top groups divide that row; groups split downward keep a local tab header. Empty header space drags the native window.
+Wardian uses frameless, Obsidian-style top chrome: the topmost Workbench tab groups occupy the center of the window bar rather than sitting beneath a separate titlebar. Side-by-side top groups divide that row; groups split downward keep a local tab header. Empty top-edge header space drags only the native window, so it cannot accidentally detach or relocate the pane's tab strip.
 
 The chrome retains the left sidebar toggle, optional telemetry, right roster toggle, and native window controls. Commands remain in Quick Open (`Ctrl+P` / `Cmd+P`) and the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), not in another toolbar.
 

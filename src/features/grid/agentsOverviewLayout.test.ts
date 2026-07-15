@@ -114,7 +114,7 @@ describe("Agents layout", () => {
       gap: 6,
     });
 
-    expect(TERMINAL_CARD_PREFERRED).toEqual({ width: 720, height: 450 });
+    expect(TERMINAL_CARD_PREFERRED).toEqual({ width: 640, height: 450 });
     expect(result.presentationMode).toBe("grid");
     expect(result.columns).toBe(1);
     expect(result.cardHeight).toBe(TERMINAL_CARD_PREFERRED.height);
@@ -155,7 +155,7 @@ describe("Agents layout", () => {
       gap: 6,
     });
 
-    expect(CHAT_CARD_PREFERRED).toEqual({ width: 520, height: 450 });
+    expect(CHAT_CARD_PREFERRED).toEqual({ width: 480, height: 450 });
     expect(result.cardHeight).toBe(CHAT_CARD_PREFERRED.height);
     expect(result.cardHeight).toBeGreaterThan(CHAT_CARD_FLOOR.height);
   });
@@ -164,7 +164,7 @@ describe("Agents layout", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(2),
-      containerSize: { width: 1448, height: 200 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 8, height: 200 },
       gap: 8,
     });
 
@@ -194,7 +194,7 @@ describe("Agents layout", () => {
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents: terminalAgents(4),
-      containerSize: { width: 1448, height: 2200 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 8, height: 2200 },
       gap: 8,
     });
 
@@ -208,13 +208,13 @@ describe("Agents layout", () => {
     const legacyLayout = resolveAgentsOverviewLayout({
       mode: "grid",
       agents,
-      containerSize: { width: 1448, height: 2200 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 8, height: 2200 },
       gap: 8,
     });
     const result = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1448, height: 2200 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 8, height: 2200 },
       previousLayout: { ...legacyLayout, requestedMode: "auto" },
       gap: 8,
     });
@@ -278,13 +278,13 @@ describe("Agents layout", () => {
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 2175, height: 950 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 3) + 15, height: 950 },
       gap: 8,
     });
     const widened = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 2176, height: 950 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 3) + 16, height: 950 },
       previousLayout: previous,
       gap: 8,
     });
@@ -298,7 +298,7 @@ describe("Agents layout", () => {
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1448, height: 280 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 8, height: 280 },
       gap: 8,
     });
     expect(previous.presentationMode).toBe("grid");
@@ -306,7 +306,7 @@ describe("Agents layout", () => {
     const narrowed = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
-      containerSize: { width: 1447, height: 280 },
+      containerSize: { width: (TERMINAL_CARD_PREFERRED.width * 2) + 7, height: 280 },
       previousLayout: previous,
       gap: 8,
     });
@@ -314,6 +314,20 @@ describe("Agents layout", () => {
     expect(narrowed.presentationMode).toBe("grid");
     expect(narrowed.columns).toBe(1);
     expect(narrowed.visibleAgentIds).toEqual(["agent-1", "agent-2"]);
+  });
+
+  it("uses two terminal columns in the representative 1080p single-pane content width", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(6),
+      containerSize: { width: 1390, height: 950 },
+      gap: 6,
+    });
+
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(2);
+    expect(result.cardWidth).toBeGreaterThan(TERMINAL_CARD_PREFERRED.width);
+    expect(result.visibleAgentIds).toHaveLength(6);
   });
 
   it("uses the strictest floor in a mixed terminal/chat population", () => {

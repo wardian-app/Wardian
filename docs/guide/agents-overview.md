@@ -18,7 +18,7 @@ The surface header provides three modes:
 - **Grid** keeps multiple visible cards and enables direct grid sizing and ordering controls. The layout can scroll when the available area is smaller than the cards' usable floor.
 - **Single** shows the focused agent as one full-surface card. Use a card's **Maximize** control to focus it. **Minimize** restores the last explicit multi-agent mode, Auto or Grid, and reveals the roster again.
 
-Auto derives its layout from the current surface dimensions and targets comfortable working cards before adding rows or columns. Terminal cards prefer about 720 x 450px and Chat cards prefer about 520 x 450px; smaller hard floors are reserved for genuinely constrained panes. Extra rows scroll. Auto does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
+Auto derives its layout from the current surface dimensions and targets comfortable working cards before adding rows or columns. Terminal cards prefer about 640 x 450px and Chat cards prefer about 480 x 450px; smaller hard floors are reserved for genuinely constrained panes. Extra rows scroll. Auto does not overwrite the manual Grid arrangement, so you can return to Grid without losing the layout you tuned.
 
 ## Terminal and Chat Cards
 

@@ -78,13 +78,13 @@ export const CHAT_CARD_FLOOR: Readonly<AgentsOverviewCardFloor> = Object.freeze(
 
 /** Preferred working bounds for a terminal card before Auto begins compressing. */
 export const TERMINAL_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
-  width: 720,
+  width: 640,
   height: 450,
 });
 
 /** Preferred working bounds for a chat card before Auto begins compressing. */
 export const CHAT_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
-  width: 520,
+  width: 480,
   height: 450,
 });
 
