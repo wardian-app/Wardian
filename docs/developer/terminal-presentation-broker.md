@@ -66,6 +66,14 @@ epoch, revokes owners and pending activation, resets parser/replay state, and
 requires fresh presentation synchronization. A reused session ID therefore
 cannot let a stale renderer write to a replacement PTY.
 
+After synchronization, a client may restore the exact presentation that owned
+the immediately preceding generation through the ordinary two-phase activation
+protocol. Restoration is allowed only while that presentation is still
+visible, mounted, interactive, registered, and the replacement remains
+ownerless. This preserves an existing user ownership choice without making
+mount, focus, or registration implicit activation signals, and without letting
+registration order select a new owner.
+
 ## Ordered Stream and Recovery
 
 PTY reads and broker state changes are serialized by the per-session actor.

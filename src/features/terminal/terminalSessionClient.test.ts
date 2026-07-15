@@ -569,6 +569,251 @@ describe("TerminalSessionClient", () => {
     expect(client.brokerState?.runtime_generation).toBe(2);
   });
 
+  it("restores the previous input owner after a runtime replacement", async () => {
+    let registrations = 0;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      const generation = registrations <= 1 ? 1 : 2;
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        const result = registeredResult("pane-owner", registrations === 1 ? 1 : 2);
+        result.broker_state.owner_presentation_id = registrations === 1 ? "pane-owner" : null;
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const state = brokerState(generation);
+        state.owner_presentation_id = generation === 1 ? "pane-owner" : null;
+        return { broker_state: state, initial_snapshot: snapshot(generation) };
+      }
+      if (command === "begin_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: null,
+          },
+          activation_id: "replacement-owner-activation",
+          snapshot: snapshot(2),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        const state = brokerState(2);
+        state.lease_epoch = 1;
+        state.owner_presentation_id = "pane-owner";
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-owner",
+          },
+          broker_state: state,
+          snapshot: snapshot(2),
+        };
+      }
+      if (command === "send_terminal_presentation_input") {
+        return {
+          status: "accepted",
+          reason: null,
+          runtime_generation: 2,
+          lease_epoch: 1,
+          owner_presentation_id: "pane-owner",
+        };
+      }
+      if (command === "read_terminal_events") {
+        return { ...eventsBatch([], 0, 0), runtime_generation: generation };
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: generation, acknowledged_sequence: 0 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-owner"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+    expect(client.brokerState?.owner_presentation_id).toBe("pane-owner");
+
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 1,
+      lifecycle: "runtime_paused",
+    });
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 2,
+      lifecycle: "runtime_replaced",
+    });
+
+    await vi.waitFor(() => {
+      expect(tauri.invoke).toHaveBeenCalledWith("ack_terminal_activation", {
+        request: expect.objectContaining({
+          presentation_id: "pane-owner",
+          runtime_generation: 2,
+        }),
+      });
+    });
+    expect(client.brokerState).toMatchObject({
+      runtime_generation: 2,
+      owner_presentation_id: "pane-owner",
+    });
+    await expect(client.sendText("pane-owner", "after clear")).resolves.toMatchObject({
+      status: "accepted",
+    });
+    expect(tauri.invoke).toHaveBeenCalledWith("send_terminal_presentation_input", {
+      request: {
+        session_id: "agent-1",
+        presentation_id: "pane-owner",
+        runtime_generation: 2,
+        lease_epoch: 1,
+        input: "after clear",
+      },
+    });
+  });
+
+  it("does not take over a replacement runtime that already has an owner", async () => {
+    let registrations = 0;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      const generation = registrations <= 1 ? 1 : 2;
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        const result = registeredResult("pane-previous", registrations === 1 ? 1 : 2);
+        result.broker_state.owner_presentation_id = registrations === 1
+          ? "pane-previous"
+          : "pane-current";
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const state = brokerState(generation);
+        state.owner_presentation_id = generation === 1 ? "pane-previous" : "pane-current";
+        return { broker_state: state, initial_snapshot: snapshot(generation) };
+      }
+      if (command === "read_terminal_events") {
+        return { ...eventsBatch([], 0, 0), runtime_generation: generation };
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: generation, acknowledged_sequence: 0 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-previous"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 2,
+      lifecycle: "runtime_replaced",
+    });
+
+    await vi.waitFor(() => expect(registrations).toBe(2));
+    await settle();
+    expect(tauri.invoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+    expect(client.brokerState?.owner_presentation_id).toBe("pane-current");
+  });
+
+  it("re-registers and restores ownership when an update races a cleared runtime", async () => {
+    let registrations = 0;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        const generation = registrations === 1 ? 1 : 2;
+        const result = registeredResult("pane-owner", generation);
+        result.broker_state.owner_presentation_id = generation === 1 ? "pane-owner" : null;
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const generation = registrations === 1 ? 1 : 2;
+        const state = brokerState(generation);
+        state.owner_presentation_id = generation === 1 ? "pane-owner" : null;
+        return { broker_state: state, initial_snapshot: snapshot(generation) };
+      }
+      if (command === "update_terminal_presentation") {
+        throw new Error("PresentationNotFound");
+      }
+      if (command === "begin_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: null,
+          },
+          activation_id: "clear-race-activation",
+          snapshot: snapshot(2),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        const state = brokerState(2);
+        state.lease_epoch = 1;
+        state.owner_presentation_id = "pane-owner";
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-owner",
+          },
+          broker_state: state,
+          snapshot: snapshot(2),
+        };
+      }
+      if (command === "read_terminal_events") {
+        return { ...eventsBatch([], 0, 0), runtime_generation: registrations === 1 ? 1 : 2 };
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: registrations === 1 ? 1 : 2, acknowledged_sequence: 0 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-owner"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+
+    const recovered = await client.updatePresentation("pane-owner", {
+      desired_geometry: geometry(100, 30),
+      visibility: "visible",
+      render_state: "mounted",
+      requested_interaction: "interactive",
+      observed_lease_epoch: 0,
+    });
+
+    expect(registrations).toBe(2);
+    expect(recovered?.broker_state.runtime_generation).toBe(2);
+    expect(client.brokerState).toMatchObject({
+      runtime_generation: 2,
+      owner_presentation_id: "pane-owner",
+    });
+    expect(tauri.invoke).toHaveBeenCalledWith("ack_terminal_activation", {
+      request: expect.objectContaining({
+        presentation_id: "pane-owner",
+        runtime_generation: 2,
+      }),
+    });
+  });
+
   it("retains lifecycle updates and reports recovered state after a SessionNotFound retry", async () => {
     let registrations = 0;
     const registrationRequests: TerminalPresentationRegistration[] = [];

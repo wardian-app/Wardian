@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { By, until } from "selenium-webdriver";
+import { By, Key, until } from "selenium-webdriver";
 
 import {
   createNativeHarness,
@@ -56,6 +56,15 @@ process.stdout.write(JSON.stringify({
   timestamp: new Date().toISOString(),
 }) + "\\n");
 process.stdout.write("runtime-start:${SESSION_ID}\\r\\n");
+let inputBuffer = "";
+process.stdin.on("data", (chunk) => {
+  inputBuffer += chunk.toString("utf8").replace(/\\r/g, "\\n");
+  const lines = inputBuffer.split("\\n");
+  inputBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    process.stdout.write("runtime-input:" + line + "\\r\\n");
+  }
+});
 setInterval(() => {
   sequence += 1;
   process.stdout.write("runtime-tick:" + sequence + "\\r\\n");
@@ -205,6 +214,41 @@ test(
       }, agentsTerminalHost)
     ));
     assert.equal(initialAgentsFit.transform, "", "Agents first paint must use a locally fitted renderer");
+
+    const terminalInput = await agentsTerminalHost.findElement(By.css(".xterm-helper-textarea"));
+    await agentsTerminalHost.click();
+    await driver.executeScript((element) => element.focus(), terminalInput);
+    await driver.actions().sendKeys("before-clear", Key.ENTER).perform();
+    const beforeClearInput = await waitFor("terminal input before clear", 30000, async () => {
+      const snapshot = await readSnapshot(driver);
+      return {
+        ok: snapshotText(snapshot).includes("runtime-input:before-clear"),
+        snapshot,
+      };
+    });
+
+    await invokeTauri(driver, "clear_agent_session", { sessionId: SESSION_ID });
+    await waitFor("replacement runtime output", 30000, async () => {
+      const snapshot = await readSnapshot(driver);
+      return {
+        ok: snapshot.runtime_generation > beforeClearInput.snapshot.runtime_generation
+          && snapshotText(snapshot).includes("runtime-start:"),
+        snapshot,
+      };
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    await driver.wait(until.elementLocated(By.css(
+      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+    )), 30000);
+    const fatalErrors = await driver.findElements(By.xpath(
+      "//h3[contains(normalize-space(.), 'Terminal Initialization Fatal Error')]",
+    ));
+    assert.equal(
+      fatalErrors.length,
+      0,
+      fatalErrors.length > 0 ? await fatalErrors[0].getText() : "",
+    );
 
     await openWorkbenchSurface(driver, "agent-session", SESSION_ID);
     await waitForAgentSessionHost(driver);

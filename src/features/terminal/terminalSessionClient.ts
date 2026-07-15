@@ -58,6 +58,10 @@ function terminalLease(
   };
 }
 
+function isPresentationNotFound(error: unknown) {
+  return String(error).includes("PresentationNotFound");
+}
+
 /**
  * One ordered desktop broker feed for a native terminal session.
  *
@@ -70,6 +74,8 @@ export class TerminalSessionClient {
   readonly #consumerId: string;
   readonly #presentations = new Map<string, PresentationBinding>();
   #brokerState: TerminalBrokerState | null = null;
+  #replacementOwnerCandidate: string | null = null;
+  #lastOwnerPresentationId: string | null = null;
   #runtimeGeneration = 0;
   #cursor = 0;
   #subscription: Promise<TerminalEventSubscriptionResult> | null = null;
@@ -173,21 +179,33 @@ export class TerminalSessionClient {
       if (!this.#brokerState) {
         return null;
       }
-      const result = await invoke<TerminalPresentationUpdateResult>(
-        "update_terminal_presentation",
-        {
-          request: {
-            presentation_id: presentationId,
-            session_id: this.sessionId,
-            runtime_generation: this.#brokerState.runtime_generation,
-            desired_geometry: update.desired_geometry,
-            visibility: update.visibility,
-            render_state: update.render_state,
-            requested_interaction: update.requested_interaction,
-            observed_lease_epoch: update.observed_lease_epoch,
+      let result: TerminalPresentationUpdateResult;
+      try {
+        result = await invoke<TerminalPresentationUpdateResult>(
+          "update_terminal_presentation",
+          {
+            request: {
+              presentation_id: presentationId,
+              session_id: this.sessionId,
+              runtime_generation: this.#brokerState.runtime_generation,
+              desired_geometry: update.desired_geometry,
+              visibility: update.visibility,
+              render_state: update.render_state,
+              requested_interaction: update.requested_interaction,
+              observed_lease_epoch: update.observed_lease_epoch,
+            },
           },
-        },
-      );
+        );
+      } catch (error) {
+        if (!isPresentationNotFound(error)) {
+          throw error;
+        }
+        const recovered = await this.#recoverPresentation(binding);
+        return {
+          presentation: recovered.presentation,
+          broker_state: recovered.broker_state,
+        };
+      }
       binding.state = result.presentation;
       this.#setBrokerState(result.broker_state);
       return result;
@@ -248,38 +266,7 @@ export class TerminalSessionClient {
 
   async activate(presentationId: string) {
     const binding = this.#requiredPresentation(presentationId);
-    return this.#serialize(async () => {
-      const state = this.#requiredBrokerState();
-      const begin = await invoke<TerminalActivationBeginResult>("begin_terminal_activation", {
-        request: {
-          session_id: this.sessionId,
-          presentation_id: presentationId,
-          runtime_generation: state.runtime_generation,
-          observed_lease_epoch: state.lease_epoch,
-        },
-      });
-      this.#notifyDecision(begin.decision);
-      if (begin.decision.status !== "accepted" || !begin.activation_id || !begin.snapshot) {
-        return { begin, ack: null };
-      }
-      await this.#applySnapshot(binding, begin.snapshot);
-      const ack = await invoke<TerminalActivationAckResult>("ack_terminal_activation", {
-        request: {
-          session_id: this.sessionId,
-          presentation_id: presentationId,
-          runtime_generation: begin.decision.runtime_generation,
-          lease_epoch: begin.decision.lease_epoch,
-          activation_id: begin.activation_id,
-        },
-      });
-      this.#setBrokerState(ack.broker_state);
-      this.#notifyDecision(ack.decision);
-      if (ack.snapshot) {
-        await this.#applySnapshot(binding, ack.snapshot);
-      }
-      this.queueDrain();
-      return { begin, ack };
-    });
+    return this.#serialize(() => this.#activatePresentation(presentationId, binding));
   }
 
   async resyncOwner(presentationId: string) {
@@ -479,13 +466,26 @@ export class TerminalSessionClient {
             ) {
               return;
             }
+            if (
+              notification.runtime_generation === this.#runtimeGeneration &&
+              (notification.lifecycle === "runtime_paused" ||
+                notification.lifecycle === "runtime_replaced") &&
+              this.#brokerState?.owner_presentation_id
+            ) {
+              this.#replacementOwnerCandidate = this.#brokerState.owner_presentation_id;
+            }
             for (const binding of this.#presentations.values()) {
               binding.callbacks.onLifecycle?.(notification);
             }
             if (notification.runtime_generation > this.#runtimeGeneration) {
+              const previousOwnerPresentationId = this.#replacementOwnerCandidate
+                ?? this.#brokerState?.owner_presentation_id
+                ?? this.#lastOwnerPresentationId
+                ?? null;
+              this.#replacementOwnerCandidate = null;
               this.#runtimeGeneration = notification.runtime_generation;
               this.#subscription = null;
-              await this.#retryRegistrationsForGeneration();
+              await this.#retryRegistrationsForGeneration(previousOwnerPresentationId);
             } else {
               this.queueDrain();
             }
@@ -502,7 +502,7 @@ export class TerminalSessionClient {
     return this.#listenerSetup;
   }
 
-  async #retryRegistrationsForGeneration() {
+  async #retryRegistrationsForGeneration(previousOwnerPresentationId: string | null = null) {
     for (const [presentationId, binding] of this.#presentations) {
       try {
         const result = await invoke<TerminalPresentationRegistrationResult>(
@@ -522,8 +522,86 @@ export class TerminalSessionClient {
     }
     if (this.#brokerState) {
       await this.#ensureSubscription(this.#brokerState.runtime_generation).catch(() => undefined);
+      await this.#restorePreviousOwner(previousOwnerPresentationId);
       this.queueDrain();
     }
+  }
+
+  async #recoverPresentation(
+    binding: PresentationBinding,
+  ) {
+    const previousGeneration = this.#runtimeGeneration;
+    const result = await invoke<TerminalPresentationRegistrationResult>(
+      "register_terminal_presentation",
+      { request: binding.registration },
+    );
+    if (result.broker_state.runtime_generation !== previousGeneration) {
+      this.#subscription = null;
+    }
+    binding.state = result.presentation;
+    this.#setBrokerState(result.broker_state);
+    await this.#applySnapshot(binding, result.initial_snapshot);
+    await this.#ensureSubscription(result.broker_state.runtime_generation);
+    binding.callbacks.onRegistrationRecovered?.(result);
+    await this.#restorePreviousOwner(this.#lastOwnerPresentationId);
+    return result;
+  }
+
+  async #restorePreviousOwner(previousOwnerPresentationId: string | null) {
+    const previousOwner = previousOwnerPresentationId === null
+      ? null
+      : this.#presentations.get(previousOwnerPresentationId);
+    const previousOwnerState = previousOwner?.state;
+    if (
+      previousOwner &&
+      previousOwnerState?.visibility === "visible" &&
+      previousOwnerState.render_state === "mounted" &&
+      previousOwnerState.interaction_capability === "interactive" &&
+      this.#brokerState?.owner_presentation_id === null
+    ) {
+      // A replacement runtime intentionally starts with no owner. Restore the
+      // exact presentation that owned the previous generation only after it
+      // has re-registered and synchronized; never promote a mirror merely
+      // because it happened to register first.
+      await this.#activatePresentation(previousOwner.registration.presentation_id, previousOwner)
+        .catch(() => undefined);
+    }
+  }
+
+  async #activatePresentation(
+    presentationId: string,
+    binding: PresentationBinding,
+  ) {
+    const state = this.#requiredBrokerState();
+    const begin = await invoke<TerminalActivationBeginResult>("begin_terminal_activation", {
+      request: {
+        session_id: this.sessionId,
+        presentation_id: presentationId,
+        runtime_generation: state.runtime_generation,
+        observed_lease_epoch: state.lease_epoch,
+      },
+    });
+    this.#notifyDecision(begin.decision);
+    if (begin.decision.status !== "accepted" || !begin.activation_id || !begin.snapshot) {
+      return { begin, ack: null };
+    }
+    await this.#applySnapshot(binding, begin.snapshot);
+    const ack = await invoke<TerminalActivationAckResult>("ack_terminal_activation", {
+      request: {
+        session_id: this.sessionId,
+        presentation_id: presentationId,
+        runtime_generation: begin.decision.runtime_generation,
+        lease_epoch: begin.decision.lease_epoch,
+        activation_id: begin.activation_id,
+      },
+    });
+    this.#setBrokerState(ack.broker_state);
+    this.#notifyDecision(ack.decision);
+    if (ack.snapshot) {
+      await this.#applySnapshot(binding, ack.snapshot);
+    }
+    this.queueDrain();
+    return { begin, ack };
   }
 
   async #ensureSubscription(runtimeGeneration: number) {
@@ -706,6 +784,9 @@ export class TerminalSessionClient {
     }
     this.#brokerState = state;
     this.#runtimeGeneration = state.runtime_generation;
+    if (state.owner_presentation_id) {
+      this.#lastOwnerPresentationId = state.owner_presentation_id;
+    }
     for (const binding of this.#presentations.values()) {
       binding.callbacks.onBrokerState?.(state);
     }
@@ -720,6 +801,9 @@ export class TerminalSessionClient {
         owner_presentation_id: decision.owner_presentation_id,
       };
       this.#runtimeGeneration = decision.runtime_generation;
+      if (decision.owner_presentation_id) {
+        this.#lastOwnerPresentationId = decision.owner_presentation_id;
+      }
     }
     for (const binding of this.#presentations.values()) {
       binding.callbacks.onLeaseDecision?.(decision);
