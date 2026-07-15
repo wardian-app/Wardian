@@ -29,6 +29,8 @@ export interface AgentsOverviewGridCandidate {
   meetsHardFloor: boolean;
   /** Maximum number of floor-sized cards simultaneously visible in the viewport. */
   viewportCapacity: number;
+  /** Normalized distance from the preferred width and height; lower is better. */
+  preferredSizeDeviation: number;
   score: number;
 }
 
@@ -74,6 +76,18 @@ export const CHAT_CARD_FLOOR: Readonly<AgentsOverviewCardFloor> = Object.freeze(
   height: 280,
 });
 
+/** Preferred working bounds for a terminal card before Auto begins compressing. */
+export const TERMINAL_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
+  width: 520,
+  height: 450,
+});
+
+/** Preferred working bounds for a chat card before Auto begins compressing. */
+export const CHAT_CARD_PREFERRED: Readonly<AgentsOverviewCardFloor> = Object.freeze({
+  width: 360,
+  height: 450,
+});
+
 export const AGENTS_OVERVIEW_CARD_CHROME_HEIGHT = 52;
 export const AGENTS_OVERVIEW_RESIZE_DEBOUNCE_MS = 120;
 export const AGENTS_OVERVIEW_SCORE_IMPROVEMENT_THRESHOLD = 0.1;
@@ -87,6 +101,10 @@ function finiteNonNegative(value: number): number {
 
 function floorForMode(mode: AgentsOverviewCardMode): Readonly<AgentsOverviewCardFloor> {
   return mode === "terminal" ? TERMINAL_CARD_FLOOR : CHAT_CARD_FLOOR;
+}
+
+function preferredForMode(mode: AgentsOverviewCardMode): Readonly<AgentsOverviewCardFloor> {
+  return mode === "terminal" ? TERMINAL_CARD_PREFERRED : CHAT_CARD_PREFERRED;
 }
 
 function stableAgents(agents: readonly AgentsOverviewLayoutAgent[]): AgentsOverviewLayoutAgent[] {
@@ -118,6 +136,41 @@ function requiredFloor(agents: readonly AgentsOverviewLayoutAgent[]): AgentsOver
   );
 }
 
+function requiredPreferredSize(agents: readonly AgentsOverviewLayoutAgent[]): AgentsOverviewCardFloor {
+  return agents.reduce<AgentsOverviewCardFloor>(
+    (preferred, agent) => {
+      const agentPreferred = preferredForMode(agent.cardMode);
+      return {
+        width: Math.max(preferred.width, agentPreferred.width),
+        height: Math.max(preferred.height, agentPreferred.height),
+      };
+    },
+    { width: 0, height: 0 },
+  );
+}
+
+function preferredSizeDeviation(
+  width: number,
+  height: number,
+  preferred: AgentsOverviewCardFloor,
+): number {
+  const widthDeviation = preferred.width > 0 ? Math.abs(width - preferred.width) / preferred.width : 0;
+  const heightDeviation = preferred.height > 0 ? Math.abs(height - preferred.height) / preferred.height : 0;
+  return widthDeviation + heightDeviation;
+}
+
+function preferredViewportRows(
+  height: number,
+  preferredHeight: number,
+  floorHeight: number,
+  gap: number,
+): number {
+  const innerHeight = Math.max(0, height - (2 * gap));
+  const hardFloorCapacity = Math.max(1, Math.floor((innerHeight + gap) / (floorHeight + gap)));
+  const idealRows = Math.max(1, Math.round((innerHeight + gap) / (preferredHeight + gap)));
+  return Math.min(hardFloorCapacity, idealRows);
+}
+
 function evaluateCandidate(
   agents: readonly AgentsOverviewLayoutAgent[],
   containerSize: AgentsOverviewContainerSize,
@@ -137,6 +190,7 @@ function evaluateCandidate(
   });
   const minimumCardArea = cardWidth * cardHeight;
   const floor = requiredFloor(agents);
+  const preferred = requiredPreferredSize(agents);
   const viewportRows = floor.height > 0
     ? Math.max(0, Math.floor((height + safeGap) / (floor.height + safeGap)))
     : rows;
@@ -151,6 +205,7 @@ function evaluateCandidate(
     orientation: orientationFor(safeColumns, rows),
     meetsHardFloor,
     viewportCapacity: Math.min(agents.length, safeColumns * viewportRows),
+    preferredSizeDeviation: preferredSizeDeviation(cardWidth, cardHeight, preferred),
     // Candidate score is deliberately a continuous usable-area measure. Hard-floor,
     // empty-cell, and orientation policy remain explicit comparator dimensions.
     score: minimumCardArea,
@@ -303,11 +358,14 @@ function evaluateAutoCandidate(
   gap: number,
 ): AgentsOverviewGridCandidate | null {
   const floor = requiredFloor(agents);
+  const preferred = requiredPreferredSize(agents);
   const width = finiteNonNegative(containerSize.width);
   const height = finiteNonNegative(containerSize.height);
-  // Width determines whether Auto can present a useful multi-agent grid.
-  // A short pane still has one useful row; its floor height overflows vertically.
-  const viewportRows = Math.max(1, Math.floor((height + gap) / (floor.height + gap)));
+  const innerHeight = Math.max(0, height - (2 * gap));
+  // The hard floor is a last-resort constraint, not Auto's target. Choose the
+  // visible row count nearest the preferred working height, then compress only
+  // when the pane is too short to retain that height.
+  const viewportRows = preferredViewportRows(height, preferred.height, floor.height, gap);
 
   const rows = Math.ceil(agents.length / columns);
   const simultaneousRows = Math.min(rows, viewportRows);
@@ -320,7 +378,10 @@ function evaluateAutoCandidate(
     : availableCardWidth;
   const cardHeight = Math.max(
     floor.height,
-    (height - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows,
+    Math.min(
+      preferred.height,
+      (innerHeight - (Math.max(0, simultaneousRows - 1) * gap)) / simultaneousRows,
+    ),
   );
   if (columns > 1 && cardWidth < floor.width) return null;
 
@@ -334,7 +395,8 @@ function evaluateAutoCandidate(
     orientation: orientationFor(columns, rows),
     meetsHardFloor: true,
     viewportCapacity: Math.min(agents.length, columns * viewportRows),
-    score: cardWidth * cardHeight,
+    preferredSizeDeviation: preferredSizeDeviation(cardWidth, cardHeight, preferred),
+    score: 1 / (1 + preferredSizeDeviation(cardWidth, cardHeight, preferred)),
   };
 }
 
@@ -345,6 +407,9 @@ function compareAutoCandidates(
 ): number {
   if (left.viewportCapacity !== right.viewportCapacity) {
     return right.viewportCapacity - left.viewportCapacity;
+  }
+  if (Math.abs(left.preferredSizeDeviation - right.preferredSizeDeviation) > FLOAT_COMPARISON_EPSILON) {
+    return left.preferredSizeDeviation - right.preferredSizeDeviation;
   }
   return compareAgentsOverviewCandidates(left, right, previousOrientation);
 }

@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AGENTS_OVERVIEW_RESIZE_DEBOUNCE_MS,
   CHAT_CARD_FLOOR,
+  CHAT_CARD_PREFERRED,
   TERMINAL_CARD_FLOOR,
+  TERMINAL_CARD_PREFERRED,
   generateAgentsOverviewCandidates,
   resolveAgentsOverviewLayout,
   selectBestAgentsOverviewCandidate,
@@ -16,6 +18,12 @@ const terminalAgents = (count: number): AgentsOverviewLayoutAgent[] =>
   Array.from({ length: count }, (_, index) => ({
     id: `agent-${index + 1}`,
     cardMode: "terminal",
+  }));
+
+const chatAgents = (count: number): AgentsOverviewLayoutAgent[] =>
+  Array.from({ length: count }, (_, index) => ({
+    id: `chat-agent-${index + 1}`,
+    cardMode: "chat",
   }));
 
 describe("Agents layout", () => {
@@ -84,6 +92,60 @@ describe("Agents layout", () => {
     expect(result.cardHeight).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.height);
     expect(result.requiresScroll).toBe(true);
     expect(result.contentHeight).toBeGreaterThan(900);
+  });
+
+  it("targets the preferred terminal height instead of packing cards at the hard floor", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(6),
+      containerSize: { width: 700, height: 950 },
+      gap: 6,
+    });
+
+    expect(TERMINAL_CARD_PREFERRED).toEqual({ width: 520, height: 450 });
+    expect(result.presentationMode).toBe("grid");
+    expect(result.columns).toBe(1);
+    expect(result.cardHeight).toBe(TERMINAL_CARD_PREFERRED.height);
+    expect(result.visibleAgentIds).toEqual(terminalAgents(6).map(({ id }) => id));
+    expect(result.requiresScroll).toBe(true);
+  });
+
+  it("uses additional preferred-height rows when a taller pane can support them", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(6),
+      containerSize: { width: 700, height: 1400 },
+      gap: 6,
+    });
+
+    expect(result.cardHeight).toBe(TERMINAL_CARD_PREFERRED.height);
+    expect(result.candidate?.viewportCapacity).toBe(3);
+  });
+
+  it("compresses preferred rows toward the floor only when the pane is constrained", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: terminalAgents(4),
+      containerSize: { width: 700, height: 700 },
+      gap: 6,
+    });
+
+    expect(result.cardHeight).toBeGreaterThanOrEqual(TERMINAL_CARD_FLOOR.height);
+    expect(result.cardHeight).toBeLessThan(TERMINAL_CARD_PREFERRED.height);
+    expect(result.candidate?.viewportCapacity).toBe(2);
+  });
+
+  it("uses the same preferred height policy for chat cards", () => {
+    const result = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents: chatAgents(4),
+      containerSize: { width: 500, height: 950 },
+      gap: 6,
+    });
+
+    expect(CHAT_CARD_PREFERRED).toEqual({ width: 360, height: 450 });
+    expect(result.cardHeight).toBe(CHAT_CARD_PREFERRED.height);
+    expect(result.cardHeight).toBeGreaterThan(CHAT_CARD_FLOOR.height);
   });
 
   it("keeps a two-column Auto grid with one vertically overflowing row below the card floor", () => {
@@ -178,7 +240,7 @@ describe("Agents layout", () => {
     expect(result.visibleAgentIds).toEqual(["agent-3"]);
   });
 
-  it("requires a 10 percent score improvement before changing a viable Auto grid", () => {
+  it("keeps the preferred Auto column count stable across a small resize", () => {
     const agents = terminalAgents(6);
     const previous = resolveAgentsOverviewLayout({
       mode: "auto",
@@ -186,17 +248,9 @@ describe("Agents layout", () => {
       containerSize: { width: 1600, height: 1600 },
       gap: 8,
     });
-    expect(previous.candidate?.columns).toBe(2);
+    expect(previous.candidate?.columns).toBe(3);
 
-    const unconstrainedChoice = resolveAgentsOverviewLayout({
-      mode: "auto",
-      agents,
-      containerSize: { width: 1610, height: 1600 },
-      gap: 8,
-    });
-    expect(unconstrainedChoice.candidate?.columns).toBe(3);
-
-    const smallImprovement = resolveAgentsOverviewLayout({
+    const resized = resolveAgentsOverviewLayout({
       mode: "auto",
       agents,
       containerSize: { width: 1610, height: 1600 },
@@ -204,7 +258,27 @@ describe("Agents layout", () => {
       gap: 8,
     });
 
-    expect(smallImprovement.candidate?.columns).toBe(previous.candidate?.columns);
+    expect(resized.candidate?.columns).toBe(previous.candidate?.columns);
+  });
+
+  it("switches when a newly admitted column is materially closer to the preferred width", () => {
+    const agents = terminalAgents(6);
+    const previous = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents,
+      containerSize: { width: 1575, height: 950 },
+      gap: 8,
+    });
+    const widened = resolveAgentsOverviewLayout({
+      mode: "auto",
+      agents,
+      containerSize: { width: 1576, height: 950 },
+      previousLayout: previous,
+      gap: 8,
+    });
+
+    expect(previous.candidate?.columns).toBe(2);
+    expect(widened.candidate?.columns).toBe(3);
   });
 
   it("stacks Auto immediately after a two-column hard-floor crossing", () => {
