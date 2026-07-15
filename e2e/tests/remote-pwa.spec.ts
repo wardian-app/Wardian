@@ -77,7 +77,51 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ workflows: [] }) });
   });
   await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events: [] }) });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          {
+            id: "remote-user-message",
+            session_id: "agent-1",
+            provider: "opencode",
+            kind: "message",
+            role: "user",
+            text: "Summarize the current implementation status.",
+            title: null,
+            status: null,
+            turn_id: "turn-1",
+            source: "provider_log",
+            command: null,
+            exit_code: null,
+            path: null,
+            language: null,
+            created_at: "2099-05-21T07:59:00.000Z",
+            sequence: 1,
+            metadata: {},
+          },
+          {
+            id: "remote-agent-message",
+            session_id: "agent-1",
+            provider: "opencode",
+            kind: "message",
+            role: "assistant",
+            text: "The navigation workbench is implemented and the focused verification is passing.",
+            title: null,
+            status: null,
+            turn_id: "turn-1",
+            source: "provider_log",
+            command: null,
+            exit_code: null,
+            path: null,
+            language: null,
+            created_at: "2099-05-21T08:00:00.000Z",
+            sequence: 2,
+            metadata: {},
+          },
+        ],
+      }),
+    });
   });
   await page.route("**/remote/api/ws-ticket", async (route) => {
     await route.fulfill({
@@ -281,6 +325,9 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     }),
   );
   await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await expect(page.getByLabel("user message")).toHaveClass(/\bw-full\b/);
+  await expect(page.getByLabel("assistant message")).toHaveClass(/\bw-full\b/);
+  await captureFeatureScreenshot("chat-full-width.png", page.locator('[data-testid="remote-agent-detail"]'));
   await page.getByLabel("Prompt Remote Coder").fill("status please");
   await page.getByRole("button", { name: "Send prompt" }).click();
 

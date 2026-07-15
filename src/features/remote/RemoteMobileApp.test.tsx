@@ -1453,9 +1453,28 @@ describe("RemoteMobileApp", () => {
     });
   });
 
-  it("renders remote chat messages with desktop markdown and copy behavior", async () => {
+  it("renders full-width remote chat messages with sentence-case labels, desktop markdown, and copy behavior", async () => {
     mockRemoteAgentDetailFetch("codex", {
       chatEvents: [
+        {
+          id: "user-message",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "message",
+          role: "user",
+          text: "Make the messages wider.",
+          title: null,
+          status: null,
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T07:59:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
         {
           id: "assistant-markdown",
           session_id: "agent-1",
@@ -1472,7 +1491,7 @@ describe("RemoteMobileApp", () => {
           path: null,
           language: null,
           created_at: "2026-05-21T08:00:00.000Z",
-          sequence: 1,
+          sequence: 2,
           metadata: {},
         },
       ],
@@ -1483,11 +1502,18 @@ describe("RemoteMobileApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
 
-    const article = await screen.findByLabelText("assistant message");
-    expect(within(article).getByText("bold").tagName).toBe("STRONG");
-    expect(within(article).getByText("npm test").tagName).toBe("CODE");
+    const userMessage = await screen.findByLabelText("user message");
+    const agentMessage = await screen.findByLabelText("assistant message");
+    expect(userMessage).toHaveClass("w-full");
+    expect(agentMessage).toHaveClass("w-full");
+    expect(userMessage).not.toHaveClass("max-w-[86%]");
+    expect(agentMessage).not.toHaveClass("max-w-[86%]");
+    expect(within(userMessage).getByText("You")).not.toHaveClass("uppercase");
+    expect(within(agentMessage).getByText("Agent")).not.toHaveClass("uppercase");
+    expect(within(agentMessage).getByText("bold").tagName).toBe("STRONG");
+    expect(within(agentMessage).getByText("npm test").tagName).toBe("CODE");
 
-    await userEvent.click(within(article).getByRole("button", { name: "Copy message" }));
+    await userEvent.click(within(agentMessage).getByRole("button", { name: "Copy message" }));
     await waitFor(() => expect(clipboardWriteTextMock).toHaveBeenCalledWith("Use **bold** and `npm test`."));
   });
 

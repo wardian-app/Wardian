@@ -65,10 +65,10 @@ const roleLabel: Record<AgentChatRole, string> = {
 };
 
 const messageClass: Record<AgentChatRole, string> = {
-  user: "ml-auto border-[var(--color-wardian-accent)] bg-wardian-bg text-primary",
-  assistant: "mr-auto border-wardian-border bg-wardian-card text-primary",
-  system: "mx-auto border-wardian-border bg-wardian-bg text-muted-neutral",
-  tool: "mr-auto border-wardian-border bg-wardian-bg font-mono text-muted-neutral",
+  user: "w-full border-[var(--color-wardian-accent)] bg-wardian-bg text-primary",
+  assistant: "w-full border-wardian-border bg-wardian-card text-primary",
+  system: "mx-auto max-w-[86%] border-wardian-border bg-wardian-bg text-muted-neutral",
+  tool: "mr-auto max-w-[86%] border-wardian-border bg-wardian-bg font-mono text-muted-neutral",
 };
 
 const iconButtonClass =
@@ -1123,8 +1123,8 @@ function MessageBubble({ event }: { event: AgentChatEvent }) {
   const text = event.text?.trimEnd() ?? "";
 
   return (
-    <article aria-label={`${role} message`} className={`relative max-w-[86%] rounded-md border px-3 py-2 pr-9 text-sm leading-relaxed ${messageClass[role]}`}>
-      <div className="mb-1 text-[11px] font-semibold uppercase text-muted-neutral">{label}</div>
+    <article aria-label={`${role} message`} className={`relative rounded-md border px-3 py-2 pr-9 text-sm leading-relaxed ${messageClass[role]}`}>
+      <div className="mb-1 text-[11px] font-semibold text-muted-neutral">{label}</div>
       {text ? (
         <>
           <div className="absolute right-1.5 top-1.5">
