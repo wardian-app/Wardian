@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { WorkflowMonitor, buildActivities, buildMonitorModel } from './WorkflowMonitor';
+import { WorkflowMonitor } from './WorkflowMonitor';
+import { buildActivities, buildMonitorModel } from './monitorModel';
+import { formatWorkflowTime } from './workflowTime';
 import type { RunSummary } from '../run/runTypes';
 import type { WorkflowSchedule } from '../../../types/workflow';
 
@@ -60,8 +62,13 @@ describe('WorkflowMonitor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByTestId('workflow-history-run-run-1')).toHaveTextContent('routine-check');
-    expect(screen.getByTestId('workflow-history-run-run-1')).toHaveTextContent('Completed');
+    const historyCard = screen.getByTestId('workflow-history-run-run-1');
+    expect(historyCard).toHaveTextContent('routine-check');
+    expect(historyCard).toHaveTextContent('Completed');
+    expect(historyCard).toHaveAttribute('data-mode', 'history');
+    expect(historyCard).toHaveTextContent('Ran');
+    expect(historyCard).toHaveTextContent('Outcome');
+    expect(historyCard).not.toHaveTextContent('Next run');
   });
 
   it('sorts history by latest run timestamp and shows the timestamp', () => {
@@ -93,9 +100,8 @@ describe('WorkflowMonitor', () => {
     const newerRow = screen.getByTestId('workflow-history-run-run-newer');
     const olderRow = screen.getByTestId('workflow-history-run-run-older');
     expect(newerRow.compareDocumentPosition(olderRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(newerRow).toHaveTextContent('Time');
-    expect(newerRow).toHaveTextContent(new Date(newerTimestamp).toLocaleString());
-    expect(olderRow).toHaveTextContent(new Date(olderTimestamp).toLocaleString());
+    expect(newerRow).toHaveTextContent(formatWorkflowTime(newerTimestamp).primary);
+    expect(olderRow).toHaveTextContent(formatWorkflowTime(olderTimestamp).primary);
   });
 
   it('shows one activity surface with triage groups instead of duplicate monitor columns', () => {
@@ -337,7 +343,12 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByRole('heading', { name: /^scheduled$/i })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /due soon/i })).toBeNull();
-    expect(screen.getByText('Routine Check')).toBeInTheDocument();
+    const scheduledCard = screen.getByTestId('workflow-activity-row-routine-check');
+    expect(scheduledCard).toHaveTextContent('Routine Check');
+    expect(scheduledCard).toHaveAttribute('data-mode', 'scheduled');
+    expect(scheduledCard).toHaveTextContent('Next run');
+    expect(scheduledCard).toHaveTextContent('Cadence');
+    expect(scheduledCard).toHaveTextContent('Last run');
     expect(screen.getByText('Nightly Review')).toBeInTheDocument();
   });
 
@@ -481,10 +492,10 @@ describe('WorkflowMonitor', () => {
     expect(primaryRow).toHaveTextContent('run-primary');
     expect(secondaryRow).toHaveTextContent('Secondary Schedule');
     expect(secondaryRow).toHaveTextContent('Scheduled');
-    expect(secondaryRow).toHaveTextContent('No runs yet');
+    expect(secondaryRow).toHaveTextContent('Never run');
   });
 
-  it('renders activity actions inside responsive rows instead of a fixed actions table', () => {
+  it('renders activity actions inside cards instead of a fixed actions table', () => {
     scheduleState.schedules = [{
       id: 'schedule-1',
       blueprint_id: 'routine-check',
@@ -499,34 +510,8 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByTestId('workflow-activity-row-routine-check')).toHaveTextContent('Routine Check');
-    expect(screen.getByTestId('workflow-activity-row-routine-check')).toHaveClass('grid');
     expect(screen.queryByRole('columnheader', { name: /actions/i })).toBeNull();
     expect(screen.getByRole('button', { name: /pause routine check/i })).toBeInTheDocument();
-  });
-
-  it('keeps activity columns aligned when workflow names are long', () => {
-    scheduleState.schedules = [{
-      id: 'schedule-1',
-      blueprint_id: 'evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name',
-      name: 'Evolver Weekly SkillOpt Batch With An Exceptionally Long Display Name',
-      input: {},
-      bindings: {},
-      schedule: { schedule_type: 'weekly', days_of_week: ['Sun'], time_of_day: '01:10', active: true },
-      is_paused: false,
-      next_run_epoch_ms: Date.UTC(2026, 6, 26, 5, 10, 0),
-    }];
-
-    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
-
-    const row = screen.getByTestId('workflow-activity-row-evolver-weekly-skillopt-batch-with-a-very-long-blueprint-name');
-    expect(row.className).toContain(
-      'grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]',
-    );
-    const columns = Array.from(row.children);
-    expect(columns[0]).toHaveTextContent('Time');
-    expect(columns[1]).toHaveTextContent('Evolver Weekly SkillOpt Batch With An Exceptionally Long Display Name');
-    expect(columns[2]).toHaveTextContent('No runs yet');
-    expect(columns[5]).toHaveClass('justify-self-end');
   });
 
   it('counts only current workflow failures in the headline stats', () => {
@@ -593,15 +578,11 @@ describe('WorkflowMonitor', () => {
     const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
     expect(latestRunId.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(olderRunRow).toHaveTextContent('run-old');
-    expect(olderRunRow).toHaveTextContent('Status');
-    expect(olderRunRow).toHaveTextContent('Schedule');
-    expect(olderRunRow).toHaveTextContent('Assignment');
-    expect(olderRunRow).toHaveTextContent('Manual only');
     expect(olderRunRow).toHaveTextContent('Default');
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
   });
 
-  it('keeps schedule and assignment labels on scheduled history rows', () => {
+  it('keeps schedule names and assignment labels on scheduled history cards', () => {
     scheduleState.schedules = [
       {
         id: 'schedule-1',
@@ -630,13 +611,12 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
     const row = screen.getByTestId('workflow-history-run-run-scheduled');
-    expect(row).toHaveTextContent('Every 1h');
-    expect(row).toHaveTextContent('reviewer: agent-reviewer');
-    expect(row).not.toHaveTextContent('Manual only');
-    expect(row).not.toHaveTextContent('Default');
+    expect(row).toHaveTextContent('Routine Check');
+    expect(row).toHaveTextContent('reviewer · agent-reviewer');
+    expect(row).not.toHaveTextContent('Default assignment');
   });
 
-  it('reveals older history ten runs at a time', () => {
+  it('reveals older history ten runs at a time', async () => {
     runState.runs = [
       {
         run_id: 'run-latest',
@@ -666,7 +646,11 @@ describe('WorkflowMonitor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /show 3 older/i }));
 
-    expect(screen.getByText('run-old-10')).toBeInTheDocument();
+    fireEvent.scroll(screen.getByTestId('workflow-history-scroll'), {
+      target: { scrollTop: 10 * 132 },
+    });
+
+    await waitFor(() => expect(screen.getByText('run-old-10')).toBeInTheDocument());
     expect(screen.getByText('run-old-11')).toBeInTheDocument();
     expect(screen.getByText('run-old-12')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
@@ -688,14 +672,29 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByTestId('workflow-history-run-run-contained')).toHaveStyle({
       contentVisibility: 'auto',
-      containIntrinsicSize: '72px',
+      containIntrinsicSize: '132px',
     });
   });
 
   it('keeps expanded history rendering bounded', async () => {
+    scheduleState.schedules = [{
+      id: 'schedule-audit',
+      blueprint_id: 'audit',
+      name: 'Audit',
+      input: {},
+      bindings: {},
+      assignments: {
+        analyst: { target_type: 'agent', agent_id: 'agent-analyst', conversation: 'current' },
+        reviewer: { target_type: 'temporary_provider', provider: 'codex' },
+        writer: { target_type: 'temporary_provider', provider: 'gemini' },
+      },
+      schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+      is_paused: false,
+    }];
     runState.runs = Array.from({ length: 60 }, (_, index) => ({
       run_id: `run-${String(index + 1).padStart(3, '0')}`,
       blueprint_id: 'audit',
+      schedule_id: 'schedule-audit',
       status: 'completed' as const,
       node_count: 2,
       path: `/runs/${index + 1}`,
@@ -710,10 +709,11 @@ describe('WorkflowMonitor', () => {
     }
 
     expect(screen.getByText('run-001')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: /show 1 more agents/i })[0]);
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
 
     fireEvent.scroll(screen.getByTestId('workflow-history-scroll'), {
-      target: { scrollTop: 40 * 72 },
+      target: { scrollTop: 40 * 132 + 140 },
     });
 
     await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
@@ -738,14 +738,14 @@ describe('WorkflowMonitor', () => {
     }
 
     const scroller = screen.getByTestId('workflow-history-scroll');
-    fireEvent.scroll(scroller, { target: { scrollTop: 40 * 72 } });
+    fireEvent.scroll(scroller, { target: { scrollTop: 40 * 132 } });
 
     expect(screen.queryByText('run-041')).toBeNull();
     await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
   });
 
-  it('keeps wide activity columns inside one labeled two-axis scroll pane', () => {
+  it('uses a labeled adaptive-card scroll pane for monitor history', () => {
     runState.runs = [{
       run_id: 'run-scroll',
       blueprint_id: 'audit',
@@ -760,7 +760,8 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByRole('region', { name: 'Workflow activity' }))
       .toHaveClass('flex-1', 'min-h-0', 'overflow-auto');
-    expect(screen.getByTestId('workflow-activity-table')).toHaveClass('min-w-[960px]');
+    expect(screen.getByTestId('workflow-history-run-run-scroll')).toHaveAttribute('data-mode', 'history');
+    expect(screen.queryByTestId('workflow-activity-table')).toBeNull();
   });
 
   it('renders scheduled agent assignments as agent names', async () => {
@@ -787,7 +788,7 @@ describe('WorkflowMonitor', () => {
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
-    expect(await screen.findAllByText('reasoning_gate: Assistant - Gemini')).toHaveLength(1);
+    expect(await screen.findAllByText('reasoning_gate · Assistant · Gemini')).toHaveLength(1);
   });
 
   it('renders multiple scheduled assignments in stable role order', () => {
@@ -801,6 +802,14 @@ describe('WorkflowMonitor', () => {
         reviewer: {
           target_type: 'temporary_provider',
           provider: 'codex',
+        },
+        writer: {
+          target_type: 'temporary_provider',
+          provider: 'gemini',
+        },
+        zeta: {
+          target_type: 'temporary_provider',
+          provider: 'opencode',
         },
         assistant: {
           target_type: 'agent',
@@ -817,7 +826,8 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     const rowText = screen.getByTestId('workflow-activity-row-routine-check').textContent ?? '';
-    expect(rowText.indexOf('assistant: agent-assistant')).toBeLessThan(rowText.indexOf('reviewer: temp codex'));
+    expect(rowText.indexOf('assistant · agent-assistant')).toBeLessThan(rowText.indexOf('reviewer · Temporary Codex'));
+    expect(screen.getByRole('button', { name: /show 2 more agents/i })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('builds schedule activities without rescanning the full run array per schedule', () => {
