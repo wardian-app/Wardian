@@ -658,21 +658,39 @@ describe('WorkflowMonitor', () => {
   });
 
   it('marks history rows for offscreen rendering containment while scrolling', () => {
+    const failure = 'Provider returned a long failure message that must remain available without increasing the collapsed card height';
     runState.runs = [{
       run_id: 'run-contained',
       blueprint_id: 'audit',
-      status: 'completed',
+      status: 'failed',
       node_count: 2,
       path: '/runs/contained',
       updated_at: '2026-06-01T16:00:00Z',
+      failure,
     }];
 
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByTestId('workflow-history-run-run-contained')).toHaveStyle({
+    const card = screen.getByTestId('workflow-history-run-run-contained');
+    expect(card).toHaveStyle({
       contentVisibility: 'auto',
       containIntrinsicSize: '132px',
+    });
+    expect({
+      layout: card.getAttribute('data-virtual-layout'),
+      details: card.querySelector('dl')?.className,
+      failure: screen.getByRole('alert').className,
+      failureTitle: screen.getByRole('alert').getAttribute('title'),
+      footer: card.querySelector('footer')?.className,
+      compactMeta: card.querySelector('[data-virtual-meta]')?.className,
+    }).toEqual({
+      layout: 'compact',
+      details: expect.stringContaining('grid-cols-3'),
+      failure: expect.stringContaining('truncate'),
+      failureTitle: failure,
+      footer: expect.stringContaining('flex-nowrap'),
+      compactMeta: expect.stringContaining('items-center'),
     });
   });
 
