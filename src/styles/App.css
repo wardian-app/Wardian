@@ -835,6 +835,7 @@ select option {
 
 .graph-body {
   display: grid;
+  position: relative;
   grid-template-columns: minmax(0, 1fr) var(--graph-inspector-width);
   flex: 1;
   min-height: 0;
@@ -1218,7 +1219,7 @@ select option {
 }
 
 
-@media (max-width: 760px) {
+@container wardian-surface (max-width: 760px) {
   .graph-toolbar {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -1230,5 +1231,77 @@ select option {
     width: 100%;
     max-width: none;
     transform: none;
+  }
+
+  .graph-body,
+  .graph-body--inspector-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .graph-inspector {
+    position: absolute;
+    z-index: 12;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--graph-inspector-width), 92cqw);
+    border-left: 1px solid var(--color-wardian-border);
+    background: var(--color-wardian-card);
+    box-shadow: var(--shadow-wardian-card);
+  }
+}
+
+/* Dashboard cards respond to their Workbench pane, not the app window. */
+.dashboard-agent-card__content {
+  min-width: 0;
+  flex-direction: row;
+}
+
+.dashboard-agent-card__identity {
+  width: 180px;
+  border-right: 1px solid var(--color-wardian-border);
+}
+
+.dashboard-agent-card__metadata {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.dashboard-agent-card__actions {
+  width: 260px;
+  flex: 0 0 auto;
+  border-left: 1px solid var(--color-wardian-border);
+}
+
+@container wardian-surface (max-width: 760px) {
+  .dashboard-agent-card__content {
+    flex-direction: column;
+  }
+
+  .dashboard-agent-card__identity,
+  .dashboard-agent-card__actions {
+    width: 100%;
+  }
+
+  .dashboard-agent-card__identity {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-wardian-border);
+  }
+
+  .dashboard-agent-card__metadata {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
+    gap: 0.75rem;
+    overflow-x: visible;
+  }
+
+  .dashboard-agent-card__metadata > * {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .dashboard-agent-card__actions {
+    border-top: 1px solid var(--color-wardian-border);
+    border-left: 0;
   }
 }

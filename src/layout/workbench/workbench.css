@@ -300,6 +300,11 @@
   color: var(--color-wardian-text);
 }
 
+.wardian-workbench-surface-panel {
+  container-name: wardian-surface;
+  container-type: inline-size;
+}
+
 .wardian-workbench-placeholder {
   display: grid;
   place-content: center;
@@ -319,7 +324,7 @@
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: clamp(1.25rem, 5vh, 3.5rem) clamp(1rem, 4vw, 3rem);
+  padding: clamp(1.25rem, 5vh, 3.5rem) clamp(1rem, 4cqw, 3rem);
   background: var(--color-wardian-bg);
   color: var(--color-wardian-text);
 }
@@ -343,7 +348,7 @@
 
 .wardian-workbench-home__header h2 {
   margin-bottom: 0.3rem;
-  font-size: clamp(1.25rem, 2vw, 1.6rem);
+  font-size: clamp(1.25rem, 2cqw, 1.6rem);
   font-weight: 600;
   letter-spacing: -0.02em;
 }
@@ -459,7 +464,7 @@
   font-size: 0.75rem;
 }
 
-@media (max-width: 32rem) {
+@container wardian-surface (max-width: 32rem) {
   .wardian-workbench-home__recent {
     align-items: stretch;
     flex-direction: column;

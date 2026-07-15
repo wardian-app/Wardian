@@ -1,4 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { makeSurface } from "./workbenchTestUtils";
@@ -8,6 +10,17 @@ import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
 const registry = createCoreWorkbenchSurfaceRegistry();
 
 describe("HomeSurface", () => {
+  it("inherits a named inline-size surface container", () => {
+    const workbenchCss = readFileSync(
+      resolve(process.cwd(), "src/layout/workbench/workbench.css"),
+      "utf8",
+    );
+
+    expect(workbenchCss).toMatch(/\.wardian-workbench-surface-panel\s*\{[^}]*container-name:\s*wardian-surface;[^}]*container-type:\s*inline-size;/s);
+    expect(workbenchCss).toMatch(/@container wardian-surface \(max-width:\s*32rem\)/);
+    expect(workbenchCss).not.toMatch(/@media \(max-width:\s*32rem\)/);
+  });
+
   it("renders derived empty-group discovery and recent reopen actions", () => {
     const onOpenSurface = vi.fn();
     const onSelectSurface = vi.fn();

@@ -202,6 +202,17 @@ describe("GraphView", () => {
     expect(appCss).toMatch(/\.graph-lenses\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translate\(-50%,\s*-50%\);/s);
   });
 
+  it("exposes pane-responsive graph regions", () => {
+    const { container } = render(<GraphView {...defaultProps} />);
+    const appCss = readFileSync(resolve(process.cwd(), "src/styles/App.css"), "utf8");
+
+    expect(container.querySelector(".graph-toolbar-primary")).toBeInTheDocument();
+    expect(container.querySelector(".graph-body")).toHaveClass("graph-body--inspector-open");
+    expect(container.querySelector(".graph-inspector")).toBeInTheDocument();
+    expect(appCss).toMatch(/@container wardian-surface \(max-width:\s*760px\)/);
+    expect(appCss).not.toMatch(/@media \(max-width:\s*760px\)/);
+  });
+
   it("opens inspector when a node is selected", () => {
     render(<GraphView {...defaultProps} />);
 

@@ -283,7 +283,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
       }}
     >
       <div className="graph-toolbar graph-toolbar--stable-centered">
-        <div className="graph-scope">
+        <div className="graph-scope graph-toolbar-primary">
           <div className="label-small">Scope</div>
           <div className="graph-scope-label">{projection.scopeLabel}</div>
           <div className="graph-scope-count">{filteredCount} agents visible</div>
@@ -338,7 +338,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
         </div>
       </div>
 
-      <div className={`graph-body ${inspectorOpen ? "" : "graph-body--inspector-hidden"}`}>
+      <div className={`graph-body ${inspectorOpen ? "graph-body--inspector-open" : "graph-body--inspector-hidden"}`}>
         <div className="graph-canvas-shell">
           {props.rendererActive === false ? (
             <div className="graph-empty-state">Graph renderer paused while hidden</div>

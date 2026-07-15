@@ -73,6 +73,16 @@ describe('DashboardView', () => {
     expect(props.getStatusColorClass).toHaveBeenCalledWith('Processing...');
   });
 
+  it('exposes card regions for pane-local responsive layout', () => {
+    renderDashboard();
+
+    const card = document.getElementById('agent-card-agent-1')!;
+    expect(card).toHaveClass('dashboard-agent-card');
+    expect(card.querySelector('.dashboard-agent-card__identity')).toBeInTheDocument();
+    expect(card.querySelector('.dashboard-agent-card__metadata')).toBeInTheDocument();
+    expect(card.querySelector('.dashboard-agent-card__actions')).toBeInTheDocument();
+  });
+
   it('omits off agents and shows the empty state when no agents are filtered in', () => {
     renderDashboard({
       filteredAgents: [agent({ session_id: 'off-1', session_name: 'Off Agent' })],
