@@ -38,10 +38,10 @@ export function workflowAssignmentItems(
           ? labels[assignment.agent_id] ?? assignment.agent_id
           : `Temporary ${humanize(assignment.provider)}`;
         const detailLabel = assignment.target_type === 'temporary_provider'
-          ? 'Ephemeral'
+          ? 'Temporary provider · Ephemeral'
           : assignment.conversation === 'fresh_background'
-            ? 'Fresh background'
-            : 'Current session';
+            ? 'Agent · Fresh background'
+            : 'Agent · Current session';
 
         return {
           key: role,
@@ -59,7 +59,7 @@ export function workflowAssignmentItems(
       key: role,
       role,
       targetLabel: labels[target] ?? target,
-      detailLabel: 'Legacy binding',
+      detailLabel: 'Agent · Legacy binding',
       fullLabel: `${role} · ${labels[target] ?? target}`,
     }));
   if (bindingItems.length > 0) return bindingItems;
@@ -70,7 +70,7 @@ export function workflowAssignmentItems(
     key: 'default',
     role: 'default',
     targetLabel,
-    detailLabel: 'Ephemeral',
+    detailLabel: 'Temporary provider · Ephemeral',
     fullLabel: targetLabel,
   }];
 }

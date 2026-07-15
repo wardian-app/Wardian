@@ -32,5 +32,6 @@ describe('monitor presentation', () => {
     expect(onExpandedChange).toHaveBeenCalledWith(true);
     rerender(<WorkflowAssignmentSummary workflowName="Strategy" items={items} expanded onExpandedChange={onExpandedChange} />);
     expect(screen.getByText('writer · missing')).toBeVisible();
+    expect(screen.getAllByText(/^(?:Agent · (?:Current session|Fresh background)|Temporary provider · Ephemeral)$/)).toHaveLength(3);
   });
 });
