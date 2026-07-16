@@ -79,12 +79,36 @@ Monitor shows a unified activity feed for workflow schedules and runs. Use the
 tabs to switch between all activity, items needing attention, running work,
 scheduled work, and history.
 
-In a narrow Workflows pane, the activity table scrolls horizontally while its
-summary and filters stay fixed. This preserves the monitor's operational columns
-without widening the pane or collapsing the surrounding workbench layout.
+Each section uses a card hierarchy suited to the operator's question:
 
-The top counters call out due-soon schedules and attention states. Schedule
-rows expose the current Monitor actions:
+- **Scheduled** leads with assigned agents, then **Next run**, **Cadence**, and
+  **Last run**.
+- **History** leads with assigned agents, then **Ran**, **Outcome**, and the run
+  duration when available. Historical cards do not show a future next-run time.
+- **Running** leads with ownership and live state, including when the run
+  started and was last updated.
+- **Needs attention** leads with ownership, the action required, and the latest
+  status update.
+- **All** preserves those section-specific priorities instead of forcing every
+  activity into one universal row layout.
+
+Cards show up to two role-aware assignment chips. When a workflow has more
+assignments, the accessible **+N agents** control expands the complete role map
+without making every collapsed card taller. Stored agent ids remain visible if
+an assigned agent is no longer in the roster.
+
+Run and schedule times use local, calendar-aware labels such as **Today**,
+**Tomorrow**, a nearby weekday and date, or a full date for more distant
+activity. Explicit fallbacks distinguish **Paused**, **Not scheduled**, and
+**Never run** states, while exact local date, time, and timezone remain
+available as supporting detail.
+
+The top counters summarize failed, running, awaiting, scheduled, and paused
+activity. Scheduled cards retain the current Monitor actions:
+
+In a narrow or restored Workflows pane, the responsive card grid stays within
+the pane while its summary and filters remain fixed. The card list scrolls
+independently without widening or collapsing the surrounding workbench layout.
 
 - **Pause** or **Resume** changes whether the schedule fires on its cadence.
 - **Run now** launches the scheduled invoker immediately.
@@ -92,9 +116,14 @@ rows expose the current Monitor actions:
 
 Active and recent runs appear in the same feed so you can jump directly into
 Observe. Older history is paged separately to keep the main feed focused on the
-latest run per blueprint. History rows lead with the run time, keep workflow
-identity separate from status, and show schedule cadence plus assignment labels
-when the run came from a schedule.
+latest run per blueprint.
+
+The left workflow rail uses a compact Scheduled-style card at normal sidebar
+widths. It keeps the workflow name, next run, two assigned agents with the same
+**+N agents** expansion, cadence, previous run, and pause or resume and run-now
+actions readable without repeating raw blueprint ids in the primary layout.
+Sidebar search also matches resolved agent names so you can find the workflow
+owned by a particular agent.
 
 ## Important Limits
 

@@ -1,5 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { openSurface } from "../fixtures/workbench";
+import { mkdir } from "node:fs/promises";
+
+const adaptiveCardScreenshotDirectory =
+  "e2e/screenshots/workflow-monitor-adaptive-cards/2026-07-16T06-18-35Z";
 
 const blueprint = {
   schema: 2,
@@ -30,7 +34,7 @@ const blueprint = {
 };
 
 async function installScheduleMonitorIpcMock(page: Page) {
-  await page.addInitScript(({ blueprintFixture }) => {
+  await page.addInitScript(({ blueprintFixture, agentFixtures, completedRunFixture }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
     let schedules: Array<Record<string, unknown>> = [];
@@ -61,7 +65,7 @@ async function installScheduleMonitorIpcMock(page: Page) {
       invoke: async (command: string, args?: Record<string, unknown>) => {
         tauriWindow.__scheduleMonitorInvokes?.push({ command, args });
 
-        if (command === "list_agents") return [];
+        if (command === "list_agents") return agentFixtures;
         if (command === "list_agent_classes") return [];
         if (command === "list_provider_readiness") {
           return [
@@ -104,7 +108,7 @@ async function installScheduleMonitorIpcMock(page: Page) {
         }
         if (command === "workflow_parse") return { blueprint: blueprintFixture, diagnostics: [] };
         if (command === "workflow_validate") return { ok: true, diagnostics: [] };
-        if (command === "workflow_list_runs") return [];
+        if (command === "workflow_list_runs") return [completedRunFixture];
         if (command === "workflow_read_run") return { state: null, events: [], blueprint: null };
 
         if (command === "schedule_list") return schedules;
@@ -117,13 +121,18 @@ async function installScheduleMonitorIpcMock(page: Page) {
             workspace: args?.workspace ?? null,
             input: args?.input ?? {},
             bindings: args?.bindings ?? {},
+            assignments: {
+              analyst: { target_type: "agent", agent_id: "agent-analyst", conversation: "current" },
+              reviewer: { target_type: "agent", agent_id: "agent-reviewer", conversation: "fresh_background" },
+              writer: { target_type: "agent", agent_id: "agent-writer", conversation: "current" },
+            },
             schedule: args?.schedule,
-            next_run_epoch_ms: 1780174800000,
+            next_run_epoch_ms: Date.parse("2026-07-17T13:30:00.000Z"),
             paused_remaining_ms: null,
             is_paused: false,
-            last_run_status: null,
+            last_run_status: "completed",
             last_run_error: null,
-            last_run_epoch_ms: null,
+            last_run_epoch_ms: Date.parse("2026-07-15T16:32:00.000Z"),
           };
           schedules = [...schedules, schedule];
           return schedule;
@@ -149,10 +158,51 @@ async function installScheduleMonitorIpcMock(page: Page) {
         return null;
       },
     };
-  }, { blueprintFixture: blueprint });
+  }, {
+    blueprintFixture: blueprint,
+    agentFixtures: [
+      {
+        session_id: "agent-analyst",
+        session_name: "Analyst Ada",
+        agent_class: "Analyst",
+        folder: "/workspace",
+        is_off: false,
+        provider: "claude",
+      },
+      {
+        session_id: "agent-reviewer",
+        session_name: "Reviewer Rui",
+        agent_class: "Reviewer",
+        folder: "/workspace",
+        is_off: false,
+        provider: "codex",
+      },
+      {
+        session_id: "agent-writer",
+        session_name: "Writer Wren",
+        agent_class: "Writer",
+        folder: "/workspace",
+        is_off: false,
+        provider: "opencode",
+      },
+    ],
+    completedRunFixture: {
+      run_id: "run-completed",
+      blueprint_id: "wf",
+      schedule_id: "schedule-1",
+      status: "completed",
+      node_count: 2,
+      failure: null,
+      path: "/runs/wf/run-completed",
+      started_at: "2026-07-15T16:30:00.000Z",
+      updated_at: "2026-07-15T16:32:00.000Z",
+      completed_at: "2026-07-15T16:32:00.000Z",
+    },
+  });
 }
 
-test("schedule a blueprint and pause it in Monitor", async ({ page }) => {
+test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) => {
+  await mkdir(adaptiveCardScreenshotDirectory, { recursive: true });
   await installScheduleMonitorIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -174,12 +224,46 @@ test("schedule a blueprint and pause it in Monitor", async ({ page }) => {
   await dialog.getByRole("button", { name: /save schedule/i }).click();
 
   await page.getByTestId("workflows-view").getByRole("button", { name: /^monitor$/i }).click();
-  await expect(page.getByTestId("workflow-monitor")).toBeVisible();
-  await expect(page.getByTestId("workflow-monitor").getByRole("button", { name: "Pause E2E Nightly" }).first()).toBeVisible();
+  const monitor = page.getByTestId("workflow-monitor");
+  await expect(monitor).toBeVisible();
+
+  const scheduledCard = monitor.getByTestId("workflow-activity-row-wf");
+  await expect(scheduledCard).toHaveAttribute("data-mode", "scheduled");
+  await expect(scheduledCard).toContainText("Next run");
+  await expect(scheduledCard).toContainText("Cadence");
+  await expect(scheduledCard).toContainText("Analyst Ada");
+  await expect(scheduledCard).toContainText("Reviewer Rui");
+  await expect(scheduledCard.getByRole("button", { name: "Show 1 more agents for E2E Nightly" })).toHaveText("+1 agents");
+  await scheduledCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/monitor-adaptive-cards.png` });
+
+  await monitor.getByRole("button", { name: "History" }).click();
+  const historyCard = monitor.getByTestId("workflow-history-run-run-completed");
+  await expect(historyCard).toContainText("Ran");
+  await expect(historyCard).toContainText("Outcome");
+  await expect(historyCard).not.toContainText("Next run");
+
+  await page.getByTestId("sidebar-tab-workflows").click();
+  const sidebarCard = page.getByTestId("workflow-glance-row-schedule-1");
+  await expect(sidebarCard).toContainText("Analyst Ada");
+  await expect(sidebarCard).toContainText("Reviewer Rui");
+  await expect(sidebarCard.getByRole("button", { name: "Show 1 more agents for E2E Nightly" })).toHaveText("+1 agents");
+  await page.evaluate(async () => {
+    const { useLayoutStore } = await import("/src/store/useLayoutStore.ts");
+    useLayoutStore.getState().setLeftSidebarWidth(360);
+  });
+  await expect.poll(() => sidebarCard.evaluate((element) => (
+    element.closest("aside")?.getBoundingClientRect().width ?? 0
+  ))).toBeGreaterThan(359);
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  await sidebarCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/sidebar-multi-agent-card.png` });
+
+  await monitor.getByRole("button", { name: "Scheduled" }).click();
+  await expect(monitor.getByRole("button", { name: "Pause E2E Nightly" }).first()).toBeVisible();
 
   await page.getByRole("button", { name: "Edit E2E Nightly" }).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
-  await page.screenshot({ path: "e2e/screenshots/schedule-monitor/monitor-schedule-form.png", fullPage: true });
   await page.getByRole("button", { name: /^Cancel$/ }).click();
 
   await page.getByRole("button", { name: "Pause E2E Nightly" }).first().click();
