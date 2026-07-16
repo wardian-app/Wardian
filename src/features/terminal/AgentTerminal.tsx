@@ -274,7 +274,7 @@ declare global {
         wheelStats: {
           events: number;
           handled: number;
-          opencode_owned: number;
+          tui_owned: number;
           no_scrollback: number;
           zero_rows: number;
           viewport_unchanged: number;
@@ -841,7 +841,7 @@ function wheelEventRows(
 type WheelDebugStats = {
   events: number;
   handled: number;
-  opencode_owned: number;
+  tui_owned: number;
   no_scrollback: number;
   zero_rows: number;
   viewport_unchanged: number;
@@ -877,13 +877,17 @@ function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) 
   const stats = wheelDebugStats.get(sessionId) ?? {
     events: 0,
     handled: 0,
-    opencode_owned: 0,
+    tui_owned: 0,
     no_scrollback: 0,
     zero_rows: 0,
     viewport_unchanged: 0,
   };
   stats[key] += 1;
   wheelDebugStats.set(sessionId, stats);
+}
+
+function terminalOwnsMouseInteraction(term: Terminal) {
+  return term.buffer.active.type === "alternate" && term.modes.mouseTrackingMode !== "none";
 }
 
 function scrollTerminalFromWheel(
@@ -898,6 +902,10 @@ function scrollTerminalFromWheel(
   sessionId?: string,
 ) {
   recordWheel(sessionId, "events");
+  if (terminalOwnsMouseInteraction(term)) {
+    recordWheel(sessionId, "tui_owned");
+    return false;
+  }
   const buffer = term.buffer.active;
   if ((buffer.baseY ?? 0) <= 0) {
     recordWheel(sessionId, "no_scrollback");
@@ -1370,8 +1378,8 @@ function geometryForRenderer(renderer: TerminalRendererEntry) {
   };
 }
 
-function shouldUseRenderedRowGeometryForProvider(provider: string | undefined, force: boolean) {
-  return !force && provider !== "opencode";
+function shouldUseRenderedRowGeometry(term: Terminal, force: boolean) {
+  return !force && term.buffer.active.type === "normal";
 }
 
 async function fitTerminalToContainer(
@@ -1405,7 +1413,7 @@ async function fitTerminalToContainer(
       // A forced fit runs during mount/remount before the browser has painted
       // fresh row DOM. Preserved rows can report stale heights and create a
       // resize -> repaint -> resize cascade, so use xterm's cell metrics only.
-      useRenderedRowGeometry: shouldUseRenderedRowGeometryForProvider(entry.provider, force),
+      useRenderedRowGeometry: shouldUseRenderedRowGeometry(renderer.term, force),
     });
     entry.fitCount += 1;
     if (!proposedDimensions) {
@@ -3612,9 +3620,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               ? "visible"
               : "hidden",
         }}
-        className={`w-full h-full overflow-hidden ${
-          provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
-        }`}
+        className="w-full h-full overflow-hidden"
       />
     </div>
   );
@@ -3629,7 +3635,8 @@ export const __terminalTesting = {
   proposeTerminalDimensions,
   removeSnapshotOverlay,
   resizeParser,
-  shouldUseRenderedRowGeometryForProvider,
+  shouldUseRenderedRowGeometry,
+  terminalOwnsMouseInteraction,
   isProviderViewportRedraw,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,
