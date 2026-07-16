@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  localWindowsNativeDriverCandidates,
   msEdgeDriverToolInstallArgs,
   nativeDriverCandidates,
   nativeDriverGuidance,
@@ -30,6 +31,14 @@ test("native setup resolves commands from PATH entries", () => {
 
 test("native setup provides driver candidates and guidance for supported platforms", () => {
   assert.ok(nativeDriverCandidates("win32").some((candidate) => candidate.includes("msedgedriver")));
+  assert.deepEqual(
+    nativeDriverCandidates("win32").slice(0, 2),
+    localWindowsNativeDriverCandidates(),
+  );
+  assert.ok(
+    localWindowsNativeDriverCandidates().every((candidate) => candidate.includes("tools")),
+    "Windows setup must only reuse drivers provisioned in Wardian's tools directory",
+  );
   assert.ok(nativeDriverCandidates("linux").includes("chromedriver"));
   assert.match(nativeDriverGuidance("darwin"), /chromedriver|geckodriver/);
 });
