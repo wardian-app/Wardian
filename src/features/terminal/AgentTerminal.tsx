@@ -2465,7 +2465,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   const restoreEvictedRendererRef = useRef<() => Promise<void>>(async () => undefined);
   const rendererReadyRef = useRef(false);
   const rendererLifecycleActiveRef = useRef(
-    visibility === "visible" && renderState === "mounted",
+    renderState === "mounted",
   );
   const presentationLifecycleRef = useRef({ visibility, renderState, requestedInteraction });
   presentationLifecycleRef.current = { visibility, renderState, requestedInteraction };
@@ -2560,7 +2560,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   }, [markRendererReady, terminalKey]);
 
   useEffect(() => {
-    const rendererLifecycleActive = visibility === "visible" && renderState === "mounted";
+    const rendererLifecycleActive = renderState === "mounted";
     const wasRendererLifecycleActive = rendererLifecycleActiveRef.current;
     rendererLifecycleActiveRef.current = rendererLifecycleActive;
     if (!rendererLifecycleActive) {
@@ -2576,6 +2576,8 @@ export const AgentTerminal = memo(function AgentTerminal({
       fitAddonRef.current = null;
       rendererEvictedRef.current = false;
       setRendererEvicted(false);
+    } else if (visibility !== "visible") {
+      markRendererReady(false);
     } else if (!wasRendererLifecycleActive) {
       setRendererMountRevision((revision) => revision + 1);
     }
@@ -2834,7 +2836,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!sessionId || !terminalRef.current) {
       return;
     }
-    if (visibility !== "visible" || renderState !== "mounted") {
+    if (renderState !== "mounted") {
       const existing = terminalSessionMap.get(terminalKey);
       if (existing?.renderer) {
         const renderer = existing.renderer;
@@ -2844,6 +2846,14 @@ export const AgentTerminal = memo(function AgentTerminal({
       }
       rendererEvictedRef.current = false;
       setRendererEvicted(false);
+      markRendererReady(false);
+      return;
+    }
+    if (visibility !== "visible") {
+      const existing = terminalSessionMap.get(terminalKey);
+      if (existing) {
+        cancelRendererDisposal(existing);
+      }
       markRendererReady(false);
       return;
     }
@@ -3248,7 +3258,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       }
       if (entry && !entry.disposed) {
         const lifecycle = presentationLifecycleRef.current;
-        if (lifecycle.visibility !== "visible" || lifecycle.renderState !== "mounted") {
+        if (lifecycle.renderState !== "mounted") {
           cancelRendererDisposal(entry);
           if (entry.renderer) {
             const renderer = entry.renderer;

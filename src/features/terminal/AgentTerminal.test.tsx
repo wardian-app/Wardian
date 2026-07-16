@@ -480,6 +480,99 @@ describe("AgentTerminal scrollback", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("unregister_terminal_presentation", expect.anything());
   });
 
+  it("retains a hidden mounted renderer without registering or snapshotting again", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-retained";
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "request_terminal_snapshot") return modernSnapshot();
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const view = render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-retained"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+    });
+    const renderer = getLatestTerminalInstance();
+    const registrationCount = mockInvoke.mock.calls.filter(
+      ([command]) => command === "register_terminal_presentation",
+    ).length;
+    const snapshotCount = mockInvoke.mock.calls.filter(
+      ([command]) => command === "request_terminal_snapshot",
+    ).length;
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-retained"
+        visibility="hidden"
+        renderState="mounted"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "update_terminal_presentation",
+        expect.objectContaining({
+          request: expect.objectContaining({
+            presentation_id: "pane-retained",
+            visibility: "hidden",
+            render_state: "mounted",
+          }),
+        }),
+      );
+    });
+    expect(getLatestTerminalInstance()).toBe(renderer);
+    expect(renderer.dispose).not.toHaveBeenCalled();
+
+    view.rerender(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-retained"
+        visibility="visible"
+        renderState="mounted"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
+    });
+    expect(getLatestTerminalInstance()).toBe(renderer);
+    expect(renderer.dispose).not.toHaveBeenCalled();
+    expect(mockInvoke.mock.calls.filter(
+      ([command]) => command === "register_terminal_presentation",
+    )).toHaveLength(registrationCount);
+    expect(mockInvoke.mock.calls.filter(
+      ([command]) => command === "request_terminal_snapshot",
+    )).toHaveLength(snapshotCount);
+  });
+
   it("settles an in-flight broker snapshot write before disposing its retired renderer", async () => {
     const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
