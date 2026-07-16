@@ -267,8 +267,11 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     const root = containerRef.current;
     const grid = gridRef.current;
     const logicalIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);
-    if (!root || !grid || surfaceVisibility !== "visible") {
+    if (!root || !grid) {
       setResidentAgentIds(new Set());
+      return;
+    }
+    if (surfaceVisibility !== "visible") {
       return;
     }
     const orderedLogicalIds = Array.from(logicalIds);
@@ -424,7 +427,8 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
       {renderableAgents.map((agent: AgentConfig, _idx: number) => {
         const agentId = agent.session_id.toString();
         const isAgentVisible = surfaceVisibility === "visible" && visibleAgentIds.has(agentId);
-        const isAgentRendererActive = isAgentVisible && residentAgentIds.has(agentId);
+        const isAgentRendererResident = residentAgentIds.has(agentId);
+        const isAgentPresentationVisible = isAgentVisible && isAgentRendererResident;
         const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
         const isOff = offAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
@@ -565,8 +569,8 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                     isMaximized={isAgentMaximized}
                     theme={theme}
                     workspacePath={visibleWorkspacePath}
-                    visibility={isAgentRendererActive ? "visible" : "hidden"}
-                    renderState={isAgentRendererActive ? "mounted" : "suspended"}
+                visibility={isAgentPresentationVisible ? "visible" : "hidden"}
+                renderState={isAgentRendererResident ? "mounted" : "suspended"}
                     onTerminalFocus={onTerminalFocus}
                     onTitleChange={handleTitleChange}
                   />

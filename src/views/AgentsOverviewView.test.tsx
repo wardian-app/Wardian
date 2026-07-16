@@ -361,6 +361,77 @@ describe('AgentsOverviewView maximize behavior', () => {
     }
   });
 
+  it('preserves resident terminals while hidden without admitting new renderers', async () => {
+    const originalIntersectionObserver = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = undefined as unknown as typeof IntersectionObserver;
+
+    const manyAgents = Array.from({ length: 25 }, (_, index): AgentConfig => ({
+      session_id: `resident-agent-${index + 1}`,
+      session_name: `Agent ${index + 1}`,
+      agent_class: 'Coder',
+      folder: 'C:/project',
+      is_off: false,
+    }));
+
+    try {
+      const view = render(
+        <AgentsOverviewView {...gridProps(null, manyAgents)} surfaceVisibility="visible" />,
+      );
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(latestProps.get('resident-agent-1')).toMatchObject({
+          visibility: 'visible',
+          renderState: 'mounted',
+        });
+        expect(latestProps.get('resident-agent-25')).toMatchObject({
+          visibility: 'hidden',
+          renderState: 'suspended',
+        });
+      });
+
+      view.rerender(
+        <AgentsOverviewView {...gridProps(null, manyAgents)} surfaceVisibility="hidden" />,
+      );
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(latestProps.get('resident-agent-1')).toMatchObject({
+          visibility: 'hidden',
+          renderState: 'mounted',
+        });
+        expect(latestProps.get('resident-agent-25')).toMatchObject({
+          visibility: 'hidden',
+          renderState: 'suspended',
+        });
+      });
+
+      view.rerender(
+        <AgentsOverviewView {...gridProps(null, manyAgents)} surfaceVisibility="visible" />,
+      );
+
+      await waitFor(() => {
+        const latestProps = new Map(
+          terminalRenderSpy.mock.calls.map(([props]) => [props.sessionId, props]),
+        );
+        expect(latestProps.get('resident-agent-1')).toMatchObject({
+          visibility: 'visible',
+          renderState: 'mounted',
+        });
+        expect(latestProps.get('resident-agent-25')).toMatchObject({
+          visibility: 'hidden',
+          renderState: 'suspended',
+        });
+      });
+    } finally {
+      globalThis.IntersectionObserver = originalIntersectionObserver;
+    }
+  });
+
   it('reports the owning agent when its terminal receives focus', () => {
     const onTerminalFocus = vi.fn();
     renderGrid(null, agents, onTerminalFocus);
