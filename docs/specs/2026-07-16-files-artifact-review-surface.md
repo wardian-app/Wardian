@@ -462,6 +462,7 @@ artifacts/
 ├── index.json
 ├── threads/<artifact-id>/manifest.json
 ├── reviews/<review-id>.json
+├── drafts/<draft-id>.json
 ├── checkpoints/<checkpoint-id>.json
 └── blobs/<sha256>
 ```
