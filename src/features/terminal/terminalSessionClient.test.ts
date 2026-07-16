@@ -865,6 +865,104 @@ describe("TerminalSessionClient", () => {
     expect(client.brokerState?.owner_presentation_id).toBe("pane-current");
   });
 
+  it("restores the last local owner when the current owner before replacement was external", async () => {
+    let registrations = 0;
+    let deliveredRemoteTakeover = false;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      const generation = registrations <= 1 ? 1 : 2;
+      if (command === "register_terminal_presentation") {
+        registrations += 1;
+        const result = registeredResult("pane-auto", registrations === 1 ? 1 : 2);
+        result.broker_state.owner_presentation_id = registrations === 1 ? "pane-auto" : null;
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const state = brokerState(generation);
+        state.owner_presentation_id = generation === 1 ? "pane-auto" : null;
+        return { broker_state: state, initial_snapshot: snapshot(generation) };
+      }
+      if (command === "begin_terminal_activation") {
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: null,
+          },
+          activation_id: "external-owner-replacement-activation",
+          snapshot: snapshot(2),
+          sequence_barrier: 0,
+        };
+      }
+      if (command === "ack_terminal_activation") {
+        const state = brokerState(2);
+        state.lease_epoch = 1;
+        state.owner_presentation_id = "pane-auto";
+        return {
+          decision: {
+            status: "accepted",
+            reason: null,
+            runtime_generation: 2,
+            lease_epoch: 1,
+            owner_presentation_id: "pane-auto",
+          },
+          broker_state: state,
+          snapshot: snapshot(2),
+        };
+      }
+      if (command === "read_terminal_events") {
+        if (registrations === 1 && !deliveredRemoteTakeover) {
+          deliveredRemoteTakeover = true;
+          return eventsBatch([
+            {
+              sequence: 1,
+              runtime_generation: 1,
+              type: "ownership",
+              owner_presentation_id: "remote-owner",
+              lease_epoch: 1,
+              activation_id: "remote-takeover",
+            },
+          ], 1, 1);
+        }
+        return { ...eventsBatch([], 0, 0), runtime_generation: generation };
+      }
+      if (command === "ack_terminal_events") {
+        return { runtime_generation: generation, acknowledged_sequence: 0 };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-auto"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+    client.queueDrain();
+    await vi.waitFor(() => expect(client.brokerState?.owner_presentation_id).toBe("remote-owner"));
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 1,
+      lifecycle: "runtime_paused",
+    });
+    emit<TerminalSessionLifecycleNotification>("terminal-session-lifecycle", {
+      session_id: "agent-1",
+      runtime_generation: 2,
+      lifecycle: "runtime_replaced",
+    });
+
+    await vi.waitFor(() => expect(client.brokerState?.owner_presentation_id).toBe("pane-auto"));
+    expect(tauri.invoke).toHaveBeenCalledWith("ack_terminal_activation", {
+      request: expect.objectContaining({
+        presentation_id: "pane-auto",
+        runtime_generation: 2,
+      }),
+    });
+  });
+
   it("re-registers and restores ownership when an update races a cleared runtime", async () => {
     let registrations = 0;
     tauri.invoke.mockImplementation(async (command: string) => {

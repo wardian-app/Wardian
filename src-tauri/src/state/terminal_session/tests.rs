@@ -1824,7 +1824,7 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
     register_desktop(&broker, "owner").await;
     register_desktop(&broker, "takeover").await;
     let active = activate(&broker, "owner", generation, 0).await;
-    broker
+    let pending = broker
         .begin_activation(TerminalActivationBeginRequest {
             session_id: "session-1".to_string(),
             presentation_id: "takeover".to_string(),
@@ -1833,6 +1833,7 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
         })
         .await
         .expect("begin pending takeover");
+    let activation_id = pending.activation_id.expect("activation id");
     let mut wakeups = broker.subscribe_wakeups();
 
     let release = broker
@@ -1857,6 +1858,7 @@ async fn activation_timeout_has_priority_over_a_saturated_external_queue() {
     wait_for_external_capacity(&broker, 0).await;
     timer.fire(Duration::from_millis(16)).await;
     timer.fire(Duration::from_secs(5)).await;
+    wait_for_activation_deadline_elapsed(&broker, &activation_id).await;
     release.send(()).expect("release actor");
 
     let wake = tokio::time::timeout(Duration::from_secs(5), wakeups.recv())

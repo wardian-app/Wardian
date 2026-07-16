@@ -494,7 +494,7 @@ export class TerminalSessionClient {
                 notification.lifecycle === "runtime_replaced") &&
               !this.#runtimeTransitionPending
             ) {
-              this.#replacementOwnerCandidate = this.#brokerState?.owner_presentation_id
+              this.#replacementOwnerCandidate = this.#currentLocalOwnerPresentationId()
                 ?? this.#lastOwnerPresentationId;
               this.#runtimeTransitionPending = true;
               // The paused actor and its presentation registry are no longer a
@@ -508,7 +508,7 @@ export class TerminalSessionClient {
             if (generationAdvanced || sameGenerationReplacementNeedsRecovery) {
               this.#runtimeTransitionPending = true;
               const previousOwnerPresentationId = this.#replacementOwnerCandidate
-                ?? this.#brokerState?.owner_presentation_id
+                ?? this.#currentLocalOwnerPresentationId()
                 ?? this.#lastOwnerPresentationId
                 ?? null;
               this.#replacementOwnerCandidate = null;
@@ -827,7 +827,7 @@ export class TerminalSessionClient {
     }
     this.#brokerState = state;
     this.#runtimeGeneration = state.runtime_generation;
-    if (state.owner_presentation_id) {
+    if (state.owner_presentation_id && this.#presentations.has(state.owner_presentation_id)) {
       this.#lastOwnerPresentationId = state.owner_presentation_id;
     }
     for (const binding of this.#presentations.values()) {
@@ -844,7 +844,10 @@ export class TerminalSessionClient {
         owner_presentation_id: decision.owner_presentation_id,
       };
       this.#runtimeGeneration = decision.runtime_generation;
-      if (decision.owner_presentation_id) {
+      if (
+        decision.owner_presentation_id &&
+        this.#presentations.has(decision.owner_presentation_id)
+      ) {
         this.#lastOwnerPresentationId = decision.owner_presentation_id;
       }
     }
@@ -859,6 +862,13 @@ export class TerminalSessionClient {
       throw new Error(`Terminal presentation not registered: ${presentationId}`);
     }
     return binding;
+  }
+
+  #currentLocalOwnerPresentationId() {
+    const ownerPresentationId = this.#brokerState?.owner_presentation_id ?? null;
+    return ownerPresentationId !== null && this.#presentations.has(ownerPresentationId)
+      ? ownerPresentationId
+      : null;
   }
 
   #requiredBrokerState() {

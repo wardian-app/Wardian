@@ -40,6 +40,16 @@ presentation merely because it re-registered first. A hidden, suspended,
 read-only, removed, or superseded owner remains unowned until a user explicitly
 activates an eligible presentation.
 
+The desktop client tracks continuity only for presentations registered in that
+client. A remote takeover changes the broker's live owner, but it does not
+replace the desktop client's remembered local owner with a remote presentation
+ID that the client cannot re-register. If clear replaces the runtime while a
+remote presentation owns it, the last eligible local owner is restored after
+the replacement unless another presentation has already claimed the new
+generation. This preserves remote control during the existing generation while
+preventing the replacement desktop terminal from becoming permanently
+ownerless.
+
 `PresentationNotFound` recovery remains a defensive fallback for a missed or
 racy lifecycle notification. It is not the expected clear path.
 
@@ -59,6 +69,9 @@ normal owner resize protocol.
   completes activation, and sends input using generation 2 and its current
   lease epoch.
 - A replacement that already has an owner is not taken over.
+- A remote owner is honored while its generation is live, and a replacement
+  generation restores the last eligible local owner rather than attempting to
+  activate the remote presentation ID through the desktop client.
 - A removed or ineligible previous owner is not restored.
 - A paused-generation presentation update and snapshot request issue no stale
   IPC before replacement registration completes.
