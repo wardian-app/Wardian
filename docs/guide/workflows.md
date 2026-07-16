@@ -114,9 +114,9 @@ independently without widening or collapsing the surrounding workbench layout.
 - **Run now** launches the scheduled invoker immediately.
 - **Edit** reopens the schedule form.
 
-Active and recent runs appear in the same feed so you can jump directly into
-Observe. Older history is paged separately to keep the main feed focused on the
-latest run per blueprint.
+**All** aggregates the **Needs attention**, **Running**, and **Scheduled**
+sections into one operational view. **History** is the chronological run stream,
+paged 10 entries at a time so you can move through earlier activity.
 
 The left workflow rail uses a compact Scheduled-style card at normal sidebar
 widths. It keeps the workflow name, next run, two assigned agents with the same

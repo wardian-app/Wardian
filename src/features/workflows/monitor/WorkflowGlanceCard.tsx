@@ -5,7 +5,7 @@ import type { RunStatusKind, RunSummary } from '../run/runTypes';
 import { formatRunStatus } from '../run/statusLabels';
 import { WorkflowAssignmentSummary } from './WorkflowAssignmentSummary';
 import { workflowAssignmentItems } from './assignmentPresentation';
-import { cadenceLabel, scheduleStatusColor } from './scheduleStatus';
+import { cadenceLabel, scheduleStatusColor, scheduleStatusLabel } from './scheduleStatus';
 import { formatWorkflowTime } from './workflowTime';
 
 interface GlanceCardCommonProps {
@@ -65,6 +65,9 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
       agentLabels,
     );
     const nextRun = schedule.is_paused ? null : schedule.next_run_epoch_ms;
+    const statusLabel = scheduleStatusLabel(schedule);
+    const scheduleIssue = schedule.last_run_error?.trim()
+      || (schedule.last_run_status === 'failed' ? 'Last scheduled run failed' : null);
 
     return (
       <article
@@ -84,6 +87,13 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
               {schedule.name}
             </h4>
             <div className="mt-0.5 flex min-w-0 gap-1 text-[9px] text-muted">
+              <span
+                className="shrink-0 font-bold capitalize"
+                style={{ color: scheduleStatusColor(schedule) }}
+              >
+                {statusLabel}
+              </span>
+              <span aria-hidden>·</span>
               <span className="shrink-0 font-bold uppercase tracking-wide">Next run</span>
               <span className="min-w-0 truncate text-[var(--color-wardian-text)]">
                 {schedule.is_paused ? 'Paused' : timeLabel(nextRun, 'Not scheduled', now)}
@@ -115,9 +125,9 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
           <CompactDetail label="Last run">{timeLabel(schedule.last_run_epoch_ms, 'Never run', now)}</CompactDetail>
         </dl>
 
-        {schedule.last_run_error ? (
+        {scheduleIssue ? (
           <p role="alert" className="mt-2 break-words text-[9px] text-[var(--color-wardian-error)]">
-            {schedule.last_run_error}
+            {scheduleIssue}
           </p>
         ) : null}
       </article>

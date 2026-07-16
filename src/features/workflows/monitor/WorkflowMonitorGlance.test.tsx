@@ -25,7 +25,7 @@ const failedSchedule: WorkflowSchedule = {
   schedule: { schedule_type: 'daily', time_of_day: '09:00', active: true },
   is_paused: false,
   last_run_status: 'failed',
-  last_run_error: 'Provider crashed',
+  last_run_error: null,
   next_run_epoch_ms: Date.UTC(2026, 4, 31, 21, 0, 0),
 };
 
@@ -122,6 +122,7 @@ describe('WorkflowMonitorGlance', () => {
     expect(within(heartbeatRow).getByText('Passive Heartbeat')).toHaveClass('truncate');
     expect(within(heartbeatRow).getByLabelText(/run passive heartbeat now/i)).toHaveAttribute('title', 'Run now');
     expect(within(heartbeatRow).queryByText('Run now')).toBeNull();
+    expect(within(screen.getByTestId('workflow-glance-row-schedule-broken')).getByRole('alert')).toHaveTextContent('Last scheduled run failed');
   });
 
   it('prioritizes attention items before active and upcoming work', () => {
