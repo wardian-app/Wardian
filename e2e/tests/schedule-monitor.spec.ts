@@ -4,6 +4,9 @@ import { mkdir } from "node:fs/promises";
 
 const adaptiveCardScreenshotDirectory =
   "e2e/screenshots/workflow-monitor-adaptive-cards/2026-07-16T06-18-35Z";
+const fixedBrowserTime = "2026-07-16T16:00:00.000Z";
+
+test.use({ locale: "en-US", timezoneId: "America/New_York" });
 
 const blueprint = {
   schema: 2,
@@ -205,8 +208,18 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await mkdir(adaptiveCardScreenshotDirectory, { recursive: true });
   await installScheduleMonitorIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
+  await page.clock.setFixedTime(fixedBrowserTime);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+  await expect(page.evaluate(() => ({
+    now: new Date().toISOString(),
+    locale: Intl.DateTimeFormat().resolvedOptions().locale,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }))).resolves.toEqual({
+    now: fixedBrowserTime,
+    locale: "en-US",
+    timeZone: "America/New_York",
+  });
 
   await openSurface(page, "workflows");
   await page.evaluate(async () => {
@@ -231,6 +244,8 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(scheduledCard).toHaveAttribute("data-mode", "scheduled");
   await expect(scheduledCard).toContainText("Next run");
   await expect(scheduledCard).toContainText("Cadence");
+  await expect(scheduledCard).toContainText("Tomorrow, 9:30 AM");
+  await expect(scheduledCard).toContainText("Wed, Jul 15 · 12:32 PM");
   await expect(scheduledCard).toContainText("Analyst Ada");
   await expect(scheduledCard).toContainText("Reviewer Rui");
   await expect(scheduledCard.getByRole("button", { name: "Show 1 more agents for E2E Nightly" })).toHaveText("+1 agents");
@@ -240,6 +255,7 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   const historyCard = monitor.getByTestId("workflow-history-run-run-completed");
   await expect(historyCard).toContainText("Ran");
   await expect(historyCard).toContainText("Outcome");
+  await expect(historyCard).toContainText("Wed, Jul 15 · 12:32 PM");
   await expect(historyCard).not.toContainText("Next run");
 
   await page.getByTestId("sidebar-tab-workflows").click();
