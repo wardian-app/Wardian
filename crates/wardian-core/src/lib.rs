@@ -5,6 +5,7 @@ pub mod conversation_lease;
 pub mod conversations;
 pub mod db;
 pub mod engine;
+pub mod files;
 pub mod identity;
 pub mod library;
 pub mod models;
