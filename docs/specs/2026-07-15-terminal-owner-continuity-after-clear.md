@@ -9,6 +9,11 @@ client previously discarded which presentation owned the prior generation.
 When a React rebind raced the broker lifecycle event, it could also update the
 replacement actor before re-registering and surface `PresentationNotFound` as
 a terminal initialization fatal error.
+The ordered event subscription can also observe the replacement snapshot
+before Tauri delivers `runtime_replaced`. In that ordering, the lifecycle
+notice has the same generation as the client's current snapshot. Treating it
+as informational leaves the replacement registry ownerless even though output
+continues normally.
 The terminal could therefore resume rendering while its still-focused xterm
 sent input with an ownerless lease, making typing appear permanently broken
 until another explicit activation gesture happened to run.
@@ -38,6 +43,16 @@ activates an eligible presentation.
 `PresentationNotFound` recovery remains a defensive fallback for a missed or
 racy lifecycle notification. It is not the expected clear path.
 
+A same-generation `runtime_replaced` notification still initiates recovery
+when that replacement generation has not already been recovered. This makes
+snapshot-first and lifecycle-first delivery equivalent while preventing a
+duplicate notification from repeatedly rebuilding the registry.
+
+Viewport acknowledgements are generation-scoped too. Recovery invalidates the
+previous generation's last-reported geometry and, after ownership is restored,
+fits the existing renderer and commits its current columns and rows through the
+normal owner resize protocol.
+
 ## Verification
 
 - A presentation that owns generation 1 is re-registered for generation 2,
@@ -48,7 +63,8 @@ racy lifecycle notification. It is not the expected clear path.
 - A paused-generation presentation update and snapshot request issue no stale
   IPC before replacement registration completes.
 - Existing explicit click and keyboard activation behavior remains unchanged.
-- Native runtime coverage proves input before clear and verifies that the
-  replacement presentation remounts without an initialization fatal error.
+- Native runtime coverage proves input before and after clear, verifies that
+  the same presentation owns generation 2, and compares its reported columns
+  and rows with the recovered renderer geometry.
 - Client integration coverage proves the recovered generation and lease accept
   presentation-aware input; browser-only tests cannot prove PTY delivery.

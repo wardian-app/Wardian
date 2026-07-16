@@ -148,10 +148,12 @@ test(
     const mockScript = createRuntimeMockScript();
     const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
     const previousSafeMode = process.env.WARDIAN_WORKBENCH_SAFE_MODE;
+    const previousTerminalDebug = process.env.VITE_WARDIAN_TERMINAL_DEBUG;
     let normalSession = null;
     let safeSession = null;
 
     process.env.WARDIAN_MOCK_SCRIPT = mockScript;
+    process.env.VITE_WARDIAN_TERMINAL_DEBUG = "1";
     delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
 
     t.after(async () => {
@@ -162,6 +164,8 @@ test(
       else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
       if (previousSafeMode === undefined) delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
       else process.env.WARDIAN_WORKBENCH_SAFE_MODE = previousSafeMode;
+      if (previousTerminalDebug === undefined) delete process.env.VITE_WARDIAN_TERMINAL_DEBUG;
+      else process.env.VITE_WARDIAN_TERMINAL_DEBUG = previousTerminalDebug;
     });
 
     if (!skipNativeBuild) ensureNativeAppBuilt(harness);
@@ -214,6 +218,14 @@ test(
       }, agentsTerminalHost)
     ));
     assert.equal(initialAgentsFit.transform, "", "Agents first paint must use a locally fitted renderer");
+    const initialPresentationDebug = await driver.executeScript((host) => ({
+      presentation_id: host.getAttribute("data-terminal-presentation-id"),
+      presentation_ids: window.__wardianTerminalDebug?.presentationIds() ?? [],
+    }), agentsTerminalHost);
+    assert.ok(
+      initialPresentationDebug.presentation_ids.includes(initialPresentationDebug.presentation_id),
+      `Agents presentation must be registered before clear: ${JSON.stringify(initialPresentationDebug)}`,
+    );
 
     const terminalInput = await agentsTerminalHost.findElement(By.css(".xterm-helper-textarea"));
     await agentsTerminalHost.click();
@@ -248,6 +260,86 @@ test(
       fatalErrors.length,
       0,
       fatalErrors.length > 0 ? await fatalErrors[0].getText() : "",
+    );
+
+    const recoveredAgentsTerminalHost = await driver.findElement(By.css(
+      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+    ));
+    await waitFor("recovered Agents presentation", 10000, async () => (
+      driver.executeScript((host) => {
+        const presentationId = host.getAttribute("data-terminal-presentation-id");
+        const rect = host.getBoundingClientRect();
+        const cardRect = host.closest("[data-agent-grid-card-id]")?.getBoundingClientRect();
+        const computed = getComputedStyle(host);
+        const presentationIds = window.__wardianTerminalDebug?.presentationIds() ?? [];
+        return {
+          ok: presentationId !== null && presentationIds.includes(presentationId),
+          presentation_id: presentationId,
+          presentation_ids: presentationIds,
+          host_visibility: computed.visibility,
+          host_display: computed.display,
+          host_width: rect.width,
+          host_height: rect.height,
+          card_width: cardRect?.width ?? 0,
+          card_height: cardRect?.height ?? 0,
+        };
+      }, recoveredAgentsTerminalHost)
+    ));
+    const recoveredTerminalInput = await recoveredAgentsTerminalHost.findElement(
+      By.css(".xterm-helper-textarea"),
+    );
+    await recoveredAgentsTerminalHost.click();
+    await driver.executeScript((element) => element.focus(), recoveredTerminalInput);
+    await driver.actions().sendKeys("after-clear", Key.ENTER).perform();
+    await waitFor("terminal input after clear", 30000, async () => {
+      const snapshot = await readSnapshot(driver);
+      const debug = await driver.executeScript((host) => {
+        const presentationIds = window.__wardianTerminalDebug?.presentationIds() ?? [];
+        const presentationId = host.getAttribute("data-terminal-presentation-id");
+        const snapshot = presentationId
+          ? window.__wardianTerminalDebug?.snapshot(presentationId) ?? null
+          : null;
+        return {
+          presentation_id: presentationId ?? null,
+          presentation_ids: presentationIds,
+          broker: snapshot?.broker ?? null,
+          last_reported_size: snapshot?.lastReportedSize ?? null,
+          renderer_geometry: snapshot?.renderer
+            ? { cols: snapshot.renderer.cols, rows: snapshot.renderer.rows }
+            : null,
+        };
+      }, recoveredAgentsTerminalHost);
+      return {
+        ok: snapshotText(snapshot).includes("runtime-input:after-clear"),
+        snapshot,
+        debug,
+      };
+    });
+
+    const recoveredFit = await waitFor("fitted Agents terminal after clear", 30000, async () => (
+      await driver.executeScript((host) => {
+        const presentationId = host.getAttribute("data-terminal-presentation-id");
+        const debug = presentationId
+          ? window.__wardianTerminalDebug?.snapshot(presentationId) ?? null
+          : null;
+        const rect = host.getBoundingClientRect();
+        return {
+          ok: debug?.broker?.ownerPresentationId === presentationId
+            && debug?.lastReportedSize?.cols === debug?.renderer?.cols
+            && debug?.lastReportedSize?.rows === debug?.renderer?.rows
+            && rect.width >= 10
+            && rect.height >= 10,
+          presentation_id: presentationId,
+          debug,
+          host_width: rect.width,
+          host_height: rect.height,
+        };
+      }, recoveredAgentsTerminalHost)
+    ));
+    assert.equal(
+      recoveredFit.debug.broker.ownerPresentationId,
+      recoveredFit.presentation_id,
+      "The pre-clear owner must own the replacement runtime",
     );
 
     await openWorkbenchSurface(driver, "agent-session", SESSION_ID);

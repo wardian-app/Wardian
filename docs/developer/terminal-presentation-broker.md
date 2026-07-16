@@ -72,6 +72,13 @@ generation, remembers the current owner, and waits for the replacement
 generation before re-registering. A `PresentationNotFound` retry is only a
 fallback for missed or racy lifecycle delivery, not the normal clear flow.
 
+Lifecycle delivery can race the ordered event subscription. If a replacement
+snapshot advances the client generation before `runtime_replaced` arrives, the
+same-generation lifecycle notice still rebuilds the presentation registry
+once. The recovered owner then re-reports its renderer geometry because
+viewport acknowledgements from the previous generation cannot size the new
+PTY.
+
 After synchronization, a client may restore the exact presentation that owned
 the immediately preceding generation through the ordinary two-phase activation
 protocol. Restoration is allowed only while that presentation is still

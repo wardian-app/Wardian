@@ -77,6 +77,7 @@ export class TerminalSessionClient {
   #replacementOwnerCandidate: string | null = null;
   #lastOwnerPresentationId: string | null = null;
   #runtimeTransitionPending = false;
+  #lastRecoveredReplacementGeneration = 0;
   #runtimeGeneration = 0;
   #cursor = 0;
   #subscription: Promise<TerminalEventSubscriptionResult> | null = null;
@@ -470,6 +471,12 @@ export class TerminalSessionClient {
             ) {
               return;
             }
+            const generationAdvanced =
+              notification.runtime_generation > this.#runtimeGeneration;
+            const sameGenerationReplacementNeedsRecovery =
+              notification.lifecycle === "runtime_replaced" &&
+              notification.runtime_generation === this.#runtimeGeneration &&
+              notification.runtime_generation !== this.#lastRecoveredReplacementGeneration;
             if (
               notification.runtime_generation === this.#runtimeGeneration &&
               (notification.lifecycle === "runtime_paused" ||
@@ -487,7 +494,7 @@ export class TerminalSessionClient {
             for (const binding of this.#presentations.values()) {
               binding.callbacks.onLifecycle?.(notification);
             }
-            if (notification.runtime_generation > this.#runtimeGeneration) {
+            if (generationAdvanced || sameGenerationReplacementNeedsRecovery) {
               this.#runtimeTransitionPending = true;
               const previousOwnerPresentationId = this.#replacementOwnerCandidate
                 ?? this.#brokerState?.owner_presentation_id
@@ -496,7 +503,12 @@ export class TerminalSessionClient {
               this.#replacementOwnerCandidate = null;
               this.#runtimeGeneration = notification.runtime_generation;
               this.#subscription = null;
-              await this.#retryRegistrationsForGeneration(previousOwnerPresentationId);
+              const recovered = await this.#retryRegistrationsForGeneration(
+                previousOwnerPresentationId,
+              );
+              if (recovered && notification.lifecycle === "runtime_replaced") {
+                this.#lastRecoveredReplacementGeneration = notification.runtime_generation;
+              }
             } else {
               this.queueDrain();
             }
@@ -540,7 +552,9 @@ export class TerminalSessionClient {
     }
     if (recoveredPresentations === this.#presentations.size) {
       this.#runtimeTransitionPending = false;
+      return true;
     }
+    return false;
   }
 
   async #recoverPresentation(
