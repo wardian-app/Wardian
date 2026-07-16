@@ -164,6 +164,20 @@ jobs:
         env:
           WARDIAN_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
           WARDIAN_E2E_NATIVE_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
+      - name: Configure elevated WebView2 automation
+        shell: pwsh
+        run: |
+          # WebView2 150 ignores environment-supplied browser arguments for
+          # elevated hosts. GitHub's Windows runner is elevated, while
+          # tauri-driver needs this switch to attach to Wardian's WebView.
+          $policyPath = "HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+          New-Item -Path $policyPath -Force | Out-Null
+          New-ItemProperty `
+            -Path $policyPath `
+            -Name "Wardian.exe" `
+            -Value "--remote-debugging-port=0" `
+            -PropertyType String `
+            -Force | Out-Null
       - name: Run focused workbench native suite
         run: >-
           npm run test:e2e:native:fast --
