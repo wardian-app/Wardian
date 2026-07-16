@@ -65,7 +65,7 @@ The same terminal can appear in more than one desktop or remote presentation. Th
 - **Mirror** follows the same output and is read-only until explicitly activated.
 - **Connecting** is waiting for the terminal broker.
 
-Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly request interaction ownership for that presentation. Keyboard focus alone does not steal ownership. Wardian may reclaim hidden renderers to stay within resource limits; visible renderers restore and fit themselves automatically.
+Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly request interaction ownership for that presentation. Keyboard focus alone does not steal ownership. Short switches away from Agents keep its budgeted terminals warm but hidden and unable to accept input. Returning reuses those renderers; if Wardian had to reclaim one to stay within resource limits, it remains hidden until its backend, snapshot, and final fitted geometry are ready.
 
 ## Left Rail and Right Roster
 

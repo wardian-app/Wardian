@@ -188,8 +188,38 @@ contexts. The pools are independent deterministic LRUs:
 - WebGL eviction falls back to xterm's DOM renderer;
 - xterm eviction keeps the logical presentation registered, marks it for
   synchronization, and restores it from a broker snapshot when needed;
-- an ordinary unmount has a 30-second disposal grace so quick tab switches,
-  moves, and zoom changes can reuse the renderer.
+- an Agents presentation may be hidden while its budgeted xterm remains
+  mounted; hidden still disables input and reveal, but does not itself discard
+  renderer state;
+- an ordinary component unmount has a 30-second disposal grace so moves and
+  zoom changes can reuse the renderer.
+
+Renderer residency and presentation visibility are deliberately independent.
+The Agents surface keeps its current bounded resident set across short tab
+switches. A presentation outside that set is suspended and consumes no xterm
+budget. Hiding a resident presentation updates the broker to `hidden` while
+leaving its xterm mounted, so returning to Agents does not cause a simultaneous
+registration, snapshot, and renderer-construction burst.
+
+### First-paint reveal barrier
+
+A new or restored xterm is not visible as soon as its DOM node exists. Its
+current reveal generation must complete this transaction first:
+
+1. confirm connected, non-zero host bounds and physical intersection;
+2. select WebGL or settle on the complete DOM fallback;
+3. fit the local xterm to the measured host;
+4. apply and await the broker snapshot or recovery write;
+5. verify that the host, backend, proposed grid, and actual grid still agree;
+6. reveal the host atomically.
+
+Registration's pre-snapshot hook keeps backend selection and the first fit
+inside the client's serialized registration transaction. Suspending,
+replacing, hiding, or changing the renderer invalidates the reveal generation,
+so stale font, snapshot, or intersection continuations cannot reveal a newer
+renderer. Resize observation schedules at most one animation-frame fit and
+does no work when measured pixels are unchanged. Timer expiry is never used as
+evidence that terminal geometry has settled.
 
 Graph and Garden have a separate 30-second heavy-child grace through their
 surface render policy. Neither grace weakens broker ownership or changes PTY
