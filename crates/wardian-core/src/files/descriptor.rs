@@ -1,4 +1,4 @@
-use super::authorized_roots::FileIdentity;
+use super::authorized_roots::{FileIdentity, FileRevisionToken};
 use super::AuthorizedPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,7 +59,65 @@ impl FileContentDescriptorV1 {
         authorized: &AuthorizedPath,
         limits: &FileResourceLimits,
     ) -> Result<Self, FileResourceErrorV1> {
+        VerifiedFileSnapshot::from_authorized_path(authorized, limits)
+            .map(|snapshot| snapshot.descriptor)
+    }
+
+    #[cfg(test)]
+    fn from_authorized_path_with_hook(
+        authorized: &AuthorizedPath,
+        limits: &FileResourceLimits,
+        after_read: impl FnMut(usize, u64),
+    ) -> Result<Self, FileResourceErrorV1> {
+        VerifiedFileSnapshot::from_authorized_path_with_hook(authorized, limits, after_read)
+            .map(|snapshot| snapshot.descriptor)
+    }
+}
+
+/// Descriptor metadata and an opaque retained-handle revision token produced
+/// together by one stable scan of an [`AuthorizedPath`].
+///
+/// The token is intentionally not serializable and its fields remain private,
+/// so callers can retain or present it but cannot redirect or forge it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedFileSnapshot {
+    descriptor: FileContentDescriptorV1,
+    revision_token: FileRevisionToken,
+}
+
+impl VerifiedFileSnapshot {
+    /// Performs a stable descriptor scan and mints its opaque revision token.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` if the original path no longer resolves to
+    /// the authorized handle, `unstable_file` if every bounded scan observes a
+    /// change, `file_too_large` for a renderer-limit violation, or
+    /// `unavailable_path` for other file access failures.
+    pub fn from_authorized_path(
+        authorized: &AuthorizedPath,
+        limits: &FileResourceLimits,
+    ) -> Result<Self, FileResourceErrorV1> {
         Self::from_authorized_path_with_hook(authorized, limits, |_, _| {})
+    }
+
+    /// Borrows the renderer-safe descriptor produced by this stable scan.
+    #[must_use]
+    pub fn descriptor(&self) -> &FileContentDescriptorV1 {
+        &self.descriptor
+    }
+
+    /// Borrows the opaque revision token produced by this stable scan.
+    #[must_use]
+    pub fn revision_token(&self) -> &FileRevisionToken {
+        &self.revision_token
+    }
+
+    /// Separates descriptor metadata from the opaque revision token for
+    /// capability-aware storage boundaries.
+    #[must_use]
+    pub fn into_parts(self) -> (FileContentDescriptorV1, FileRevisionToken) {
+        (self.descriptor, self.revision_token)
     }
 
     fn from_authorized_path_with_hook(
@@ -112,6 +170,7 @@ impl FileContentDescriptorV1 {
                 extension.clone(),
                 scan,
                 after.modified_at_ms,
+                after.identity,
                 limits,
             );
         }
@@ -212,8 +271,9 @@ fn descriptor_from_scan(
     extension: Option<String>,
     scan: ScannedFile,
     modified_at_ms: u64,
+    identity: FileIdentity,
     limits: &FileResourceLimits,
-) -> Result<FileContentDescriptorV1, FileResourceErrorV1> {
+) -> Result<VerifiedFileSnapshot, FileResourceErrorV1> {
     let detected = detect_content(
         &scan.probe,
         extension.as_deref(),
@@ -227,21 +287,37 @@ fn descriptor_from_scan(
         detected.image_pixels,
         limits,
     );
+    let maximum_size_bytes = match detected.renderer_kind {
+        FileRendererKind::Text | FileRendererKind::Markdown => limits.monaco_max_size_bytes,
+        FileRendererKind::Image => limits.image_max_size_bytes,
+        FileRendererKind::Pdf => limits.pdf_max_size_bytes,
+        FileRendererKind::Unsupported => 0,
+    };
+    let revision_token = FileRevisionToken::new(
+        identity,
+        canonical_path.into(),
+        scan.content_hash.clone(),
+        scan.size_bytes,
+        maximum_size_bytes,
+    );
 
-    Ok(FileContentDescriptorV1 {
-        schema: 1,
-        canonical_path: canonical_path.to_string(),
-        display_name,
-        extension,
-        mime_type: detected.mime_type.to_string(),
-        encoding: detected.line_count.map(|_| "utf-8".to_string()),
-        renderer_kind: detected.renderer_kind,
-        size_bytes: scan.size_bytes,
-        line_count: detected.line_count,
-        content_hash: scan.content_hash,
-        modified_at_ms,
-        capabilities,
-        unavailable_reason,
+    Ok(VerifiedFileSnapshot {
+        descriptor: FileContentDescriptorV1 {
+            schema: 1,
+            canonical_path: canonical_path.to_string(),
+            display_name,
+            extension,
+            mime_type: detected.mime_type.to_string(),
+            encoding: detected.line_count.map(|_| "utf-8".to_string()),
+            renderer_kind: detected.renderer_kind,
+            size_bytes: scan.size_bytes,
+            line_count: detected.line_count,
+            content_hash: scan.content_hash,
+            modified_at_ms,
+            capabilities,
+            unavailable_reason,
+        },
+        revision_token,
     })
 }
 
@@ -814,7 +890,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
-    fn describe(name: &str, bytes: &[u8]) -> FileContentDescriptorV1 {
+    fn snapshot(name: &str, bytes: &[u8]) -> VerifiedFileSnapshot {
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join(name);
         fs::write(&path, bytes).expect("fixture file");
@@ -826,8 +902,12 @@ mod tests {
         let authorized = service
             .authorize_existing_file(&path)
             .expect("authorized fixture");
-        FileContentDescriptorV1::from_authorized_path(&authorized, &FileResourceLimits::default())
-            .expect("descriptor")
+        VerifiedFileSnapshot::from_authorized_path(&authorized, &FileResourceLimits::default())
+            .expect("verified snapshot")
+    }
+
+    fn describe(name: &str, bytes: &[u8]) -> FileContentDescriptorV1 {
+        snapshot(name, bytes).into_parts().0
     }
 
     #[test]
@@ -1293,5 +1373,18 @@ mod tests {
                 "message": "file is missing"
             })
         );
+    }
+
+    #[test]
+    fn verified_snapshot_keeps_revision_authority_out_of_descriptor_metadata() {
+        let snapshot = snapshot("notes.txt", b"bounded text\n");
+        let (descriptor, _revision_token) = snapshot.into_parts();
+
+        let serialized = serde_json::to_value(&descriptor).expect("serialize descriptor");
+        assert!(serialized.get("revision_token").is_none());
+        let reconstructed: FileContentDescriptorV1 =
+            serde_json::from_value(serialized).expect("deserialize descriptor metadata");
+
+        assert_eq!(reconstructed, descriptor);
     }
 }

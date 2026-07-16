@@ -2,9 +2,12 @@ use super::FileResourceErrorV1;
 use crate::models::AgentConfig;
 use std::fs;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 use std::path::Component;
@@ -128,6 +131,204 @@ pub struct AuthorizedPath {
 }
 
 impl AuthorizedPath {
+    /// Reads validated UTF-8 text from the retained authorized file handle for
+    /// one exact verified revision.
+    ///
+    /// `maximum_length_bytes` is an additional caller-selected ceiling. It can
+    /// only narrow the renderer ceiling sealed into `revision`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` if the original pathname no longer binds to
+    /// the retained file, `stale_revision` if size or SHA-256 differs,
+    /// `file_too_large` if the content exceeds either ceiling, and
+    /// `unsupported_content` if the verified bytes are not UTF-8.
+    pub fn read_verified_text(
+        &self,
+        revision: &FileRevisionToken,
+        maximum_length_bytes: u64,
+    ) -> Result<String, FileResourceErrorV1> {
+        let bytes = self.read_verified_bytes(revision, None, maximum_length_bytes, true)?;
+        String::from_utf8(bytes)
+            .map_err(|_| FileResourceErrorV1::new("unsupported_content", "file is not valid UTF-8"))
+    }
+
+    /// Reads one inclusive byte range from the retained authorized file handle
+    /// for one exact verified revision.
+    ///
+    /// The entire bounded file is hashed while only the requested range is
+    /// captured. `maximum_length_bytes` limits the returned allocation and can
+    /// never increase the renderer ceiling sealed into `revision`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` if the original pathname no longer binds to
+    /// the retained file, `stale_revision` if size or SHA-256 differs,
+    /// `file_too_large` if the file or requested allocation exceeds its limit,
+    /// and a range-specific error for an invalid interval.
+    pub fn read_verified_range(
+        &self,
+        revision: &FileRevisionToken,
+        range: RangeInclusive<u64>,
+        maximum_length_bytes: u64,
+    ) -> Result<Vec<u8>, FileResourceErrorV1> {
+        let (start, end) = range.into_inner();
+        self.read_verified_bytes(revision, Some((start, end)), maximum_length_bytes, true)
+    }
+
+    /// Verifies that the retained authorized handle still contains the exact
+    /// revision without allocating or returning content bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` if the original pathname binding changed,
+    /// `stale_revision` if size or SHA-256 differs, and `file_too_large` if the
+    /// content exceeds the renderer ceiling sealed into `revision`.
+    pub fn verify_revision(&self, revision: &FileRevisionToken) -> Result<(), FileResourceErrorV1> {
+        self.read_verified_bytes(revision, None, 0, false).map(drop)
+    }
+
+    fn read_verified_bytes(
+        &self,
+        revision: &FileRevisionToken,
+        range: Option<(u64, u64)>,
+        maximum_length_bytes: u64,
+        capture_bytes: bool,
+    ) -> Result<Vec<u8>, FileResourceErrorV1> {
+        if revision.identity != self.identity
+            || revision.canonical_path != self.verified_canonical_path
+        {
+            return Err(FileResourceErrorV1::new(
+                "unauthorized_path",
+                "file revision token belongs to another authorized file",
+            ));
+        }
+        let expected_size_bytes = revision.size_bytes;
+        let maximum_size_bytes = revision.maximum_size_bytes;
+        if expected_size_bytes > maximum_size_bytes {
+            return Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "file revision exceeds the allowed read size",
+            ));
+        }
+
+        let selected_range = if !capture_bytes {
+            None
+        } else {
+            match range {
+                Some((start, end)) if start <= end && end < expected_size_bytes => {
+                    Some((start, end))
+                }
+                Some((start, end)) if start > end => {
+                    return Err(FileResourceErrorV1::new(
+                        "invalid_range",
+                        "byte range start exceeds its end",
+                    ));
+                }
+                Some(_) => {
+                    return Err(FileResourceErrorV1::new(
+                        "range_not_satisfiable",
+                        "byte range is outside the expected file revision",
+                    ));
+                }
+                None if expected_size_bytes == 0 => None,
+                None => Some((0, expected_size_bytes - 1)),
+            }
+        };
+        let selected_len = selected_range
+            .map(|(start, end)| end - start + 1)
+            .unwrap_or_default();
+        if selected_len > maximum_length_bytes {
+            return Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "selected content exceeds the allowed read length",
+            ));
+        }
+        let selected_capacity: usize = selected_len.try_into().map_err(|_| {
+            FileResourceErrorV1::new(
+                "file_too_large",
+                "selected byte range cannot fit in process memory",
+            )
+        })?;
+
+        let mut file = self.lock_verified_file()?;
+        let metadata = file.metadata().map_err(|error| {
+            FileResourceErrorV1::new(
+                "unavailable_path",
+                format!("cannot read authorized file metadata: {error}"),
+            )
+        })?;
+        if metadata.len() > maximum_size_bytes {
+            return Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "current file exceeds the allowed read size",
+            ));
+        }
+        if metadata.len() != expected_size_bytes {
+            return Err(FileResourceErrorV1::new(
+                "stale_revision",
+                "file size no longer matches the expected revision",
+            ));
+        }
+
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            FileResourceErrorV1::new(
+                "unavailable_path",
+                format!("cannot seek authorized file: {error}"),
+            )
+        })?;
+        let mut hasher = Sha256::new();
+        let mut selected = Vec::with_capacity(selected_capacity);
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut offset = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                FileResourceErrorV1::new(
+                    "unavailable_path",
+                    format!("cannot read authorized file: {error}"),
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            let read_u64 = u64::try_from(read).unwrap_or(u64::MAX);
+            let next_offset = offset.saturating_add(read_u64);
+            if next_offset > maximum_size_bytes {
+                return Err(FileResourceErrorV1::new(
+                    "file_too_large",
+                    "file grew beyond the allowed read size",
+                ));
+            }
+            hasher.update(&buffer[..read]);
+
+            if let Some((start, end)) = selected_range {
+                let chunk_end = next_offset.saturating_sub(1);
+                if offset <= end && chunk_end >= start {
+                    let copy_start = start.saturating_sub(offset) as usize;
+                    let copy_end = (end.min(chunk_end) - offset + 1) as usize;
+                    selected.extend_from_slice(&buffer[copy_start..copy_end]);
+                }
+            }
+            offset = next_offset;
+        }
+
+        self.verify_current_binding(&file)?;
+        if offset != expected_size_bytes {
+            return Err(FileResourceErrorV1::new(
+                "stale_revision",
+                "file length changed while reading the expected revision",
+            ));
+        }
+        let actual_hash = format!("sha256:{:x}", hasher.finalize());
+        if actual_hash != revision.content_hash {
+            return Err(FileResourceErrorV1::new(
+                "stale_revision",
+                "file content no longer matches the expected revision",
+            ));
+        }
+        Ok(selected)
+    }
+
     pub(super) fn verified_canonical_path(&self) -> &Path {
         &self.verified_canonical_path
     }
@@ -172,6 +373,35 @@ impl AuthorizedPath {
 pub(super) struct FileIdentity {
     volume: u64,
     file: u64,
+}
+
+/// Opaque capability proving that a descriptor was scanned from one retained
+/// authorized file handle at one bounded content revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevisionToken {
+    identity: FileIdentity,
+    canonical_path: PathBuf,
+    content_hash: String,
+    size_bytes: u64,
+    maximum_size_bytes: u64,
+}
+
+impl FileRevisionToken {
+    pub(super) fn new(
+        identity: FileIdentity,
+        canonical_path: PathBuf,
+        content_hash: String,
+        size_bytes: u64,
+        maximum_size_bytes: u64,
+    ) -> Self {
+        Self {
+            identity,
+            canonical_path,
+            content_hash,
+            size_bytes,
+            maximum_size_bytes,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -499,6 +729,135 @@ mod tests {
                 .expect_err("unresolvable root must fail")
                 .code(),
             "unavailable_path",
+        );
+    }
+
+    #[test]
+    fn verified_snapshot_token_reads_text_and_ranges_from_the_retained_handle() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, b"0123456789").expect("fixture");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &authorized,
+            &super::super::FileResourceLimits::default(),
+        )
+        .expect("verified snapshot");
+        let revision = snapshot.revision_token();
+
+        assert_eq!(
+            authorized
+                .read_verified_text(revision, 10)
+                .expect("text read"),
+            "0123456789"
+        );
+        assert_eq!(
+            authorized
+                .read_verified_range(revision, 2..=5, 4)
+                .expect("range read"),
+            b"2345"
+        );
+        authorized
+            .verify_revision(revision)
+            .expect("verification-only read");
+    }
+
+    #[test]
+    fn retained_handle_read_methods_enforce_caller_length_limits() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, b"0123456789").expect("fixture");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &authorized,
+            &super::super::FileResourceLimits::default(),
+        )
+        .expect("verified snapshot");
+
+        assert_eq!(
+            authorized
+                .read_verified_text(snapshot.revision_token(), 9)
+                .expect_err("text limit must be enforced")
+                .code(),
+            "file_too_large"
+        );
+        assert_eq!(
+            authorized
+                .read_verified_range(snapshot.revision_token(), 2..=5, 3)
+                .expect_err("range limit must be enforced")
+                .code(),
+            "file_too_large"
+        );
+        assert_eq!(
+            authorized
+                .read_verified_range(snapshot.revision_token(), 8..=10, 3)
+                .expect_err("range must remain within the snapshot")
+                .code(),
+            "range_not_satisfiable"
+        );
+    }
+
+    #[test]
+    fn verified_snapshot_token_rejects_stale_or_different_authorizations() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, b"0123456789").expect("fixture");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &authorized,
+            &super::super::FileResourceLimits::default(),
+        )
+        .expect("verified snapshot");
+        let revision = snapshot.revision_token();
+
+        fs::write(&path, b"abcdefghij").expect("mutate same file");
+        assert_eq!(
+            authorized
+                .verify_revision(revision)
+                .expect_err("verification must reject the stale revision")
+                .code(),
+            "stale_revision"
+        );
+        assert_eq!(
+            authorized
+                .read_verified_text(revision, 10)
+                .expect_err("old revision must fail")
+                .code(),
+            "stale_revision"
+        );
+
+        let other_path = workspace.join("other.txt");
+        fs::write(&other_path, b"abcdefghij").expect("other fixture");
+        let other_authorized = service
+            .authorize_existing_file(&other_path)
+            .expect("other authorized file");
+        assert_eq!(
+            other_authorized
+                .read_verified_range(revision, 0..=3, 4)
+                .expect_err("token must be bound to one authorized file")
+                .code(),
+            "unauthorized_path"
         );
     }
 
