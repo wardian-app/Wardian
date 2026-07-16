@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -113,9 +114,8 @@ async function openGraphView(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  // Click the Graph tab in the titlebar
-  await page.getByRole("button", { name: "Graph", exact: true }).click();
-  await expect(page.locator('[data-testid="graph-view"]')).toBeVisible({ timeout: 10_000 });
+  await openSurface(page, "graph");
+  await expect(surfacePanel(page, "graph").locator('[data-testid="graph-view"]')).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe("Graph Topology", () => {
@@ -314,6 +314,69 @@ test.describe("Graph Topology", () => {
     await expect(neighborsRow).toContainText("Target");
     const deleteBtn = neighborsRow.locator(".graph-neighbors-action-btn");
     await expect(deleteBtn).toContainText("×");
+  });
+
+  test("keeps the graph surface stable during repeated wheel zoom", async ({}, testInfo) => {
+    const runtimeErrors: string[] = [];
+    const onPageError = (error: Error) => runtimeErrors.push(error.message);
+    page.on("pageerror", onPageError);
+
+    const zoomAgents: MockAgent[] = Array.from({ length: 12 }, (_, index) => ({
+      session_id: `zoom-test-${index}`,
+      session_name: `Zoom Agent ${index}`,
+      agent_class: "TestClass",
+      folder: `/test/zoom-${index}`,
+      provider: "claude",
+      is_off: false,
+    }));
+    const topology = {
+      edges: zoomAgents.slice(1).map((agent, index) => ({
+        a: zoomAgents[index].session_id,
+        b: agent.session_id,
+        origin: "manual",
+      })),
+      ignored_pairs: [] as [string, string][],
+      fallback_groups: [] as string[][],
+    };
+
+    try {
+      await installGraphTopologyIpcMock(page, topology, zoomAgents);
+      await openGraphView(page);
+
+      const canvasShell = surfacePanel(page, "graph").locator(".graph-canvas-shell");
+      const before = await canvasShell.boundingBox();
+      expect(before).not.toBeNull();
+      await page.mouse.move(
+        before!.x + before!.width / 2,
+        before!.y + before!.height / 2,
+      );
+
+      for (let index = 0; index < 8; index += 1) {
+        await page.mouse.wheel(0, index < 5 ? -180 : 180);
+        await page.waitForTimeout(20);
+      }
+
+      await expect(canvasShell).toBeVisible();
+      expect(await canvasShell.locator("canvas").count()).toBeGreaterThan(1);
+      const after = await canvasShell.boundingBox();
+      expect(after).not.toBeNull();
+      expect(after!.width).toBeCloseTo(before!.width, 0);
+      expect(after!.height).toBeCloseTo(before!.height, 0);
+      expect(runtimeErrors).toEqual([]);
+
+      const screenshotDir = process.env.WARDIAN_GRAPH_ZOOM_SCREENSHOT_DIR;
+      if (screenshotDir) {
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        const screenshotPath = path.join(screenshotDir, "graph-after-wheel-zoom.png");
+        await canvasShell.screenshot({ path: screenshotPath, animations: "disabled" });
+        await testInfo.attach("graph-after-wheel-zoom", {
+          path: screenshotPath,
+          contentType: "image/png",
+        });
+      }
+    } finally {
+      page.off("pageerror", onPageError);
+    }
   });
 
   test("delete button triggers remove_topology_edge command", async () => {

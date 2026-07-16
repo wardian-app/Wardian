@@ -158,7 +158,6 @@ test("source control panel renders git files and history for a seeded repo", { t
   await driver.findElement(By.css('[data-testid="sidebar-tab-git"]')).click();
 
   await waitForExactText(driver, "Source Control");
-  await waitForExactText(driver, "main");
   await waitForExactText(driver, "tracked.txt");
   await waitForExactText(driver, "untracked.txt");
   await waitForExactText(driver, "Initial commit");

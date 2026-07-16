@@ -11,11 +11,13 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 
 - https://docs.wardian.org/guide/getting-started - Install Wardian, complete first-run setup, verify a provider, spawn the first agent, and inspect the first Queue result.
 - https://docs.wardian.org/guide/ui-overview - Learn the title bar, navigation rail, agent roster, workspace areas, and common app surfaces.
+- https://docs.wardian.org/guide/workbench - Open surfaces as tabs, split and merge panes, move and reopen tabs, zoom, restore, reset, and understand terminal presentation ownership.
 - https://docs.wardian.org/guide/first-run-troubleshooting - Recover from launch, provider detection, terminal startup, Queue, and CLI setup problems.
 
 ## Core Workspace
 
-- https://docs.wardian.org/guide/grid - Use the main agent grid, terminal cards, focused chat mode, and per-agent controls.
+- https://docs.wardian.org/guide/agents-overview - Monitor agents with adaptive Auto, multi-card Grid, or focused Single layouts and switch cards between Terminal and Chat.
+- https://docs.wardian.org/guide/grid - Map the former Grid page to the current Agents Grid mode.
 - https://docs.wardian.org/guide/dashboard - Compare live agent health, runtime status, and summary controls.
 - https://docs.wardian.org/guide/watchlists - Group, select, sort, and monitor agents in the roster.
 - https://docs.wardian.org/guide/queue - Review completed agent and workflow results, action-needed items, and notification behavior.

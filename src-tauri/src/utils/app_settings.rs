@@ -27,6 +27,8 @@ pub struct AppSettings {
     pub external_editor_custom_executable: Option<String>,
     #[serde(default = "default_explorer_file_click_action")]
     pub explorer_file_click_action: String,
+    #[serde(default = "default_workbench_new_tab_action")]
+    pub workbench_new_tab_action: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +53,8 @@ pub struct AppSettingsOverrides {
     pub external_editor_custom_executable: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explorer_file_click_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench_new_tab_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +86,7 @@ impl Default for AppSettings {
             external_editor: default_external_editor(),
             external_editor_custom_executable: None,
             explorer_file_click_action: default_explorer_file_click_action(),
+            workbench_new_tab_action: default_workbench_new_tab_action(),
         }
     }
 }
@@ -115,6 +120,10 @@ fn default_external_editor() -> String {
 
 fn default_explorer_file_click_action() -> String {
     "preview".to_string()
+}
+
+fn default_workbench_new_tab_action() -> String {
+    "home".to_string()
 }
 
 fn titlebar_telemetry_visible_default_for_build(
@@ -250,6 +259,8 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         .and_then(|value| trim_to_option(&value));
     settings.explorer_file_click_action =
         normalize_explorer_file_click_action(&settings.explorer_file_click_action);
+    settings.workbench_new_tab_action =
+        normalize_workbench_new_tab_action(&settings.workbench_new_tab_action);
     settings
 }
 
@@ -315,6 +326,10 @@ fn app_settings_from_overrides_for_build(
             .explorer_file_click_action
             .clone()
             .unwrap_or(defaults.explorer_file_click_action),
+        workbench_new_tab_action: overrides
+            .workbench_new_tab_action
+            .clone()
+            .unwrap_or(defaults.workbench_new_tab_action),
     })
 }
 
@@ -343,6 +358,10 @@ fn normalize_app_overrides(mut overrides: AppSettingsOverrides) -> AppSettingsOv
             let normalized = normalize_explorer_file_click_action(&action);
             (normalized != default_explorer_file_click_action()).then_some(normalized)
         });
+    overrides.workbench_new_tab_action = overrides.workbench_new_tab_action.and_then(|action| {
+        let normalized = normalize_workbench_new_tab_action(&action);
+        (normalized != default_workbench_new_tab_action()).then_some(normalized)
+    });
     overrides
 }
 
@@ -375,6 +394,9 @@ fn app_overrides_from_settings(
         explorer_file_click_action: (settings.explorer_file_click_action
             != defaults.explorer_file_click_action)
             .then(|| settings.explorer_file_click_action.clone()),
+        workbench_new_tab_action: (settings.workbench_new_tab_action
+            != defaults.workbench_new_tab_action)
+            .then(|| settings.workbench_new_tab_action.clone()),
     }
 }
 
@@ -415,6 +437,13 @@ fn normalize_explorer_file_click_action(value: &str) -> String {
     }
 }
 
+fn normalize_workbench_new_tab_action(value: &str) -> String {
+    match value.trim() {
+        "palette" => "palette".to_string(),
+        _ => "home".to_string(),
+    }
+}
+
 fn trim_to_option(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -449,6 +478,65 @@ mod tests {
         assert_eq!(settings.external_editor, "system");
         assert_eq!(settings.external_editor_custom_executable, None);
         assert_eq!(settings.explorer_file_click_action, "preview");
+        assert_eq!(
+            serde_json::to_value(&settings).expect("serialize defaults")
+                ["workbench_new_tab_action"],
+            "home"
+        );
+    }
+
+    #[test]
+    fn app_settings_persists_palette_workbench_new_tab_action_override() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("settings/app.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "overrides": {
+                "workbench_new_tab_action": "palette"
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let document = load_app_settings_document_from_path(&path).expect("load settings");
+        let serialized = serde_json::to_value(&document).expect("serialize document");
+
+        assert_eq!(
+            serialized["settings"]["workbench_new_tab_action"],
+            "palette"
+        );
+        assert_eq!(
+            serialized["overrides"]["workbench_new_tab_action"],
+            "palette"
+        );
+    }
+
+    #[test]
+    fn app_settings_normalizes_invalid_workbench_new_tab_action_to_home_without_override() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("settings/app.json");
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "overrides": {
+                "workbench_new_tab_action": "cards"
+              }
+            }"#,
+        )
+        .expect("write settings");
+
+        let document = load_app_settings_document_from_path(&path).expect("load settings");
+        let serialized = serde_json::to_value(&document).expect("serialize document");
+
+        assert_eq!(serialized["settings"]["workbench_new_tab_action"], "home");
+        assert!(serialized["overrides"]
+            .get("workbench_new_tab_action")
+            .is_none());
     }
 
     #[test]
@@ -513,6 +601,7 @@ mod tests {
             external_editor: "custom".to_string(),
             external_editor_custom_executable: Some("/opt/editor/bin/editor".to_string()),
             explorer_file_click_action: "external".to_string(),
+            workbench_new_tab_action: "palette".to_string(),
         };
 
         let saved = save_app_settings_to_path(&path, &settings).expect("save settings");
@@ -539,6 +628,7 @@ mod tests {
             external_editor: "system".to_string(),
             external_editor_custom_executable: None,
             explorer_file_click_action: "preview".to_string(),
+            workbench_new_tab_action: "home".to_string(),
         };
 
         save_app_settings_to_path(&path, &settings).expect("save settings");

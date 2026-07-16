@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { DetailPane } from './DetailPane';
@@ -70,6 +70,8 @@ function baseState(overrides: Partial<ReturnType<typeof useLibraryStore.getState
     selectedContent: null,
     contentStale: false,
     markEditorDirty: vi.fn(),
+    markEditorSurfaceDirty: vi.fn(),
+    registerEditorCloseActions: vi.fn(() => vi.fn()),
     select: vi.fn().mockResolvedValue(undefined),
     revertSelection: vi.fn(),
     resolveStale: vi.fn(),
@@ -249,6 +251,38 @@ describe('DetailPane', () => {
 
       await waitFor(() => expect(resolveStale).toHaveBeenCalledTimes(1));
       expect(saveItem).toHaveBeenCalledWith('skills', 'planner', '# planner');
+    });
+
+    it('keeps a newer draft dirty when it changes during an async close save', async () => {
+      let finishSave: (() => void) | undefined;
+      let closeActions: { save: () => Promise<boolean> | boolean } | undefined;
+      const saveItem = vi.fn(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+      const registerEditorCloseActions = vi.fn((_surfaceId, actions) => {
+        closeActions = actions;
+        return vi.fn();
+      });
+      useLibraryStore.setState({
+        selection: { section: 'skills', entryRef: 'skills/planner' },
+        selectedContent: '# planner',
+        contentStale: false,
+        saveItem,
+        registerEditorCloseActions,
+      });
+      render(<DetailPane selectedAgentIds={new Set()} />);
+      const textarea = await screen.findByTestId('markdown-editor-textarea');
+      fireEvent.change(textarea, { target: { value: '# first draft' } });
+
+      let saveResult: boolean | undefined;
+      await act(async () => {
+        const pending = closeActions?.save();
+        fireEvent.change(textarea, { target: { value: '# newer draft' } });
+        finishSave?.();
+        saveResult = await pending;
+      });
+
+      expect(saveItem).toHaveBeenCalledWith('skills', 'planner', '# first draft');
+      expect(saveResult).toBe(false);
+      expect(textarea).toHaveValue('# newer draft');
     });
 
     it('Reload adopts on-disk content and clears the dirty draft', async () => {

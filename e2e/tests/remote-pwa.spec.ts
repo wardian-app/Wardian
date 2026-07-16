@@ -77,7 +77,51 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ workflows: [] }) });
   });
   await page.route("**/remote/api/agents/agent-1/chat", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ events: [] }) });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          {
+            id: "remote-user-message",
+            session_id: "agent-1",
+            provider: "opencode",
+            kind: "message",
+            role: "user",
+            text: "Summarize the current implementation status.",
+            title: null,
+            status: null,
+            turn_id: "turn-1",
+            source: "provider_log",
+            command: null,
+            exit_code: null,
+            path: null,
+            language: null,
+            created_at: "2099-05-21T07:59:00.000Z",
+            sequence: 1,
+            metadata: {},
+          },
+          {
+            id: "remote-agent-message",
+            session_id: "agent-1",
+            provider: "opencode",
+            kind: "message",
+            role: "assistant",
+            text: "The navigation workbench is implemented and the focused verification is passing.",
+            title: null,
+            status: null,
+            turn_id: "turn-1",
+            source: "provider_log",
+            command: null,
+            exit_code: null,
+            path: null,
+            language: null,
+            created_at: "2099-05-21T08:00:00.000Z",
+            sequence: 2,
+            metadata: {},
+          },
+        ],
+      }),
+    });
   });
   await page.route("**/remote/api/ws-ticket", async (route) => {
     await route.fulfill({
@@ -95,31 +139,124 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await page.routeWebSocket("**/remote/api/agents/agent-1/terminal-stream", async (ws) => {
     let seeded = false;
     ws.onMessage((message) => {
-      if (seeded) return;
-      expect(JSON.parse(String(message))).toMatchObject({
-        ticket: "ws-ticket-e2e",
-        cols: expect.any(Number),
-        rows: expect.any(Number),
-      });
-      seeded = true;
-      ws.send(
-        JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-e2e",
-          owner_attachment_id: "attach-e2e",
-          cols: 80,
-          rows: 24,
-          state_base64: Buffer.from("terminal ready from e2e", "utf8").toString("base64"),
-        }),
-      );
-      ws.send(
-        JSON.stringify({
-          type: "update",
-          attachment_id: "attach-e2e",
-          owner_attachment_id: "attach-e2e",
-          state_base64: Buffer.from("Finished remote e2e update.", "utf8").toString("base64"),
-        }),
-      );
+      const payload = JSON.parse(String(message));
+      if (!seeded) {
+        expect(payload).toMatchObject({
+          protocol_version: 2,
+          ticket: "ws-ticket-e2e",
+          cols: expect.any(Number),
+          rows: expect.any(Number),
+        });
+        seeded = true;
+        ws.send(
+          JSON.stringify({
+            type: "registered",
+            protocol_version: 2,
+            presentation: {
+              presentation_id: "remote-e2e",
+              client_kind: "remote",
+              desired_geometry: { cols: 80, rows: 24 },
+              visibility: "visible",
+              render_state: "mounted",
+              interaction_capability: "interactive",
+              interaction_sequence: 1,
+              requires_resync: false,
+            },
+            broker_state: {
+              session_id: "agent-1",
+              runtime_generation: 1,
+              lease_epoch: 1,
+              stream_sequence: 1,
+              interaction_sequence: 1,
+              geometry: { cols: 80, rows: 24 },
+              owner_presentation_id: "desktop-e2e",
+              pending_activation: null,
+              runtime_state: "live",
+            },
+            initial_snapshot: {
+              snapshot_id: "snapshot-e2e",
+              session_id: "agent-1",
+              runtime_generation: 1,
+              sequence_barrier: 0,
+              geometry: { cols: 80, rows: 24 },
+              terminal_state_base64: Buffer.from("terminal ready from e2e", "utf8").toString("base64"),
+              visible_grid: "terminal ready from e2e",
+              scrollback: [],
+            },
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: "events",
+            batch: {
+              status: "events",
+              runtime_generation: 1,
+              events: [{
+                type: "output",
+                sequence: 1,
+                runtime_generation: 1,
+                bytes_base64: Buffer.from("Finished remote e2e update.", "utf8").toString("base64"),
+              }],
+              next_sequence: 1,
+              available_from_sequence: 1,
+              latest_sequence: 1,
+              recovery_snapshot: null,
+            },
+          }),
+        );
+        return;
+      }
+      if (payload.type === "begin_activation") {
+        ws.send(JSON.stringify({
+          type: "activation_begin",
+          result: {
+            decision: {
+              status: "accepted",
+              reason: null,
+              runtime_generation: 1,
+              lease_epoch: 2,
+              owner_presentation_id: "desktop-e2e",
+            },
+            activation_id: "activation-e2e",
+            snapshot: {
+              snapshot_id: "activation-snapshot-e2e",
+              session_id: "agent-1",
+              runtime_generation: 1,
+              sequence_barrier: 1,
+              geometry: { cols: 80, rows: 24 },
+              terminal_state_base64: Buffer.from("terminal ready from e2e", "utf8").toString("base64"),
+              visible_grid: "terminal ready from e2e",
+              scrollback: [],
+            },
+            sequence_barrier: 1,
+          },
+        }));
+      } else if (payload.type === "ack_activation") {
+        ws.send(JSON.stringify({
+          type: "activation_ack",
+          result: {
+            decision: {
+              status: "accepted",
+              reason: null,
+              runtime_generation: 1,
+              lease_epoch: 2,
+              owner_presentation_id: "remote-e2e",
+            },
+            broker_state: {
+              session_id: "agent-1",
+              runtime_generation: 1,
+              lease_epoch: 2,
+              stream_sequence: 1,
+              interaction_sequence: 2,
+              geometry: { cols: 80, rows: 24 },
+              owner_presentation_id: "remote-e2e",
+              pending_activation: null,
+              runtime_state: "live",
+            },
+            snapshot: null,
+          },
+        }));
+      }
     });
   });
   await page.route("**/remote/api/agents/action", async (route) => {
@@ -157,6 +294,9 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await expect(page.locator('[data-testid="remote-agent-detail"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText("terminal ready from e2e")).toBeVisible();
+  await expect(page.locator('[data-testid="remote-terminal-presentation-mode"]')).toHaveText("Mirror");
+  await page.getByRole("button", { name: "Take terminal control" }).click();
+  await expect(page.locator('[data-testid="remote-terminal-presentation-mode"]')).toHaveText("Owner");
   await captureFeatureScreenshot("terminal-detail.png", page.locator('[data-testid="remote-agent-detail"]'));
   await expect.poll(() => statusStream !== null).toBe(true);
   statusStream?.send(
@@ -185,6 +325,9 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     }),
   );
   await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await expect(page.getByLabel("user message")).toHaveClass(/\bw-full\b/);
+  await expect(page.getByLabel("assistant message")).toHaveClass(/\bw-full\b/);
+  await captureFeatureScreenshot("chat-full-width.png", page.locator('[data-testid="remote-agent-detail"]'));
   await page.getByLabel("Prompt Remote Coder").fill("status please");
   await page.getByRole("button", { name: "Send prompt" }).click();
 

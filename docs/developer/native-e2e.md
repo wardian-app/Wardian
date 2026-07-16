@@ -69,9 +69,11 @@ npm run tauri -- build --debug --no-bundle
 
 Use this layer when validating:
 
+- workbench JSON persistence, backup rotation, restart recovery, or safe mode
 - terminal scrollback or renderer behavior
 - Tauri `invoke` commands
 - PTY-backed input/output
+- desktop/remote presentation ownership, geometry, snapshots, or event order
 - provider spawn, resume, or shutdown behavior
 - app and CLI shared-state behavior through isolated `WARDIAN_HOME`
 - workflow behavior that depends on native runtime state
@@ -83,6 +85,34 @@ npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mj
 ```
 
 It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `send --wait-until` can drive a mock action-required turn to idle, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
+
+### Workbench and Terminal Presentation Package
+
+After building current native assets, run the focused package:
+
+```bash
+npm run tauri -- build --debug --no-bundle
+npm run test:e2e:native:workbench
+```
+
+It proves four native boundaries with an isolated Wardian home:
+
+- exact workbench primary/backup bytes, restart, corrupt-file fallback, and
+  future-schema preservation;
+- desktop terminal owner/mirror activation races, timeouts, stale lease
+  rejection, ordered output, and stable canonical geometry;
+- closing all workbench presentations leaves the agent runtime live, while
+  safe mode preserves the durable split tree byte-for-byte;
+- authenticated desktop-to-remote-to-desktop transfer and socket liveness.
+
+The related browser package remains useful for navigation and layout only:
+
+```bash
+npm run test:e2e:workbench
+```
+
+Do not use its mocked transport to claim native file durability, PTY resize,
+lease enforcement, remote authentication, or provider behavior.
 
 ## Real Providers
 

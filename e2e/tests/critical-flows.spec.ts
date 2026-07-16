@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 test.describe("Critical browser flows", () => {
   test.describe.configure({ mode: "serial" });
@@ -35,14 +36,12 @@ test.describe("Critical browser flows", () => {
   });
 
   test("workflow builder can add a manual trigger block from the library", async () => {
-    await page
-      .locator(".titlebar-center")
-      .getByRole("button", { name: "Workflows" })
-      .click();
-    await expect(page.getByTestId("workflows-view")).toBeVisible();
-    await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
+    await openSurface(page, "workflows");
+    const workflows = surfacePanel(page, "workflows");
+    await expect(workflows.getByTestId("workflows-view")).toBeVisible();
+    await expect(workflows.getByTestId("workflows-edit-mode")).toBeVisible();
 
-    await page.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
+    await workflows.getByTestId("workflows-view").getByRole("button", { name: "Add node" }).click();
     await expect(page.getByTestId("node-library")).toBeVisible();
 
     await page.getByRole("button", { name: /Manual Trigger/ }).click();
@@ -52,6 +51,6 @@ test.describe("Critical browser flows", () => {
       .filter({ hasText: "Manual Trigger" });
     await expect(manualTriggerNode).toHaveCount(1);
     await expect(manualTriggerNode).toBeVisible();
-    await expect(page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ })).toBeDisabled();
+    await expect(workflows.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ })).toBeDisabled();
   });
 });

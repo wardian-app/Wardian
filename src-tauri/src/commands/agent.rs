@@ -150,13 +150,9 @@ fn clone_unique_name(
 fn detach_agent_for_kill(
     agents: &mut HashMap<String, ActiveAgent>,
     order: &mut Vec<String>,
-    input_senders: &std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
     session_id: &str,
 ) -> Option<ActiveAgent> {
     let agent = agents.remove(session_id)?;
-    if let Ok(mut senders) = input_senders.write() {
-        senders.remove(session_id);
-    }
     order.retain(|id| id != session_id);
     Some(agent)
 }
@@ -226,9 +222,7 @@ fn take_agent_runtime_for_termination(agent: &mut ActiveAgent) -> ActiveAgent {
         config: agent.config.clone(),
         child_process: agent.child_process.take(),
         background_processes: std::mem::take(&mut agent.background_processes),
-        pty_master: agent.pty_master.take(),
-        stdin_tx: agent.stdin_tx.take(),
-        output_buffer: agent.output_buffer.clone(),
+        runtime_generation: agent.runtime_generation.take(),
         process_id: agent.process_id.take(),
         query_count: agent.query_count.clone(),
         init_timestamp: agent.init_timestamp.clone(),
@@ -249,9 +243,6 @@ fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
     let config = agent.config.lock().unwrap().clone();
     let init_timestamp = agent.init_timestamp.lock().unwrap().clone();
 
-    if let Ok(mut buf) = agent.output_buffer.lock() {
-        buf.clear();
-    }
     if let Ok(mut title) = agent.terminal_title.lock() {
         title.clear();
     }
@@ -962,21 +953,6 @@ fn promote_fresh_provider_session_after_resume(
 }
 
 #[cfg(test)]
-fn sync_resumed_input_sender(
-    state: &AppState,
-    session_id: &str,
-    stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-) {
-    if let Ok(mut senders) = state.input_senders.write() {
-        if let Some(tx) = stdin_tx {
-            senders.insert(session_id.to_string(), tx);
-        } else {
-            senders.remove(session_id);
-        }
-    }
-}
-
-#[cfg(test)]
 fn agent_status_update_payload(session_id: &str, current_status: &str) -> serde_json::Value {
     serde_json::json!({
         "session_id": session_id,
@@ -1040,8 +1016,7 @@ fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
 
 #[cfg(test)]
 fn mark_agent_paused_off(agent: &mut crate::state::ActiveAgent) {
-    agent.pty_master = None;
-    agent.stdin_tx = None;
+    agent.runtime_generation = None;
     {
         let mut config = agent.config.lock().unwrap();
         config.is_off = true;
@@ -2101,11 +2076,6 @@ async fn register_new_agent(
         let mut cfg = active_agent.config.lock().unwrap();
         cfg.session_name = config.session_name.clone();
     }
-    if let Some(ref tx) = active_agent.stdin_tx {
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.insert(session_id.clone(), tx.clone());
-        }
-    }
     agents.insert(session_id.clone(), active_agent);
     insert_new_agent_order(&mut order, &session_id, placement);
     manager::save_state(app, &agents, &order);
@@ -2498,8 +2468,7 @@ pub async fn kill_agent(
     let (agent, state_snapshot, remaining_agent_ids) = {
         let mut agents = state.agents.lock().await;
         let mut order = state.agent_order.lock().await;
-        let agent =
-            detach_agent_for_kill(&mut agents, &mut order, &state.input_senders, &session_id);
+        let agent = detach_agent_for_kill(&mut agents, &mut order, &session_id);
         let state_snapshot = agent
             .is_some()
             .then(|| manager::state_configs_snapshot(&agents, &order));
@@ -2514,9 +2483,24 @@ pub async fn kill_agent(
     if agent.is_some() {
         state.remove_agent_delivery_state(&session_id).await;
     }
+    state
+        .terminal_sessions
+        .forget_deferred_geometry(&session_id)
+        .await;
 
     #[allow(unused_mut)]
     if let Some(mut agent) = agent {
+        if let Some(runtime_generation) = agent.runtime_generation {
+            if let Err(error) = state
+                .terminal_sessions
+                .terminate_and_remove_runtime(&session_id, runtime_generation)
+                .await
+            {
+                manager::log_debug(&format!(
+                    "[WARDIAN] terminal broker cleanup failed while killing {session_id}: {error}"
+                ));
+            }
+        }
         manager::terminate_active_agent_process(&mut agent);
 
         // Phase 2: Remove from SQLite
@@ -2592,14 +2576,23 @@ pub async fn pause_agent(
             config.is_off = true;
         }
 
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
         let state_snapshot = manager::state_configs_snapshot(&agents, &order);
         (termination, state_snapshot, status_arc)
     };
     manager::save_state_snapshot(&app, &state_snapshot);
     manager::set_agent_status(&app, &session_id, &status_arc, "Off");
+
+    if let Some(runtime_generation) = termination.runtime_generation {
+        if let Err(error) = state
+            .terminal_sessions
+            .pause_runtime(&session_id, runtime_generation)
+            .await
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] terminal broker pause failed for {session_id}: {error}"
+            ));
+        }
+    }
 
     manager::terminate_active_agent_process(&mut termination);
 
@@ -2654,7 +2647,6 @@ pub async fn resume_agent(
     );
     promote_fresh_provider_session_after_resume(&config.provider, &mut new_active);
 
-    let stdin_tx = new_active.stdin_tx.clone();
     let mut pending_new_active = Some(new_active);
     let (mut old_agent, state_snapshot) = {
         let mut agents = state.agents.lock().await;
@@ -2673,16 +2665,6 @@ pub async fn resume_agent(
         let old_agent = agents
             .insert(session_id.clone(), inserted)
             .expect("agent should exist after contains check");
-        if let Ok(mut senders) = state.input_senders.write() {
-            match stdin_tx {
-                Some(tx) => {
-                    senders.insert(session_id.clone(), tx);
-                }
-                None => {
-                    senders.remove(&session_id);
-                }
-            }
-        }
         (old_agent, manager::state_configs_snapshot(&agents, &order))
     };
     manager::save_state_snapshot(&app, &state_snapshot);
@@ -2824,14 +2806,21 @@ async fn clear_agent_session_inner(
             return Err(format!("Agent {} not found", session_id));
         };
 
-        let prepared = prepare_agent_for_clear(agent);
-        if let Ok(mut senders) = state.input_senders.write() {
-            senders.remove(&session_id);
-        }
-        prepared
+        prepare_agent_for_clear(agent)
     };
 
     // 1. Terminate the old agent's process tree outside the global agent lock.
+    if let Some(runtime_generation) = prepared.termination.runtime_generation {
+        if let Err(error) = state
+            .terminal_sessions
+            .pause_runtime(&session_id, runtime_generation)
+            .await
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] terminal broker pause failed while clearing {session_id}: {error}"
+            ));
+        }
+    }
     manager::terminate_active_agent_process(&mut prepared.termination);
 
     // 2. Prepare fresh config (new provider session ID for Claude, clear resume IDs)
@@ -2916,7 +2905,6 @@ async fn clear_agent_session_inner(
         }
     }
 
-    let new_stdin_tx = new_active.stdin_tx.clone();
     let db_snapshot = {
         let config = new_active.config.lock().unwrap();
         let born = new_active.init_timestamp.lock().unwrap();
@@ -2953,16 +2941,6 @@ async fn clear_agent_session_inner(
             .expect("new active agent should still be pending");
         let displaced_agent = std::mem::replace(agent, inserted);
 
-        if let Ok(mut senders) = state.input_senders.write() {
-            match new_stdin_tx {
-                Some(tx) => {
-                    senders.insert(session_id.clone(), tx);
-                }
-                None => {
-                    senders.remove(&session_id);
-                }
-            }
-        };
         (
             manager::state_configs_snapshot(&agents, &order),
             displaced_agent,
@@ -3637,9 +3615,8 @@ mod tests {
         provider_uses_generated_session_id, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
         resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        strip_claude_embedded_stream_flags, sync_resumed_input_sender,
-        restore_agent_config_in_state, take_agent_runtime_for_termination,
-        terminal_cleared_payload, update_agent_fields_in_state,
+        strip_claude_embedded_stream_flags, restore_agent_config_in_state,
+        take_agent_runtime_for_termination, terminal_cleared_payload, update_agent_fields_in_state,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
@@ -3671,9 +3648,7 @@ mod tests {
             config: Arc::new(Mutex::new(AgentConfig::default())),
             child_process: None,
             background_processes: Vec::new(),
-            pty_master: None,
-            stdin_tx: None,
-            output_buffer: Arc::new(Mutex::new(String::new())),
+            runtime_generation: None,
             process_id: None,
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(None)),
@@ -6381,40 +6356,21 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn sync_resumed_input_sender_inserts_or_removes_sender() {
-        let state = AppState::new();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-
-        sync_resumed_input_sender(&state, "agent-1", Some(tx));
-        assert!(state.input_senders.read().unwrap().contains_key("agent-1"));
-
-        sync_resumed_input_sender(&state, "agent-1", None);
-        assert!(!state.input_senders.read().unwrap().contains_key("agent-1"));
-    }
-
-    #[test]
-    fn detach_agent_for_kill_removes_live_state_and_input_sender() {
+    fn detach_agent_for_kill_removes_live_state() {
         let mut agents = std::collections::HashMap::new();
         let mut order = vec!["agent-1".to_string(), "agent-2".to_string()];
-        let input_senders = std::sync::RwLock::new(std::collections::HashMap::new());
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
         let agent = make_test_agent();
         agent.config.lock().unwrap().session_id = "agent-1".to_string();
         agents.insert("agent-1".to_string(), agent);
         agents.insert("agent-2".to_string(), make_test_agent());
 
-        let detached = detach_agent_for_kill(&mut agents, &mut order, &input_senders, "agent-1")
+        let detached = detach_agent_for_kill(&mut agents, &mut order, "agent-1")
             .expect("agent should be detached");
 
         assert_eq!(detached.config.lock().unwrap().session_id, "agent-1");
         assert!(!agents.contains_key("agent-1"));
         assert!(agents.contains_key("agent-2"));
         assert_eq!(order, vec!["agent-2".to_string()]);
-        assert!(!input_senders.read().unwrap().contains_key("agent-1"));
     }
 
     #[tokio::test]
@@ -6457,17 +6413,15 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     #[test]
     fn take_agent_runtime_for_termination_detaches_process_related_state() {
         let mut active = make_test_agent();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        active.stdin_tx = Some(tx);
+        active.runtime_generation = Some(7);
         active.process_id = Some(12345);
-        active.pty_master = None;
 
         let detached = take_agent_runtime_for_termination(&mut active);
 
         assert_eq!(detached.process_id, Some(12345));
-        assert!(detached.stdin_tx.is_some());
+        assert_eq!(detached.runtime_generation, Some(7));
         assert_eq!(active.process_id, None);
-        assert!(active.stdin_tx.is_none());
+        assert_eq!(active.runtime_generation, None);
         assert!(active.child_process.is_none());
         assert!(active.background_processes.is_empty());
     }
@@ -6475,11 +6429,9 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     #[test]
     fn prepare_agent_for_clear_resets_visible_runtime_without_terminating_inline() {
         let mut active = make_test_agent();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        active.stdin_tx = Some(tx);
+        active.runtime_generation = Some(9);
         active.process_id = Some(12345);
         let runtime_status = active.current_status.clone();
-        active.output_buffer.lock().unwrap().push_str("old output");
         *active.terminal_title.lock().unwrap() = "Old Title".to_string();
         *active.current_status.lock().unwrap() = "Idle".to_string();
         *active.query_count.lock().unwrap() = 5;
@@ -6510,12 +6462,11 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             Some("2026-05-20T00:00:00Z")
         );
         assert_eq!(active.process_id, None);
-        assert!(active.stdin_tx.is_none());
+        assert_eq!(active.runtime_generation, None);
         assert!(
             !Arc::ptr_eq(&runtime_status, &active.current_status),
             "clear must detach stale runtime status writers before replacement spawn"
         );
-        assert_eq!(active.output_buffer.lock().unwrap().as_str(), "");
         assert_eq!(active.terminal_title.lock().unwrap().as_str(), "");
         assert_eq!(
             active.current_status.lock().unwrap().as_str(),
@@ -6581,10 +6532,9 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn mark_agent_paused_off_clears_runtime_channels_and_status() {
+    fn mark_agent_paused_off_clears_runtime_generation_and_status() {
         let mut active = make_test_agent();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        active.stdin_tx = Some(tx);
+        active.runtime_generation = Some(3);
         {
             let mut config = active.config.lock().unwrap();
             config.is_off = false;
@@ -6592,8 +6542,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 
         mark_agent_paused_off(&mut active);
 
-        assert!(active.stdin_tx.is_none());
-        assert!(active.pty_master.is_none());
+        assert_eq!(active.runtime_generation, None);
         assert!(active.config.lock().unwrap().is_off);
         assert_eq!(active.current_status.lock().unwrap().as_str(), "Off");
     }

@@ -69,6 +69,84 @@ function bytesToBase64(bytes: number[]) {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function remoteTerminalRegisteredMessage(options: { owner?: boolean; generation?: number; state?: string } = {}) {
+  const generation = options.generation ?? 1;
+  const presentationId = "remote:presentation-1";
+  return {
+    type: "registered",
+    protocol_version: 2,
+    presentation: {
+      presentation_id: presentationId,
+      client_kind: "remote",
+      desired_geometry: { cols: 80, rows: 24 },
+      visibility: "visible",
+      render_state: "mounted",
+      interaction_capability: "interactive",
+      interaction_sequence: 1,
+      requires_resync: false,
+    },
+    broker_state: {
+      session_id: "agent-1",
+      runtime_generation: generation,
+      lease_epoch: 1,
+      stream_sequence: 1,
+      interaction_sequence: 1,
+      geometry: { cols: 80, rows: 24 },
+      owner_presentation_id: options.owner ? presentationId : "desktop:presentation-1",
+      pending_activation: null,
+      runtime_state: "live",
+    },
+    initial_snapshot: {
+      snapshot_id: `snapshot-${generation}`,
+      session_id: "agent-1",
+      runtime_generation: generation,
+      sequence_barrier: 1,
+      geometry: { cols: 80, rows: 24 },
+      terminal_state_base64: btoa(options.state ?? "ready"),
+      visible_grid: options.state ?? "ready",
+      scrollback: [],
+    },
+  };
+}
+
+function remoteTerminalSnapshotMessage(state: string, sequenceBarrier = 2) {
+  return {
+    type: "snapshot",
+    snapshot: {
+      snapshot_id: `snapshot-${sequenceBarrier}`,
+      session_id: "agent-1",
+      runtime_generation: 1,
+      sequence_barrier: sequenceBarrier,
+      geometry: { cols: 80, rows: 24 },
+      terminal_state_base64: btoa(state),
+      visible_grid: state,
+      scrollback: [],
+    },
+  };
+}
+
+function remoteTerminalEventsMessage(chunks: Uint8Array[], startSequence = 2) {
+  const events = chunks.map((chunk, index) => ({
+    type: "output",
+    sequence: startSequence + index,
+    runtime_generation: 1,
+    bytes_base64: bytesToBase64([...chunk]),
+  }));
+  const nextSequence = startSequence + chunks.length - 1;
+  return {
+    type: "events",
+    batch: {
+      status: "events",
+      runtime_generation: 1,
+      events,
+      next_sequence: nextSequence,
+      available_from_sequence: startSequence,
+      latest_sequence: nextSequence,
+      recovery_snapshot: null,
+    },
+  };
+}
+
 function mockRemoteAgentDetailFetch(
   provider: string,
   options: {
@@ -144,7 +222,7 @@ describe("RemoteMobileApp", () => {
       const textarea = document.createElement("textarea");
       return {
         open: vi.fn(),
-        write: vi.fn(),
+        write: vi.fn((_data: string | Uint8Array, callback?: () => void) => callback?.()),
         resize: vi.fn(),
         clear: vi.fn(),
         onData: vi.fn(),
@@ -1199,9 +1277,22 @@ describe("RemoteMobileApp", () => {
       MockWebSocket.instances[1]?.emit("open");
     });
     expect(JSON.parse(MockWebSocket.instances[1]?.sent[0] ?? "{}")).toEqual({
+      protocol_version: 2,
       ticket: "ws-ticket-1",
       cols: 80,
       rows: 24,
+    });
+    act(() => {
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify(remoteTerminalRegisteredMessage()),
+      });
+    });
+    expect(await screen.findByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Mirror");
+    await userEvent.click(screen.getByRole("button", { name: "Take terminal control" }));
+    expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: "begin_activation",
+      runtime_generation: 1,
+      observed_lease_epoch: 1,
     });
     const terminalTicketCall = fetchMock.mock.calls
       .filter(([url]) => url === "/remote/api/ws-ticket")
@@ -1362,9 +1453,28 @@ describe("RemoteMobileApp", () => {
     });
   });
 
-  it("renders remote chat messages with desktop markdown and copy behavior", async () => {
+  it("renders full-width remote chat messages with sentence-case labels, desktop markdown, and copy behavior", async () => {
     mockRemoteAgentDetailFetch("codex", {
       chatEvents: [
+        {
+          id: "user-message",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "message",
+          role: "user",
+          text: "Make the messages wider.",
+          title: null,
+          status: null,
+          turn_id: "turn-1",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T07:59:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
         {
           id: "assistant-markdown",
           session_id: "agent-1",
@@ -1381,7 +1491,7 @@ describe("RemoteMobileApp", () => {
           path: null,
           language: null,
           created_at: "2026-05-21T08:00:00.000Z",
-          sequence: 1,
+          sequence: 2,
           metadata: {},
         },
       ],
@@ -1392,11 +1502,18 @@ describe("RemoteMobileApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
 
-    const article = await screen.findByLabelText("assistant message");
-    expect(within(article).getByText("bold").tagName).toBe("STRONG");
-    expect(within(article).getByText("npm test").tagName).toBe("CODE");
+    const userMessage = await screen.findByLabelText("user message");
+    const agentMessage = await screen.findByLabelText("assistant message");
+    expect(userMessage).toHaveClass("w-full");
+    expect(agentMessage).toHaveClass("w-full");
+    expect(userMessage).not.toHaveClass("max-w-[86%]");
+    expect(agentMessage).not.toHaveClass("max-w-[86%]");
+    expect(within(userMessage).getByText("You")).not.toHaveClass("uppercase");
+    expect(within(agentMessage).getByText("Agent")).not.toHaveClass("uppercase");
+    expect(within(agentMessage).getByText("bold").tagName).toBe("STRONG");
+    expect(within(agentMessage).getByText("npm test").tagName).toBe("CODE");
 
-    await userEvent.click(within(article).getByRole("button", { name: "Copy message" }));
+    await userEvent.click(within(agentMessage).getByRole("button", { name: "Copy message" }));
     await waitFor(() => expect(clipboardWriteTextMock).toHaveBeenCalledWith("Use **bold** and `npm test`."));
   });
 
@@ -2458,7 +2575,11 @@ describe("RemoteMobileApp", () => {
       await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
       act(() => {
         MockWebSocket.instances[1]?.emit("open");
+        MockWebSocket.instances[1]?.emit("message", {
+          data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
+        });
       });
+      await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
 
       const terminalResults = vi.mocked(Terminal).mock.results;
       const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { cols: number; rows: number };
@@ -2471,6 +2592,9 @@ describe("RemoteMobileApp", () => {
 
       expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
         type: "resize",
+        runtime_generation: 1,
+        lease_epoch: 1,
+        geometry_sequence: 2,
         cols: 112,
         rows: 31,
       });
@@ -2541,28 +2665,14 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("history line 1\r\nhistory line 2\r\n"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "history line 1\r\nhistory line 2\r\n" })),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 100,
-          rows: 30,
-          state_base64: btoa("current viewport"),
-        }),
+        data: JSON.stringify(remoteTerminalSnapshotMessage("current viewport", 2)),
       });
     });
 
-    expect(terminalInstance.reset).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(terminalInstance.reset).toHaveBeenCalledTimes(2));
     expect(terminalInstance.write).toHaveBeenCalledTimes(2);
   });
 
@@ -2629,17 +2739,11 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa(firstFrame + secondFrame),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: firstFrame + secondFrame })),
       });
     });
 
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalled());
     const written = terminalInstance.write.mock.calls[0]?.[0];
         expect(written).not.toContain("\u001b[999;1H");
         expect(written).toContain("  63");
@@ -2709,25 +2813,14 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa(codexComposerFrame),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: codexComposerFrame })),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          state_base64: btoa(codexComposerFrame),
-        }),
+        data: JSON.stringify(remoteTerminalEventsMessage([new TextEncoder().encode(codexComposerFrame)])),
       });
     });
 
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalledTimes(2));
     const writes = terminalInstance.write.mock.calls.map(([data]) => String(data));
     expect(writes).toEqual([
       "\u001b[48;2;242;240;235m\n\u001b[K",
@@ -2799,25 +2892,14 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa(firstFrame),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: firstFrame })),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          state_base64: btoa(secondFrame),
-        }),
+        data: JSON.stringify(remoteTerminalEventsMessage([new TextEncoder().encode(secondFrame)])),
       });
     });
 
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalledTimes(2));
     expect(terminalInstance.write.mock.calls[1]?.[0]).toBe(secondFrame);
     expect(terminalInstance.write.mock.calls[1]?.[0]).not.toContain("\u001b[999;1H");
   });
@@ -2883,17 +2965,11 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("\u001b[0 qprompt\u001b[1 q"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "\u001b[0 qprompt\u001b[1 q" })),
       });
     });
 
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalled());
     const written = String(terminalInstance.write.mock.calls[0]?.[0] ?? "");
     expect(written).toContain("prompt");
     expect(written).not.toContain("\u001b[0 q");
@@ -2920,17 +2996,10 @@ describe("RemoteMobileApp", () => {
     act(() => {
       terminalSocket?.emit("open");
       terminalSocket?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
 
     const sentBeforeColorReply = terminalSocket?.sent.length ?? 0;
     act(() => {
@@ -2939,7 +3008,7 @@ describe("RemoteMobileApp", () => {
     });
 
     const sentAfterColorReply = terminalSocket?.sent.slice(sentBeforeColorReply).map((payload) => JSON.parse(payload));
-    expect(sentAfterColorReply).toEqual([{ type: "input", data: "ls -la\r" }]);
+    expect(sentAfterColorReply).toEqual([{ type: "input", runtime_generation: 1, lease_epoch: 1, data: "ls -la\r" }]);
   });
 
   it("forwards only the new suffix from cumulative mobile composition input frames", async () => {
@@ -2962,17 +3031,10 @@ describe("RemoteMobileApp", () => {
     act(() => {
       terminalSocket?.emit("open");
       terminalSocket?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
 
     const sentBeforeTyping = terminalSocket?.sent.length ?? 0;
     act(() => {
@@ -2985,9 +3047,9 @@ describe("RemoteMobileApp", () => {
 
     const sentAfterTyping = terminalSocket?.sent.slice(sentBeforeTyping).map((payload) => JSON.parse(payload));
     expect(sentAfterTyping).toEqual([
-      { type: "input", data: "h" },
-      { type: "input", data: "e" },
-      { type: "input", data: "l" },
+      { type: "input", runtime_generation: 1, lease_epoch: 1, data: "h" },
+      { type: "input", runtime_generation: 1, lease_epoch: 1, data: "e" },
+      { type: "input", runtime_generation: 1, lease_epoch: 1, data: "l" },
     ]);
   });
 
@@ -3008,26 +3070,16 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          state_base64: btoa("\u001b[?2026hhello\u001b[?1016$ptest\u001b[?2026l"),
-        }),
+        data: JSON.stringify(remoteTerminalEventsMessage([
+          new TextEncoder().encode("\u001b[?2026hhello\u001b[?1016$ptest\u001b[?2026l"),
+        ])),
       });
     });
 
-    expect(terminalInstance.write).toHaveBeenLastCalledWith("hellotest");
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenLastCalledWith("hellotest", expect.any(Function)));
   });
 
   it("answers OpenCode terminal capability probes on the remote terminal stream", async () => {
@@ -3042,22 +3094,15 @@ describe("RemoteMobileApp", () => {
     act(() => {
       terminalSocket?.emit("open");
       terminalSocket?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("\u001b[6n\u001b[14t"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "\u001b[6n\u001b[14t" })),
       });
     });
-    await waitFor(() => expect(terminalSocket?.sent[0]).toContain("ws-ticket-1"));
+    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
 
     const inputFrames = terminalSocket?.sent.map((payload) => JSON.parse(payload)).filter((frame) => frame.type === "input");
     expect(inputFrames).toEqual([
-      { type: "input", data: "\u001b[1;1R" },
-      { type: "input", data: "\u001b[4;1;1t" },
+      { type: "input", runtime_generation: 1, lease_epoch: 1, data: "\u001b[1;1R" },
+      { type: "input", runtime_generation: 1, lease_epoch: 1, data: "\u001b[4;1;1t" },
     ]);
   });
 
@@ -3195,17 +3240,10 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    expect(terminalInstance.options.disableStdin).toBe(false);
+    await waitFor(() => expect(terminalInstance.options.disableStdin).toBe(false));
 
     act(() => {
       MockWebSocket.instances[1]?.emit("close");
@@ -3272,29 +3310,35 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    expect(terminalInstance.options.disableStdin).toBe(false);
+    await waitFor(() => expect(terminalInstance.options.disableStdin).toBe(false));
 
     act(() => {
       MockWebSocket.instances[1]?.emit("message", {
         data: JSON.stringify({
-          type: "ownership",
-          owner_attachment_id: "attach-2",
-          cols: 80,
-          rows: 24,
+          type: "events",
+          batch: {
+            status: "events",
+            runtime_generation: 1,
+            events: [{
+              type: "ownership",
+              sequence: 2,
+              runtime_generation: 1,
+              owner_presentation_id: "desktop:presentation-2",
+              lease_epoch: 2,
+              activation_id: null,
+            }],
+            next_sequence: 2,
+            available_from_sequence: 2,
+            latest_sequence: 2,
+            recovery_snapshot: null,
+          },
         }),
       });
     });
-    expect(terminalInstance.options.disableStdin).toBe(true);
+    await waitFor(() => expect(terminalInstance.options.disableStdin).toBe(true));
   });
 
   it("streams live terminal UTF-8 across split update frames", async () => {
@@ -3356,35 +3400,18 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("ready"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: null,
-          owner_attachment_id: "attach-1",
-          state_base64: bytesToBase64([0xe2]),
-        }),
+        data: JSON.stringify(remoteTerminalEventsMessage([Uint8Array.from([0xe2])], 2)),
       });
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: null,
-          owner_attachment_id: "attach-1",
-          state_base64: bytesToBase64([0x82, 0xac]),
-        }),
+        data: JSON.stringify(remoteTerminalEventsMessage([Uint8Array.from([0x82, 0xac])], 3)),
       });
     });
 
-    expect(terminalInstance.write).toHaveBeenCalledTimes(2);
-    expect(terminalInstance.write).toHaveBeenLastCalledWith("\u20ac");
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalledTimes(2));
+    expect(terminalInstance.write).toHaveBeenLastCalledWith("\u20ac", expect.any(Function));
   });
 
   it("adds streamed remote terminal output to the mobile queue when the agent returns idle", async () => {
@@ -3442,13 +3469,20 @@ describe("RemoteMobileApp", () => {
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "update",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          state_base64: btoa("Finished the requested update."),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "" })),
       });
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify(remoteTerminalEventsMessage([
+          new TextEncoder().encode("Finished the requested update."),
+        ])),
+      });
+    });
+
+    await waitFor(() => {
+      expect(useRemoteStore.getState().remoteQueueBuffers["agent-1"]).toContain("Finished the requested update.");
+    });
+
+    act(() => {
       MockWebSocket.instances[0]?.emit("message", {
         data: JSON.stringify({
           type: "agent_status",
@@ -3466,6 +3500,7 @@ describe("RemoteMobileApp", () => {
         }),
       });
     });
+    await waitFor(() => expect(useRemoteStore.getState().remoteQueueItems).toHaveLength(1));
 
     await userEvent.click(screen.getByRole("button", { name: "Back to remote agents" }));
     await userEvent.click(screen.getByRole("button", { name: "Queue" }));
@@ -3817,14 +3852,7 @@ describe("RemoteMobileApp", () => {
     });
     act(() => {
       MockWebSocket.instances[1]?.emit("message", {
-        data: JSON.stringify({
-          type: "snapshot",
-          attachment_id: "attach-1",
-          owner_attachment_id: "attach-1",
-          cols: 80,
-          rows: 24,
-          state_base64: btoa("new terminal"),
-        }),
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "new terminal" })),
       });
     });
 

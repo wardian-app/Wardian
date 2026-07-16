@@ -1,5 +1,5 @@
 use std::future::Future;
-use tokio::sync::mpsc::Sender;
+use crate::utils::delivery_transaction::TerminalInputSink;
 
 pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
     prompt
@@ -20,8 +20,8 @@ pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<V
     Ok(vec![plan.payload_bytes, plan.submit_key])
 }
 
-pub async fn submit_prompt_chunks_via_sender(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_chunks_via_sender<S: TerminalInputSink + ?Sized>(
+    tx: &S,
     provider_name: &str,
     prompt: &str,
 ) -> Result<(), String> {
@@ -31,8 +31,8 @@ pub async fn submit_prompt_chunks_via_sender(
         .map_err(|error| error.to_string())
 }
 
-pub async fn submit_prompt_with_outcome_chunks_via_sender(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_with_outcome_chunks_via_sender<S: TerminalInputSink + ?Sized>(
+    tx: &S,
     provider_name: &str,
     prompt: &str,
 ) -> Result<
@@ -48,8 +48,8 @@ pub async fn submit_prompt_with_outcome_chunks_via_sender(
     .await
 }
 
-pub async fn submit_prompt_with_outcome_chunks_via_sender_after_payload<F, Fut>(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_with_outcome_chunks_via_sender_after_payload<S, F, Fut>(
+    tx: &S,
     provider_name: &str,
     prompt: &str,
     on_payload_sent: F,
@@ -58,6 +58,7 @@ pub async fn submit_prompt_with_outcome_chunks_via_sender_after_payload<F, Fut>(
     crate::utils::delivery_transaction::TerminalDeliveryError,
 >
 where
+    S: TerminalInputSink + ?Sized,
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
@@ -82,16 +83,16 @@ where
     .await
 }
 
-pub async fn submit_prompt_via_sender(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_via_sender<S: TerminalInputSink + ?Sized>(
+    tx: &S,
     prompt: &str,
     provider_name: &str,
 ) -> Result<(), String> {
     submit_prompt_chunks_via_sender(tx, provider_name, prompt).await
 }
 
-pub async fn submit_prompt_with_outcome_via_sender(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_with_outcome_via_sender<S: TerminalInputSink + ?Sized>(
+    tx: &S,
     prompt: &str,
     provider_name: &str,
 ) -> Result<
@@ -101,8 +102,8 @@ pub async fn submit_prompt_with_outcome_via_sender(
     submit_prompt_with_outcome_chunks_via_sender(tx, provider_name, prompt).await
 }
 
-pub async fn submit_prompt_with_outcome_via_sender_after_payload<F, Fut>(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_prompt_with_outcome_via_sender_after_payload<S, F, Fut>(
+    tx: &S,
     prompt: &str,
     provider_name: &str,
     on_payload_sent: F,
@@ -111,6 +112,7 @@ pub async fn submit_prompt_with_outcome_via_sender_after_payload<F, Fut>(
     crate::utils::delivery_transaction::TerminalDeliveryError,
 >
 where
+    S: TerminalInputSink + ?Sized,
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {

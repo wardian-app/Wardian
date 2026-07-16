@@ -7,3 +7,4 @@ pub mod operations;
 pub mod policy;
 pub mod setup_check;
 pub mod storage;
+pub mod terminal_stream;

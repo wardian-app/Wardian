@@ -18,6 +18,7 @@ import type {
   ShellSettings,
   ShellSettingsOverrides,
   WatchlistNewAgentPosition,
+  WorkbenchNewTabAction,
 } from '../types/settings';
 import type { GridCardDisplayMode } from '../types';
 
@@ -157,7 +158,14 @@ export function normalizeExplorerFileClickAction(
     : 'preview';
 }
 
+export function normalizeWorkbenchNewTabAction(
+  value: string | null | undefined,
+): WorkbenchNewTabAction {
+  return value?.trim() === 'palette' ? 'palette' : 'home';
+}
+
 interface SettingsState {
+  settingsOpen: boolean;
   theme: AppThemeSetting;
   autoPatchGemini: boolean;
   terminalFontSize: number;
@@ -168,6 +176,7 @@ interface SettingsState {
   externalEditor: ExternalEditorSetting;
   externalEditorCustomExecutable: string;
   explorerFileClickAction: ExplorerFileClickAction;
+  workbenchNewTabAction: WorkbenchNewTabAction;
   shell_id: string;
   custom_executable: string;
   custom_args: string;
@@ -181,6 +190,8 @@ interface SettingsState {
   app_settings_loaded: boolean;
   shell_settings_loaded: boolean;
   shells_loaded: boolean;
+  setSettingsOpen: (open: boolean) => void;
+  toggleSettings: () => void;
   setTheme: (theme: AppThemeSetting) => void;
   setAutoPatchGemini: (enabled: boolean) => void;
   setTerminalFontSize: (value: number) => void;
@@ -191,6 +202,7 @@ interface SettingsState {
   setExternalEditor: (value: ExternalEditorSetting) => void;
   setExternalEditorCustomExecutable: (value: string) => void;
   setExplorerFileClickAction: (value: ExplorerFileClickAction) => void;
+  setWorkbenchNewTabAction: (value: WorkbenchNewTabAction) => void;
   setShellId: (shellId: string) => void;
   setCustomExecutable: (value: string) => void;
   setCustomArgs: (value: string) => void;
@@ -221,6 +233,7 @@ type PersistedSettingsState = Pick<
   | 'externalEditor'
   | 'externalEditorCustomExecutable'
   | 'explorerFileClickAction'
+  | 'workbenchNewTabAction'
 >;
 
 const DEFAULT_SHELL_SETTINGS: ShellSettings = {
@@ -244,6 +257,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   external_editor: 'system',
   external_editor_custom_executable: null,
   explorer_file_click_action: 'preview',
+  workbench_new_tab_action: 'home',
 };
 
 const EMPTY_APP_SETTINGS_OVERRIDES: AppSettingsOverrides = {};
@@ -324,6 +338,9 @@ function appOverridesFromSettings(settings: AppSettings): AppSettingsOverrides {
     ...(normalizeExplorerFileClickAction(settings.explorer_file_click_action) !== DEFAULT_APP_SETTINGS.explorer_file_click_action
       ? { explorer_file_click_action: normalizeExplorerFileClickAction(settings.explorer_file_click_action) }
       : {}),
+    ...(normalizeWorkbenchNewTabAction(settings.workbench_new_tab_action) !== DEFAULT_APP_SETTINGS.workbench_new_tab_action
+      ? { workbench_new_tab_action: normalizeWorkbenchNewTabAction(settings.workbench_new_tab_action) }
+      : {}),
   };
 }
 
@@ -339,6 +356,7 @@ function appOverridesFromState(state: SettingsState): AppSettingsOverrides {
     external_editor: state.externalEditor,
     external_editor_custom_executable: state.externalEditorCustomExecutable.trim() || null,
     explorer_file_click_action: state.explorerFileClickAction,
+    workbench_new_tab_action: state.workbenchNewTabAction,
   });
 }
 
@@ -406,6 +424,9 @@ function normalizeAppOverrides(overrides: AppSettingsOverrides | undefined): App
     ...(normalizeExplorerFileClickAction(overrides?.explorer_file_click_action) !== DEFAULT_APP_SETTINGS.explorer_file_click_action
       ? { explorer_file_click_action: normalizeExplorerFileClickAction(overrides?.explorer_file_click_action) }
       : {}),
+    ...(normalizeWorkbenchNewTabAction(overrides?.workbench_new_tab_action) !== DEFAULT_APP_SETTINGS.workbench_new_tab_action
+      ? { workbench_new_tab_action: normalizeWorkbenchNewTabAction(overrides?.workbench_new_tab_action) }
+      : {}),
   };
 }
 
@@ -447,13 +468,15 @@ function stateHasMigratedAppPreferences(state: SettingsState) {
     state.titlebarTelemetryVisible !== DEFAULT_APP_SETTINGS.titlebar_telemetry_visible ||
     state.externalEditor !== DEFAULT_APP_SETTINGS.external_editor ||
     state.externalEditorCustomExecutable.trim() !== '' ||
-    state.explorerFileClickAction !== DEFAULT_APP_SETTINGS.explorer_file_click_action
+    state.explorerFileClickAction !== DEFAULT_APP_SETTINGS.explorer_file_click_action ||
+    state.workbenchNewTabAction !== DEFAULT_APP_SETTINGS.workbench_new_tab_action
   );
 }
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
+      settingsOpen: false,
       theme: 'system',
       autoPatchGemini: false,
       terminalFontSize: defaultTerminalFontSize(),
@@ -464,6 +487,7 @@ export const useSettingsStore = create<SettingsState>()(
       externalEditor: 'system',
       externalEditorCustomExecutable: '',
       explorerFileClickAction: 'preview',
+      workbenchNewTabAction: 'home',
       shell_id: DEFAULT_SHELL_SETTINGS.shell_id,
       custom_executable: DEFAULT_SHELL_SETTINGS.custom_executable ?? '',
       custom_args: DEFAULT_SHELL_SETTINGS.custom_args ?? '',
@@ -477,6 +501,8 @@ export const useSettingsStore = create<SettingsState>()(
       app_settings_loaded: false,
       shell_settings_loaded: false,
       shells_loaded: false,
+      setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      toggleSettings: () => set((state) => ({ settingsOpen: !state.settingsOpen })),
       setTheme: (theme) => set((state) => ({
         theme,
         app_settings_overrides: { ...state.app_settings_overrides, theme },
@@ -543,6 +569,16 @@ export const useSettingsStore = create<SettingsState>()(
           app_settings_overrides: normalized === DEFAULT_APP_SETTINGS.explorer_file_click_action
             ? rest
             : { ...state.app_settings_overrides, explorer_file_click_action: normalized },
+        };
+      }),
+      setWorkbenchNewTabAction: (workbenchNewTabAction) => set((state) => {
+        const normalized = normalizeWorkbenchNewTabAction(workbenchNewTabAction);
+        const { workbench_new_tab_action: _removed, ...rest } = state.app_settings_overrides;
+        return {
+          workbenchNewTabAction: normalized,
+          app_settings_overrides: normalized === DEFAULT_APP_SETTINGS.workbench_new_tab_action
+            ? rest
+            : { ...state.app_settings_overrides, workbench_new_tab_action: normalized },
         };
       }),
       setShellId: (shell_id) => set((state) => ({
@@ -649,6 +685,7 @@ export const useSettingsStore = create<SettingsState>()(
             externalEditor: normalizeExternalEditorSetting(settings.external_editor),
             externalEditorCustomExecutable: settings.external_editor_custom_executable?.trim() ?? '',
             explorerFileClickAction: normalizeExplorerFileClickAction(settings.explorer_file_click_action),
+            workbenchNewTabAction: normalizeWorkbenchNewTabAction(settings.workbench_new_tab_action),
             app_settings_overrides: normalizeAppOverrides(overrides),
             app_settings_loaded: true,
           });
@@ -669,6 +706,7 @@ export const useSettingsStore = create<SettingsState>()(
           external_editor: normalizeExternalEditorSetting(get().externalEditor),
           external_editor_custom_executable: get().externalEditorCustomExecutable.trim() || null,
           explorer_file_click_action: normalizeExplorerFileClickAction(get().explorerFileClickAction),
+          workbench_new_tab_action: normalizeWorkbenchNewTabAction(get().workbenchNewTabAction),
         };
         const settings: SettingsDocument<AppSettings, AppSettingsOverrides> = {
           schema_version: 2,
@@ -689,6 +727,7 @@ export const useSettingsStore = create<SettingsState>()(
           externalEditor: normalizeExternalEditorSetting(saved.external_editor),
           externalEditorCustomExecutable: saved.external_editor_custom_executable?.trim() ?? '',
           explorerFileClickAction: normalizeExplorerFileClickAction(saved.explorer_file_click_action),
+          workbenchNewTabAction: normalizeWorkbenchNewTabAction(saved.workbench_new_tab_action),
           app_settings_overrides: normalizeAppOverrides(overrides),
           app_settings_loaded: true,
         });
@@ -793,6 +832,7 @@ export const useSettingsStore = create<SettingsState>()(
           externalEditor: normalizeExternalEditorSetting(state.externalEditor),
           externalEditorCustomExecutable: state.externalEditorCustomExecutable?.trim() ?? '',
           explorerFileClickAction: normalizeExplorerFileClickAction(state.explorerFileClickAction),
+          workbenchNewTabAction: normalizeWorkbenchNewTabAction(state.workbenchNewTabAction),
         };
       },
       partialize: (state) => ({
@@ -806,6 +846,7 @@ export const useSettingsStore = create<SettingsState>()(
         externalEditor: normalizeExternalEditorSetting(state.externalEditor),
         externalEditorCustomExecutable: state.externalEditorCustomExecutable.trim(),
         explorerFileClickAction: normalizeExplorerFileClickAction(state.explorerFileClickAction),
+        workbenchNewTabAction: normalizeWorkbenchNewTabAction(state.workbenchNewTabAction),
       }),
     }
   )

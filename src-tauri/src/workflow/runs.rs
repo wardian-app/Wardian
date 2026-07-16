@@ -272,17 +272,6 @@ pub async fn agent_catalog_from_state_with_assignments(
     default_provider: &str,
 ) -> HashMap<String, AgentBinding> {
     let mut catalog = HashMap::new();
-    let live_senders = state
-        .input_senders
-        .read()
-        .map(|senders| {
-            senders
-                .keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>()
-        })
-        .unwrap_or_default();
-
     {
         let agents = state.agents.lock().await;
         for agent in agents.values() {
@@ -293,7 +282,7 @@ pub async fn agent_catalog_from_state_with_assignments(
                     .map(|status| status.clone())
                     .unwrap_or_default();
                 let normalized_status = wardian_core::identity::normalize_status(&current_status);
-                let is_live = !config.is_off && live_senders.contains(&config.session_id);
+                let is_live = !config.is_off && agent.runtime_generation.is_some();
                 let is_input_ready = is_live
                     && !matches!(
                         normalized_status.as_str(),

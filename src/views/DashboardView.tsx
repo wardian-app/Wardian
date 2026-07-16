@@ -2,7 +2,7 @@ import React from "react";
 import { AgentConfig, AgentTelemetry } from "../types";
 import { getAgentStatusLabel, getAgentStatusTextClass } from "../utils/statusUtils";
 
-interface DashboardViewProps {
+export interface DashboardViewProps {
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
   terminalTitles: Record<string, string>;
@@ -44,7 +44,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   getStatusColorClass,
 }) => {
   return (
-    <div className="flex-1 flex gap-4 min-h-full flex-col pb-[100px]">
+    <div className="dashboard-view flex-1 flex gap-4 min-h-full flex-col pb-[100px]">
       {filteredAgents.map((agent: AgentConfig) => {
         const agentId = agent.session_id.toString();
         const isOff = offAgentIds.has(agentId);
@@ -70,14 +70,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             onMouseEnter={() => onMouseEnterCard(agentId)}
             onDragStart={(e) => e.preventDefault()}
             onMouseUp={() => onMouseUp()}
-            className={`bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg relative transition-all rounded-xl flex-col md:flex-row border w-full min-h-[85px] ${isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border/50 hover:border-wardian-border-heavy'} ${draggedAgentId === agentId ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId ? 'translate-y-[-2px]' : ''}`}
+            className={`dashboard-agent-card bg-[var(--color-wardian-card)] overflow-hidden flex shadow-lg relative transition-all rounded-xl flex-col border w-full min-h-[85px] ${isSelected || draggedAgentId === agentId || dragOverAgentId === agentId ? 'border-[var(--color-wardian-accent)] ring-1 ring-[var(--color-wardian-accent)]/50 shadow-[0_0_15px_rgba(241,211,130,0.1)]' : 'border-wardian-border/50 hover:border-wardian-border-heavy'} ${draggedAgentId === agentId ? 'opacity-50 scale-[0.98]' : ''} ${dragOverAgentId === agentId ? 'translate-y-[-2px]' : ''}`}
           >
             <div 
-              className="flex flex-col md:flex-row w-full h-full cursor-grab active:cursor-grabbing select-none"
+              className="dashboard-agent-card__content flex w-full h-full cursor-grab active:cursor-grabbing select-none"
               onMouseDown={(e) => { if (e.button === 0) onMouseDown(agentId); }}
               onClick={(e) => { e.stopPropagation(); onCardClick(e, agentId); }}
             >
-              <div className="flex flex-col justify-center p-3 bg-[var(--color-wardian-input-bg)] w-[180px] flex-shrink-0 border-r border-wardian-light/50">
+              <div className="dashboard-agent-card__identity flex flex-col justify-center p-3 bg-[var(--color-wardian-input-bg)] flex-shrink-0">
                 <div className="flex items-center gap-2.5 mb-0.5">
                   <div className={`w-2.5 h-2.5 rounded-full transition-colors ${statusColorClass}`}></div>
                   <h3 className="font-bold text-base text-primary truncate">{agent.session_name}</h3>
@@ -86,7 +86,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
 
 
-              <div className="flex flex-1 items-center justify-start p-2 px-4 gap-8 overflow-x-auto no-scrollbar">
+              <div className="dashboard-agent-card__metadata flex flex-1 items-center justify-start p-2 px-4 gap-8 no-scrollbar">
                 <div className="flex flex-col min-w-[120px]">
                   <span className="label-small mb-0.5">Hardware</span>
                   <div className="flex items-center gap-2 text-xs font-mono text-primary">
@@ -118,7 +118,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex flex-col justify-center p-2 w-[260px] bg-wardian-card-bg-muted border-l border-wardian-light/50">
+              <div className="dashboard-agent-card__actions flex flex-col justify-center p-2 bg-wardian-card-bg-muted">
                 <div className="grid grid-cols-2 gap-1.5 w-full">
                   <button 
                     onClick={(e) => { e.stopPropagation(); onPause(agentId); }} 

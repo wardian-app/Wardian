@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import type Sigma from "sigma";
+import { matrixFromCamera } from "sigma/utils";
 import type { CommunicationEdge } from "./graphProjection";
 import {
   dashPattern,
@@ -163,6 +164,18 @@ function renderOverlay(
 
   // Collect edges to render
   const overlayEdges: OverlayEdge[] = [];
+  // Sigma updates the camera state before its scheduled render refreshes the
+  // cached projection matrix. The overlay has its own rAF loop, so it can run
+  // first during wheel zoom and otherwise project against the previous frame.
+  // Supplying the current state makes both layers describe the same camera
+  // frame regardless of callback ordering.
+  const cameraState = sigma.getCamera().getState();
+  const matrix = matrixFromCamera(
+    cameraState,
+    sigma.getDimensions(),
+    sigma.getGraphDimensions(),
+    sigma.getStagePadding(),
+  );
   for (const commEdge of commEdges) {
     // Skip manual edges (Sigma draws them); we only draw ghost edges and
     // particles (including particles over ongoing manual edges)
@@ -172,8 +185,8 @@ function renderOverlay(
     const targetNode = sigma.getNodeDisplayData(commEdge.target);
     if (!sourceNode || !targetNode) continue;
 
-    const source = sigma.framedGraphToViewport(sourceNode);
-    const target = sigma.framedGraphToViewport(targetNode);
+    const source = sigma.framedGraphToViewport(sourceNode, { matrix });
+    const target = sigma.framedGraphToViewport(targetNode, { matrix });
 
     overlayEdges.push({
       id: commEdge.id,

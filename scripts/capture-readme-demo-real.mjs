@@ -1,4 +1,4 @@
-import { By, until } from "selenium-webdriver";
+import { By, Key, until } from "selenium-webdriver";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
@@ -392,11 +392,20 @@ async function invokeTauri(driver, command, args = {}) {
 async function terminalText(driver, sessionId) {
   return await driver.executeScript((sid) => {
     const card = document.getElementById(`agent-card-${sid}`);
-    const host = card?.querySelector('[data-testid="agent-terminal-host"]');
+    const matchingHosts = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .filter((candidate) => candidate.getAttribute("data-terminal-session-id") === sid);
+    const host = matchingHosts.length === 1 ? matchingHosts[0] : null;
+    const presentationId = host?.getAttribute("data-terminal-presentation-id") ?? null;
+    const registeredPresentationIds = window.__wardianTerminalDebug?.presentationIds?.() ?? [];
+    const exactPresentationId = presentationId && registeredPresentationIds.includes(presentationId)
+      ? presentationId
+      : null;
     const rows = Array.from(host?.querySelectorAll(".xterm-rows > div") ?? [])
       .map((element) => element.textContent || "")
       .join("\n");
-    const debug = window.__wardianTerminalDebug?.snapshot?.(sid);
+    const debug = exactPresentationId
+      ? window.__wardianTerminalDebug?.snapshot?.(exactPresentationId)
+      : null;
     return [
       rows,
       debug?.lines?.join("\n") ?? "",
@@ -634,6 +643,16 @@ async function main() {
     await setCursor(session.driver, cursorPosition.x, cursorPosition.y, false);
   };
 
+  const openWorkbenchSurface = async (surfaceType) => {
+    const modifier = process.platform === "darwin" ? Key.COMMAND : Key.CONTROL;
+    await session.driver.actions().keyDown(modifier).sendKeys("p").keyUp(modifier).perform();
+    await clickCss(`[role="option"][data-surface-type="${surfaceType}"]`, 0.18);
+    await waitForCss(
+      session.driver,
+      `[role="tab"][data-surface-type="${surfaceType}"][aria-selected="true"]`,
+    );
+  };
+
   const contextMenuXpath = async (xpath, moveSeconds = 0.25) => {
     const element = await waitForXpath(session.driver, xpath);
     await moveCursorTo(xpath, moveSeconds, "xpath");
@@ -795,14 +814,14 @@ async function main() {
     await clickCss('[data-testid="sidebar-tab-git"]');
     await captureFor(3);
 
-    await clickXpath("//button[normalize-space(.)='Library']");
+    await openWorkbenchSurface("library");
     await waitForCss(session.driver, '[data-testid="library-view"]');
     await captureFor(1.7);
     await clickXpath("//button[normalize-space(.)='Skills']", 0.18);
     await waitForXpath(session.driver, "//*[contains(normalize-space(.), 'readme-auditor') or contains(normalize-space(.), 'diff-reviewer')]", 20000);
     await captureFor(1.8);
 
-    await clickXpath("//button[normalize-space(.)='Workflows']");
+    await openWorkbenchSurface("workflows");
     await waitForCss(session.driver, '[data-testid="workflows-view"]');
     await captureWhile(() => session.driver.executeScript(() => {
       const select = document.querySelector('[data-testid="blueprint-selector"] select');
@@ -816,7 +835,7 @@ async function main() {
     await waitForCss(session.driver, '[data-testid="builder-node-inspect-workspace"]', 20000);
     await captureFor(3.5);
 
-    await clickXpath("//button[normalize-space(.)='Dashboard']");
+    await openWorkbenchSurface("dashboard");
     await waitForXpath(session.driver, "//*[contains(normalize-space(.), 'Demo-Claude') or contains(normalize-space(.), 'Demo-Antigravity')]", 20000);
     await captureFor(4.5);
 

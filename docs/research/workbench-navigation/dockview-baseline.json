@@ -1,0 +1,391 @@
+{
+  "schema_version": 2,
+  "measured_at": "2026-07-10T10:46:35.500Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "node": "v24.13.1",
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "logical_cpu_count": 32,
+    "total_memory_bytes": 102747942912,
+    "wardian_home": "isolated-os-temp"
+  },
+  "package": {
+    "name": "dockview-react",
+    "version": "7.0.2",
+    "license": "MIT",
+    "unpacked_size_bytes": 3300226,
+    "react_version": "19.2.4",
+    "react_dom_version": "19.2.4",
+    "react_peer_compatible": true
+  },
+  "scenario": {
+    "group_count": 4,
+    "tab_count": 20,
+    "xterm_owner_count": 1,
+    "xterm_mirror_count": 3,
+    "heavy_renderers": [
+      "GraphView",
+      "GardenView"
+    ],
+    "seed_file": "settings/workbench-proof-seed.json"
+  },
+  "bundle": {
+    "base_raw_bytes": 2511673,
+    "base_gzip_bytes": 672211,
+    "candidate_raw_bytes": 2629271,
+    "candidate_gzip_bytes": 685704,
+    "production_delta_raw_bytes": 117598,
+    "production_delta_gzip_bytes": 13493,
+    "candidate_files": [
+      {
+        "file": "assets/app-Berf75Jz.js",
+        "raw_bytes": 611444,
+        "gzip_bytes": 152706
+      },
+      {
+        "file": "assets/vendor-B7wjXCJ3.js",
+        "raw_bytes": 597676,
+        "gzip_bytes": 180051
+      },
+      {
+        "file": "assets/vendor-terminal-core-qj1dOPsw.js",
+        "raw_bytes": 327904,
+        "gzip_bytes": 81562
+      },
+      {
+        "file": "assets/vendor-graph-TPxHg13f.js",
+        "raw_bytes": 231125,
+        "gzip_bytes": 57785
+      },
+      {
+        "file": "assets/vendor-react-B0CMYsXv.js",
+        "raw_bytes": 190806,
+        "gzip_bytes": 59982
+      },
+      {
+        "file": "assets/vendor-terminal-headless-DQ1I8SQB.js",
+        "raw_bytes": 182111,
+        "gzip_bytes": 46950
+      },
+      {
+        "file": "assets/vendor-CidfP7C8.css",
+        "raw_bytes": 110145,
+        "gzip_bytes": 8677
+      },
+      {
+        "file": "assets/app-nYAUDK9K.css",
+        "raw_bytes": 109544,
+        "gzip_bytes": 17181
+      },
+      {
+        "file": "assets/vendor-terminal-webgl-BxRL2ZST.js",
+        "raw_bytes": 109452,
+        "gzip_bytes": 29129
+      },
+      {
+        "file": "assets/vendor-terminal-addons-BsOkQHVH.js",
+        "raw_bytes": 40938,
+        "gzip_bytes": 13579
+      },
+      {
+        "file": "assets/GraphView-Kv62o_uS.js",
+        "raw_bytes": 27607,
+        "gzip_bytes": 8479
+      },
+      {
+        "file": "assets/vendor-qrcode-rnTv95nV.js",
+        "raw_bytes": 23707,
+        "gzip_bytes": 8922
+      },
+      {
+        "file": "assets/graphProjection-B-XKWEOe.js",
+        "raw_bytes": 16283,
+        "gzip_bytes": 5262
+      },
+      {
+        "file": "assets/vendor-graph-BZV40eAE.css",
+        "raw_bytes": 15851,
+        "gzip_bytes": 2656
+      },
+      {
+        "file": "assets/vendor-icons-BhgMo4Bi.js",
+        "raw_bytes": 13881,
+        "gzip_bytes": 4884
+      },
+      {
+        "file": "assets/GardenView-DlzDF_Jo.js",
+        "raw_bytes": 7775,
+        "gzip_bytes": 3167
+      },
+      {
+        "file": "assets/vendor-terminal-core-DOrYoP_4.css",
+        "raw_bytes": 5175,
+        "gzip_bytes": 1908
+      },
+      {
+        "file": "assets/workbench-proof-Cr9QU_GL.css",
+        "raw_bytes": 3794,
+        "gzip_bytes": 944
+      },
+      {
+        "file": "assets/workbench-proof-BFgovj8V.js",
+        "raw_bytes": 2569,
+        "gzip_bytes": 1287
+      },
+      {
+        "file": "remote-sw.js",
+        "raw_bytes": 1484,
+        "gzip_bytes": 593
+      }
+    ]
+  },
+  "runtime": {
+    "browser_version": "147.0.7727.15",
+    "startup_measurement": "fresh browser context after Vite transform warm-up",
+    "startup_ms": 116.94,
+    "heavy_renderers_ready_ms": 243.04,
+    "tab_switch_ms": {
+      "samples": [
+        27.9,
+        29.4,
+        31.9,
+        32.4,
+        32.9,
+        32.9,
+        33,
+        33.1,
+        33.3,
+        33.3,
+        33.4,
+        33.7,
+        33.8,
+        33.9,
+        34.6,
+        38.8
+      ],
+      "median": 33.1,
+      "p95": 38.8,
+      "max": 38.8
+    },
+    "drag_ms": {
+      "samples": [
+        274.33,
+        277.98,
+        291.04
+      ],
+      "median": 277.98,
+      "p95": 291.04,
+      "max": 291.04
+    },
+    "terminal_output_500_lines_ms": 16.3,
+    "react_commit_measurement": "model publish to React layout effect",
+    "react_commit_count": 29,
+    "react_commits": {
+      "samples": [
+        0.3,
+        0.3,
+        0.4,
+        0.8,
+        0.8,
+        0.9,
+        0.9,
+        1,
+        1.1,
+        1.1,
+        1.1,
+        1.2,
+        1.2,
+        1.2,
+        1.4,
+        1.4,
+        1.5,
+        1.5,
+        1.6,
+        1.6,
+        1.7,
+        1.7,
+        1.7,
+        1.8,
+        1.8,
+        2.9,
+        7.3,
+        7.5,
+        10.9
+      ],
+      "median": 1.4,
+      "p95": 7.5,
+      "max": 10.9
+    },
+    "model_command_ms": {
+      "samples": [
+        0,
+        0.1,
+        0.1,
+        0.2,
+        0.2,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.4,
+        0.4,
+        0.6,
+        0.6,
+        0.8,
+        0.9,
+        1,
+        1.3,
+        1.4
+      ],
+      "median": 0.3,
+      "p95": 1.3,
+      "max": 1.4
+    },
+    "renderer_counts": {
+      "mounted_surfaces": 20,
+      "mounted_terminal_hosts": 4,
+      "mounted_terminal_owners": 1,
+      "mounted_terminal_mirrors": 3,
+      "mounted_graph_wrappers": 1,
+      "mounted_garden_wrappers": 1,
+      "canvas_elements": 18,
+      "webgl_canvases": 7
+    },
+    "surface_mounts": {
+      "terminal-owner": 1,
+      "graph": 1,
+      "synthetic-01": 1,
+      "synthetic-02": 1,
+      "synthetic-03": 1,
+      "terminal-mirror-1": 1,
+      "garden": 1,
+      "synthetic-04": 1,
+      "synthetic-05": 1,
+      "synthetic-06": 1,
+      "terminal-mirror-2": 1,
+      "synthetic-07": 1,
+      "synthetic-08": 1,
+      "synthetic-09": 1,
+      "synthetic-10": 1,
+      "terminal-mirror-3": 1,
+      "synthetic-11": 1,
+      "synthetic-12": 1,
+      "synthetic-13": 1,
+      "synthetic-14": 1
+    },
+    "surface_unmounts": {},
+    "terminal_write_chars": {
+      "terminal-owner": 9500,
+      "terminal-mirror-1": 9500,
+      "terminal-mirror-2": 9500,
+      "terminal-mirror-3": 9500
+    },
+    "terminal_webgl_loaded": 4,
+    "terminal_webgl_failures": 0,
+    "adapter_move_events": 6,
+    "accessibility": {
+      "tab_count": 20,
+      "tablist_count": 4,
+      "selected_tab_count": 4,
+      "roving_tabstop_count": 4,
+      "separator_count": 3,
+      "separators_with_role": 0,
+      "separators_with_value": 0
+    },
+    "final_group_count": 4,
+    "final_tab_count": 20
+  },
+  "adapter_boundary": {
+    "model_source": "wardian-proof-model",
+    "dockview_json_persisted": false,
+    "dockview_serialization_reference_count": 0,
+    "renderer_mode": "always",
+    "production_route_present": false
+  },
+  "promotion": {
+    "schema_version": 1,
+    "passed": true,
+    "checks": [
+      {
+        "metric": "bundle_delta_raw_bytes",
+        "observed": 117598,
+        "operator": "<=",
+        "limit": 160000,
+        "unit": "bytes",
+        "passed": true
+      },
+      {
+        "metric": "bundle_delta_gzip_bytes",
+        "observed": 13493,
+        "operator": "<=",
+        "limit": 20000,
+        "unit": "bytes",
+        "passed": true
+      },
+      {
+        "metric": "startup_ms",
+        "observed": 116.94,
+        "operator": "<=",
+        "limit": 650,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "heavy_renderers_ready_ms",
+        "observed": 243.04,
+        "operator": "<=",
+        "limit": 700,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "tab_switch_p95_ms",
+        "observed": 38.8,
+        "operator": "<=",
+        "limit": 60,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "model_command_p95_ms",
+        "observed": 1.3,
+        "operator": "<=",
+        "limit": 5,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "react_commit_p95_ms",
+        "observed": 7.5,
+        "operator": "<=",
+        "limit": 16.7,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "pointer_drag_p95_ms",
+        "observed": 291.04,
+        "operator": "<=",
+        "limit": 350,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "terminal_output_500_lines_ms",
+        "observed": 16.3,
+        "operator": "<=",
+        "limit": 35,
+        "unit": "ms",
+        "passed": true
+      }
+    ]
+  }
+}

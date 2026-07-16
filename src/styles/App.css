@@ -43,6 +43,8 @@
 
   /* TopBar */
   --topbar-height: 36px;
+  --wardian-collapsed-right-chrome-width: 184px;
+  --wardian-mac-collapsed-left-chrome-overhang: 64px;
 
   /* Density */
   --density-panel-padding-x: 12px;
@@ -64,11 +66,10 @@
   min-height: var(--topbar-height);
   display: flex;
   align-items: stretch;
-  background: var(--color-wardian-sidebar-primary);
-  border-bottom: 1px solid var(--color-wardian-border);
+  background: transparent;
   user-select: none;
-  z-index: 50;
-  -webkit-app-region: drag;
+  pointer-events: none;
+  z-index: 52;
 }
 
 /* ── Zone Layout ─────────────────────────────────────── */
@@ -76,6 +77,9 @@
   display: flex;
   align-items: center;
   -webkit-app-region: no-drag;
+  background: var(--color-wardian-sidebar-primary);
+  border-bottom: 1px solid var(--color-wardian-border);
+  pointer-events: auto;
 }
 
 /* Zone 1: Aligns with entire left sidebar (rail + content) */
@@ -87,37 +91,44 @@
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Zone 2: Sits over the main content area - Window Centered */
-.titlebar-center-container {
-  flex: 1;
-  display: flex;
-  align-items: stretch;
-  position: relative;
-  min-width: 0;
-  container-type: inline-size;
-}
-
-.titlebar-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: stretch;
-  height: 100%;
-  gap: 1px;
-  max-width: 100%;
-  z-index: 1;
-}
-
 /* Zone 3: Aligns with the right sidebar column */
 .titlebar-right {
   width: var(--titlebar-right-width, 240px);
-  min-width: 180px; /* Persistent area for window controls */
   padding: 0;
   flex-shrink: 0;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   justify-content: flex-end;
+  margin-left: auto;
+}
+
+/* Dockview supplies the center segment of the native top chrome. */
+.app-shell-titlebar {
+  position: absolute;
+  z-index: 52;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--topbar-height);
+  pointer-events: none;
+}
+
+.app-shell-titlebar > * {
+  width: 100%;
+  height: 100%;
+}
+
+.app-shell-content {
+  min-height: 0;
+}
+
+.app-shell-content > :not(.app-shell-workbench) {
+  height: calc(100% - var(--topbar-height));
+  margin-top: var(--topbar-height);
+}
+
+.app-shell-workbench {
+  height: 100%;
 }
 
 .titlebar-right-content {
@@ -126,61 +137,6 @@
   gap: 6px;
   padding-left: 8px;
   height: 100%;
-}
-
-/* ── Workspace Tabs — Obsidian Style (Zone 2) ────────── */
-.titlebar-tab {
-  position: relative;
-  padding: 0 16px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-wardian-text-muted-neutral);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s, padding 0.2s;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  border-right: 1px solid transparent;
-  border-left: 1px solid transparent;
-  height: 100%;
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.titlebar-tab:hover {
-  color: var(--color-wardian-text);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.titlebar-tab.active {
-  color: var(--color-wardian-text);
-  background: var(--color-wardian-bg);
-  border-right-color: var(--color-wardian-border);
-  border-left-color: var(--color-wardian-border);
-}
-
-.titlebar-tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: -1px;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--color-wardian-bg);
-}
-
-.titlebar-tab.active::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--color-wardian-accent);
 }
 
 /* ── Panel Toggle Buttons ────────────────────────────── */
@@ -220,18 +176,6 @@
   pointer-events: none;
   margin-left: 12px; /* Push away from the toggle button */
   white-space: nowrap;
-}
-
-@container (max-width: 500px) {
-  .titlebar-tab {
-    padding: 0 8px;
-    font-size: 11px;
-  }
-}
-@container (max-width: 350px) {
-  .titlebar-center {
-    display: none;
-  }
 }
 
 .titlebar-telemetry-accent {
@@ -891,6 +835,7 @@ select option {
 
 .graph-body {
   display: grid;
+  position: relative;
   grid-template-columns: minmax(0, 1fr) var(--graph-inspector-width);
   flex: 1;
   min-height: 0;
@@ -1274,7 +1219,7 @@ select option {
 }
 
 
-@media (max-width: 760px) {
+@container wardian-surface (max-width: 760px) {
   .graph-toolbar {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -1286,5 +1231,192 @@ select option {
     width: 100%;
     max-width: none;
     transform: none;
+  }
+
+  .graph-body,
+  .graph-body--inspector-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .graph-inspector {
+    position: absolute;
+    z-index: 12;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--graph-inspector-width), 92cqw);
+    border-left: 1px solid var(--color-wardian-border);
+    background: var(--color-wardian-card);
+    box-shadow: var(--shadow-wardian-card);
+  }
+}
+
+/* Workflow chrome uses the pane as its responsive boundary. */
+.workflows-body {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflows-body[data-drawer-open="true"] {
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.workflows-edit-body {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflows-edit-body[data-inspector-open="true"] {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.library-view__back {
+  display: none;
+}
+
+@container wardian-surface (max-width: 760px) {
+  .workflows-toolbar {
+    min-height: 0;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.375rem;
+    padding-block: 0.5rem;
+  }
+
+  .workflows-toolbar__primary {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .workflows-toolbar__primary > input {
+    min-width: min(11rem, 100%);
+    max-width: none;
+  }
+
+  .workflows-toolbar__actions {
+    width: 100%;
+    justify-content: flex-end;
+    overflow-x: auto;
+    padding-bottom: 1px;
+  }
+
+  .workflows-body[data-drawer-open="true"],
+  .workflows-edit-body[data-inspector-open="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflows-run-drawer,
+  .workflow-node-inspector {
+    position: absolute;
+    z-index: 14;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 92cqw);
+    border-left: 1px solid var(--color-wardian-border);
+    background: var(--color-wardian-card);
+    box-shadow: var(--shadow-wardian-card);
+  }
+
+  .workflows-launch-overlay,
+  .workflow-node-library-overlay {
+    padding: 12px;
+  }
+
+  .library-view__body {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .library-view__browse {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .library-view__detail {
+    display: none;
+    width: 100% !important;
+    border-left: 0;
+  }
+
+  .library-view[data-detail-open="true"] .library-view__browse {
+    display: none;
+  }
+
+  .library-view[data-detail-open="true"] .library-view__detail {
+    display: block;
+  }
+
+  .library-view__detail > [data-testid="sidebar-resize-handle"] {
+    display: none;
+  }
+
+  .library-view__back {
+    position: sticky;
+    z-index: 2;
+    top: 0;
+    display: inline-flex;
+    margin: 0.5rem 0.75rem 0;
+    border: 1px solid var(--color-wardian-border);
+    border-radius: 0.25rem;
+    background: var(--color-wardian-card);
+    color: var(--color-wardian-text-muted);
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+  }
+}
+
+/* Dashboard cards respond to their Workbench pane, not the app window. */
+.dashboard-agent-card__content {
+  min-width: 0;
+  flex-direction: row;
+}
+
+.dashboard-agent-card__identity {
+  width: 180px;
+  border-right: 1px solid var(--color-wardian-border);
+}
+
+.dashboard-agent-card__metadata {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.dashboard-agent-card__actions {
+  width: 260px;
+  flex: 0 0 auto;
+  border-left: 1px solid var(--color-wardian-border);
+}
+
+@container wardian-surface (max-width: 760px) {
+  .dashboard-agent-card__content {
+    flex-direction: column;
+  }
+
+  .dashboard-agent-card__identity,
+  .dashboard-agent-card__actions {
+    width: 100%;
+  }
+
+  .dashboard-agent-card__identity {
+    border-right: 0;
+    border-bottom: 1px solid var(--color-wardian-border);
+  }
+
+  .dashboard-agent-card__metadata {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
+    gap: 0.75rem;
+    overflow-x: visible;
+  }
+
+  .dashboard-agent-card__metadata > * {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .dashboard-agent-card__actions {
+    border-top: 1px solid var(--color-wardian-border);
+    border-left: 0;
   }
 }

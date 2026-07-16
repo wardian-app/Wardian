@@ -22,4 +22,63 @@ describe('useBuilderStore', () => {
     expect(useBuilderStore.getState().diagnostics).toHaveLength(1);
     expect(useBuilderStore.getState().hasErrors()).toBe(true);
   });
+
+  it('does not clear a newer edit that arrives while save is pending', async () => {
+    const savedDraft = { schema: 2 as const, id: 'wf', name: 'First draft', nodes: [], edges: [] };
+    const newerDraft = { ...savedDraft, name: 'Newer draft' };
+    let finishSave: ((result: { written: boolean; diagnostics: [] }) => void) | undefined;
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve; }));
+    useBuilderStore.setState({
+      blueprint: savedDraft,
+      baseline: { ...savedDraft, name: 'Baseline' },
+      path: '/x/wf.md',
+      dirty: true,
+      editRevision: 1,
+    });
+
+    const pendingSave = useBuilderStore.getState().save();
+    useBuilderStore.getState().setBlueprint(newerDraft);
+    finishSave?.({ written: true, diagnostics: [] });
+
+    await expect(pendingSave).resolves.toBe(false);
+    expect(useBuilderStore.getState().blueprint).toBe(newerDraft);
+    expect(useBuilderStore.getState().baseline).toBe(savedDraft);
+    expect(useBuilderStore.getState().dirty).toBe(true);
+  });
+
+  it('ignores a stale save response after another workflow resource loads', async () => {
+    const first = { schema: 2 as const, id: 'one', name: 'One', nodes: [], edges: [] };
+    const second = { schema: 2 as const, id: 'two', name: 'Two', nodes: [], edges: [] };
+    let finishSave: ((result: { written: boolean; diagnostics: [] }) => void) | undefined;
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve; }));
+    useBuilderStore.setState({
+      blueprint: first,
+      baseline: first,
+      baselineDiagnostics: [],
+      path: '/x/one.md',
+      dirty: true,
+      editRevision: 1,
+    });
+
+    const pendingSave = useBuilderStore.getState().save();
+    useBuilderStore.setState({
+      blueprint: second,
+      baseline: second,
+      baselineDiagnostics: [{ severity: 'warning', code: 'two', message: 'two' }],
+      path: '/x/two.md',
+      diagnostics: [{ severity: 'warning', code: 'two', message: 'two' }],
+      dirty: false,
+      editRevision: 0,
+    });
+    finishSave?.({ written: true, diagnostics: [] });
+
+    await expect(pendingSave).resolves.toBe(false);
+    expect(useBuilderStore.getState()).toMatchObject({
+      blueprint: second,
+      baseline: second,
+      path: '/x/two.md',
+      dirty: false,
+      diagnostics: [{ severity: 'warning', code: 'two', message: 'two' }],
+    });
+  });
 });

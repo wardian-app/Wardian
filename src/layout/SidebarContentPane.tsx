@@ -1,6 +1,11 @@
 import React, { useEffect } from "react";
 import { SidebarTab } from "./SidebarIconRail";
-import { AgentConfig, AgentClassDefinition, AgentTelemetry } from "../types";
+import {
+  AgentConfig,
+  AgentClassDefinition,
+  AgentTelemetry,
+  type OpenSurfaceRequest,
+} from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { SidebarResizeHandle } from "../components/SidebarResizeHandle";
 import { ConfigureAgentPanel } from "../features/agents/ConfigureAgentPanel";
@@ -27,7 +32,7 @@ interface SidebarContentPaneProps {
   broadcastMessage: string;
   setBroadcastMessage: (msg: string) => void;
   onBroadcast: (e: React.FormEvent) => void;
-  onOpenWorkflowsView: () => void;
+  onOpenSurface: (request: OpenSurfaceRequest) => void;
 }
 
 export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
@@ -43,7 +48,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
   broadcastMessage,
   setBroadcastMessage,
   onBroadcast,
-  onOpenWorkflowsView,
+  onOpenSurface,
 }) => {
   return (
     <aside className={`relative h-full bg-[var(--color-wardian-sidebar-secondary)]/30 border-r border-wardian-border sidebar-transition overflow-hidden flex flex-col ${leftCollapsed ? 'w-0' : 'w-[var(--sidebar-content-width)]'}`}>
@@ -94,7 +99,7 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onBroadcast={onBroadcast}
           />
         )}
-        {activeTab === "workflows" && <WorkflowsGlancePane onOpenWorkflowsView={onOpenWorkflowsView} />}
+        {activeTab === "workflows" && <WorkflowsGlancePane onOpenSurface={onOpenSurface} />}
 
       </div>
       {!leftCollapsed && (
@@ -110,10 +115,10 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
 };
 
 interface WorkflowsGlancePaneProps {
-  onOpenWorkflowsView: () => void;
+  onOpenSurface: (request: OpenSurfaceRequest) => void;
 }
 
-const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflowsView }) => {
+const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenSurface }) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
   const pauseSchedule = useSchedulesStore((state) => state.pause);
@@ -140,11 +145,11 @@ const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenWorkflo
       schedules={schedules}
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {
-        onOpenWorkflowsView();
+        onOpenSurface({ surface_type: "workflows" });
         void openRun(blueprintId, runId).then(() => observeRun(blueprintId, runId));
       }}
       onOpenMonitor={() => {
-        onOpenWorkflowsView();
+        onOpenSurface({ surface_type: "workflows" });
         setMode('monitor');
       }}
       onPauseSchedule={(id) => void pauseSchedule(id)}

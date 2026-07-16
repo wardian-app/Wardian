@@ -52,6 +52,22 @@ describe('useLayoutStore — gridStacked basics', () => {
     expect(useLayoutStore.getState().gridStacked).toBe(false);
     expect(useLayoutStore.getState().previousColumnTracks).toBeNull();
   });
+
+  it('resetGridLayout preserves shell layout while clearing only grid overrides', () => {
+    act(() => {
+      useLayoutStore.getState().setLeftSidebarCollapsed(true);
+      useLayoutStore.getState().setGridStacked(true);
+      useLayoutStore.getState().setPreviousColumnTracks([0.4, 0.6]);
+      useLayoutStore.getState().setColumnTracks([0.2, 0.8]);
+      useLayoutStore.getState().resetGridLayout();
+    });
+
+    const state = useLayoutStore.getState();
+    expect(state.leftSidebarCollapsed).toBe(true);
+    expect(state.gridStacked).toBe(false);
+    expect(state.previousColumnTracks).toBeNull();
+    expect(state.layout.column_tracks).toEqual([0.5, 0.5]);
+  });
 });
 
 describe('useGridResize — stacked entry', () => {
@@ -159,7 +175,7 @@ describe('useGridResize — row resizing', () => {
     act(() => result.current.startResize('v', 0));
     act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, clientY: 570 })));
 
-    expect(result.current.guidePos).toBe(450);
+    expect(result.current.guidePos).toBe(456);
   });
 
   it('treats vertical resize indexes as row boundaries rather than agent indexes', () => {
@@ -170,5 +186,6 @@ describe('useGridResize — row resizing', () => {
     act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 0, clientY: 900 })));
 
     expect(useLayoutStore.getState().layout.row_height).toBe(450);
+    expect(result.current.guidePos).toBe(912);
   });
 });

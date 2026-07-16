@@ -21,6 +21,10 @@ Object.defineProperty(window, 'matchMedia', {
 
 describe('AgentWatchlist', () => {
   const mockOnSelectionChange = vi.fn();
+  const mockOnSelectAgent = vi.fn();
+  const mockOnOpenAgent = vi.fn();
+  const mockOnOpenAgentToSide = vi.fn();
+  const mockOnRevealAgent = vi.fn();
   const mockOnAgentClick = vi.fn();
   const mockOnRename = vi.fn(async () => {});
   const mockOnReorderAgents = vi.fn();
@@ -65,6 +69,9 @@ describe('AgentWatchlist', () => {
     selectedAgentIds: new Set<string>(),
     offAgentIds: new Set(['agent-2']),
     onSelectionChange: mockOnSelectionChange,
+    onOpenAgent: mockOnOpenAgent,
+    onOpenAgentToSide: mockOnOpenAgentToSide,
+    onRevealAgent: mockOnRevealAgent,
     onAgentClick: mockOnAgentClick,
     onRename: mockOnRename,
     onReorderAgents: mockOnReorderAgents,
@@ -131,6 +138,113 @@ describe('AgentWatchlist', () => {
     render(<AgentWatchlist {...defaultProps} />);
     expect(screen.getByText('Alpha')).toBeInTheDocument();
     expect(screen.getByText('Beta')).toBeInTheDocument();
+  });
+
+  it('exposes roster target selection as semantic state', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        selectedAgentIds={new Set(['agent-1'])}
+      />,
+    );
+
+    expect(screen.getByLabelText('Agent Alpha')).toHaveAttribute('data-selected', 'true');
+    expect(screen.getByLabelText('Agent Beta')).toHaveAttribute('data-selected', 'false');
+  });
+
+  it('routes plain, Ctrl, and Shift clicks only through roster selection', () => {
+    render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
+    const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+    const betaRow = screen.getByText('Beta').closest('.watchlist-row')!;
+
+    fireEvent.click(alphaRow);
+    fireEvent.click(betaRow, { ctrlKey: true });
+    fireEvent.click(betaRow, { shiftKey: true });
+
+    expect(mockOnSelectAgent).toHaveBeenNthCalledWith(1, 'agent-1', {
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      rangeAgentIds: ['agent-1', 'agent-2'],
+    });
+    expect(mockOnSelectAgent).toHaveBeenNthCalledWith(2, 'agent-2', {
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+      rangeAgentIds: ['agent-1', 'agent-2'],
+    });
+    expect(mockOnSelectAgent).toHaveBeenNthCalledWith(3, 'agent-2', {
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: true,
+      rangeAgentIds: ['agent-1', 'agent-2'],
+    });
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
+    expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
+    expect(mockOnAgentClick).not.toHaveBeenCalled();
+  });
+
+  it('reveals an agent on an unmodified double-click without opening a tab', () => {
+    render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
+    const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+
+    fireEvent.doubleClick(alphaRow);
+
+    expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
+    expect(mockOnAgentClick).not.toHaveBeenCalled();
+  });
+
+  it('reveals the focused agent with Enter without opening a tab', () => {
+    render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
+    const alphaRow = screen.getByLabelText('Agent Alpha');
+
+    fireEvent.keyDown(alphaRow, { key: 'Enter' });
+
+    expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
+    expect(mockOnSelectAgent).not.toHaveBeenCalled();
+    expect(mockOnSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it('offers navigation and management actions in one context menu', async () => {
+    render(<AgentWatchlist {...defaultProps} />);
+    const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
+
+    fireEvent.contextMenu(alphaRow);
+    expect(mockOnOpenAgent).not.toHaveBeenCalled();
+    expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId('agent-context-menu')).toHaveLength(1);
+    expect(document.querySelectorAll('.context-menu')).toHaveLength(1);
+    const menu = screen.getByTestId('agent-context-menu');
+    expect(within(menu).getByRole('button', { name: 'Rename' })).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole('button', { name: 'Open' }));
+
+    expect(mockOnOpenAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByTestId('agent-context-menu')).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(alphaRow);
+    expect(screen.getAllByTestId('agent-context-menu')).toHaveLength(1);
+    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Open to Side' }));
+
+    expect(mockOnOpenAgentToSide).toHaveBeenCalledWith('agent-1');
+    await waitFor(() => expect(screen.queryByTestId('agent-context-menu')).not.toBeInTheDocument());
+  });
+
+  it('keeps the legacy onAgentClick callback as a flag-off navigation fallback', () => {
+    render(
+      <AgentWatchlist
+        {...defaultProps}
+        onOpenAgent={undefined}
+        onOpenAgentToSide={undefined}
+        onRevealAgent={undefined}
+      />,
+    );
+
+    fireEvent.doubleClick(screen.getByText('Alpha').closest('.watchlist-row')!);
+
+    expect(mockOnAgentClick).toHaveBeenCalledWith('agent-1');
   });
 
   it('does not prune persisted individual watchlist entries before agents load', async () => {

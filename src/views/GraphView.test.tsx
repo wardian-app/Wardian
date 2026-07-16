@@ -90,7 +90,7 @@ const telemetry: Record<string, AgentTelemetry> = {
 
 const handlers = {
   onSelectionChange: vi.fn(),
-  onOpenAgentInGrid: vi.fn(),
+  onOpenAgent: vi.fn(),
   onInitiateRename: vi.fn(),
   onQuery: vi.fn(),
   onPause: vi.fn(),
@@ -145,6 +145,51 @@ describe("GraphView", () => {
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
 
+  it("restores and publishes registered view state", async () => {
+    const onSurfaceStateChange = vi.fn();
+    render(
+      <GraphView
+        {...defaultProps}
+        initialSurfaceState={{
+          enabled_reasons: ["same_team"],
+          inspected_agent_id: "b",
+          inspector_open: false,
+          selected_edge_id: null,
+          picker_search: "Alpha",
+        }}
+        onSurfaceStateChange={onSurfaceStateChange}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "same team" })).toHaveClass("active");
+    expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();
+    await waitFor(() => expect(onSurfaceStateChange).toHaveBeenCalledWith(expect.objectContaining({
+      enabled_reasons: ["same_team"],
+      inspected_agent_id: "b",
+      inspector_open: false,
+      picker_search: "Alpha",
+    })));
+  });
+
+  it("pauses subscriptions while hidden and can release only the canvas renderer", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { listen } = await import("@tauri-apps/api/event");
+    vi.mocked(invoke).mockClear();
+    vi.mocked(listen).mockClear();
+    const view = render(
+      <GraphView {...defaultProps} visibility="hidden" rendererActive={false} />,
+    );
+
+    expect(invoke).not.toHaveBeenCalledWith("get_topology");
+    expect(invoke).not.toHaveBeenCalledWith("get_pair_activity");
+    expect(listen).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("mock-graph-node")).not.toBeInTheDocument();
+
+    view.rerender(<GraphView {...defaultProps} visibility="visible" rendererActive />);
+    await waitFor(() => expect(listen).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
+  });
+
   it("centers relationship lenses in the stable toolbar center", () => {
     const { container } = render(<GraphView {...defaultProps} />);
 
@@ -157,6 +202,17 @@ describe("GraphView", () => {
     expect(appCss).toMatch(/\.graph-lenses\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translate\(-50%,\s*-50%\);/s);
   });
 
+  it("exposes pane-responsive graph regions", () => {
+    const { container } = render(<GraphView {...defaultProps} />);
+    const appCss = readFileSync(resolve(process.cwd(), "src/styles/App.css"), "utf8");
+
+    expect(container.querySelector(".graph-toolbar-primary")).toBeInTheDocument();
+    expect(container.querySelector(".graph-body")).toHaveClass("graph-body--inspector-open");
+    expect(container.querySelector(".graph-inspector")).toBeInTheDocument();
+    expect(appCss).toMatch(/@container wardian-surface \(max-width:\s*760px\)/);
+    expect(appCss).not.toMatch(/@media \(max-width:\s*760px\)/);
+  });
+
   it("opens inspector when a node is selected", () => {
     render(<GraphView {...defaultProps} />);
 
@@ -165,6 +221,14 @@ describe("GraphView", () => {
     expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["a"]));
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
     expect(screen.getByText("Coder / Codex")).toBeInTheDocument();
+  });
+
+  it("routes the inspector open action through onOpenAgent", () => {
+    render(<GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Agent" }));
+
+    expect(handlers.onOpenAgent).toHaveBeenCalledWith("a");
   });
 
   it("keeps the inspector aligned with external single-agent selection changes", () => {
@@ -443,6 +507,31 @@ describe("GraphView", () => {
       await waitFor(() => {
         expect(mockInvoke).toHaveBeenCalledWith("remove_topology_edge", { a: "a", b: "b" });
       });
+    });
+
+    it("does not handle global Delete after its surface becomes hidden", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const mockInvoke = vi.mocked(invoke);
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges: [{ a: "a", b: "b", origin: "manual" }], ignored_pairs: [] };
+        }
+        if (command === "get_pair_activity") return [];
+        return undefined;
+      });
+      const view = render(
+        <GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} visibility="visible" />,
+      );
+      await waitFor(() => expect(screen.getByTitle("Disconnect")).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId("mock-graph-edge"));
+
+      view.rerender(
+        <GraphView {...defaultProps} selectedAgentIds={new Set(["a"])} visibility="hidden" />,
+      );
+      mockInvoke.mockClear();
+      fireEvent.keyDown(window, { key: "Delete" });
+
+      expect(mockInvoke).not.toHaveBeenCalledWith("remove_topology_edge", expect.anything());
     });
 
     it("delete key while focus is in an input → NOT invoke remove_topology_edge", async () => {

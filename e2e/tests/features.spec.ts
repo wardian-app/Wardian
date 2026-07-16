@@ -4,6 +4,7 @@ import {
   buildLibraryIndexFixture,
   installLibraryIpcMock,
 } from "../fixtures/libraryIpcMock";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 async function openSettings(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Settings" });
@@ -91,10 +92,10 @@ test.describe("Wardian Core Feature Tests", () => {
   });
 
   test("6. Library - Classes section", async () => {
-    await page.getByText("Library", { exact: true }).click();
-    await page.waitForTimeout(500);
-    await page.locator('[data-testid="library-section-classes"]').click();
-    await expect(page.locator('[data-testid="library-list-content"]')).toBeVisible();
+    await openSurface(page, "library");
+    const library = surfacePanel(page, "library");
+    await library.locator('[data-testid="library-section-classes"]').click();
+    await expect(library.locator('[data-testid="library-list-content"]')).toBeVisible();
   });
 
   test("7. Sidebar navigation - Explorer tab", async () => {
@@ -128,16 +129,16 @@ test.describe("Wardian Core Feature Tests", () => {
   });
 
   test("10. Library - Create class entry form", async () => {
-    await page.getByText("Library", { exact: true }).click();
-    await page.waitForTimeout(500);
-    await page.locator('[data-testid="library-section-classes"]').click();
+    await openSurface(page, "library");
+    const library = surfacePanel(page, "library");
+    await library.locator('[data-testid="library-section-classes"]').click();
 
-    await page.locator('[data-testid="library-new"]').click();
-    await page.locator('[data-testid="library-new-item"]').click();
-    await page.locator('[data-testid="library-new-name"]').fill("TestClass");
+    await library.locator('[data-testid="library-new"]').click();
+    await library.locator('[data-testid="library-new-item"]').click();
+    await library.locator('[data-testid="library-new-name"]').fill("TestClass");
     await page.waitForTimeout(200);
 
-    await expect(page.locator('[data-testid="library-new-confirm"]')).toBeVisible();
+    await expect(library.locator('[data-testid="library-new-confirm"]')).toBeVisible();
   });
 
   test("11. Spawn Agent form validation", async () => {
@@ -170,8 +171,10 @@ test.describe("Wardian Core Feature Tests", () => {
   });
 
   test("14. Grid view container exists", async () => {
-    await page.getByRole("button", { name: "Grid" }).click();
-    await expect(page.getByText("No Active Instances")).toBeVisible();
+    await openSurface(page, "agents-overview");
+    const overview = surfacePanel(page, "agents-overview");
+    await overview.getByRole("button", { name: "Grid", exact: true }).click();
+    await expect(overview.getByText("No Active Instances")).toBeVisible();
   });
 
   test("15. Watchlist shows empty state message", async () => {

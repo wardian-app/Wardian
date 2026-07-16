@@ -15,6 +15,8 @@ export interface AgentContextMenuProps {
   teamId?: string;
   offAgentIds: Set<string>;
   watchlists: Watchlist[];
+  onOpen?: (agentId: string) => MaybePromise;
+  onOpenToSide?: (agentId: string) => MaybePromise;
   onInitiateRename: (agentId: string) => MaybePromise;
   onInitiateTeamRename?: (teamId: string) => MaybePromise;
   onQuery: (agentId: string) => MaybePromise;
@@ -43,6 +45,8 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   teamId,
   offAgentIds,
   watchlists,
+  onOpen,
+  onOpenToSide,
   onInitiateRename,
   onInitiateTeamRename,
   onQuery,
@@ -69,6 +73,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
   const anyTargetOff = targetAgentIds.some((id) => offAgentIds.has(id));
   const anyTargetRunning = targetAgentIds.some((id) => !offAgentIds.has(id));
   const canClone = !isTeam && !isBulk && Boolean(onClone);
+  const hasPrimaryAction = !isTeam && !isBulk && Boolean(onOpen || onOpenToSide);
 
   const forEachTarget = async (handler: (id: string) => MaybePromise) => {
     for (const id of targetAgentIds) {
@@ -95,6 +100,30 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >
+      {!isTeam && !isBulk && onOpen && (
+        <button
+          className="context-menu-item"
+          onClick={async () => {
+            await onOpen(agentId);
+            onClose();
+          }}
+        >
+          Open
+        </button>
+      )}
+      {!isTeam && !isBulk && onOpenToSide && (
+        <button
+          className="context-menu-item"
+          onClick={async () => {
+            await onOpenToSide(agentId);
+            onClose();
+          }}
+        >
+          Open to Side
+        </button>
+      )}
+      {hasPrimaryAction && <div className="context-menu-divider" />}
+
       <button
         className={`context-menu-item ${isBulk && !isTeam ? 'opacity-50 cursor-not-allowed' : ''}`}
         disabled={isBulk && !isTeam}

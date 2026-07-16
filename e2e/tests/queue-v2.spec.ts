@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
 
 async function installQueueV2IpcMock(page: Page) {
   await page.addInitScript(() => {
@@ -131,7 +132,7 @@ test.describe("Queue v2", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-    await page.getByRole("button", { name: "Queue" }).click();
+    await openSurface(page, "queue");
 
     await expect(page.getByText("Action needed", { exact: true })).toBeVisible();
     await expect(page.getByText("Approve the generated patch before continuing.")).toBeVisible();

@@ -11,6 +11,7 @@ pub mod models;
 pub mod paths;
 pub mod schedule;
 pub mod topology;
+pub mod workbench;
 pub mod workflow;
 
 #[cfg(test)]

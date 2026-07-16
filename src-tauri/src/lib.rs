@@ -49,6 +49,9 @@ fn restored_agent_without_process(
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut watch_state =
         crate::state::AgentWatchState::new(config.session_id.clone(), 4096, 262_144);
+    if !output.is_empty() {
+        watch_state.push_output(output.as_bytes());
+    }
     watch_state.push_event(
         "status",
         serde_json::json!({
@@ -61,9 +64,7 @@ fn restored_agent_without_process(
         config: std::sync::Arc::new(std::sync::Mutex::new(config)),
         child_process: None,
         background_processes: Vec::new(),
-        pty_master: None,
-        stdin_tx: None,
-        output_buffer: std::sync::Arc::new(std::sync::Mutex::new(output)),
+        runtime_generation: None,
         process_id,
         query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
         init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(born)),
@@ -238,6 +239,10 @@ pub fn run() {
                 tauri::async_runtime::block_on(async {
                     state.interactions.hydrate_from_persistence().await;
                 });
+                crate::commands::terminal_session::start_terminal_session_event_bridge(
+                    app.handle().clone(),
+                    state.terminal_sessions.clone(),
+                );
             }
 
             let control_endpoint_claim = control::claim_control_endpoint().map_err(|error| {
@@ -444,20 +449,7 @@ pub fn run() {
                                     )
                                     .await;
                                     let agent = match spawn_result {
-                                        Ok(agent) => {
-                                            if let Some(ref tx) = agent.stdin_tx {
-                                                let state = app_handle.state::<AppState>();
-                                                if let Ok(mut senders) =
-                                                    state.input_senders.write()
-                                                {
-                                                    senders.insert(
-                                                        config.session_id.clone(),
-                                                        tx.clone(),
-                                                    );
-                                                };
-                                            }
-                                            agent
-                                        }
+                                        Ok(agent) => agent,
                                         Err(error) => {
                                             eprintln!(
                                                 "Failed to restore agent {}: {}",
@@ -510,6 +502,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::workbench::get_workbench_boot_config,
+            commands::workbench::load_workbench_state,
+            commands::workbench::save_workbench_state,
+            commands::workbench::reset_workbench_state,
             commands::agent::spawn_agent,
             commands::agent::list_provider_readiness,
             commands::agent::clone_agent,
@@ -543,6 +539,22 @@ pub fn run() {
             commands::terminal::resize_agent_terminal,
             commands::terminal::read_agent_pty,
             commands::terminal::get_terminal_runtime_diagnostics,
+            commands::terminal_session::register_terminal_presentation,
+            commands::terminal_session::update_terminal_presentation,
+            commands::terminal_session::unregister_terminal_presentation,
+            commands::terminal_session::report_terminal_presentation_viewport,
+            commands::terminal_session::begin_terminal_activation,
+            commands::terminal_session::ack_terminal_activation,
+            commands::terminal_session::begin_terminal_owner_resync,
+            commands::terminal_session::ack_terminal_owner_resync,
+            commands::terminal_session::request_terminal_snapshot,
+            commands::terminal_session::subscribe_terminal_events,
+            commands::terminal_session::read_terminal_events,
+            commands::terminal_session::ack_terminal_events,
+            commands::terminal_session::unsubscribe_terminal_events,
+            commands::terminal_session::send_terminal_presentation_input,
+            commands::terminal_session::send_terminal_presentation_binary,
+            commands::terminal_session::resize_terminal_presentation,
             commands::terminal::ensure_user_terminal,
             commands::terminal::send_input_to_user_terminal,
             commands::terminal::send_binary_input_to_user_terminal,

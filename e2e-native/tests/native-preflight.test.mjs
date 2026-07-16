@@ -9,10 +9,23 @@ import {
   assertNativePreflight,
   createNativeHarness,
   formatAppShellTimeoutMessage,
+  isRetryableNativeSessionStartError,
   nativeAppBuildArgs,
   prepareIsolatedHome,
   startNativeSession,
 } from "../lib/harness.mjs";
+
+test("native session startup retries transient WebDriver transport failures", () => {
+  assert.equal(
+    isRetryableNativeSessionStartError(new Error("ECONNRESET socket hang up")),
+    true,
+  );
+  assert.equal(
+    isRetryableNativeSessionStartError(new Error("tcp connect error: target machine actively refused it")),
+    true,
+  );
+  assert.equal(isRetryableNativeSessionStartError(new Error("application assertion failed")), false);
+});
 
 test("native preflight reports missing tauri-driver clearly", () => {
   assert.throws(
@@ -188,6 +201,12 @@ test("native app build args include explicit Cargo features from environment", (
       "build",
       "--debug",
       "--no-bundle",
+      "--config",
+      JSON.stringify({
+        build: {
+          beforeBuildCommand: "npm run build && npm run stage-cli:dev",
+        },
+      }),
       "--features",
       "terminal-trace",
     ]);

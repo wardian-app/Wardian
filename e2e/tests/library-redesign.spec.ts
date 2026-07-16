@@ -8,6 +8,7 @@ import {
   buildLibraryIndexFixture,
   installLibraryIpcMock,
 } from "../fixtures/libraryIpcMock";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 /**
  * Library redesign browser E2E tests.
@@ -34,8 +35,8 @@ async function openLibraryView(page: Page) {
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Library", exact: true }).click();
-  await expect(page.locator('[data-testid="library-view"]')).toBeVisible({ timeout: 10_000 });
+  await openSurface(page, "library");
+  await expect(surfacePanel(page, "library").locator('[data-testid="library-view"]')).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe("Library Redesign", () => {

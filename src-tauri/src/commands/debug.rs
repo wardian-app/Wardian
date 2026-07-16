@@ -10,12 +10,16 @@ pub async fn debug_remove_agent_input_sender(
         return Err("debug commands are disabled in production builds".to_string());
     }
 
-    let mut senders = state
-        .input_senders
-        .write()
-        .map_err(|_| "input_senders lock poisoned".to_string())?;
-    senders.remove(&session_id);
-    Ok(())
+    let broker_state = state
+        .terminal_sessions
+        .broker_state(&session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .terminal_sessions
+        .terminate_and_remove_runtime(&session_id, broker_state.runtime_generation)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

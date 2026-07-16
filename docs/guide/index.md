@@ -10,11 +10,13 @@ automation, and extension. Take only the next step that helps the work at hand.
 - [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Queue result.
 - [Provider Readiness](./provider-readiness.md): verify provider CLIs, authentication, shell `PATH`, and runtime prerequisites before spawning agents.
 - [First-Run Troubleshooting](./first-run-troubleshooting.md): recover from app launch, provider detection, terminal startup, Queue, or CLI issues during first setup.
-- [UI Overview](./ui-overview.md): learn the top bar, sidebars, roster, and main workspace layout.
+- [UI Overview](./ui-overview.md): learn the title bar, auxiliary rail, roster, and central workspace.
+- [Workbench](./workbench.md): open surfaces as tabs, split and merge panes, move and reopen tabs, zoom, restore, and reset the layout.
 
 ## Run and Monitor Agents
 
-- [Grid](./grid.md): interact with active agent terminals.
+- [Agents](./agents-overview.md): monitor agents in adaptive Auto, multi-card Grid, or focused Single mode.
+- [Grid](./grid.md): map the former Grid page to the current Agents Grid mode.
 - [Dashboard](./dashboard.md): compare live agent health and quick controls.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.

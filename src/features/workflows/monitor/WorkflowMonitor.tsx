@@ -198,39 +198,44 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
         <div
           ref={historyScrollRef}
           data-testid="workflow-history-scroll"
-          className="min-h-0 flex-1 overflow-y-auto p-3"
+          role="region"
+          aria-label="Workflow activity"
+          className="min-h-0 flex-1 overflow-auto p-3"
         >
-          {visibleSections.map((section) => {
-            const isHistorySection = historyFilterActive && section === 'history';
-            const items = isHistorySection ? [] : groupedActivities[section];
-            const historyItems = isHistorySection ? visibleHistoryRuns : [];
-            if (items.length === 0 && historyItems.length === 0) return null;
-            return (
-              <ActivitySection
-                key={section}
-                title={SECTION_LABELS[section]}
-                activities={items}
-                olderRuns={historyItems}
-                schedulesById={schedulesById}
-                remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
-                agentLabels={agentLabels}
-                historyScrollRef={historyScrollRef}
-                onOpenRun={onOpenRun}
-                onPause={pause}
-                onResume={resume}
-                onRunNow={runNow}
-                onEditSchedule={onEditSchedule}
-                onShowMoreOlderRuns={() => setVisibleOlderHistoryCount((count) => Math.min(historyRuns.length, count + HISTORY_PAGE_SIZE))}
-                onResetOlderRuns={() => setVisibleOlderHistoryCount(0)}
-                canResetOlderRuns={isHistorySection && visibleOlderHistoryCount > 0}
-              />
-            );
-          })}
-          {!hasVisibleActivity ? (
+          {hasVisibleActivity ? (
+            <div data-testid="workflow-activity-table" className="min-w-[960px]">
+              {visibleSections.map((section) => {
+                const isHistorySection = historyFilterActive && section === 'history';
+                const items = isHistorySection ? [] : groupedActivities[section];
+                const historyItems = isHistorySection ? visibleHistoryRuns : [];
+                if (items.length === 0 && historyItems.length === 0) return null;
+                return (
+                  <ActivitySection
+                    key={section}
+                    title={SECTION_LABELS[section]}
+                    activities={items}
+                    olderRuns={historyItems}
+                    schedulesById={schedulesById}
+                    remainingOlderRuns={isHistorySection ? Math.max(0, historyRuns.length - visibleHistoryRuns.length) : 0}
+                    agentLabels={agentLabels}
+                    historyScrollRef={historyScrollRef}
+                    onOpenRun={onOpenRun}
+                    onPause={pause}
+                    onResume={resume}
+                    onRunNow={runNow}
+                    onEditSchedule={onEditSchedule}
+                    onShowMoreOlderRuns={() => setVisibleOlderHistoryCount((count) => Math.min(historyRuns.length, count + HISTORY_PAGE_SIZE))}
+                    onResetOlderRuns={() => setVisibleOlderHistoryCount(0)}
+                    canResetOlderRuns={isHistorySection && visibleOlderHistoryCount > 0}
+                  />
+                );
+              })}
+            </div>
+          ) : (
             <div className="select-text rounded border border-dashed border-wardian-border p-4 text-center text-xs text-muted">
               No workflow activity in this view.
             </div>
-          ) : null}
+          )}
         </div>
       </section>
     </div>
@@ -476,7 +481,7 @@ function ActivityRow({
   return (
     <div
       data-testid={testId ?? `workflow-activity-row-${activity.blueprintId}`}
-      className="grid grid-cols-1 items-start gap-x-4 gap-y-1 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)] md:grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px]"
+      className="grid grid-cols-[minmax(120px,170px)_minmax(120px,1fr)_minmax(120px,150px)_minmax(150px,190px)_minmax(140px,220px)_112px] items-start gap-x-4 gap-y-1 border-b border-wardian-border/70 bg-[var(--color-wardian-bg)] px-3 py-2 last:border-b-0 hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)]"
       style={activityRowScrollStyle}
     >
       <div className="min-w-0">
@@ -548,7 +553,7 @@ function ActivityRow({
           <span className="text-[10px] text-muted">Default</span>
         )}
       </div>
-      <div className="flex w-[112px] items-center justify-end gap-1.5 pr-1 pt-0.5 md:justify-self-end">
+      <div className="flex w-[112px] items-center justify-end justify-self-end gap-1.5 pr-1 pt-0.5">
           {activity.latestRun ? (
             <button
               type="button"

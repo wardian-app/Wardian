@@ -76,7 +76,22 @@ interface AgentWatchlistProps {
   selectedAgentIds: Set<string>;
   offAgentIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
-  onAgentClick: (agentId: string) => void;
+  filter?: string;
+  onFilterChange?: (filter: string) => void;
+  onSelectAgent?: (agentId: string, modifiers: {
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    rangeAgentIds?: readonly string[];
+  }) => void;
+  /** Opens the agent in the current workbench group. */
+  onOpenAgent?: (agentId: string) => void;
+  /** Opens the agent in a new workbench group beside the current one. */
+  onOpenAgentToSide?: (agentId: string) => void;
+  /** Selects and reveals the agent in the existing Agents surface. */
+  onRevealAgent?: (agentId: string) => void;
+  /** @deprecated Use onOpenAgent. Retained for the legacy navigation flag path. */
+  onAgentClick?: (agentId: string) => void;
   onRename: (agentId: string, newName: string) => Promise<void>;
   onReorderAgents: (newOrder: string[]) => void;
   onQuery: (agentId: string) => void;
@@ -116,6 +131,12 @@ export default function AgentWatchlist({
   selectedAgentIds,
   offAgentIds,
   onSelectionChange,
+  filter,
+  onFilterChange,
+  onSelectAgent,
+  onOpenAgent,
+  onOpenAgentToSide,
+  onRevealAgent,
   onAgentClick,
   onRename,
   onReorderAgents,
@@ -152,6 +173,7 @@ export default function AgentWatchlist({
 
   // ── Search State ───────────────────────────────────────────────────
   const [searchTerm, setSearchTerm] = useState("");
+  const effectiveSearchTerm = filter ?? searchTerm;
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
   const [draggedTeamId, setDraggedTeamId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
@@ -184,7 +206,11 @@ export default function AgentWatchlist({
   const [collapsedTeamsByList, setCollapsedTeamsByList] = useState<Record<string, string[]>>({});
   const wasDragging = useRef(false);
   const lastSelectedIdRef = useRef<string | null>(null);
-  const lastClickRef = useRef<{ id: string; time: number } | null>(null);
+
+  // Navigation is deliberately separate from roster targeting. The deprecated
+  // alias keeps the flag-off shell working while callers move to workbench tabs.
+  const openAgent = onOpenAgent ?? onAgentClick;
+  const revealAgent = onRevealAgent ?? onAgentClick ?? onOpenAgent;
 
   // ── Load watchlists is now handled in App.tsx ──────────────────────────
 
@@ -220,16 +246,16 @@ export default function AgentWatchlist({
   const baseDisplayItems = getDisplayItemsForList(agents, activeList, teams);
   const filteredDisplayItems = baseDisplayItems
     .map((item): WatchlistDisplayItem | null => {
-      if (!searchTerm.trim()) return item;
-      const term = searchTerm.toLowerCase();
+      if (!effectiveSearchTerm.trim()) return item;
+      const term = effectiveSearchTerm.toLowerCase();
       if (item.type === "team") {
-        const matchingAgents = filterAgents(item.agents, searchTerm);
+        const matchingAgents = filterAgents(item.agents, effectiveSearchTerm);
         if (item.team.name.toLowerCase().includes(term) || matchingAgents.length > 0) {
           return { ...item, agents: matchingAgents.length > 0 ? matchingAgents : item.agents };
         }
         return null;
       }
-      return filterAgents([item.agent], searchTerm).length > 0 ? item : null;
+      return filterAgents([item.agent], effectiveSearchTerm).length > 0 ? item : null;
     })
     .filter((item): item is WatchlistDisplayItem => Boolean(item));
   const unsortedDisplayedAgents = flattenDisplayItems(filteredDisplayItems);
@@ -642,7 +668,13 @@ export default function AgentWatchlist({
     const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
     const isInsideMultiSelection = selectedAgentIds.size > 1 && selectedAgentIds.has(agentId);
     if (!isInsideMultiSelection && !selectedAgentIds.has(agentId)) {
-      onSelectionChange(new Set([agentId]));
+      if (onSelectAgent) {
+        onSelectAgent(agentId, {
+          rangeAgentIds: displayedAgents.map((agent) => agent.session_id),
+        });
+      } else {
+        onSelectionChange(new Set([agentId]));
+      }
     }
     setContextMenu({
       visible: true,
@@ -721,13 +753,19 @@ export default function AgentWatchlist({
           e.stopPropagation();
           if (wasDragging.current) { wasDragging.current = false; return; }
 
-          const now = Date.now();
-          const DOUBLE_CLICK_TOLERANCE = 450;
-          const isDoubleClick = lastClickRef.current &&
-                               lastClickRef.current.id === agentId &&
-                               (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
+          // The second click of a double-click belongs to the navigation
+          // gesture. Avoid toggling the roster target immediately before open.
+          if (e.detail > 1 && !(e.ctrlKey || e.metaKey || e.shiftKey)) return;
 
-          lastClickRef.current = { id: agentId, time: now };
+          if (onSelectAgent) {
+            onSelectAgent(agentId, {
+              ctrlKey: e.ctrlKey,
+              metaKey: e.metaKey,
+              shiftKey: e.shiftKey,
+              rangeAgentIds: displayedAgents.map((agent) => agent.session_id),
+            });
+            return;
+          }
 
           if (e.shiftKey && lastSelectedIdRef.current) {
             const currentIndex = displayedAgents.findIndex(a => a.session_id === agentId);
@@ -755,21 +793,29 @@ export default function AgentWatchlist({
             lastSelectedIdRef.current = agentId;
           } else {
             if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-              if (!isDoubleClick) {
-                onSelectionChange(new Set());
-                lastSelectedIdRef.current = null;
-              } else {
-                onAgentClick(agentId);
-                onSelectionChange(new Set([agentId]));
-                lastSelectedIdRef.current = agentId;
-              }
+              onSelectionChange(new Set());
+              lastSelectedIdRef.current = null;
             } else {
               onSelectionChange(new Set([agentId]));
               lastSelectedIdRef.current = agentId;
             }
           }
         }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          if (wasDragging.current || e.ctrlKey || e.metaKey || e.shiftKey) return;
+          revealAgent?.(agentId);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          e.stopPropagation();
+          revealAgent?.(agentId);
+        }}
         onContextMenu={(e) => handleContextMenu(e, agentId)}
+        tabIndex={0}
+        aria-label={`Agent ${agent.session_name}`}
+        data-selected={isSelected ? "true" : "false"}
         className={`watchlist-row ${isSelected ? "selected" : ""} ${isDragTarget ? `drag-over-${dropTarget?.type === "agent" ? dropTarget.position : "before"}` : ""} ${isNestedTeamDropTarget ? "bg-[var(--color-wardian-accent)]/10" : ""} ${isBeingDragged ? "opacity-50" : ""} ${options.nested ? "ml-2 border-l border-wardian-border/40" : ""} select-none`}
         style={{ cursor: "grab", gridTemplateColumns: gridTemplate }}
       >
@@ -935,8 +981,12 @@ export default function AgentWatchlist({
           <input
             className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-lg px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
             placeholder="Search agents..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.currentTarget.value)}
+            value={effectiveSearchTerm}
+            onChange={(e) => {
+              const nextFilter = e.currentTarget.value;
+              if (onFilterChange) onFilterChange(nextFilter);
+              else setSearchTerm(nextFilter);
+            }}
           />
         </div>
 
@@ -1113,6 +1163,8 @@ export default function AgentWatchlist({
           teams={teams}
           offAgentIds={offAgentIds}
           watchlists={watchlists}
+          onOpen={openAgent}
+          onOpenToSide={onOpenAgentToSide}
           onInitiateRename={(id) => {
             setEditingAgentId(id);
             const a = agents.find(ag => ag.session_id === id);

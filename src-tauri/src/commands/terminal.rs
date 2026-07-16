@@ -261,68 +261,43 @@ pub async fn send_input_to_agent(
 ) -> Result<(), String> {
     let is_interrupt = input.contains('\u{3}');
     let is_submit = input.contains('\r') || input.contains('\n');
-    let tx = match state.input_senders.try_read() {
-        Ok(s) => s,
-        Err(_) => {
-            manager::log_debug(&format!(
-                "[Wardian] [{}] send_input_to_agent: input_senders write-locked, dropping keystroke",
-                session_id
-            ));
-            return Err("Input channel temporarily locked".to_string());
-        }
-    }
-    .get(&session_id)
-    .cloned();
-    if let Some(tx) = tx {
-        match tx.try_send(input.as_bytes().to_vec()) {
-            Ok(()) => {
-                if is_interrupt {
-                    clear_raw_terminal_prompt_buffer(&session_id);
-                    let agents = state.agents.lock().await;
-                    if let Some(agent) = agents.get(&session_id) {
-                        manager::set_agent_status(&app, &session_id, &agent.current_status, "Idle");
-                    }
-                } else if is_submit {
-                    let agents = state.agents.lock().await;
-                    if let Some(agent) = agents.get(&session_id) {
-                        let provider = agent.config.lock().unwrap().provider.clone();
-                        if (provider == "opencode"
-                            || provider == "gemini"
-                            || provider == "antigravity")
-                            && manager::mark_agent_prompt_started(agent)
-                        {
-                            manager::set_agent_status(
-                                &app,
-                                &session_id,
-                                &agent.current_status,
-                                "Processing...",
-                            );
-                        }
-                    }
-                }
-                if !is_interrupt {
-                    archive_completed_raw_terminal_prompts(state.inner(), &session_id, &input)
-                        .await;
-                }
-                Ok(())
+    let decision = state
+        .terminal_sessions
+        .send_legacy_input(&session_id, input.as_bytes().to_vec())
+        .await
+        .map_err(|error| error.to_string())?;
+    if decision.status == wardian_core::models::TerminalLeaseDecisionStatus::Accepted {
+        if is_interrupt {
+            clear_raw_terminal_prompt_buffer(&session_id);
+            let agents = state.agents.lock().await;
+            if let Some(agent) = agents.get(&session_id) {
+                manager::set_agent_status(&app, &session_id, &agent.current_status, "Idle");
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] send_input_to_agent: channel FULL (writer thread likely blocked on ConPTY write_all)",
-                    session_id
-                ));
-                Err("Terminal input buffer full - PTY may be stalled".to_string())
-            }
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] send_input_to_agent: channel error: {}",
-                    session_id, e
-                ));
-                Err(format!("Failed to send input: {}", e))
+        } else if is_submit {
+            let agents = state.agents.lock().await;
+            if let Some(agent) = agents.get(&session_id) {
+                let provider = agent.config.lock().unwrap().provider.clone();
+                if (provider == "opencode" || provider == "gemini" || provider == "antigravity")
+                    && manager::mark_agent_prompt_started(agent)
+                {
+                    manager::set_agent_status(
+                        &app,
+                        &session_id,
+                        &agent.current_status,
+                        "Processing...",
+                    );
+                }
             }
         }
+        if !is_interrupt {
+            archive_completed_raw_terminal_prompts(state.inner(), &session_id, &input).await;
+        }
+        Ok(())
     } else {
-        Err(format!("Agent {} not found or is off", session_id))
+        Err(format!(
+            "Terminal input lease rejected: {:?}",
+            decision.reason
+        ))
     }
 }
 
@@ -332,30 +307,11 @@ pub async fn inject_session_input(
     text: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let senders = match state.input_senders.try_read() {
-        Ok(s) => s,
-        Err(_) => {
-            manager::log_debug(&format!(
-                "[Wardian] [{}] inject_session_input: input_senders write-locked",
-                session_id
-            ));
-            return Err("Input channel temporarily locked".to_string());
-        }
-    };
-    if let Some(tx) = senders.get(&session_id) {
-        match tx.try_send(text.into_bytes()) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] inject_session_input: channel error: {}",
-                    session_id, e
-                ));
-                Err(format!("Failed to inject input: {}", e))
-            }
-        }
-    } else {
-        Err(format!("Agent {} not found or is off", session_id))
-    }
+    state
+        .terminal_sessions
+        .send_privileged_input(&session_id, text.into_bytes())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -394,12 +350,18 @@ pub async fn submit_prompt_to_agent(
 
 #[tauri::command]
 pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
-    let senders = state
-        .input_senders
-        .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    for tx in senders.values() {
-        let _ = tx.try_send(input.clone().into_bytes());
+    let session_ids = state
+        .agents
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for session_id in session_ids {
+        let _ = state
+            .terminal_sessions
+            .send_privileged_input(&session_id, input.clone().into_bytes())
+            .await;
     }
     Ok(())
 }
@@ -410,39 +372,18 @@ pub async fn send_binary_input_to_agent(
     input: Vec<u8>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let tx = match state.input_senders.try_read() {
-        Ok(s) => s,
-        Err(_) => {
-            manager::log_debug(&format!(
-                "[Wardian] [{}] send_binary_input_to_agent: input_senders write-locked, dropping binary input",
-                session_id
-            ));
-            return Err("Input channel temporarily locked".to_string());
-        }
-    }
-    .get(&session_id)
-    .cloned();
-
-    if let Some(tx) = tx {
-        match tx.try_send(input) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] send_binary_input_to_agent: channel FULL (writer thread likely blocked on ConPTY write_all)",
-                    session_id
-                ));
-                Err("Terminal input buffer full - PTY may be stalled".to_string())
-            }
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[Wardian] [{}] send_binary_input_to_agent: channel error: {}",
-                    session_id, e
-                ));
-                Err(format!("Failed to send binary input: {}", e))
-            }
-        }
+    let decision = state
+        .terminal_sessions
+        .send_legacy_input(&session_id, input)
+        .await
+        .map_err(|error| error.to_string())?;
+    if decision.status == wardian_core::models::TerminalLeaseDecisionStatus::Accepted {
+        Ok(())
     } else {
-        Err(format!("Agent {} not found or is off", session_id))
+        Err(format!(
+            "Terminal input lease rejected: {:?}",
+            decision.reason
+        ))
     }
 }
 
@@ -466,16 +407,15 @@ pub async fn read_agent_pty(
     options: Option<ReadAgentPtyOptions>,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let agents = state.agents.lock().await;
-    if let Some(agent) = agents.get(&session_id) {
-        if let Ok(mut buf) = agent.output_buffer.lock() {
-            Ok(read_pty_buffer(&mut buf, options.as_ref()))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Err(format!("Agent {} not found", session_id))
-    }
+    state
+        .terminal_sessions
+        .read_legacy_output(
+            &session_id,
+            options.as_ref().and_then(|value| value.max_bytes),
+            options.as_ref().is_some_and(|value| value.peek),
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -485,6 +425,7 @@ pub struct ReadAgentPtyOptions {
     pub peek: bool,
 }
 
+#[cfg(test)]
 fn read_pty_buffer(buffer: &mut String, options: Option<&ReadAgentPtyOptions>) -> Option<String> {
     if buffer.is_empty() {
         return None;
@@ -508,6 +449,7 @@ fn read_pty_buffer(buffer: &mut String, options: Option<&ReadAgentPtyOptions>) -
     Some(output)
 }
 
+#[cfg(test)]
 fn pty_tail_from_line_boundary(buffer: &str, max_bytes: usize) -> String {
     let mut start = buffer.len().saturating_sub(max_bytes);
     while start < buffer.len() && !buffer.is_char_boundary(start) {
@@ -685,13 +627,15 @@ fn spawn_user_terminal_session(
 
 async fn resize_user_terminal_master(
     master_arc: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    native_resize_lock: Arc<tokio::sync::Mutex<()>>,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let size = normalized_user_terminal_size(cols, rows);
+    let native_resize_lock = crate::state::terminal_session::native_pty_resize_gate();
     tokio::task::spawn_blocking(move || {
-        let _native_resize_guard = native_resize_lock.blocking_lock();
+        let _native_resize_guard = native_resize_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let master = match master_arc.lock() {
             Ok(master) => master,
             Err(poisoned) => poisoned.into_inner(),
@@ -734,8 +678,7 @@ pub async fn ensure_user_terminal(
     };
 
     if let Some(master) = existing_master {
-        resize_user_terminal_master(master, state.pty_native_resize_lock.clone(), cols, rows)
-            .await?;
+        resize_user_terminal_master(master, cols, rows).await?;
     }
 
     current_session_id.ok_or("User terminal is not running".to_string())
@@ -787,7 +730,7 @@ pub async fn resize_user_terminal(
             .ok_or("User terminal is not running".to_string())?;
         terminal.pty_master.clone()
     };
-    resize_user_terminal_master(master, state.pty_native_resize_lock.clone(), cols, rows).await
+    resize_user_terminal_master(master, cols, rows).await
 }
 
 #[tauri::command]
@@ -959,12 +902,6 @@ mod tests {
             test_agent("agent-1", "codex", watch_state.clone()),
         );
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx.clone());
-
         let submit = tokio::spawn(async move {
             submit_prompt_to_agent_with_codex_echo_guard(
                 &state,
@@ -1147,9 +1084,7 @@ mod tests {
             })),
             child_process: None,
             background_processes: Vec::new(),
-            pty_master: None,
-            stdin_tx: None,
-            output_buffer: Arc::new(Mutex::new(String::new())),
+            runtime_generation: None,
             process_id: Some(1234),
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(None)),

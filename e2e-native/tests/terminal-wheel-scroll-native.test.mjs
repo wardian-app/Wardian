@@ -12,11 +12,17 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+  resolveAgentTerminalPresentationId,
+} from "../lib/terminal-debug.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
 const SESSION_ID = `e2e-terminal-wheel-${RUN_ID}`;
 const SESSION_NAME = `E2E-Terminal-Wheel-${RUN_ID}`;
+const RESTORE_SCROLLBACK_MARKER = `WARDIAN_RESTORE_SCROLLBACK_${RUN_ID}`;
 // Replicates the stream shape captured live from Claude Code 2.1.173: banner
 // rows, then a synchronized-output diff frame that cursor-addresses some rows
 // and scrolls the rest in with newlines at the bottom row, hiding the cursor
@@ -52,12 +58,6 @@ async function invokeTauri(driver, command, args = {}) {
   return result.value;
 }
 
-async function readTerminalDebug(driver, sessionId) {
-  return await driver.executeScript((sid) => {
-    return window.__wardianTerminalDebug?.snapshot(sid) ?? null;
-  }, sessionId);
-}
-
 function rendererViewport(snapshot) {
   return {
     baseY: snapshot?.renderer?.baseY ?? snapshot?.baseY ?? 0,
@@ -70,18 +70,16 @@ function rendererViewport(snapshot) {
 // Mirrors the wheel dispatch used by the real-provider rendering audit so a
 // failure here reproduces the user-visible "mouse wheel does not scroll the
 // agent terminal" behavior without spending provider tokens.
-async function dispatchTerminalWheel(driver, sessionId, deltaY) {
-  return await driver.executeScript((sid, wheelDeltaY) => {
+async function dispatchTerminalWheel(driver, sessionId, presentationId, deltaY) {
+  return await driver.executeScript((sid, pid, wheelDeltaY) => {
     const card = document.getElementById(`agent-card-${sid}`);
-    const host = card?.querySelector('[data-testid="agent-terminal-host"]') ??
-      document.querySelector('[data-testid="agent-terminal-host"]');
-    const targets = [
-      host?.querySelector(".xterm-screen"),
-      host?.querySelector(".xterm-viewport"),
-      host?.querySelector(".xterm"),
-      host,
-    ].filter(Boolean);
-    for (const target of targets) {
+    const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
+    // Dispatch once at Wardian's terminal host. A synthetic event sent to
+    // every nested xterm layer is processed multiple times while bubbling and
+    // can reverse the state this assertion is trying to observe.
+    const target = host;
+    if (target) {
       target.dispatchEvent(
         new WheelEvent("wheel", {
           bubbles: true,
@@ -94,16 +92,59 @@ async function dispatchTerminalWheel(driver, sessionId, deltaY) {
       );
     }
     return {
-      targetCount: targets.length,
+      targetCount: target ? 1 : 0,
       hasCard: Boolean(card),
       hasHost: Boolean(host),
       hasXterm: Boolean(host?.querySelector(".xterm")),
     };
-  }, sessionId, deltaY);
+  }, sessionId, presentationId, deltaY);
 }
 
-async function assertWheelScrolls(driver, sessionId, label) {
-  const before = rendererViewport(await readTerminalDebug(driver, sessionId));
+async function focusAgentTerminal(driver, sessionId, presentationId) {
+  const focused = await driver.executeScript((sid, pid) => {
+    const card = document.getElementById(`agent-card-${sid}`);
+    const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
+    if (!host) return false;
+    host.focus();
+    host.click();
+    return document.activeElement === host || host.contains(document.activeElement);
+  }, sessionId, presentationId);
+  assert.equal(focused, true, `Expected terminal presentation ${presentationId} to receive focus`);
+}
+
+async function sendTerminalPresentationInput(driver, sessionId, presentationId, input) {
+  const snapshot = await readTerminalDebugSnapshot(driver, presentationId);
+  assert.equal(snapshot?.broker?.ownerPresentationId, presentationId,
+    `Expected ${presentationId} to own terminal input`);
+  await invokeTauri(driver, "send_terminal_presentation_input", {
+    request: {
+      session_id: sessionId,
+      presentation_id: presentationId,
+      runtime_generation: snapshot.broker.runtimeGeneration,
+      lease_epoch: snapshot.broker.leaseEpoch,
+      input,
+    },
+  });
+}
+
+async function selectGridMode(driver) {
+  const gridButton = await driver.wait(async () => {
+    for (const button of await driver.findElements(By.css('[aria-label="Agents mode"] button'))) {
+      if (await button.isDisplayed() && (await button.getText()).trim() === "Grid") {
+        return button;
+      }
+    }
+    return false;
+  }, 20_000, "Timed out locating the Agents Grid mode control");
+  await gridButton.click();
+  await driver.wait(async () => await driver.executeScript(() => (
+    document.querySelector('[data-testid="agent-grid"]')?.getAttribute("data-overview-mode") === "grid"
+  )), 20_000, "Timed out selecting explicit Agents Grid mode");
+}
+
+async function assertWheelScrolls(driver, sessionId, presentationId, label) {
+  const before = rendererViewport(await readTerminalDebugSnapshot(driver, presentationId));
   assert.ok(before.baseY > 0, `[${label}] Expected renderer scrollback, got ${JSON.stringify(before)}`);
   assert.equal(
     before.viewportY,
@@ -114,10 +155,10 @@ async function assertWheelScrolls(driver, sessionId, label) {
   let after = before;
   let lastDispatch = null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    lastDispatch = await dispatchTerminalWheel(driver, sessionId, -480);
+    lastDispatch = await dispatchTerminalWheel(driver, sessionId, presentationId, -480);
     assert.ok(lastDispatch.targetCount > 0, `[${label}] Expected wheel dispatch targets: ${JSON.stringify(lastDispatch)}`);
     await new Promise((resolve) => setTimeout(resolve, 150));
-    after = rendererViewport(await readTerminalDebug(driver, sessionId));
+    after = rendererViewport(await readTerminalDebugSnapshot(driver, presentationId));
     if (after.viewportY < before.viewportY) {
       break;
     }
@@ -134,9 +175,9 @@ async function assertWheelScrolls(driver, sessionId, label) {
   // Wheel back down must return to the bottom so live output resumes following.
   let settled = after;
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    await dispatchTerminalWheel(driver, sessionId, 480);
+    await dispatchTerminalWheel(driver, sessionId, presentationId, 480);
     await new Promise((resolve) => setTimeout(resolve, 150));
-    settled = rendererViewport(await readTerminalDebug(driver, sessionId));
+    settled = rendererViewport(await readTerminalDebugSnapshot(driver, presentationId));
     if (settled.viewportY >= settled.baseY) {
       break;
     }
@@ -166,6 +207,7 @@ process.stdout.write(${JSON.stringify(RAW_FRAME)});
 const esc = String.fromCharCode(27);
 const spinnerGlyphs = ["*", "+", "x", "."];
 let spin = 0;
+let restored = false;
 setInterval(() => {
   spin += 1;
   const glyph = spinnerGlyphs[spin % spinnerGlyphs.length];
@@ -175,20 +217,30 @@ setInterval(() => {
     esc + "[13;3H" + esc + "[?25h" + esc + "[m" + esc + "[?2026l";
   process.stdout.write(frame.repeat(24));
 }, 10);
+let pendingInput = "";
+process.stdin.on("data", (chunk) => {
+  pendingInput += chunk.toString();
+  if (!restored && pendingInput.includes(${JSON.stringify(RESTORE_SCROLLBACK_MARKER)})) {
+    restored = true;
+    for (let line = 1; line <= 80; line += 1) {
+      process.stdout.write("restored-wheel-" + String(line).padStart(2, "0") + "\\r\\n");
+    }
+  }
+});
 process.stdin.resume();
 `;
   fs.writeFileSync(scriptPath, script, "utf8");
   return scriptPath;
 }
 
-async function waitForScrollback(driver, sessionId) {
+async function waitForScrollback(driver, presentationId, expectedText = "wheel-70") {
   const startedAt = Date.now();
   let last = null;
   while (Date.now() - startedAt < 30000) {
-    last = await readTerminalDebug(driver, sessionId);
+    last = await readTerminalDebugSnapshot(driver, presentationId);
     const viewport = rendererViewport(last);
-    const text = (last?.lines ?? []).join("\n");
-    if (viewport.baseY > 0 && text.includes("wheel-70")) {
+    const text = (last?.allLines ?? last?.lines ?? []).join("\n");
+    if (viewport.baseY > 0 && text.includes(expectedText)) {
       return last;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -298,12 +350,11 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
   });
   assert.equal(agent.session_id, SESSION_ID);
 
-  const gridTab = await driver.wait(
-    until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-    20000,
-  );
-  await driver.wait(until.elementIsVisible(gridTab), 20000);
-  await gridTab.click();
+  await openWorkbenchSurface(driver, "agents-overview");
+  // The test's fixed two-column layout is an explicit Grid contract. Leaving
+  // the surface in Auto can intentionally switch to one presentation when the
+  // window narrows, which would test responsive selection instead of wheel IO.
+  await selectGridMode(driver);
   const card = await driver.wait(
     until.elementLocated(By.id(`agent-card-${SESSION_ID}`)),
     20000,
@@ -318,21 +369,29 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     }
     assert.fail("Expected terminal debug snapshots in the native build");
   }
+  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
+  await focusAgentTerminal(driver, SESSION_ID, presentationId);
 
-  const beforeSnapshot = await waitForScrollback(driver, SESSION_ID);
+  const beforeSnapshot = await waitForScrollback(driver, presentationId);
   console.log("renderer diagnostics:", JSON.stringify({
     bufferType: beforeSnapshot?.renderer?.bufferType,
     mouseTrackingMode: beforeSnapshot?.renderer?.mouseTrackingMode,
     scrollableElement: beforeSnapshot?.renderer?.scrollableElement,
     webglActive: beforeSnapshot?.renderer?.webglActive,
   }));
-  await assertWheelScrolls(driver, SESSION_ID, "initial");
+  await assertWheelScrolls(driver, SESSION_ID, presentationId, "initial");
 
   // The live-Claude audit failed its wheel checks after shrinking the window
   // (content reflow + terminal refit); guard that transition too.
   await driver.manage().window().setRect({ width: 980, height: 980 });
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-  const narrowSnapshot = await readTerminalDebug(driver, SESSION_ID);
+  await driver.wait(async () => await driver.executeScript((sid, pid) => {
+    const card = document.getElementById(`agent-card-${sid}`);
+    const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
+    return Boolean(host?.querySelector(".xterm"));
+  }, SESSION_ID, presentationId), 20_000,
+  "Timed out waiting for the focused terminal presentation after the narrow resize");
+  const narrowSnapshot = await readTerminalDebugSnapshot(driver, presentationId);
   console.log("narrow diagnostics:", JSON.stringify({
     cols: narrowSnapshot?.cols,
     rows: narrowSnapshot?.rows,
@@ -341,9 +400,16 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     wheelStats: narrowSnapshot?.wheelStats,
     viewportScrollState: narrowSnapshot?.renderer?.viewportScrollState,
   }));
-  await assertWheelScrolls(driver, SESSION_ID, "narrow");
+  await assertWheelScrolls(driver, SESSION_ID, presentationId, "narrow");
 
   await driver.manage().window().setRect({ width: 1920, height: 1080 });
   await new Promise((resolve) => setTimeout(resolve, 2000));
-  await assertWheelScrolls(driver, SESSION_ID, "restored");
+  await sendTerminalPresentationInput(
+    driver,
+    SESSION_ID,
+    presentationId,
+    `${RESTORE_SCROLLBACK_MARKER}\r`,
+  );
+  await waitForScrollback(driver, presentationId, "restored-wheel-80");
+  await assertWheelScrolls(driver, SESSION_ID, presentationId, "restored");
 });

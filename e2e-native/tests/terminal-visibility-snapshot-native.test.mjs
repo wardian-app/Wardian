@@ -12,6 +12,11 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+  resolveAgentTerminalPresentationId,
+} from "../lib/terminal-debug.mjs";
+import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 // Visibility-scoped WebGL contexts: terminals only hold a WebGL context while
 // their card is on screen. This test proves the demotion/promotion lifecycle
@@ -22,9 +27,11 @@ import {
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
 const TOP_SESSION_ID = `e2e-vis-top-${RUN_ID}`;
-const TOP_SESSION_NAME = `E2E-Vis-Top-${RUN_ID}`;
+const TOP_SESSION_NAME = `E2E-Vis-01-Top-${RUN_ID}`;
+const MIDDLE_SESSION_ID = `e2e-vis-middle-${RUN_ID}`;
+const MIDDLE_SESSION_NAME = `E2E-Vis-02-Middle-${RUN_ID}`;
 const BOTTOM_SESSION_ID = `e2e-vis-bottom-${RUN_ID}`;
-const BOTTOM_SESSION_NAME = `E2E-Vis-Bottom-${RUN_ID}`;
+const BOTTOM_SESSION_NAME = `E2E-Vis-03-Bottom-${RUN_ID}`;
 const OFFSCREEN_MARKER = `OFFSCREEN_ECHO_${RUN_ID}`;
 const VISIBLE_MARKER = `VISIBLE_ECHO_${RUN_ID}`;
 
@@ -38,12 +45,6 @@ async function invokeTauri(driver, command, args = {}) {
 
   assert.equal(result.ok, true, `${command} failed: ${result.error}`);
   return result.value;
-}
-
-async function readTerminalDebug(driver, sessionId) {
-  return await driver.executeScript((sid) => {
-    return window.__wardianTerminalDebug?.snapshot(sid) ?? null;
-  }, sessionId);
 }
 
 async function readCardState(driver, sessionId) {
@@ -66,6 +67,55 @@ async function scrollCardIntoView(driver, sessionId, block) {
   await driver.executeScript((sid, blockOption) => {
     document.getElementById(`agent-card-${sid}`)?.scrollIntoView({ block: blockOption, behavior: "instant" });
   }, sessionId, block);
+}
+
+async function activateAgentTerminalPresentation(driver, sessionId, presentationId) {
+  const activated = await driver.executeScript((sid, pid) => {
+    const card = document.getElementById(`agent-card-${sid}`);
+    const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
+      .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
+    if (!host) return false;
+    host.click();
+    return true;
+  }, sessionId, presentationId);
+  assert.equal(activated, true, `Expected terminal presentation ${presentationId} to activate`);
+  await driver.wait(async () => {
+    const snapshot = await readTerminalDebugSnapshot(driver, presentationId);
+    return snapshot?.broker?.ownerPresentationId === presentationId;
+  }, 20_000, `Timed out waiting for terminal presentation ${presentationId} to own input`);
+}
+
+async function sendTerminalPresentationInput(driver, sessionId, presentationId, input) {
+  const snapshot = await readTerminalDebugSnapshot(driver, presentationId);
+  assert.equal(
+    snapshot?.broker?.ownerPresentationId,
+    presentationId,
+    `Expected ${presentationId} to retain its input lease`,
+  );
+  await invokeTauri(driver, "send_terminal_presentation_input", {
+    request: {
+      session_id: sessionId,
+      presentation_id: presentationId,
+      runtime_generation: snapshot.broker.runtimeGeneration,
+      lease_epoch: snapshot.broker.leaseEpoch,
+      input,
+    },
+  });
+}
+
+async function selectGridMode(driver) {
+  const gridButton = await driver.wait(async () => {
+    for (const button of await driver.findElements(By.css('[aria-label="Agents mode"] button'))) {
+      if (await button.isDisplayed() && (await button.getText()).trim() === "Grid") {
+        return button;
+      }
+    }
+    return false;
+  }, 20_000, "Timed out locating the Agents Grid mode control");
+  await gridButton.click();
+  await driver.wait(async () => await driver.executeScript(() => (
+    document.querySelector('[data-testid="agent-grid"]')?.getAttribute("data-overview-mode") === "grid"
+  )), 20_000, "Timed out selecting explicit Agents Grid mode");
 }
 
 async function waitFor(label, timeoutMs, probe) {
@@ -164,8 +214,8 @@ test(
 
     const { driver } = session;
     await waitForAppShell(driver, 20000);
-    // Single stacked column with tall rows so the second card sits below the
-    // fold — the shape that triggers visibility demotion.
+    // Use a compact viewport after reload so the second default Grid row sits
+    // below the fold — the shape that triggers visibility demotion.
     await driver.executeScript(() => {
       localStorage.setItem(
         "wardian-settings",
@@ -174,25 +224,10 @@ test(
           version: 0,
         }),
       );
-      localStorage.setItem(
-        "wardian-layout",
-        JSON.stringify({
-          state: {
-            layout: { column_tracks: [1], row_height: 900 },
-            leftSidebarWidth: 260,
-            rightSidebarWidth: 240,
-            userTerminalOpen: false,
-            userTerminalHeight: 360,
-            gridStacked: true,
-            previousColumnTracks: null,
-          },
-          version: 0,
-        }),
-      );
       location.reload();
     });
     await waitForAppShell(driver, 20000);
-    await driver.manage().window().setRect({ width: 1400, height: 760 });
+    await driver.manage().window().setRect({ width: 1400, height: 520 });
 
     const topAgent = await invokeTauri(driver, "spawn_agent", {
       req: {
@@ -205,6 +240,17 @@ test(
       },
     });
     assert.equal(topAgent.session_id, TOP_SESSION_ID);
+    const middleAgent = await invokeTauri(driver, "spawn_agent", {
+      req: {
+        sessionName: MIDDLE_SESSION_NAME,
+        agentClass: "TestClass",
+        folder: harness.repoRoot,
+        resumeSession: MIDDLE_SESSION_ID,
+        isOff: false,
+        configOverride: { provider: "mock" },
+      },
+    });
+    assert.equal(middleAgent.session_id, MIDDLE_SESSION_ID);
     const bottomAgent = await invokeTauri(driver, "spawn_agent", {
       req: {
         sessionName: BOTTOM_SESSION_NAME,
@@ -217,12 +263,7 @@ test(
     });
     assert.equal(bottomAgent.session_id, BOTTOM_SESSION_ID);
 
-    const gridTab = await driver.wait(
-      until.elementLocated(By.xpath("//button[normalize-space(.)='Grid']")),
-      20000,
-    );
-    await driver.wait(until.elementIsVisible(gridTab), 20000);
-    await gridTab.click();
+    await openWorkbenchSurface(driver, "agents-overview");
     await driver.wait(until.elementLocated(By.id(`agent-card-${BOTTOM_SESSION_ID}`)), 20000);
     if (!(await driver.executeScript(() => Boolean(window.__wardianTerminalDebug?.snapshot)))) {
       if (skipNativeBuild) {
@@ -231,13 +272,23 @@ test(
       }
       assert.fail("Expected terminal debug snapshots in the native build");
     }
+    // This test exercises vertical Grid residency, not Auto's responsive
+    // single-card fallback. Both renderer identities must exist before any
+    // visibility assertion is meaningful.
+    await selectGridMode(driver);
+    const topPresentationId = await resolveAgentTerminalPresentationId(driver, TOP_SESSION_ID);
+    const bottomPresentationId = await resolveAgentTerminalPresentationId(driver, BOTTOM_SESSION_ID);
 
+    // Establish the bottom presentation's input lease while it is visible;
+    // visibility demotion must not revoke that lease.
+    await scrollCardIntoView(driver, BOTTOM_SESSION_ID, "center");
+    await activateAgentTerminalPresentation(driver, BOTTOM_SESSION_ID, bottomPresentationId);
     await scrollCardIntoView(driver, TOP_SESSION_ID, "start");
 
     // Visible top terminal holds a WebGL context; the below-the-fold bottom
     // terminal must not.
     await waitFor("top terminal on WebGL", 30000, async () => {
-      const snapshot = await readTerminalDebug(driver, TOP_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, topPresentationId);
       return { ok: snapshot?.renderer?.webglActive === true, snapshot: snapshot?.renderer };
     });
     // The IntersectionObserver is the visibility authority (it accounts for
@@ -245,7 +296,7 @@ test(
     // observable outcome — the below-the-fold terminal holds no WebGL context.
     const bottomOffscreen = await waitFor("bottom terminal demoted off screen", 30000, async () => {
       const card = await readCardState(driver, BOTTOM_SESSION_ID);
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       return {
         ok: Boolean(snapshot) && snapshot.renderer?.webglActive !== true,
         card,
@@ -256,12 +307,14 @@ test(
 
     // Input to the demoted terminal must reach its PTY, and the echoed output
     // must land in the (off-screen) buffer.
-    await invokeTauri(driver, "send_input_to_agent", {
-      sessionId: BOTTOM_SESSION_ID,
-      input: `${OFFSCREEN_MARKER}\r`,
-    });
+    await sendTerminalPresentationInput(
+      driver,
+      BOTTOM_SESSION_ID,
+      bottomPresentationId,
+      `${OFFSCREEN_MARKER}\r`,
+    );
     await waitFor("offscreen echo in demoted terminal buffer", 30000, async () => {
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       const text = (snapshot?.lines ?? []).join("\n");
       return { ok: text.includes(`echo:${OFFSCREEN_MARKER}`), tail: text.slice(-300) };
     });
@@ -270,7 +323,7 @@ test(
     // no snapshot overlay left and the offscreen-era content present.
     await scrollCardIntoView(driver, BOTTOM_SESSION_ID, "center");
     await waitFor("bottom terminal promoted on re-entry", 30000, async () => {
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       const card = await readCardState(driver, BOTTOM_SESSION_ID);
       return {
         ok: snapshot?.renderer?.webglActive === true && card?.hasSnapshotOverlay === false,
@@ -278,7 +331,7 @@ test(
         card,
       };
     });
-    const promotedSnapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+    const promotedSnapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
     const promotedText = (promotedSnapshot?.lines ?? []).join("\n");
     assert.ok(
       promotedText.includes(`echo:${OFFSCREEN_MARKER}`),
@@ -290,12 +343,14 @@ test(
     );
 
     // The promoted terminal stays fully interactive.
-    await invokeTauri(driver, "send_input_to_agent", {
-      sessionId: BOTTOM_SESSION_ID,
-      input: `${VISIBLE_MARKER}\r`,
-    });
+    await sendTerminalPresentationInput(
+      driver,
+      BOTTOM_SESSION_ID,
+      bottomPresentationId,
+      `${VISIBLE_MARKER}\r`,
+    );
     await waitFor("visible echo after promotion", 30000, async () => {
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       const text = (snapshot?.lines ?? []).join("\n");
       return { ok: text.includes(`echo:${VISIBLE_MARKER}`), tail: text.slice(-300) };
     });
@@ -304,7 +359,7 @@ test(
     // cosmetic (pointer-transparent) snapshot of the last frame.
     await scrollCardIntoView(driver, TOP_SESSION_ID, "start");
     const demotedAgain = await waitFor("bottom terminal demoted again with snapshot", 30000, async () => {
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       const card = await readCardState(driver, BOTTOM_SESSION_ID);
       return {
         ok: snapshot?.renderer?.webglActive === false && card?.hasSnapshotOverlay === true,
@@ -320,13 +375,15 @@ test(
 
     // Fresh output while frozen lifts the stale snapshot so the live DOM
     // rendering shows through.
-    await invokeTauri(driver, "send_input_to_agent", {
-      sessionId: BOTTOM_SESSION_ID,
-      input: `${OFFSCREEN_MARKER}-again\r`,
-    });
+    await sendTerminalPresentationInput(
+      driver,
+      BOTTOM_SESSION_ID,
+      bottomPresentationId,
+      `${OFFSCREEN_MARKER}-again\r`,
+    );
     await waitFor("stale snapshot lifted by fresh output", 30000, async () => {
       const card = await readCardState(driver, BOTTOM_SESSION_ID);
-      const snapshot = await readTerminalDebug(driver, BOTTOM_SESSION_ID);
+      const snapshot = await readTerminalDebugSnapshot(driver, bottomPresentationId);
       const text = (snapshot?.lines ?? []).join("\n");
       return {
         ok: card?.hasSnapshotOverlay === false && text.includes(`echo:${OFFSCREEN_MARKER}-again`),

@@ -8,11 +8,9 @@ pub struct ActiveAgent {
     pub config: Arc<Mutex<AgentConfig>>,
     pub child_process: Option<Box<dyn portable_pty::Child + Send>>,
     pub background_processes: Vec<std::process::Child>,
-    pub pty_master: Option<Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
-    pub stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
-    /// Drain-on-read output buffer. The reader thread pushes PTY output here;
-    /// the frontend polls via `read_agent_pty` which takes and clears it.
-    pub output_buffer: Arc<Mutex<String>>,
+    /// Exact terminal-session broker generation for this native runtime.
+    /// Native master/input handles live only inside the broker actor.
+    pub runtime_generation: Option<u64>,
     pub process_id: Option<u32>,
     pub query_count: Arc<Mutex<usize>>,
     pub init_timestamp: Arc<Mutex<Option<String>>>,

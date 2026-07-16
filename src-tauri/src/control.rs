@@ -1253,15 +1253,16 @@ fn approval_action_bytes(provider: &str, action: &ApprovalAction) -> Vec<u8> {
     }
 }
 
-pub(crate) async fn submit_approval_action_via_sender(
-    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+pub(crate) async fn submit_approval_action_via_sender<S>(
+    tx: &S,
     provider: &str,
     action: &ApprovalAction,
-) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String> {
+) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String>
+where
+    S: crate::utils::delivery_transaction::TerminalInputSink + ?Sized,
+{
     let bytes = approval_action_bytes(provider, action);
-    tx.send(bytes)
-        .await
-        .map_err(|_| "input channel closed".to_string())?;
+    tx.send_bytes(bytes).await?;
     Ok(
         crate::utils::delivery_transaction::TerminalDeliveryOutcome {
             delivery_state:
@@ -3009,11 +3010,14 @@ pub(crate) async fn wait_for_terminal_ready_for_delivery_service(
     wait_for_terminal_ready_for_control_send(state, &info).await
 }
 
-pub(crate) async fn submit_approval_action_for_delivery_service(
-    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+pub(crate) async fn submit_approval_action_for_delivery_service<S>(
+    tx: &S,
     provider: &str,
     action: &ApprovalAction,
-) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String> {
+) -> Result<crate::utils::delivery_transaction::TerminalDeliveryOutcome, String>
+where
+    S: crate::utils::delivery_transaction::TerminalInputSink + ?Sized,
+{
     submit_approval_action_via_sender(tx, provider, action).await
 }
 
@@ -3531,9 +3535,7 @@ mod tests {
             })),
             child_process: None,
             background_processes: Vec::new(),
-            pty_master: None,
-            stdin_tx: None,
-            output_buffer: Arc::new(Mutex::new(String::new())),
+            runtime_generation: None,
             process_id: Some(1234),
             query_count: Arc::new(Mutex::new(0)),
             init_timestamp: Arc::new(Mutex::new(Some("2026-05-07T00:00:00.000Z".to_string()))),
@@ -3563,6 +3565,28 @@ mod tests {
             session_id.to_string(),
             test_agent(session_id, session_name, agent_class),
         );
+    }
+
+    async fn install_test_terminal_runtime(
+        state: &AppState,
+        session_id: &str,
+        input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        let generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                session_id,
+                crate::state::terminal_session::TerminalRuntimeHandles::new(
+                    input_tx,
+                    |_| Ok(()),
+                ),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .expect("test terminal runtime");
+        if let Some(agent) = state.agents.lock().await.get_mut(session_id) {
+            agent.runtime_generation = Some(generation);
+        }
     }
 
     fn expected_terminal_chunks(provider: &str, prompt: &str) -> Vec<Vec<u8>> {
@@ -3741,11 +3765,7 @@ mod tests {
             *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,
@@ -3917,11 +3937,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Idle".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
         wardian_core::conversation_lease::acquire_lease(
             wardian_core::conversation_lease::ConversationLease {
                 agent_id: "agent-1".to_string(),
@@ -4314,11 +4330,7 @@ mod tests {
                 .push_output(b"\r\n\x1b[1m\r\n\xe2\x80\xba\x1b[22m Write tests for @filename");
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,
@@ -4380,11 +4392,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Idle".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,
@@ -4422,11 +4430,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Idle".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let delivery = deliver_message_to_target(
             None,
@@ -4476,11 +4480,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Action Needed".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let delivery = deliver_message_to_target(
             None,
@@ -4519,11 +4519,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Action Needed".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let delivery = deliver_message_to_target(
             None,
@@ -4566,11 +4562,7 @@ mod tests {
                 .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -4656,11 +4648,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let delivery = deliver_message_to_target(
             None,
@@ -4703,11 +4691,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let delivery = deliver_message_to_target(
             None,
@@ -4755,11 +4739,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -4820,11 +4800,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -4898,11 +4874,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -4965,11 +4937,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -5025,11 +4993,7 @@ mod tests {
                 .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let first = deliver_message_to_target(
             None,
@@ -5121,11 +5085,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let error = deliver_message_to_target(
             None,
@@ -5163,11 +5123,7 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -5214,11 +5170,7 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,
@@ -5380,11 +5332,7 @@ mod tests {
                 .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -5469,11 +5417,7 @@ mod tests {
         }
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let queued = deliver_message_to_target(
             None,
@@ -5539,11 +5483,7 @@ mod tests {
             *agent.current_status.lock().unwrap() = "Idle".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,
@@ -5652,11 +5592,7 @@ mod tests {
                 .unwrap() = "Idle".to_string();
         }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         let error = deliver_message_to_target(
             None,
@@ -5696,11 +5632,7 @@ mod tests {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        state
-            .input_senders
-            .write()
-            .unwrap()
-            .insert("agent-1".to_string(), tx);
+        install_test_terminal_runtime(&state, "agent-1", tx).await;
 
         deliver_message_to_target(
             None,

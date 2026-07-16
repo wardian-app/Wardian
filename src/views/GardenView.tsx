@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { buildAgentGraph, type GraphRelationshipReason } from "../features/graph/graphProjection";
@@ -7,6 +7,7 @@ import { GardenCanvas } from "../features/garden/GardenCanvas";
 import { unitKey } from "../features/garden/garden.types";
 import { useGardenWorkflows } from "../features/garden/useGardenWorkflows";
 import { useGardenStore } from "../store/useGardenStore";
+import type { GardenSurfaceState } from "../features/workbench/surfaces/coreSurfaceMetadata";
 
 const ALL_REASONS: Set<GraphRelationshipReason> = new Set([
   "same_team",
@@ -14,7 +15,11 @@ const ALL_REASONS: Set<GraphRelationshipReason> = new Set([
   "same_worktree",
 ]);
 
-interface GardenViewProps {
+export interface GardenViewProps {
+  visibility?: "visible" | "hidden";
+  rendererActive?: boolean;
+  initialSurfaceState?: GardenSurfaceState;
+  onSurfaceStateChange?: (state: GardenSurfaceState) => void;
   filteredAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
   teams: AgentTeam[];
@@ -23,7 +28,9 @@ interface GardenViewProps {
   selectedAgentIds: Set<string>;
   offAgentIds: Set<string>;
   onSelectionChange: (ids: Set<string>) => void;
-  onOpenAgentInGrid: (agentId: string) => void;
+  onOpenAgent?: (agentId: string) => void;
+  /** @deprecated Legacy flag-off adapter. Workbench surfaces use onOpenAgent. */
+  onOpenAgentInGrid?: (agentId: string) => void;
 }
 
 export const GardenView: React.FC<GardenViewProps> = ({
@@ -35,17 +42,29 @@ export const GardenView: React.FC<GardenViewProps> = ({
   selectedAgentIds,
   offAgentIds,
   onSelectionChange,
+  onOpenAgent,
   onOpenAgentInGrid,
+  visibility = "visible",
+  rendererActive = true,
+  initialSurfaceState,
+  onSurfaceStateChange,
 }) => {
   const positions = useGardenStore((s) => s.positions);
   const setPosition = useGardenStore((s) => s.setPosition);
   const resetLayout = useGardenStore((s) => s.reset);
-  const workflowInputs = useGardenWorkflows();
+  const workflowInputs = useGardenWorkflows(visibility === "visible");
 
   // Canvas highlight is keyed by unitKey so agent and workflow ids can't collide,
   // and it stays local so selecting a workflow never leaks into the app's
   // agent-only selection set. Agent clicks still propagate up (for Grid routing).
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(
+    initialSurfaceState?.selected_unit_key ?? null,
+  );
+  const onSurfaceStateChangeRef = useRef(onSurfaceStateChange);
+  onSurfaceStateChangeRef.current = onSurfaceStateChange;
+  useEffect(() => {
+    onSurfaceStateChangeRef.current?.({ selected_unit_key: selectedKey });
+  }, [selectedKey]);
 
   const projection = useMemo(
     () =>
@@ -71,8 +90,8 @@ export const GardenView: React.FC<GardenViewProps> = ({
     selectedAgentIds.size === 1 ? unitKey({ kind: "agent", id: [...selectedAgentIds][0] }) : null;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <GardenCanvas
+    <div className="garden-view flex-1 flex flex-col min-h-0">
+      {rendererActive ? <GardenCanvas
         agentUnits={agentUnits}
         workflowUnits={workflowUnits}
         selectedKey={selectedKey ?? externalAgentKey}
@@ -82,13 +101,17 @@ export const GardenView: React.FC<GardenViewProps> = ({
             onSelectionChange(new Set([ref.id]));
           }
         }}
-        onOpenAgent={onOpenAgentInGrid}
+        onOpenAgent={(agentId) => (onOpenAgent ?? onOpenAgentInGrid)?.(agentId)}
         onMoveUnit={(key, x, y) => setPosition(key, { x, y })}
         onResetLayout={() => {
           resetLayout();
           setSelectedKey(null);
         }}
-      />
+      /> : (
+        <div className="flex flex-1 items-center justify-center text-sm text-muted">
+          Garden renderer paused while hidden
+        </div>
+      )}
     </div>
   );
 };

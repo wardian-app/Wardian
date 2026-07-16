@@ -346,7 +346,7 @@ function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: Queue
   );
 }
 
-interface QueueViewProps {
+export interface QueueViewProps {
   onOpenAgent?: (sessionId: string) => void;
   onSendAgentPrompt?: (sessionId: string, prompt: string) => Promise<void> | void;
 }
@@ -364,7 +364,7 @@ export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
   const renderedItems = useProgressiveQueueItems(visibleItems);
 
   return (
-    <div className="flex flex-col h-full min-h-0 p-4 gap-4">
+    <div className="queue-view flex flex-col h-full min-h-0 p-4 gap-4">
       <QueueControls hasItems={items.length > 0} hasReadItems={hasReadItems} markAllRead={markAllRead} clearRead={clearRead} />
 
       {items.length === 0 ? (

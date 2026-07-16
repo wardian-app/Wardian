@@ -1,8 +1,8 @@
 # Command Panel
 
-The Command panel is the left-sidebar surface for fast message delivery and prompt execution across one or many agents.
+The Command panel is a left-sidebar auxiliary tool for fast message delivery and prompt execution across one or many agents.
 
-Use it when you need to send the same instruction to selected agents, run a starred Library prompt, or coordinate a group without switching into each terminal.
+Use it when you need to send the same instruction to selected agents, run a starred Library prompt, or coordinate a group without switching into each terminal. Opening Command does not replace the active Workbench surface.
 
 ## Two Modes in One Panel
 
@@ -26,7 +26,7 @@ Both modes operate on your current agent selection in the right roster.
 2. Open the **Command** tab in the left sidebar.
 3. Click a starred quick prompt or type a broadcast message.
 4. Confirm the all-agent fallback when no agents are selected.
-5. Watch responses in [Grid](./grid.md), [Dashboard](./dashboard.md), or [Queue](./queue.md).
+5. Keep the active agent session, [Agents](./agents-overview.md), [Dashboard](./dashboard.md), or [Queue](./queue.md) visible while responses arrive.
 
 ## Quick Prompts
 
@@ -66,6 +66,8 @@ Behavior:
 - **Multi-select**: command goes to all selected agents
 - **No selection**: confirmation prompt appears before sending to all active agents
 
+Roster selection is a targeting action, not navigation. If you also want a selected agent's terminal visible, use **Open** or **Open to Side** from the roster. Changing Workbench tabs does not change the Command target set.
+
 ## Common Patterns
 
 - Use **Quick Prompts** for curated, repeatable instructions.
@@ -84,5 +86,6 @@ Behavior:
 
 - [Library](./library.md)
 - [Watchlists](./watchlists.md)
-- [Grid](./grid.md)
+- [Workbench](./workbench.md)
+- [Agents](./agents-overview.md)
 - [Wardian CLI](./cli.md)

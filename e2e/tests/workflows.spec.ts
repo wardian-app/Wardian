@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { openSurface } from "../fixtures/workbench";
+import { makeWorkbenchDocument } from "../fixtures/workbenchIpcMock";
 import fs from "node:fs";
 
 type BlueprintNode = {
@@ -93,7 +95,8 @@ const events = [
 ];
 
 async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint) {
-  await page.addInitScript(({ blueprintFixture, eventFixture }) => {
+  const workbenchDocument = makeWorkbenchDocument();
+  await page.addInitScript(({ blueprintFixture, eventFixture, workbenchDocument }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
     const tauriWindow = window as Window & {
@@ -124,6 +127,26 @@ async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint)
       invoke: async (command: string, args?: Record<string, unknown>) => {
         tauriWindow.__workflowsInvokes?.push({ command, args });
 
+        if (command === "get_workbench_boot_config") return { safe_mode: false };
+        if (command === "load_workbench_state") {
+          return {
+            source: "primary",
+            document: workbenchDocument,
+            notice: null,
+            durable_revision: workbenchDocument.revision,
+            durable_token: `mock-token-${workbenchDocument.revision}`,
+          };
+        }
+        if (command === "save_workbench_state") {
+          const document = args?.document as { revision?: number } | undefined;
+          const revision = document?.revision ?? workbenchDocument.revision;
+          return {
+            outcome: "saved",
+            durable_revision: revision,
+            durable_token: `mock-token-${revision}`,
+            request_id: args?.request_id,
+          };
+        }
         if (command === "list_agents") return [];
         if (command === "list_agent_classes") return [];
         if (command === "list_provider_readiness") {
@@ -206,7 +229,7 @@ async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint)
         return null;
       },
     };
-  }, { blueprintFixture, eventFixture: events });
+  }, { blueprintFixture, eventFixture: events, workbenchDocument });
 }
 
 function nodeById(page: Page, id: string) {
@@ -223,12 +246,12 @@ test("unified Workflows view edits, launches, observes, and returns to edit", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(1);
+  const titlebar = page.locator(".titlebar");
+  await expect(titlebar.getByRole("button", { name: "Workflows" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Blueprints" })).toHaveCount(0);
   await expect(titlebar.getByRole("button", { name: "Runs" })).toHaveCount(0);
 
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.evaluate(async () => {
     const { useSettingsStore } = await import("/src/store/useSettingsStore.ts");
     useSettingsStore.setState({ default_provider: "codex" });
@@ -269,8 +292,7 @@ test("workflow builder renders persisted loop workflow nodes on a visible canvas
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
 
   await expect(page.getByTestId("workflows-edit-mode")).toBeVisible();
@@ -310,8 +332,7 @@ test("workflow run dialog scrolls parameter-heavy forms within the viewport", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  const titlebar = page.locator(".titlebar-center");
-  await titlebar.getByRole("button", { name: "Workflows" }).click();
+  await openSurface(page, "workflows");
   await page.getByTestId("blueprint-selector").getByRole("combobox").selectOption("/x/wf.md");
   await page.getByTestId("workflows-view").getByRole("button", { name: /^Run$/ }).click();
   const dialog = page.getByTestId("run-launch-dialog");
@@ -355,4 +376,54 @@ test("workflow run dialog scrolls parameter-heavy forms within the viewport", as
 
   fs.mkdirSync("e2e/screenshots/workflow-run-dialog", { recursive: true });
   await dialog.screenshot({ path: "e2e/screenshots/workflow-run-dialog/scrollable-parameter-form.png" });
+});
+
+test("workflow monitor contains wide activity columns inside a narrow surface", async ({ page }) => {
+  await installWorkflowsIpcMock(page);
+  await page.setViewportSize({ width: 1200, height: 700 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+  await openSurface(page, "workflows");
+  await page.getByTestId("workflows-view").getByRole("button", { name: /^monitor$/i }).click();
+  await page.evaluate(async () => {
+    const { useRunStore } = await import("/src/features/workflows/run/useRunStore.ts");
+    useRunStore.setState({
+      loadRuns: async () => undefined,
+      runs: [{
+        run_id: "run-monitor-overflow",
+        blueprint_id: "wf",
+        status: "completed",
+        node_count: 3,
+        failure: null,
+        path: "/runs/run-monitor-overflow",
+        updated_at: "2026-07-15T12:00:00Z",
+      }],
+    });
+  });
+  await page.getByTestId("workflow-monitor").getByRole("button", { name: /^history$/i }).click();
+
+  const scroller = page.getByRole("region", { name: "Workflow activity" });
+  const table = page.getByTestId("workflow-activity-table");
+  await expect(table).toBeVisible();
+
+  const geometry = await scroller.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    documentClientWidth: document.documentElement.clientWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+  }));
+  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+  expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.documentClientWidth);
+  expect(await table.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(960);
+
+  await scroller.evaluate((element) => {
+    element.scrollLeft = element.scrollWidth - element.clientWidth;
+  });
+  await expect.poll(() => scroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+
+  fs.mkdirSync("e2e/screenshots/workflow-monitor-horizontal-overflow", { recursive: true });
+  await page.getByTestId("workflow-monitor").screenshot({
+    path: "e2e/screenshots/workflow-monitor-horizontal-overflow/narrow-pane.png",
+  });
 });

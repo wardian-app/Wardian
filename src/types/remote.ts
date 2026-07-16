@@ -1,4 +1,20 @@
 import type { AgentTeam, Watchlist, WatchlistPrefs } from "../layout/watchlist/types";
+import type {
+  TerminalActivationAckResult,
+  TerminalActivationBeginResult,
+  TerminalBrokerEvent,
+  TerminalBrokerState,
+  TerminalEventBatch,
+  TerminalEventAckResult,
+  TerminalGeometryCommitResult,
+  TerminalLeaseDecision,
+  TerminalOwnerResyncAckResult,
+  TerminalOwnerResyncBeginResult,
+  TerminalPresentationRegistrationResult,
+  TerminalPresentationState,
+  TerminalPresentationUpdateResult,
+  TerminalSnapshot,
+} from "./index";
 
 export type RemoteAccessStatus = "disabled" | "enabled" | "needs_repair";
 
@@ -90,39 +106,150 @@ export interface RemoteTerminalSnapshot {
   omitted_bytes: number;
 }
 
-export interface RemoteTerminalSnapshotMessage {
-  type: "snapshot";
-  attachment_id: string | null;
-  owner_attachment_id: string | null;
-  cols: number;
-  rows: number;
-  state_base64: string;
-}
-
-export interface RemoteTerminalUpdateMessage {
-  type: "update";
-  attachment_id: string | null;
-  owner_attachment_id: string | null;
-  state_base64: string;
-}
-
-export interface RemoteTerminalOwnershipMessage {
-  type: "ownership";
-  owner_attachment_id: string | null;
-  cols: number;
-  rows: number;
-}
-
 export interface RemoteTerminalErrorMessage {
   type: "error";
   code: string;
+  fatal?: boolean;
+  decision?: TerminalLeaseDecision;
 }
 
+export type RemoteTerminalBrokerEvent = Exclude<TerminalBrokerEvent, { type: "output" }> | {
+  type: "output";
+  sequence: number;
+  runtime_generation: number;
+  bytes_base64: string;
+};
+
+export type RemoteTerminalEventBatch = Omit<TerminalEventBatch, "events"> & {
+  events: RemoteTerminalBrokerEvent[];
+};
+
+export type RemoteTerminalRegisteredMessage = {
+  type: "registered";
+  protocol_version: 2;
+} & TerminalPresentationRegistrationResult;
+
+export type RemoteTerminalPresentationStateMessage = {
+  type: "presentation_state";
+  presentation: TerminalPresentationState;
+  broker_state?: TerminalPresentationUpdateResult["broker_state"];
+};
+
+export type RemoteTerminalActivationBeginMessage = {
+  type: "activation_begin";
+  result: TerminalActivationBeginResult;
+};
+
+export type RemoteTerminalActivationAckMessage = {
+  type: "activation_ack";
+  result: TerminalActivationAckResult;
+};
+
+export type RemoteTerminalOwnerResyncBeginMessage = {
+  type: "owner_resync_begin";
+  result: TerminalOwnerResyncBeginResult;
+};
+
+export type RemoteTerminalOwnerResyncAckMessage = {
+  type: "owner_resync_ack";
+  result: TerminalOwnerResyncAckResult;
+};
+
+export type RemoteTerminalInputResultMessage = {
+  type: "input_result";
+  decision: TerminalLeaseDecision;
+};
+
+export type RemoteTerminalResizeResultMessage = {
+  type: "resize_result";
+  result: TerminalGeometryCommitResult;
+};
+
+export type RemoteTerminalBrokerSnapshotMessage = {
+  type: "snapshot";
+  snapshot: TerminalSnapshot;
+};
+
+export type RemoteTerminalEventsMessage = {
+  type: "events";
+  batch: RemoteTerminalEventBatch;
+};
+
+export type RemoteTerminalEventsAckMessage = {
+  type: "events_ack";
+  result: TerminalEventAckResult;
+};
+
+export type RemoteTerminalDetachedMessage = { type: "detached" };
+
 export type RemoteTerminalStreamMessage =
-  | RemoteTerminalSnapshotMessage
-  | RemoteTerminalUpdateMessage
-  | RemoteTerminalOwnershipMessage
-  | RemoteTerminalErrorMessage;
+  | RemoteTerminalErrorMessage
+  | RemoteTerminalRegisteredMessage
+  | RemoteTerminalPresentationStateMessage
+  | RemoteTerminalActivationBeginMessage
+  | RemoteTerminalActivationAckMessage
+  | RemoteTerminalOwnerResyncBeginMessage
+  | RemoteTerminalOwnerResyncAckMessage
+  | RemoteTerminalInputResultMessage
+  | RemoteTerminalResizeResultMessage
+  | RemoteTerminalBrokerSnapshotMessage
+  | RemoteTerminalEventsMessage
+  | RemoteTerminalEventsAckMessage
+  | RemoteTerminalDetachedMessage;
+
+export type RemoteTerminalPresentationMode = "owner" | "mirror" | "connecting";
+
+export type RemoteTerminalV2ClientMessage =
+  | { type: "report_viewport"; runtime_generation: number; cols: number; rows: number }
+  | {
+      type: "set_presentation_state";
+      runtime_generation: number;
+      observed_lease_epoch: number;
+      visibility: "visible" | "hidden";
+      render_state: "mounted" | "suspended";
+      requested_interaction: "interactive" | "read_only";
+      cols?: number;
+      rows?: number;
+    }
+  | { type: "begin_activation"; runtime_generation: number; observed_lease_epoch: number }
+  | {
+      type: "ack_activation";
+      runtime_generation: number;
+      lease_epoch: number;
+      activation_id: string;
+    }
+  | { type: "begin_owner_resync"; runtime_generation: number; lease_epoch: number }
+  | {
+      type: "ack_owner_resync";
+      runtime_generation: number;
+      lease_epoch: number;
+      resync_id: string;
+    }
+  | { type: "input"; runtime_generation: number; lease_epoch: number; data: string }
+  | { type: "binary"; runtime_generation: number; lease_epoch: number; data_base64: string }
+  | {
+      type: "resize";
+      runtime_generation: number;
+      lease_epoch: number;
+      geometry_sequence: number;
+      cols: number;
+      rows: number;
+    }
+  | { type: "request_snapshot" }
+  | {
+      type: "request_events";
+      runtime_generation: number;
+      after_sequence: number;
+    }
+  | { type: "ack_events"; runtime_generation: number; applied_sequence: number }
+  | { type: "detach" };
+
+export type RemoteTerminalV2State = {
+  presentation: TerminalPresentationState | null;
+  broker_state: TerminalBrokerState | null;
+  mode: RemoteTerminalPresentationMode;
+  applied_sequence: number;
+};
 
 export type RemoteAgentInputMode = "message" | "command";
 

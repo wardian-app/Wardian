@@ -7,6 +7,7 @@ import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlis
 import { AgentContextMenu } from "../components/AgentContextMenu";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
 import { isUserFacingProviderName, providerDisplayName } from "../features/agents/providerOptions";
+import type { GraphSurfaceState } from "../features/workbench/surfaces/coreSurfaceMetadata";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "unknown";
@@ -20,7 +21,11 @@ import {
 
 type MaybePromise = void | Promise<void>;
 
-interface GraphViewProps {
+export interface GraphViewProps {
+  visibility?: "visible" | "hidden";
+  rendererActive?: boolean;
+  initialSurfaceState?: GraphSurfaceState;
+  onSurfaceStateChange?: (state: GraphSurfaceState) => void;
   filteredAgents: AgentConfig[];
   allAgents: AgentConfig[];
   telemetry: Record<string, AgentTelemetry>;
@@ -33,7 +38,9 @@ interface GraphViewProps {
   teams: AgentTeam[];
   interactions: AgentInteractions;
   onSelectionChange: (ids: Set<string>) => void;
-  onOpenAgentInGrid: (agentId: string) => void;
+  onOpenAgent?: (agentId: string) => void;
+  /** @deprecated Legacy flag-off adapter. Workbench surfaces use onOpenAgent. */
+  onOpenAgentInGrid?: (agentId: string) => void;
   onInitiateRename: (agentId: string) => MaybePromise;
   onQuery: (agentId: string) => MaybePromise;
   onPause: (agentId: string) => MaybePromise;
@@ -61,23 +68,41 @@ const ALL_REASONS: GraphRelationshipReason[] = [
 ];
 
 export const GraphView: React.FC<GraphViewProps> = (props) => {
-  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(new Set());
+  const openAgent = props.onOpenAgent ?? props.onOpenAgentInGrid;
+  const initialSurfaceState = props.initialSurfaceState;
+  const [enabledReasons, setEnabledReasons] = useState<Set<GraphRelationshipReason>>(
+    () => new Set(initialSurfaceState?.enabled_reasons ?? []),
+  );
   const [topology, setTopology] = useState<TopologySnapshot | null>(null);
   const [pairActivity, setPairActivity] = useState<PairActivityEntry[]>([]);
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(
-    Array.from(props.selectedAgentIds)[0] ?? null,
+    initialSurfaceState?.inspected_agent_id ?? Array.from(props.selectedAgentIds)[0] ?? null,
   );
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(initialSurfaceState?.inspector_open ?? true);
   const [resetSignal, setResetSignal] = useState(0);
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(
+    initialSurfaceState?.selected_edge_id ?? null,
+  );
   const [contextMenu, setContextMenu] = useState<{ agentId: string; agentIds: string[]; x: number; y: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerSearch, setPickerSearch] = useState("");
+  const [pickerSearch, setPickerSearch] = useState(initialSurfaceState?.picker_search ?? "");
+  const onSurfaceStateChangeRef = useRef(props.onSurfaceStateChange);
+  onSurfaceStateChangeRef.current = props.onSurfaceStateChange;
   // Layout freeze: node positions are captured once topology data is loaded
   // and reused across edge edits, so drawing or deleting edges never moves
   // nodes. A re-layout (button or node-set change) clears the freeze.
   const frozenLayoutRef = useRef<{ nodeKey: string; positions: Map<string, { x: number; y: number }> } | null>(null);
   const [layoutNonce, setLayoutNonce] = useState(0);
+
+  useEffect(() => {
+    onSurfaceStateChangeRef.current?.({
+      enabled_reasons: ALL_REASONS.filter((reason) => enabledReasons.has(reason)),
+      inspected_agent_id: inspectedAgentId,
+      inspector_open: inspectorOpen,
+      selected_edge_id: selectedEdgeId,
+      picker_search: pickerSearch,
+    });
+  }, [enabledReasons, inspectedAgentId, inspectorOpen, pickerSearch, selectedEdgeId]);
 
   const rerunLayout = () => {
     frozenLayoutRef.current = null;
@@ -85,6 +110,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   };
 
   useEffect(() => {
+    if (props.visibility === "hidden") return;
     let cancelled = false;
     const refreshTopology = async () => {
       try {
@@ -120,7 +146,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
         p.then((un) => un()).catch(() => {});
       });
     };
-  }, []);
+  }, [props.visibility]);
 
   const projection = useMemo(() => buildAgentGraph({
     agents: props.allAgents,
@@ -187,6 +213,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   }, [projection.nodes, projectionNodeIds, props.selectedAgentIds]);
 
   useEffect(() => {
+    if (props.visibility === "hidden") return;
     const handleKeyDown = async (event: KeyboardEvent) => {
       if (event.key === "Delete" && selectedEdgeId) {
         // Skip if typing in an input or contentEditable element
@@ -209,7 +236,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedEdgeId, projection.commEdges]);
+  }, [props.visibility, selectedEdgeId, projection.commEdges]);
 
   const inspectedAgent = projection.nodes.find((node) => node.id === inspectedAgentId) ?? projection.nodes[0] ?? null;
   const filteredCount = props.filteredAgents.length;
@@ -256,7 +283,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
       }}
     >
       <div className="graph-toolbar graph-toolbar--stable-centered">
-        <div className="graph-scope">
+        <div className="graph-scope graph-toolbar-primary">
           <div className="label-small">Scope</div>
           <div className="graph-scope-label">{projection.scopeLabel}</div>
           <div className="graph-scope-count">{filteredCount} agents visible</div>
@@ -311,16 +338,18 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
         </div>
       </div>
 
-      <div className={`graph-body ${inspectorOpen ? "" : "graph-body--inspector-hidden"}`}>
+      <div className={`graph-body ${inspectorOpen ? "graph-body--inspector-open" : "graph-body--inspector-hidden"}`}>
         <div className="graph-canvas-shell">
-          {projection.nodes.length === 0 ? (
+          {props.rendererActive === false ? (
+            <div className="graph-empty-state">Graph renderer paused while hidden</div>
+          ) : projection.nodes.length === 0 ? (
             <div className="graph-empty-state">No agents in graph scope</div>
           ) : (
             <GraphCanvas
               projection={projection}
               resetSignal={resetSignal}
               onSelectAgent={selectAgent}
-              onOpenAgent={props.onOpenAgentInGrid}
+              onOpenAgent={(agentId) => openAgent?.(agentId)}
               onContextMenu={openContextMenu}
               selectedEdgeId={selectedEdgeId}
               onSelectEdge={setSelectedEdgeId}
@@ -402,8 +431,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
                   setPickerSearch,
                 )}
               </div>
-              <button type="button" className="graph-open-grid" onClick={() => props.onOpenAgentInGrid(inspectedAgent.id)}>
-                Open in Grid
+              <button type="button" className="graph-open-grid" onClick={() => openAgent?.(inspectedAgent.id)}>
+                Open Agent
               </button>
               </>
             ) : (

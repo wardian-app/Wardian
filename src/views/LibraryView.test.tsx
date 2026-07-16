@@ -2,7 +2,6 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LibraryView } from './LibraryView';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { useLayoutStore } from '../store/useLayoutStore';
 import { LibraryIndex } from '../types';
 
 const emptyIndex: LibraryIndex = {
@@ -25,8 +24,7 @@ describe('LibraryView', () => {
       error: null,
       activeSection: 'skills',
     });
-    localStorage.clear();
-    act(() => useLayoutStore.getState().resetLayout());
+    act(() => useLibraryStore.getState().resetLibraryDetailWidth());
   });
 
   it('renders the section rail, list, and detail regions', () => {
@@ -36,6 +34,25 @@ describe('LibraryView', () => {
     expect(screen.getByTestId('library-section-rail')).toBeInTheDocument();
     expect(screen.getByTestId('library-list')).toBeInTheDocument();
     expect(screen.getByTestId('library-detail')).toBeInTheDocument();
+  });
+
+  it('uses browse/detail navigation in compact panes', () => {
+    const select = vi.fn().mockResolvedValue(undefined);
+    useLibraryStore.setState({
+      selection: { section: 'skills', entryRef: 'skills/test' },
+      select,
+    });
+
+    render(<LibraryView selectedAgentIds={new Set()} />);
+
+    expect(screen.getByTestId('library-view')).toHaveAttribute('data-detail-open', 'true');
+    expect(screen.getByTestId('library-list')).toHaveClass('library-view__browse');
+    expect(screen.getByTestId('library-detail')).toHaveClass('library-view__detail');
+
+    const back = screen.getByRole('button', { name: 'Back to library list' });
+    expect(back).toHaveClass('library-view__back');
+    fireEvent.click(back);
+    expect(select).toHaveBeenCalledWith(null);
   });
 
   it('subscribes to library changes on mount', () => {
@@ -110,13 +127,13 @@ describe('LibraryView', () => {
 
     expect(handle).toBeInTheDocument();
     expect(detail).toContainElement(handle);
-    expect(detail).toHaveStyle({ width: `${useLayoutStore.getState().libraryDetailWidth}px` });
+    expect(detail).toHaveStyle({ width: `${useLibraryStore.getState().libraryDetailWidth}px` });
   });
 
   it('dragging the resize handle widens the detail pane and persists the width', () => {
     render(<LibraryView selectedAgentIds={new Set()} />);
 
-    const startWidth = useLayoutStore.getState().libraryDetailWidth;
+    const startWidth = useLibraryStore.getState().libraryDetailWidth;
     const handle = screen.getByTestId('sidebar-resize-handle');
 
     // edge="left": dragging left (negative delta) grows the right-anchored detail pane.
@@ -124,7 +141,7 @@ describe('LibraryView', () => {
     fireEvent.pointerMove(window, { clientX: 440 });
     fireEvent.pointerUp(window, { clientX: 440 });
 
-    const nextWidth = useLayoutStore.getState().libraryDetailWidth;
+    const nextWidth = useLibraryStore.getState().libraryDetailWidth;
     expect(nextWidth).toBe(startWidth + 60);
     expect(screen.getByTestId('library-detail')).toHaveStyle({ width: `${nextWidth}px` });
   });
@@ -138,11 +155,11 @@ describe('LibraryView', () => {
     fireEvent.pointerMove(window, { clientX: 300 });
     fireEvent.pointerUp(window, { clientX: 300 });
 
-    expect(useLayoutStore.getState().libraryDetailWidth).not.toBe(480);
+    expect(useLibraryStore.getState().libraryDetailWidth).not.toBe(480);
 
     fireEvent.doubleClick(handle);
 
-    expect(useLayoutStore.getState().libraryDetailWidth).toBe(480);
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(480);
   });
 
   it('never shrinks the list pane below its minimum width', () => {

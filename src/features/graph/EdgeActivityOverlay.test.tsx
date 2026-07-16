@@ -28,15 +28,26 @@ vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(mockCanvasCo
 
 const mocks = vi.hoisted(() => {
   const cameraHandlers = new Map<string, (state: any) => void>();
+  const cameraState = { x: 0.4, y: 0.6, angle: 0, ratio: 1.25 };
+  const cameraMatrix = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
   return {
     cameraHandlers,
+    cameraState,
+    cameraMatrix,
+    matrixFromCamera: vi.fn((
+      _state: unknown,
+      _viewportDimensions: unknown,
+      _graphDimensions: unknown,
+      _padding: number,
+    ) => cameraMatrix),
     getNodeDisplayData: vi.fn(),
-    framedGraphToViewport: vi.fn((data) => data),
+    framedGraphToViewport: vi.fn((data, _override?: unknown) => data),
     getContainer: vi.fn().mockReturnValue(document.createElement("div")),
     requestAnimationFrame: vi.spyOn(global, "requestAnimationFrame").mockReturnValue(123 as any),
     cancelAnimationFrame: vi.spyOn(global, "cancelAnimationFrame"),
     createSigmaInstance: () => ({
       getCamera: () => ({
+        getState: () => cameraState,
         on: (event: string, handler: (state: any) => void) => {
           cameraHandlers.set(event, handler);
         },
@@ -45,16 +56,30 @@ const mocks = vi.hoisted(() => {
         },
       }),
       getNodeDisplayData: (nodeId: string) => mocks.getNodeDisplayData(nodeId),
-      framedGraphToViewport: (data: any) => mocks.framedGraphToViewport(data),
+      framedGraphToViewport: (data: any, override?: any) =>
+        mocks.framedGraphToViewport(data, override),
+      getDimensions: () => ({ width: 800, height: 600 }),
+      getGraphDimensions: () => ({ width: 1, height: 1 }),
+      getStagePadding: () => 30,
       getContainer: () => mocks.getContainer(),
     } as any as Sigma),
   };
 });
 
+vi.mock("sigma/utils", () => ({
+  matrixFromCamera: (
+    state: unknown,
+    viewportDimensions: unknown,
+    graphDimensions: unknown,
+    padding: number,
+  ) => mocks.matrixFromCamera(state, viewportDimensions, graphDimensions, padding),
+}));
+
 beforeEach(() => {
   mocks.cameraHandlers.clear();
   mocks.getNodeDisplayData.mockClear();
   mocks.framedGraphToViewport.mockClear();
+  mocks.matrixFromCamera.mockClear();
   mocks.getContainer.mockClear().mockReturnValue(document.createElement("div"));
   mocks.requestAnimationFrame.mockClear();
   mocks.cancelAnimationFrame.mockClear();
@@ -413,6 +438,44 @@ describe("EdgeActivityOverlay", () => {
     expect(mocks.getNodeDisplayData).toHaveBeenCalledWith("a");
     expect(mocks.getNodeDisplayData).toHaveBeenCalledWith("b");
     expect(mocks.getNodeDisplayData).toHaveBeenCalledWith("c");
+  });
+
+  it("projects overlay edges from the current camera state", () => {
+    const sigma = mocks.createSigmaInstance();
+
+    render(
+      <EdgeActivityOverlay
+        sigma={sigma}
+        commEdges={[
+          {
+            id: "a--b",
+            source: "a",
+            target: "b",
+            origin: "ghost",
+            state: "dormant",
+            recency: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(mocks.framedGraphToViewport).toHaveBeenCalledTimes(2);
+    expect(mocks.matrixFromCamera).toHaveBeenCalledWith(
+      mocks.cameraState,
+      { width: 800, height: 600 },
+      { width: 1, height: 1 },
+      30,
+    );
+    expect(mocks.framedGraphToViewport).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ x: 100, y: 100 }),
+      { matrix: mocks.cameraMatrix },
+    );
+    expect(mocks.framedGraphToViewport).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ x: 100, y: 100 }),
+      { matrix: mocks.cameraMatrix },
+    );
   });
 
   it("skips edges with missing node display data", () => {

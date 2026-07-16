@@ -1654,12 +1654,55 @@ test("deterministic Wardian rendering audit scrolls through the terminal debug A
     "utf8",
   );
 
+  assert.match(renderingTestSource, /resolveAgentTerminalPresentationId/);
   assert.match(renderingTestSource, /__wardianTerminalDebug\?\.scrollToTop/);
-  assert.match(renderingTestSource, /snapshot\?\.\(sid\)/);
+  assert.match(renderingTestSource, /snapshot\?\.\(pid\)/);
   assert.match(renderingTestSource, /viewportY === 0/);
+  assert.doesNotMatch(renderingTestSource, /snapshot\?\.\(sid\)/);
   assert.doesNotMatch(renderingTestSource, /viewport\.scrollTop = 0/);
-  assert.match(terminalSource, /scrollToBottom: \(sessionId: string\) => boolean/);
-  assert.match(terminalSource, /scrollToViewportLine: \(sessionId: string, line: number\) => boolean/);
+  assert.match(terminalSource, /scrollToBottom: \(presentationId: string\) => boolean/);
+  assert.match(terminalSource, /scrollToViewportLine: \(presentationId: string, line: number\) => boolean/);
+});
+
+test("repository terminal debug consumers never pass runtime session identities", () => {
+  const sourceFiles = [];
+  const ignoredDirectories = new Set([
+    ".git",
+    ".tmp",
+    "dist",
+    "node_modules",
+    "playwright-report",
+    "target",
+    "vendor",
+  ]);
+  const collectSources = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory() && !ignoredDirectories.has(entry.name)) {
+        collectSources(entryPath);
+      } else if (/\.(?:[cm]?js|tsx?)$/.test(entry.name)) {
+        sourceFiles.push(entryPath);
+      }
+    }
+  };
+  collectSources(process.cwd());
+
+  const staleInvocation = /__wardianTerminalDebug\?\.(?:snapshot|rawOutputLog|scrollToTop|scrollToBottom|scrollToViewportLine|terminalLinks)(?:\?\.)?\(\s*(?:sid|sessionId)\b/;
+  for (const file of sourceFiles) {
+    const source = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(
+      source,
+      staleInvocation,
+      `${path.relative(process.cwd(), file)} must not pass a runtime session identity to terminal debug`,
+    );
+  }
+
+  const demoSource = fs.readFileSync(
+    path.join(process.cwd(), "scripts", "capture-readme-demo-real.mjs"),
+    "utf8",
+  );
+  assert.match(demoSource, /data-terminal-presentation-id/);
+  assert.match(demoSource, /snapshot\?\.\(exactPresentationId\)/);
 });
 
 test("outside capture records native terminal ANSI size probe responses", () => {
@@ -1833,7 +1876,9 @@ test("Wardian geometry sweep records terminal metrics across app window sizes", 
   assert.match(testSource, /WARDIAN_E2E_TERMINAL_SWEEP_WIDTHS/);
   assert.match(testSource, /WARDIAN_E2E_TERMINAL_SWEEP_ROW_HEIGHT/);
   assert.match(testSource, /geometry-sweep/);
-  assert.match(testSource, /__wardianTerminalDebug\?\.snapshot/);
+  assert.match(testSource, /resolveAgentTerminalPresentationId/);
+  assert.match(testSource, /__wardianTerminalDebug\?\.snapshot\(pid\)/);
+  assert.doesNotMatch(testSource, /__wardianTerminalDebug\?\.snapshot\(sid\)/);
   assert.match(testSource, /cssCellWidth/);
   assert.match(testSource, /hostRect/);
 });

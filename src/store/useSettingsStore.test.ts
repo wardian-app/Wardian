@@ -6,6 +6,7 @@ import {
   defaultTerminalFontSize,
   LINUX_TERMINAL_FONT_FAMILY,
   MACOS_TERMINAL_FONT_FAMILY,
+  normalizeWorkbenchNewTabAction,
   WINDOWS_TERMINAL_FONT_FAMILY,
   useSettingsStore,
 } from './useSettingsStore';
@@ -24,6 +25,7 @@ function resetAppPreferences() {
     externalEditor: 'system',
     externalEditorCustomExecutable: '',
     explorerFileClickAction: 'preview',
+    workbenchNewTabAction: 'home',
     app_settings_overrides: {},
     app_settings_loaded: false,
   });
@@ -239,6 +241,28 @@ describe('app settings persistence', () => {
     mockedInvoke.mockReset();
     localStorage.clear();
     resetAppPreferences();
+  });
+
+  it('normalizes workbench new tab actions to the visual chooser by default', () => {
+    expect(normalizeWorkbenchNewTabAction('palette')).toBe('palette');
+    expect(normalizeWorkbenchNewTabAction('home')).toBe('home');
+    expect(normalizeWorkbenchNewTabAction('')).toBe('home');
+    expect(normalizeWorkbenchNewTabAction('  ')).toBe('home');
+    expect(normalizeWorkbenchNewTabAction('cards')).toBe('home');
+    expect(normalizeWorkbenchNewTabAction(undefined)).toBe('home');
+  });
+
+  it('persists only the non-default workbench new tab action override', () => {
+    useSettingsStore.getState().setWorkbenchNewTabAction('palette');
+    expect(useSettingsStore.getState().app_settings_overrides).toEqual(
+      expect.objectContaining({ workbench_new_tab_action: 'palette' }),
+    );
+
+    useSettingsStore.getState().setWorkbenchNewTabAction('home');
+    expect(useSettingsStore.getState()).toHaveProperty('workbenchNewTabAction', 'home');
+    expect(useSettingsStore.getState().app_settings_overrides).not.toHaveProperty(
+      'workbench_new_tab_action',
+    );
   });
 
   it('loads app preferences from the backend app settings file', async () => {
@@ -570,5 +594,18 @@ describe('app settings persistence', () => {
     expect(useSettingsStore.getState().app_settings_loaded).toBe(true);
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+
+  it('owns transient Settings modal state without serializing it', () => {
+    useSettingsStore.getState().setSettingsOpen(false);
+    useSettingsStore.getState().toggleSettings();
+    expect(useSettingsStore.getState().settingsOpen).toBe(true);
+    useSettingsStore.getState().setSettingsOpen(false);
+    expect(useSettingsStore.getState().settingsOpen).toBe(false);
+
+    const persisted = JSON.parse(localStorage.getItem('wardian-settings') ?? '{}') as {
+      state?: Record<string, unknown>;
+    };
+    expect(persisted.state).not.toHaveProperty('settingsOpen');
   });
 });

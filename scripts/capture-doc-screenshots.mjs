@@ -83,6 +83,43 @@ const telemetry = [
   },
 ];
 
+const workbenchDocument = {
+  schema_version: 1,
+  revision: 1,
+  saved_at: "2026-05-12T10:20:00.000Z",
+  root: { kind: "group", group_id: "docs-group" },
+  groups: {
+    "docs-group": {
+      group_id: "docs-group",
+      surface_ids: ["docs-overview"],
+      active_surface_id: "docs-overview",
+    },
+  },
+  surfaces: {
+    "docs-overview": {
+      surface_id: "docs-overview",
+      surface_type: "agents-overview",
+      state_schema_version: 1,
+      state: {
+        mode: "auto",
+        focused_agent_id: "docs-codex",
+        search_query: "",
+        status_filter: [],
+      },
+    },
+  },
+  active_group_id: "docs-group",
+  recently_closed: [],
+  shell: {
+    left_sidebar_collapsed: false,
+    left_sidebar_width: 240,
+    right_sidebar_collapsed: false,
+    right_sidebar_width: 240,
+    bottom_terminal_open: false,
+    bottom_terminal_height: 360,
+  },
+};
+
 const terminalOutput = {
   "docs-codex":
     "\x1b]0;Working\x07$ Summarize this workspace in five bullets. Do not edit files.\n" +
@@ -193,6 +230,38 @@ const libraryTree = {
       },
     },
   ],
+};
+
+const emptyLibraryTree = { path: "", name: "Root", children: [] };
+const libraryIndex = {
+  sections: {
+    skills: { stubbed: false, tree: emptyLibraryTree },
+    prompts: {
+      stubbed: false,
+      tree: {
+        path: "",
+        name: "Root",
+        children: [
+          {
+            kind: "prompt",
+            name: "Review Checklist",
+            path: "review/checklist.md",
+            entry_ref: "prompts/review/checklist.md",
+            description: "Focused patch review with findings first.",
+            tags: ["review", "quality"],
+            is_starred: true,
+            deployment_count: 0,
+            error: null,
+          },
+        ],
+      },
+    },
+    workflows: { stubbed: false, tree: emptyLibraryTree },
+    classes: { stubbed: false, tree: emptyLibraryTree },
+    mcps: { stubbed: true, tree: emptyLibraryTree },
+  },
+  deployments: {},
+  orphans: [],
 };
 
 const workflows = [
@@ -339,6 +408,15 @@ async function setSidebarContentWidth(page, width) {
   }, width);
 }
 
+async function openWorkbenchSurface(page, surfaceType) {
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+P" : "Control+P");
+  const dialog = page.getByRole("dialog", { name: "Open Surface" });
+  await dialog.waitFor({ timeout: 10_000 });
+  await dialog.locator(`[role="option"][data-surface-type="${surfaceType}"]`).click();
+  await page.locator(`[role="tab"][data-surface-type="${surfaceType}"][aria-selected="true"]`)
+    .waitFor({ timeout: 10_000 });
+}
+
 async function assertShellHasNoHorizontalOverlap(page, relativePath) {
   const rects = await page.evaluate(() => {
     const rectFor = (selector) => {
@@ -388,7 +466,7 @@ async function assertShellHasNoHorizontalOverlap(page, relativePath) {
 
 async function installTauriDocsMock(page, options = {}) {
   const effectiveTerminalOutput = options.terminalOutput ?? terminalOutput;
-  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds }) => {
+  await page.addInitScript(({ agents, agentClasses, telemetry, terminalOutput, libraryTree, libraryIndex, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds, workbenchDocument }) => {
     const fixedNow = 1778590800000;
     const RealDate = Date;
 
@@ -409,6 +487,7 @@ async function installTauriDocsMock(page, options = {}) {
     const callbacks = new Map();
     const listeners = new Map();
     const terminalReads = {};
+    let workbenchState = structuredClone(workbenchDocument);
     let callbackId = 1;
 
     const tauriWindow = window;
@@ -449,6 +528,25 @@ async function installTauriDocsMock(page, options = {}) {
           return callbackId++;
         }
         if (command === "plugin:event|unlisten") return null;
+        if (command === "get_workbench_boot_config") return { safe_mode: false };
+        if (command === "load_workbench_state") {
+          return {
+            source: "primary",
+            document: structuredClone(workbenchState),
+            notice: null,
+            durable_revision: workbenchState.revision,
+            durable_token: `docs-${workbenchState.revision}`,
+          };
+        }
+        if (command === "save_workbench_state") {
+          workbenchState = structuredClone(args.document);
+          return {
+            outcome: "saved",
+            durable_revision: workbenchState.revision,
+            durable_token: `docs-${workbenchState.revision}`,
+            request_id: args.request_id,
+          };
+        }
         if (command === "list_agents") return agents;
         if (command === "list_agent_classes") return agentClasses;
         if (command === "load_watchlists") {
@@ -569,6 +667,10 @@ async function installTauriDocsMock(page, options = {}) {
         if (command === "save_workflow_library") return null;
         if (command === "list_scheduled_runs") return [];
         if (command === "get_library_tree") return libraryTree;
+        if (command === "get_library_index") return libraryIndex;
+        if (command === "read_library_item") {
+          return "Review the current branch and return findings first.";
+        }
         if (command === "library_watch" || command === "library_unwatch") return null;
         if (command === "list_deployed_skills" || command === "list_deployed_skill_refs") return [];
         if (command === "sync_provider_theme_settings") return null;
@@ -607,7 +709,7 @@ async function installTauriDocsMock(page, options = {}) {
         data: { type: "progress", content: "Capturing screenshots" },
       });
     }, 600);
-  }, { agents, agentClasses, telemetry, terminalOutput: effectiveTerminalOutput, libraryTree, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds });
+  }, { agents, agentClasses, telemetry, terminalOutput: effectiveTerminalOutput, libraryTree, libraryIndex, workflows, queueItems, repoRoot, directoryTree, gitStatus, gitHistory, dismissedOnboardingHintIds, workbenchDocument });
 }
 
 function collectPageDiagnostics(page, browserErrors) {
@@ -669,6 +771,16 @@ async function main() {
     await capture(page, "grid/app-shell.png");
     await capture(page, "grid/active-agent-state.png", page.locator("main"));
 
+    await page.keyboard.press("Control+Shift+P");
+    await page.getByRole("dialog", { name: "Command Palette" }).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(300);
+    await capture(page, "workbench-navigation/command-palette.png");
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "Command Palette" }).waitFor({
+      state: "hidden",
+      timeout: 10_000,
+    });
+
     await page.locator('[data-testid="agent-watchlist"]').waitFor({ timeout: 10_000 });
     await capture(page, "watchlists/agent-roster.png", page.locator('[data-testid="agent-watchlist"]'));
 
@@ -681,11 +793,6 @@ async function main() {
     await page.locator('[data-testid="spawn-agent-name"]').waitFor({ timeout: 10_000 });
     await page.locator('[data-testid="spawn-workspace-path"]').blur();
     await capture(page, "spawn-agent/spawn-form.png");
-
-    await page.locator('[data-testid="sidebar-tab-classes"]').click();
-    await page.getByRole("heading", { name: "Classes", exact: true }).waitFor({ timeout: 10_000 });
-    await page.waitForTimeout(700);
-    await capture(page, "classes/class-management.png", page.locator('[data-testid="class-manager-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await page.waitForTimeout(500);
@@ -704,7 +811,7 @@ async function main() {
 
     await setSidebarContentWidth(page, defaultSidebarContentWidth);
 
-    await page.getByRole("button", { name: "Grid" }).click();
+    await openWorkbenchSurface(page, "agents-overview");
     await page.locator("#agent-card-docs-codex").click();
     await page.locator('[data-testid="sidebar-tab-explorer"]').click();
     await page.waitForTimeout(700);
@@ -716,11 +823,11 @@ async function main() {
     await capture(page, "explorer/workspace-tree.png", page.locator('[data-testid="explorer-panel"]'));
 
     await page.locator('[data-testid="sidebar-tab-git"]').click();
-    await page.getByText("docs/task-oriented-feature-guides").waitFor({ timeout: 10_000 });
+    await page.getByRole("heading", { name: "Source Control", exact: true }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "source-control/status-panel.png", page.locator("aside").filter({ hasText: "Source Control" }).first());
 
-    await page.locator(".titlebar-tab", { hasText: "Queue" }).click();
+    await openWorkbenchSurface(page, "queue");
     await page.getByText("Workflow completed").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "queue/queue-view.png", page.locator("main"));
@@ -729,18 +836,22 @@ async function main() {
     await page.waitForTimeout(700);
     await capture(page, "queue/completed-result.png", page.locator("main"));
 
-    await page.getByRole("button", { name: "Library" }).click();
+    await openWorkbenchSurface(page, "library");
+    await page.getByTestId("library-section-prompts").click();
+    await page.getByTestId("library-row-prompts/review/checklist.md").click();
     await page.getByRole("heading", { name: "Review Checklist" }).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "library/library-view.png");
 
-    await page.locator(".titlebar-tab", { hasText: "Workflows" }).click();
+    await openWorkbenchSurface(page, "workflows");
     await page.getByTestId("workflows-view").waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "workflows/builder-canvas.png");
 
-    await page.getByRole("button", { name: "Dashboard" }).click();
-    await page.locator("#agent-card-docs-codex").waitFor({ timeout: 10_000 });
+    await openWorkbenchSurface(page, "dashboard");
+    await page.locator(
+      '[data-testid="surface-panel"][data-surface-type="dashboard"] #agent-card-docs-codex',
+    ).waitFor({ timeout: 10_000 });
     await page.waitForTimeout(700);
     await capture(page, "dashboard/system-summary.png");
 

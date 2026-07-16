@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "scenario": "production-workbench-performance-v1",
+  "benchmark": {
+    "heavy_surface_hidden_grace_ms": 250
+  },
+  "workbench": {
+    "schema_version": 1,
+    "revision": 20,
+    "saved_at": "2026-07-10T00:00:00.000Z",
+    "root": {
+      "kind": "split",
+      "node_id": "perf-split-root",
+      "direction": "horizontal",
+      "ratio": 0.5,
+      "first": {
+        "kind": "split",
+        "node_id": "perf-split-left",
+        "direction": "vertical",
+        "ratio": 0.5,
+        "first": { "kind": "group", "group_id": "perf-group-1" },
+        "second": { "kind": "group", "group_id": "perf-group-2" }
+      },
+      "second": {
+        "kind": "split",
+        "node_id": "perf-split-right",
+        "direction": "vertical",
+        "ratio": 0.5,
+        "first": { "kind": "group", "group_id": "perf-group-3" },
+        "second": { "kind": "group", "group_id": "perf-group-4" }
+      }
+    },
+    "groups": {
+      "perf-group-1": {
+        "group_id": "perf-group-1",
+        "surface_ids": ["perf-agent-owner", "perf-overview", "perf-dashboard", "perf-queue", "perf-library"],
+        "active_surface_id": "perf-agent-owner"
+      },
+      "perf-group-2": {
+        "group_id": "perf-group-2",
+        "surface_ids": ["perf-agent-mirror-1", "perf-workflows", "perf-graph", "perf-garden", "perf-agent-02"],
+        "active_surface_id": "perf-agent-mirror-1"
+      },
+      "perf-group-3": {
+        "group_id": "perf-group-3",
+        "surface_ids": ["perf-agent-mirror-2", "perf-agent-03", "perf-agent-04", "perf-agent-05", "perf-agent-06"],
+        "active_surface_id": "perf-agent-mirror-2"
+      },
+      "perf-group-4": {
+        "group_id": "perf-group-4",
+        "surface_ids": ["perf-agent-mirror-3", "perf-agent-07", "perf-agent-08", "perf-agent-09", "perf-agent-10"],
+        "active_surface_id": "perf-agent-mirror-3"
+      }
+    },
+    "surfaces": {
+      "perf-agent-owner": { "surface_id": "perf-agent-owner", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
+      "perf-overview": { "surface_id": "perf-overview", "surface_type": "agents-overview", "state_schema_version": 1, "state": { "mode": "auto", "focused_agent_id": "perf-agent-01", "search_query": "", "status_filter": [] } },
+      "perf-dashboard": { "surface_id": "perf-dashboard", "surface_type": "dashboard", "state_schema_version": 1, "state": {} },
+      "perf-queue": { "surface_id": "perf-queue", "surface_type": "queue", "state_schema_version": 1, "state": {} },
+      "perf-library": { "surface_id": "perf-library", "surface_type": "library", "state_schema_version": 1, "state": {} },
+      "perf-agent-mirror-1": { "surface_id": "perf-agent-mirror-1", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
+      "perf-workflows": { "surface_id": "perf-workflows", "surface_type": "workflows", "state_schema_version": 1, "state": {} },
+      "perf-graph": { "surface_id": "perf-graph", "surface_type": "graph", "state_schema_version": 1, "state": { "enabled_reasons": [], "inspected_agent_id": null, "inspector_open": true, "selected_edge_id": null, "picker_search": "" } },
+      "perf-garden": { "surface_id": "perf-garden", "surface_type": "garden", "state_schema_version": 1, "state": { "selected_unit_key": null } },
+      "perf-agent-02": { "surface_id": "perf-agent-02", "surface_type": "agent-session", "resource_key": "perf-agent-02", "state_schema_version": 1, "state": {} },
+      "perf-agent-mirror-2": { "surface_id": "perf-agent-mirror-2", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
+      "perf-agent-03": { "surface_id": "perf-agent-03", "surface_type": "agent-session", "resource_key": "perf-agent-03", "state_schema_version": 1, "state": {} },
+      "perf-agent-04": { "surface_id": "perf-agent-04", "surface_type": "agent-session", "resource_key": "perf-agent-04", "state_schema_version": 1, "state": {} },
+      "perf-agent-05": { "surface_id": "perf-agent-05", "surface_type": "agent-session", "resource_key": "perf-agent-05", "state_schema_version": 1, "state": {} },
+      "perf-agent-06": { "surface_id": "perf-agent-06", "surface_type": "agent-session", "resource_key": "perf-agent-06", "state_schema_version": 1, "state": {} },
+      "perf-agent-mirror-3": { "surface_id": "perf-agent-mirror-3", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
+      "perf-agent-07": { "surface_id": "perf-agent-07", "surface_type": "agent-session", "resource_key": "perf-agent-07", "state_schema_version": 1, "state": {} },
+      "perf-agent-08": { "surface_id": "perf-agent-08", "surface_type": "agent-session", "resource_key": "perf-agent-08", "state_schema_version": 1, "state": {} },
+      "perf-agent-09": { "surface_id": "perf-agent-09", "surface_type": "agent-session", "resource_key": "perf-agent-09", "state_schema_version": 1, "state": {} },
+      "perf-agent-10": { "surface_id": "perf-agent-10", "surface_type": "agent-session", "resource_key": "perf-agent-10", "state_schema_version": 1, "state": {} }
+    },
+    "active_group_id": "perf-group-1",
+    "recently_closed": [],
+    "shell": {
+      "left_sidebar_collapsed": false,
+      "left_sidebar_width": 240,
+      "right_sidebar_collapsed": false,
+      "right_sidebar_width": 240,
+      "bottom_terminal_open": false,
+      "bottom_terminal_height": 360
+    }
+  },
+  "agents": [
+    { "session_id": "perf-agent-01", "session_name": "Perf Agent 01", "agent_class": "Coder", "folder": "/workspace/perf-agent-01", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-02", "session_name": "Perf Agent 02", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-02", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-03", "session_name": "Perf Agent 03", "agent_class": "Coder", "folder": "/workspace/perf-agent-03", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-04", "session_name": "Perf Agent 04", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-04", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-05", "session_name": "Perf Agent 05", "agent_class": "Coder", "folder": "/workspace/perf-agent-05", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-06", "session_name": "Perf Agent 06", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-06", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-07", "session_name": "Perf Agent 07", "agent_class": "Coder", "folder": "/workspace/perf-agent-07", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-08", "session_name": "Perf Agent 08", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-08", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-09", "session_name": "Perf Agent 09", "agent_class": "Coder", "folder": "/workspace/perf-agent-09", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-10", "session_name": "Perf Agent 10", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-10", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-11", "session_name": "Perf Agent 11", "agent_class": "Coder", "folder": "/workspace/perf-agent-11", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-12", "session_name": "Perf Agent 12", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-12", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-13", "session_name": "Perf Agent 13", "agent_class": "Coder", "folder": "/workspace/perf-agent-13", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-14", "session_name": "Perf Agent 14", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-14", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-15", "session_name": "Perf Agent 15", "agent_class": "Coder", "folder": "/workspace/perf-agent-15", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-16", "session_name": "Perf Agent 16", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-16", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-17", "session_name": "Perf Agent 17", "agent_class": "Coder", "folder": "/workspace/perf-agent-17", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-18", "session_name": "Perf Agent 18", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-18", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-19", "session_name": "Perf Agent 19", "agent_class": "Coder", "folder": "/workspace/perf-agent-19", "provider": "mock", "is_off": false },
+    { "session_id": "perf-agent-20", "session_name": "Perf Agent 20", "agent_class": "Reviewer", "folder": "/workspace/perf-agent-20", "provider": "mock", "is_off": false }
+  ],
+  "terminal_presentations": [
+    { "surface_id": "perf-agent-owner", "presentation_id": "perf-agent-owner:agent:perf-agent-01", "session_id": "perf-agent-01", "mode": "owner" },
+    { "surface_id": "perf-agent-mirror-1", "presentation_id": "perf-agent-mirror-1:agent:perf-agent-01", "session_id": "perf-agent-01", "mode": "mirror" },
+    { "surface_id": "perf-agent-mirror-2", "presentation_id": "perf-agent-mirror-2:agent:perf-agent-01", "session_id": "perf-agent-01", "mode": "mirror" },
+    { "surface_id": "perf-agent-mirror-3", "presentation_id": "perf-agent-mirror-3:agent:perf-agent-01", "session_id": "perf-agent-01", "mode": "mirror" }
+  ]
+}

@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarContentPane } from "./SidebarContentPane";
-import type { AgentClassDefinition, AgentConfig } from "../types";
+import type { AgentClassDefinition, AgentConfig, OpenSurfaceRequest } from "../types";
 import type { SelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 
 const loadSchedulesMock = vi.hoisted(() => vi.fn());
@@ -27,17 +27,22 @@ vi.mock("../features/commands/CommandPanel", () => ({
 
 vi.mock("../features/workflows/monitor/WorkflowMonitorGlance", () => ({
   WorkflowMonitorGlance: ({
+    onOpenRun,
     onOpenMonitor,
     onPauseSchedule,
     onResumeSchedule,
     onRunScheduleNow,
   }: {
+    onOpenRun: (blueprintId: string, runId: string) => void;
     onOpenMonitor: () => void;
     onPauseSchedule: (id: string) => void;
     onResumeSchedule: (id: string) => void;
     onRunScheduleNow: (id: string) => void;
   }) => (
     <div>
+      <button type="button" onClick={() => onOpenRun("workflow-1", "run-1")}>
+        Open Run
+      </button>
       <button type="button" onClick={onOpenMonitor}>
         Open Monitor
       </button>
@@ -100,11 +105,11 @@ const sourceControlStatus: SelectedAgentGitStatus = {
 function renderPane({
   activeTab = "agent-config",
   selectedAgentIds = new Set<string>(),
-  onOpenWorkflowsView = vi.fn(),
+  onOpenSurface = vi.fn(),
 }: {
   activeTab?: "agent-config" | "workflows";
   selectedAgentIds?: Set<string>;
-  onOpenWorkflowsView?: () => void;
+  onOpenSurface?: (request: OpenSurfaceRequest) => void;
 } = {}) {
   return render(
     <SidebarContentPane
@@ -120,7 +125,7 @@ function renderPane({
       broadcastMessage=""
       setBroadcastMessage={vi.fn()}
       onBroadcast={vi.fn()}
-      onOpenWorkflowsView={onOpenWorkflowsView}
+      onOpenSurface={onOpenSurface}
     />,
   );
 }
@@ -145,14 +150,34 @@ describe("SidebarContentPane", () => {
     expect(screen.getByRole("heading", { name: "Spawn Agent", level: 3 })).toHaveClass("text-xs");
   });
 
-  it("opens the main workflows view before switching the glance to monitor", () => {
-    const onOpenWorkflowsView = vi.fn();
-    renderPane({ activeTab: "workflows", onOpenWorkflowsView });
+  it("opens the Workflows surface before switching the glance to monitor", () => {
+    const onOpenSurface = vi.fn();
+    renderPane({ activeTab: "workflows", onOpenSurface });
 
     fireEvent.click(screen.getByRole("button", { name: /open monitor/i }));
 
-    expect(onOpenWorkflowsView).toHaveBeenCalled();
+    expect(onOpenSurface).toHaveBeenCalledWith({ surface_type: "workflows" });
     expect(setModeMock).toHaveBeenCalledWith("monitor");
+    expect(onOpenSurface.mock.invocationCallOrder[0]).toBeLessThan(setModeMock.mock.invocationCallOrder[0]);
+  });
+
+  it("does not navigate when the Workflows auxiliary pane is selected", () => {
+    const onOpenSurface = vi.fn();
+
+    renderPane({ activeTab: "workflows", onOpenSurface });
+
+    expect(onOpenSurface).not.toHaveBeenCalled();
+  });
+
+  it("routes a workflow run object action through the surface boundary", async () => {
+    const onOpenSurface = vi.fn();
+    renderPane({ activeTab: "workflows", onOpenSurface });
+
+    fireEvent.click(screen.getByRole("button", { name: /open run/i }));
+
+    expect(onOpenSurface).toHaveBeenCalledWith({ surface_type: "workflows" });
+    expect(openRunMock).toHaveBeenCalledWith("workflow-1", "run-1");
+    await waitFor(() => expect(observeRunMock).toHaveBeenCalledWith("workflow-1", "run-1"));
   });
 
   it("loads workflow state and wires schedule controls into the glance pane", () => {

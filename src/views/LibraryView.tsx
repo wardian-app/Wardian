@@ -1,13 +1,13 @@
 import React, { useEffect } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { useLayoutStore } from '../store/useLayoutStore';
 import { SectionRail } from '../features/library/SectionRail';
 import { LibraryList } from '../features/library/LibraryList';
 import { DetailPane } from '../features/library/DetailPane';
 import { SidebarResizeHandle } from '../components/SidebarResizeHandle';
 import { LibrarySectionId } from '../types';
 
-interface LibraryViewProps {
+export interface LibraryViewProps {
+    surfaceId?: string;
     selectedAgentIds: Set<string>;
     /** Threaded through to the workflow detail panel's "Open in Workflows
      * view" link. Optional and no-op when absent — App.tsx wiring lands in
@@ -20,16 +20,22 @@ interface LibraryViewProps {
  * the active section) | DetailPane (selected entry, with the inline editor
  * and per-kind panels).
  */
-export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOpenWorkflowsView }) => {
+export const LibraryView: React.FC<LibraryViewProps> = ({
+    surfaceId = 'legacy-library',
+    selectedAgentIds,
+    onOpenWorkflowsView,
+}) => {
     const index = useLibraryStore((s) => s.index);
     const isLoading = useLibraryStore((s) => s.isLoading);
     const error = useLibraryStore((s) => s.error);
     const activeSection = useLibraryStore((s) => s.activeSection);
     const setActiveSection = useLibraryStore((s) => s.setActiveSection);
+    const selection = useLibraryStore((s) => s.selection);
+    const select = useLibraryStore((s) => s.select);
     const subscribeToLibraryChanges = useLibraryStore((s) => s.subscribeToLibraryChanges);
     const fetchIndex = useLibraryStore((s) => s.fetchIndex);
-    const libraryDetailWidth = useLayoutStore((s) => s.libraryDetailWidth);
-    const setLibraryDetailWidth = useLayoutStore((s) => s.setLibraryDetailWidth);
+    const libraryDetailWidth = useLibraryStore((s) => s.libraryDetailWidth);
+    const setLibraryDetailWidth = useLibraryStore((s) => s.setLibraryDetailWidth);
 
     useEffect(() => subscribeToLibraryChanges(), []);
 
@@ -87,7 +93,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
     }
 
     return (
-        <div data-testid="library-view" className="flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden">
+        <div
+            data-testid="library-view"
+            data-detail-open={selection ? 'true' : 'false'}
+            className="library-view flex-1 h-full flex flex-col bg-wardian-bg text-primary overflow-hidden"
+        >
             {/* A background refetch (e.g. a failed reload after a
                 library-changed event) failed while we still have a stale
                 index to show — surface it non-destructively instead of
@@ -108,27 +118,40 @@ export const LibraryView: React.FC<LibraryViewProps> = ({ selectedAgentIds, onOp
                     </button>
                 </div>
             )}
-            <div className="flex-1 flex min-h-0">
-                <SectionRail
-                    activeSection={activeSection}
-                    sections={index?.sections ?? null}
-                    onSelect={handleSelectSection}
-                />
-                <div data-testid="library-list" className="flex-1 min-w-[320px] min-h-0 overflow-hidden">
-                    <LibraryList />
+            <div className="library-view__body flex-1 flex min-h-0">
+                <div data-testid="library-list" className="library-view__browse flex flex-1 min-w-[320px] min-h-0 overflow-hidden">
+                    <SectionRail
+                        activeSection={activeSection}
+                        sections={index?.sections ?? null}
+                        onSelect={handleSelectSection}
+                    />
+                    <div className="library-view__list flex-1 min-w-0 min-h-0 overflow-hidden">
+                        <LibraryList />
+                    </div>
                 </div>
                 <div
                     data-testid="library-detail"
-                    className="relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
+                    className="library-view__detail relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
                     style={{ width: `${libraryDetailWidth}px` }}
                 >
+                    <button
+                        type="button"
+                        className="library-view__back"
+                        onClick={() => void select(null)}
+                    >
+                        Back to library list
+                    </button>
                     <SidebarResizeHandle
                         baseWidth={libraryDetailWidth}
                         edge="left"
                         onResize={setLibraryDetailWidth}
                         onReset={() => setLibraryDetailWidth(480)}
                     />
-                    <DetailPane selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={onOpenWorkflowsView} />
+                    <DetailPane
+                        surfaceId={surfaceId}
+                        selectedAgentIds={selectedAgentIds}
+                        onOpenWorkflowsView={onOpenWorkflowsView}
+                    />
                 </div>
             </div>
         </div>

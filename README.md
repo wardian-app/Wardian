@@ -28,7 +28,7 @@ Wardian gives the agent tools you already run durable identity, live terminals, 
 
 Use it to spawn specialized agents, monitor their progress, hand work between them, collect completed output, and automate repeatable flows across providers such as Antigravity, Claude, Codex, and OpenCode. The bundled `wardian` CLI gives agents and scripts a textual control surface for discovering identity, coordinating peers, and controlling Wardian without driving the graphical app.
 
-Wardian is built for malleable agent work. Prompts, classes, skills, workflows, queues, and memory-ready evidence are treated as visible, reusable artifacts rather than opaque app state. The product direction is a Habitat of Sites, Cohorts, and movable surfaces where agent work can be inspected, rearranged, and extended over time. You can start by watching live agents, then gradually turn repeated instructions into prompts, reusable roles, deployable skills, workflow templates, and durable project context.
+Wardian is built for malleable agent work. Prompts, classes, skills, workflows, queues, and memory-ready evidence are treated as visible, reusable artifacts rather than opaque app state. Its tab-based Workbench lets surfaces move between panes, split side by side, and restore across launches while the agent roster and auxiliary tools remain available. You can start by watching live agents, then gradually turn repeated instructions into prompts, reusable roles, deployable skills, workflow templates, and durable project context.
 
 ---
 
@@ -107,6 +107,8 @@ For complete user and developer docs, start here:
 
 - [Public Documentation](https://docs.wardian.org/)
 - [User Guide Index](https://docs.wardian.org/guide/)
+- [Workbench](https://docs.wardian.org/guide/workbench)
+- [Agents Overview](https://docs.wardian.org/guide/agents-overview)
 - [Wardian CLI](https://docs.wardian.org/guide/cli)
 - [Queue](https://docs.wardian.org/guide/queue)
 - [Workflow Reference](https://docs.wardian.org/workflows/)
@@ -166,8 +168,10 @@ practice rather than repeating them from scratch.
 - Spawn and supervise provider CLI agents from one desktop app.
 - Keep each agent in a real PTY-backed terminal with live status, telemetry,
   process control, and retained output.
-- Use Grid, Dashboard, Graph, Watchlists, and Queue as different views over the
-  same managed sessions.
+- Arrange agent sessions, Agents Overview, Dashboard, Graph, Queue, Library,
+  Garden, and Workflows as tabs or side-by-side Workbench panes.
+- Switch Agents Overview between adaptive Auto, multi-card Grid, and focused
+  Single layouts without treating Grid as a global app page.
 
 ### Coordination and Control
 
@@ -201,8 +205,9 @@ practice rather than repeating them from scratch.
 - Work across multiple providers and multiple workspaces without leaving the
   local app.
 - Assign Wardian-managed Git worktrees to agents for branch isolation.
-- Use Explorer and Source Control surfaces to inspect files, diffs, commits, and
-  workspace state around the agents doing the work.
+- Keep Explorer and Source Control auxiliary panes beside the Workbench to
+  inspect files, diffs, commits, and workspace state around the agents doing
+  the work.
 
 ---
 
@@ -226,6 +231,7 @@ Wardian is evolving toward a malleable home for agent work: a local environment
 where agent capabilities, workflows, evidence, and project context can be
 inspected, rearranged, and extended over time.
 
+- **Malleable Workbench**: extend the canonical tab, split, restore, and surface contribution model with new tools such as file editing and browsing.
 - **Runtime reliability and provider fidelity**: keep real PTY behavior, provider-specific delivery, transcript capture, and cross-platform process supervision stable as provider CLIs change.
 - **Malleable workbench**: evolve fixed pages into restorable work surfaces so an agent session, Queue, Library, workflow, and project files can stay visible together without confusing layout with runtime state.
 - **Reusable context and capabilities**: continue tightening the Library around prompts, skills, classes, workflow blueprints, MCP configuration, and inspectable filesystem-backed artifacts.
@@ -264,9 +270,9 @@ Wardian is built with a focus on modularity, thread safety, and separation of co
 ### Frontend (React 19 / TypeScript)
 
 - **Infrastructure vs. Feature Split**:
-  - **Layout**: Persistent structural components (Sidebars, Roster, Titlebars).
-  - **Features**: Domain-driven logical boundaries (Agent lifecycle, Terminal implementation).
-  - **Views**: Page-level containers for switching display modes (Dashboard, Grid).
+  - **Layout**: persistent structural components such as the Workbench adapter, sidebars, roster, and title bar.
+  - **Features**: domain-driven logical boundaries such as Workbench navigation, agent lifecycle, and terminal presentation brokering.
+  - **Views and surfaces**: feature containers hosted as Workbench tabs; Agents Overview owns Auto, Grid, and Single display modes.
 - **Type Safety**: Strictly typed interfaces for agent telemetry, system configurations, and data transport models located in `src/types/`.
 
 ---

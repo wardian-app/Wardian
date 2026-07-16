@@ -25,8 +25,8 @@ to one agent without turning the whole app into a custom plugin project.
 
 ## Layout: Rail, List, Detail
 
-Click **Library** in the top workspace tabs to open the view. It is a
-self-contained three-pane layout that does not touch the global left sidebar:
+Open **Library** from a pane's **+** menu or Quick Open palette. It is a
+self-contained three-pane surface that does not replace the global left sidebar:
 
 - **Section rail** — a slim vertical strip on the left with one icon-and-label
   button per section (Skills, Prompts, Classes, Workflows, MCPs) and a count

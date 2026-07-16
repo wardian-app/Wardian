@@ -72,6 +72,7 @@ describe('DetailPane — discard-confirm Cancel preserves the dirty draft (regre
       selectedContent: null,
       contentStale: false,
       _editorDirty: false,
+      _editorResources: {},
     });
   });
 

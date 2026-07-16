@@ -2,7 +2,7 @@
 
 The **Agent Watchlist** (Right Sidebar) is your primary high-fidelity tool for monitoring the health, activity, and thoughts of your agent swarm.
 
-Use it when you need persistent awareness of all agents while working in Grid, Dashboard, Library, Workflows, or any sidebar tool.
+Use it when you need persistent awareness of all agents while working in any Workbench surface or auxiliary tool.
 
 ![Wardian agent roster showing grouped agents with status, query count, and last queried columns](../assets/screenshots/watchlists/agent-roster.png)
 
@@ -11,7 +11,7 @@ Use it when you need persistent awareness of all agents while working in Grid, D
 - Select one or more agents before using Command, Library prompt runs, Explorer, or Source Control.
 - Group agents by project, workstream, role, or review lane.
 - Spot agents that are idle, processing, blocked, off, or errored without opening every terminal.
-- Jump back to a specific terminal in the [Grid](./grid.md).
+- Open a specific agent session in the current Workbench pane or to its side.
 
 ## Basic Workflow
 
@@ -19,7 +19,17 @@ Use it when you need persistent awareness of all agents while working in Grid, D
 2. Use the roster to select the agents you want to inspect or target.
 3. Sort or filter the list when the swarm grows.
 4. Create watchlists or teams for repeated groups.
-5. Double-click an agent to focus it in Grid, or use context actions for lifecycle controls.
+5. Use **Open** to focus or open an agent session in the active pane, or **Open to Side** to create a neighboring pane. Use the remaining context actions for lifecycle controls.
+
+## Selection Is Not Navigation
+
+Roster selection and Workbench navigation are deliberately separate:
+
+- Select one or more rows to target Explorer, Source Control, Command, Library prompt runs, and other auxiliary tools.
+- Use **Open** when you want an agent-session tab in the active pane.
+- Use **Open to Side** when you want the session beside the current surface.
+
+Selecting an agent never replaces the active Workbench surface. Opening an agent does not change which agents a multi-target Command operation will use.
 
 ## Real-Time Monitoring
 
@@ -94,7 +104,7 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 - **Reordering Lists**: Drag custom watchlist tabs left or right to reorder them. The **All** tab stays fixed as the first view.
 - **Reordering**: Drag and drop agent cards within a watchlist to prioritize your view.
 - **Filtering**: Click a watchlist tab to focus only on that group of agents.
-- **Bulk Selection**: Use `Ctrl+Click` to select multiple agents within a watchlist for broadcast commands.
+- **Bulk Selection**: Use `Ctrl+Click` on Windows/Linux or `Cmd+Click` on macOS to select multiple agents within a watchlist for broadcast commands.
 - **Bulk Context Menu**: If you right-click inside the current multi-selection, the menu applies to the whole selection. Bulk delete shows one confirmation dialog for the full selected set instead of prompting once per agent.
 
 ### Collapsing Teams
@@ -108,21 +118,29 @@ workspace contains several parallel efforts. Watchlists decide what is visible
 and targetable now; teams describe the durable work context those agents are
 cooperating inside.
 
-## Remote Management
-Hover over any agent in the Roster to access instant control icons:
+## Session and Lifecycle Actions
+
+Use an agent's open menu to choose the presentation action separately from lifecycle controls:
+
+- **Open**: focus an existing agent-session surface or open it in the active pane.
+- **Open to Side**: focus an existing session or open it in a neighboring pane.
+
+Hover over an agent in the roster or use its context menu for runtime controls:
 - **Pause/Resume**: Suspend the PTY process to save CPU.
 - **Restart**: Re-spawn the agent with its initial instructions.
-- **Quick-Jump**: Double-click an agent to center the main Grid view on that agent's terminal.
+
+Closing an agent-session tab is not a lifecycle action. It detaches that presentation while the agent and PTY continue running. Use Pause, Restart, Clear, or Delete only when you intend to affect the runtime.
 
 ## Important Limits
 
 - The roster is the targeting surface for many tools. Check selection before broadcasting or running prompts.
 - CLI team and watchlist commands mutate persisted state directly; use an isolated `WARDIAN_HOME` for tests and scripts that should not affect your normal roster.
-- Status and thought snippets are compact summaries. Use Grid or the CLI watch command for detailed output.
+- Status and thought snippets are compact summaries. Open an agent session, use [Agents](./agents-overview.md), or use the CLI watch command for detailed output.
 
 ## Related Links
 
-- [Grid](./grid.md)
+- [Workbench](./workbench.md)
+- [Agents](./agents-overview.md)
 - [Dashboard](./dashboard.md)
 - [Command Panel](./command-panel.md)
 - [Wardian CLI](./cli.md)

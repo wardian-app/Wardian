@@ -1,7 +1,62 @@
 use crate::utils::delivery_profile::DeliveryProfile;
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+#[cfg(test)]
 use tokio::sync::mpsc::Sender;
+
+pub trait TerminalInputSink: Send + Sync {
+    fn send_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
+}
+
+#[cfg(test)]
+impl TerminalInputSink for Sender<Vec<u8>> {
+    fn send_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move {
+            self.send(bytes)
+                .await
+                .map_err(|error| format!("input channel closed: {error}"))
+        })
+    }
+}
+
+pub struct BrokerTerminalInputSink {
+    broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
+    session_id: String,
+}
+
+impl BrokerTerminalInputSink {
+    pub fn new(
+        broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            broker,
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl TerminalInputSink for BrokerTerminalInputSink {
+    fn send_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move {
+            self.broker
+                .send_privileged_input(&self.session_id, bytes)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+}
 
 pub const DELIVERY_STATE_SUBMIT_SENT_UNCONFIRMED: &str = "submit_sent_unconfirmed";
 
@@ -91,21 +146,22 @@ pub fn plan_terminal_payload(profile: &DeliveryProfile, prompt: &str) -> Termina
     }
 }
 
-pub async fn submit_terminal_transaction(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_terminal_transaction<S: TerminalInputSink + ?Sized>(
+    tx: &S,
     profile: &DeliveryProfile,
     prompt: &str,
 ) -> Result<TerminalDeliveryOutcome, TerminalDeliveryError> {
     submit_terminal_transaction_with_payload_hook(tx, profile, prompt, || async {}).await
 }
 
-pub async fn submit_terminal_transaction_with_payload_hook<F, Fut>(
-    tx: &Sender<Vec<u8>>,
+pub async fn submit_terminal_transaction_with_payload_hook<S, F, Fut>(
+    tx: &S,
     profile: &DeliveryProfile,
     prompt: &str,
     on_payload_sent: F,
 ) -> Result<TerminalDeliveryOutcome, TerminalDeliveryError>
 where
+    S: TerminalInputSink + ?Sized,
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
@@ -119,7 +175,7 @@ where
         });
     }
 
-    tx.send(plan.payload_bytes).await.map_err(|e| {
+    tx.send_bytes(plan.payload_bytes).await.map_err(|e| {
         TerminalDeliveryError::retry_safe(
             "payload_send_failed",
             format!("Failed to send prompt payload: {e}"),
@@ -129,7 +185,7 @@ where
 
     tokio::time::sleep(std::time::Duration::from_millis(plan.submit_delay_ms)).await;
 
-    tx.send(plan.submit_key).await.map_err(|e| {
+    tx.send_bytes(plan.submit_key).await.map_err(|e| {
         TerminalDeliveryError::terminal_state_unknown(
             "payload_sent_submit_failed",
             format!("Failed to send prompt submit key after payload send: {e}"),

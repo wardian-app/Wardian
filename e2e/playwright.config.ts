@@ -14,35 +14,40 @@ const e2eViewport = {
   height: Number.isFinite(parsedViewportHeight) && parsedViewportHeight > 0 ? parsedViewportHeight : 1080,
 };
 
-export default defineConfig({
-  testDir: "./tests",
-  workers: 1,
-  timeout: 60_000,
-  retries: 1,
-  reporter: [["html", { open: "never" }]],
-  outputDir: "./test-results",
+export function createE2eConfig(options: { isolated_server?: boolean } = {}) {
+  const isolatedServer = options.isolated_server === true;
+  return defineConfig({
+    testDir: "./tests",
+    workers: 1,
+    timeout: 60_000,
+    retries: 1,
+    reporter: [["html", { open: "never" }]],
+    outputDir: "./test-results",
 
-  use: {
-    baseURL,
-    viewport: e2eViewport,
-    trace: "retain-on-failure",
-    screenshot: "only-on-failure",
-  },
-
-  webServer: {
-    command: `npm run vite -- --host ${e2eHost} --port ${e2ePort} --strictPort`,
-    url: baseURL,
-    timeout: 180_000,
-    reuseExistingServer,
-    env: {
-      WARDIAN_HOME: testHome,
+    use: {
+      baseURL,
+      viewport: e2eViewport,
+      trace: "retain-on-failure",
+      screenshot: "only-on-failure",
     },
-  },
 
-  projects: [
-    {
-      name: "smoke",
-      testMatch: "*.spec.ts",
+    webServer: {
+      command: `npm run vite -- --host ${e2eHost} --port ${e2ePort} --strictPort`,
+      url: baseURL,
+      timeout: 180_000,
+      reuseExistingServer: isolatedServer ? false : reuseExistingServer,
+      env: {
+        WARDIAN_HOME: testHome,
+      },
     },
-  ],
-});
+
+    projects: [
+      {
+        name: "smoke",
+        testMatch: "*.spec.ts",
+      },
+    ],
+  });
+}
+
+export default createE2eConfig();

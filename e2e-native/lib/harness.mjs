@@ -312,7 +312,21 @@ function npmInvocation(args) {
 }
 
 export function nativeAppBuildArgs() {
-  const args = ["run", "tauri", "--", "build", "--debug", "--no-bundle"];
+  const debugBuildConfig = JSON.stringify({
+    build: {
+      beforeBuildCommand: "npm run build && npm run stage-cli:dev",
+    },
+  });
+  const args = [
+    "run",
+    "tauri",
+    "--",
+    "build",
+    "--debug",
+    "--no-bundle",
+    "--config",
+    debugBuildConfig,
+  ];
   const features = (process.env.WARDIAN_NATIVE_BUILD_FEATURES || "").trim();
   if (features) {
     args.push("--features", features);
@@ -541,13 +555,15 @@ async function startNativeSessionAttempt(harness) {
   }
 }
 
-function isRetryableNativeSessionStartError(error) {
+export function isRetryableNativeSessionStartError(error) {
   const text = String(error instanceof Error ? error.message : error).toLowerCase();
   return (
     text.includes("sessionnotcreatederror") ||
     text.includes("chrome not reachable") ||
     text.includes("microsoft edge failed to start") ||
     text.includes("can not listen to address") ||
+    text.includes("econnreset") ||
+    text.includes("tcp connect error") ||
     text.includes("timed out waiting for tauri-driver")
   );
 }

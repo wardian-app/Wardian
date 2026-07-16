@@ -2,13 +2,12 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AgentConfig, AgentJsonEvent, AgentTelemetry, AgentClassDefinition, AgentStatusUpdate, AppTelemetry } from "../types";
-import type { CloneMode } from "../types";
+import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
+import type { CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
-import { normalizeAgentConfigs } from "../features/agents/configUtils";
-import { classifyJsonEvent, deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
+import { deriveCurrentThought, getStatusColorClass } from "../utils/statusUtils";
 import {
   getAgentsForList,
   addAgentsToList,
@@ -30,23 +29,50 @@ import { useConfirm } from "../components/ConfirmDialog";
 import { SidebarIconRail, SidebarTab } from "../layout/SidebarIconRail";
 import { SidebarContentPane } from "../layout/SidebarContentPane";
 import { CustomTitleBar } from "../layout/titlebar/CustomTitleBar";
-import type { ViewMode } from "../layout/titlebar/CustomTitleBar";
 import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
-import { DashboardView } from "./DashboardView";
-import { GridView } from "./GridView";
-import { GraphView } from "./GraphView";
-import { GardenView } from "./GardenView";
-import { QueueView } from "./QueueView";
-import { WorkflowsView } from "./WorkflowsView";
-import { LibraryView } from "./LibraryView";
 import { useQueueStore } from "../store/useQueueStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { submitInputToAgent, submitInputToAgents } from "../utils/terminalInput";
 import { CustomCloneModal } from "../features/agents/CustomCloneModal";
+import { WorkbenchConflictDialog } from "../features/workbench/WorkbenchConflictDialog";
+import { createWorkbenchInvokeAdapter } from "../features/workbench/workbenchPersistence";
+import { useWorkbenchPersistence } from "../features/workbench/useWorkbenchPersistence";
+import {
+  canSplitWorkbenchGroup,
+  WorkbenchHost,
+} from "../layout/workbench/WorkbenchHost";
+import { AppShell } from "../layout/AppShell";
+import { AgentResourceContext } from "../features/agents/AgentResourceContext";
+import {
+  useAgentResourceController,
+  type AgentStatusTransition,
+} from "../features/agents/useAgentResourceController";
+import { RosterProvider } from "../features/agents/RosterContext";
+import { useRosterController } from "../features/agents/useRosterController";
+import {
+  AgentsOverviewSurface,
+  normalizeAgentsOverviewSurfaceState,
+} from "../features/workbench/surfaces/AgentsOverviewSurface";
+import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
+import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
+import { SurfaceRecoveryPlaceholder } from "../features/workbench/SurfaceRecoveryPlaceholder";
+import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
+import {
+  DashboardSurface,
+  GardenSurface,
+  GraphSurface,
+  QueueSurface,
+  normalizeGardenSurfaceState,
+  normalizeGraphSurfaceState,
+} from "../features/workbench/surfaces/coreSurfaceDefinitions";
+import type { WorkbenchSurfaceRenderer } from "../layout/workbench/DockviewLayoutAdapter";
+import { LibrarySurface } from "../features/workbench/surfaces/LibrarySurface";
+import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurface";
+import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
 
 declare global {
   interface Window {
@@ -68,7 +94,42 @@ const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
 const MIN_NATIVE_WINDOW_WIDTH_PX = 320;
 const MIN_NATIVE_WINDOW_HEIGHT_PX = 240;
-const CACHED_CANVAS_VIEWS = new Set<ViewMode>(["graph", "garden"]);
+const WORKBENCH_PERSISTENCE_ADAPTER = createWorkbenchInvokeAdapter(
+  (command, args) => invoke(command, args),
+);
+const WORKBENCH_SHELL_PROJECTION = {
+  read: () => {
+    const layout = useLayoutStore.getState();
+    return {
+      left_sidebar_collapsed: layout.leftSidebarCollapsed,
+      left_sidebar_width: layout.leftSidebarWidth,
+      right_sidebar_collapsed: layout.rightSidebarCollapsed,
+      right_sidebar_width: layout.rightSidebarWidth,
+      bottom_terminal_open: layout.userTerminalOpen,
+      bottom_terminal_height: layout.userTerminalHeight,
+    };
+  },
+  write: (shell: WorkbenchShellV1) => {
+    useLayoutStore.setState({
+      leftSidebarCollapsed: shell.left_sidebar_collapsed,
+      leftSidebarWidth: shell.left_sidebar_width,
+      rightSidebarCollapsed: shell.right_sidebar_collapsed,
+      rightSidebarWidth: shell.right_sidebar_width,
+      userTerminalOpen: shell.bottom_terminal_open,
+      userTerminalHeight: shell.bottom_terminal_height,
+    });
+  },
+  subscribe: (listener: () => void) => useLayoutStore.subscribe((state, previous) => {
+    if (
+      state.leftSidebarCollapsed !== previous.leftSidebarCollapsed
+      || state.leftSidebarWidth !== previous.leftSidebarWidth
+      || state.rightSidebarCollapsed !== previous.rightSidebarCollapsed
+      || state.rightSidebarWidth !== previous.rightSidebarWidth
+      || state.userTerminalOpen !== previous.userTerminalOpen
+      || state.userTerminalHeight !== previous.userTerminalHeight
+    ) listener();
+  }),
+};
 
 type NativeWindowResizePayload = {
   width?: number;
@@ -144,10 +205,31 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
-function cachedCanvasPaneClass(active: boolean) {
-  return active
-    ? "flex-1 flex flex-col min-h-0"
-    : "absolute inset-2 flex flex-col min-h-0 invisible pointer-events-none";
+/** Scrolls only the Agents surface viewport, never Dockview's pane wrapper. */
+export function scrollAgentCardWithinOverview(
+  agentId: string,
+  ownerDocument: Document = document,
+): boolean {
+  const card = ownerDocument.getElementById(`agent-card-${agentId}`);
+  const scrollRegion = card?.closest<HTMLElement>('[data-testid="agents-overview-container"]');
+  if (!card || !scrollRegion) return false;
+
+  const cardBounds = card.getBoundingClientRect();
+  const regionBounds = scrollRegion.getBoundingClientRect();
+  const centeredTop = scrollRegion.scrollTop
+    + cardBounds.top
+    - regionBounds.top
+    - ((scrollRegion.clientHeight - cardBounds.height) / 2);
+  const top = Math.max(0, Math.min(
+    centeredTop,
+    Math.max(0, scrollRegion.scrollHeight - scrollRegion.clientHeight),
+  ));
+  if (typeof scrollRegion.scrollTo === "function") {
+    scrollRegion.scrollTo({ top, behavior: "smooth" });
+  } else {
+    scrollRegion.scrollTop = top;
+  }
+  return true;
 }
 
 function App() {
@@ -160,14 +242,34 @@ function App() {
 
 function AppBody() {
   const confirm = useConfirm();
-  const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const agentsRef = React.useRef(agents);
-  const agentStatusRef = React.useRef<Record<string, string>>({});
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
-  const fetchAgentsRequestRef = React.useRef(0);
-  useEffect(() => { agentsRef.current = agents; }, [agents]);
-  const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const [cachedCanvasViews, setCachedCanvasViews] = useState<Set<ViewMode>>(new Set());
+  const workbenchRootRef = useRef<HTMLDivElement>(null);
+  const workbenchPersistence = useWorkbenchPersistence({
+    enabled: true,
+    adapter: WORKBENCH_PERSISTENCE_ADAPTER,
+    legacy_storage: window.localStorage,
+    viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
+    shell_projection: WORKBENCH_SHELL_PROJECTION,
+  });
+  const workbenchResetPending = workbenchPersistence.store.getState().reset_pending;
+  const dirtySurfacePrompt = useDirtySurfacePrompt();
+  const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
+    dirty_surface_prompt: dirtySurfacePrompt.prompt,
+  }), [dirtySurfacePrompt.prompt]);
+  const [, setSurfaceRecoveryAttempt] = useState(0);
+  const workbenchNavigation = useMemo(
+    () => createWorkbenchNavigationService({
+      registry: workbenchRegistry,
+      store: workbenchPersistence.store,
+      can_split_group: (groupId, direction) => canSplitWorkbenchGroup(
+        workbenchRootRef.current,
+        groupId,
+        direction,
+      ),
+      reset_document: workbenchPersistence.reset,
+    }),
+    [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
+  );
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
@@ -217,12 +319,16 @@ function AppBody() {
     };
   }, []);
 
-  const maybeFlushAgentQueueCompletion = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+  const maybeFlushAgentQueueCompletion = useCallback((
+    sessionId: string,
+    currentStatus: string,
+    previousStatus: string | undefined,
+    agent: AgentConfig | undefined,
+  ) => {
     const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
     if (currentStatus === "Idle" && wasActive) {
       if (pendingQueueFlushRef.current.has(sessionId)) return;
       pendingQueueFlushRef.current.add(sessionId);
-      const agent = agentsRef.current.find((a) => a.session_id === sessionId);
       const agentName = agent?.session_name ?? sessionId;
       const finishFlush = (summary?: string | null) => {
         try {
@@ -242,9 +348,13 @@ function AppBody() {
     }
   }, [flushAgentCompletion]);
 
-  const maybeAddActionNeededQueueItem = useCallback((sessionId: string, currentStatus: string, previousStatus?: string) => {
+  const maybeAddActionNeededQueueItem = useCallback((
+    sessionId: string,
+    currentStatus: string,
+    previousStatus: string | undefined,
+    agent: AgentConfig | undefined,
+  ) => {
     if (currentStatus !== "Action Needed" || previousStatus === "Action Needed") return;
-    const agent = agentsRef.current.find((a) => a.session_id === sessionId);
     addActionNeeded(
       sessionId,
       agent?.session_name ?? sessionId,
@@ -252,68 +362,112 @@ function AppBody() {
     );
   }, [addActionNeeded]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "Tab") {
-        e.preventDefault();
-        setViewMode(prev => {
-          const modes: ViewMode[] = ["grid", "dashboard", "queue", "library", "workflows", "graph", "garden"];
-          const currentIndex = modes.indexOf(prev);
-          const nextIndex = e.shiftKey ? (currentIndex - 1 + modes.length) % modes.length : (currentIndex + 1) % modes.length;
-          return modes[nextIndex];
-        });
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
   // A library deep-link (e.g. "Manage skills" from the agent config panel)
   // bumps the store's navigationRequest; switch the main view to the
   // library whenever that happens, but not on initial mount.
   useEffect(() => {
     if (seenLibraryNavigationRequestRef.current === libraryNavigationRequest) return;
     seenLibraryNavigationRequestRef.current = libraryNavigationRequest;
-    setViewMode("library");
-  }, [libraryNavigationRequest]);
+    workbenchNavigation.open({ surface_type: "library" });
+  }, [libraryNavigationRequest, workbenchNavigation]);
 
-  useEffect(() => {
-    if (!CACHED_CANVAS_VIEWS.has(viewMode)) return;
-    setCachedCanvasViews((prev) => {
-      if (prev.has(viewMode)) return prev;
-      const next = new Set(prev);
-      next.add(viewMode);
-      return next;
-    });
-  }, [viewMode]);
-
-  const [telemetry, setTelemetry] = useState<Record<string, AgentTelemetry>>({});
-  const [appTelemetry, setAppTelemetry] = useState<AppTelemetry>({ cpu_usage: 0, memory_mb: 0 });
-  const [terminalTitles, setTerminalTitles] = useState<Record<string, string>>({});
-  const handleTitleChange = useCallback((agentId: string, title: string) => {
-    setTerminalTitles(prev => ({ ...prev, [agentId]: title }));
-  }, []);
-  const [currentThoughts, setCurrentThoughts] = useState<Record<string, string>>({});
   const [broadcastMessage, setBroadcastMessage] = useState("");
 
   const [activeTab, setActiveTab] = useState<SidebarTab>("agent-config");
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(new Set());
-  const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
-  const [maximizedAgentId, setMaximizedAgentId] = useState<string | null>(null);
+  const leftCollapsed = useLayoutStore((state) => state.leftSidebarCollapsed);
+  const setLeftCollapsed = useLayoutStore((state) => state.setLeftSidebarCollapsed);
+  const rightCollapsed = useLayoutStore((state) => state.rightSidebarCollapsed);
+  const setRightCollapsed = useLayoutStore((state) => state.setRightSidebarCollapsed);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [tempName, setTempName] = useState("");
-  const [offAgentIds, setOffAgentIds] = useState<Set<string>>(new Set());
-  const { theme, autoPatchGemini, titlebarTelemetryVisible, app_settings_loaded, loadAppSettings } = useSettingsStore();
+  const {
+    theme,
+    autoPatchGemini,
+    titlebarTelemetryVisible,
+    workbenchNewTabAction,
+    app_settings_loaded,
+    loadAppSettings,
+    settingsOpen,
+    setSettingsOpen,
+    toggleSettings,
+  } = useSettingsStore();
   const resolvedTitlebarTelemetryVisible = app_settings_loaded && titlebarTelemetryVisible;
+  const resolvedWorkbenchNewTabAction = app_settings_loaded ? workbenchNewTabAction : "home";
 
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [teams, setTeams] = useState<AgentTeam[]>([]);
-  const [activeListId, setActiveListId] = useState<string>("all");
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
+  const agentInteractionsRef = useRef<AgentInteractions>({});
+  const interactionSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const hasAutoPatched = useRef(false);
+
+  const handleAgentStatusTransition = useCallback((transition: AgentStatusTransition) => {
+    maybeFlushAgentQueueCompletion(
+      transition.session_id,
+      transition.current_status,
+      transition.previous_status,
+      transition.agent,
+    );
+    maybeAddActionNeededQueueItem(
+      transition.session_id,
+      transition.current_status,
+      transition.previous_status,
+      transition.agent,
+    );
+  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
+
+  const queueAgentInteractionSnapshot = useCallback((snapshot: AgentInteractions) => {
+    interactionSaveChainRef.current = interactionSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => invoke("save_agent_interactions", { interactions: snapshot }))
+      .catch(() => undefined);
+  }, []);
+
+  const handleAgentInteractions = useCallback((updates: Readonly<Record<string, string>>) => {
+    const updated = { ...agentInteractionsRef.current, ...updates };
+    agentInteractionsRef.current = updated;
+    setAgentInteractions(updated);
+    queueAgentInteractionSnapshot(updated);
+  }, [queueAgentInteractionSnapshot]);
+
+  const agentResources = useAgentResourceController({
+    on_agent_json_event: appendAgentEvent,
+    on_agent_status_transition: handleAgentStatusTransition,
+    on_agent_interactions: handleAgentInteractions,
+  });
+  const {
+    agents,
+    telemetry,
+    app_telemetry: appTelemetry,
+    terminal_titles: terminalTitles,
+    current_thoughts: currentThoughts,
+    off_agent_ids: offAgentIds,
+    refresh_agents: fetchAgents,
+    set_terminal_title: handleTitleChange,
+  } = agentResources;
+  const roster = useRosterController({ agents, watchlists, teams });
+  const {
+    activeWatchlistId: activeListId,
+    setActiveWatchlistId: setActiveListId,
+    activeWatchlist: activeList,
+    filter: rosterFilter,
+    setFilter: setRosterFilter,
+    selectedAgentIds,
+    setSelectedAgentIds,
+    selectAgent,
+  } = roster;
+  const filteredAgents = useMemo(
+    () => getAgentsForList(agents, activeList, teams),
+    [activeList, agents, teams],
+  );
+  const recentAgentIds = useMemo(
+    () => Object.entries(agentInteractions)
+      .sort(([, left], [, right]) => right.localeCompare(left))
+      .map(([agentId]) => agentId),
+    [agentInteractions],
+  );
+  const sourceControlStatus = useSelectedAgentGitStatus(selectedAgentIds, agents);
 
   useEffect(() => {
     if (!app_settings_loaded) {
@@ -377,11 +531,19 @@ function AppBody() {
 
       try {
         const interactions = await invoke<AgentInteractions>("load_agent_interactions");
-        if (interactions) setAgentInteractions(interactions);
+        if (interactions) {
+          const preLoadUpdates = agentInteractionsRef.current;
+          const merged = { ...interactions, ...preLoadUpdates };
+          agentInteractionsRef.current = merged;
+          setAgentInteractions(merged);
+          if (Object.keys(preLoadUpdates).length > 0) {
+            queueAgentInteractionSnapshot(merged);
+          }
+        }
       } catch { /* first run */ }
     })();
 
-  }, [loadWatchlistState]);
+  }, [loadWatchlistState, queueAgentInteractionSnapshot]);
 
   useEffect(() => {
     if (app_settings_loaded && autoPatchGemini && !hasAutoPatched.current) {
@@ -482,12 +644,6 @@ function AppBody() {
     await persistWatchlistState(reorderTeamMember({ version: 2, watchlists, teams }, teamId, draggedAgentId, targetAgentId, position));
   };
 
-  const activeList = activeListId === "all" ? null : watchlists.find(l => l.id === activeListId) || null;
-  const filteredAgents = useMemo(
-    () => getAgentsForList(agents, activeList, teams),
-    [agents, activeList, teams],
-  );
-
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
     const applyTheme = () => {
@@ -506,13 +662,10 @@ function AppBody() {
   const leftSidebarWidth = useLayoutStore((s) => s.leftSidebarWidth);
   const rightSidebarWidth = useLayoutStore((s) => s.rightSidebarWidth);
   const userTerminalOpen = useLayoutStore((s) => s.userTerminalOpen);
-  const settingsOpen = useLayoutStore((s) => s.settingsOpen);
   const userTerminalHeight = useLayoutStore((s) => s.userTerminalHeight);
   const setUserTerminalOpen = useLayoutStore((s) => s.setUserTerminalOpen);
-  const setSettingsOpen = useLayoutStore((s) => s.setSettingsOpen);
   const setUserTerminalHeight = useLayoutStore((s) => s.setUserTerminalHeight);
   const toggleUserTerminal = useLayoutStore((s) => s.toggleUserTerminal);
-  const toggleSettings = useLayoutStore((s) => s.toggleSettings);
 
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -527,58 +680,27 @@ function AppBody() {
 
   const [agentClasses, setAgentClasses] = useState<AgentClassDefinition[]>([]);
 
-  const lastSelectedIdRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ id: string; time: number } | null>(null);
 
   const handleAgentCardClick = useCallback((e: React.MouseEvent, agentId: string) => {
-      if (e.shiftKey && lastSelectedIdRef.current) {
-        const currentIndex = filteredAgents.findIndex((a: AgentConfig) => a.session_id === agentId);
-        const lastIndex = filteredAgents.findIndex((a: AgentConfig) => a.session_id === lastSelectedIdRef.current);
-        if (currentIndex !== -1 && lastIndex !== -1) {
-          const start = Math.min(currentIndex, lastIndex);
-          const end = Math.max(currentIndex, lastIndex);
-          const rangeIds = filteredAgents.slice(start, end + 1).map((a: AgentConfig) => a.session_id);
-          const next = (e.ctrlKey || e.metaKey) ? new Set([...selectedAgentIds, ...rangeIds]) : new Set(rangeIds);
-          setSelectedAgentIds(next);
-          return;
-        }
-      }
-      if (e.ctrlKey || e.metaKey) {
-        setSelectedAgentIds(prev => {
-          const next = new Set(prev);
-          if (next.has(agentId)) next.delete(agentId);
-          else next.add(agentId);
-          return next;
-        });
-        lastSelectedIdRef.current = agentId;
-      } else {
-        const now = Date.now();
-        const DOUBLE_CLICK_TOLERANCE = 450;
-        const isDoubleClick = lastClickRef.current && lastClickRef.current.id === agentId && (now - lastClickRef.current.time) < DOUBLE_CLICK_TOLERANCE;
-        lastClickRef.current = { id: agentId, time: now };
-        if (selectedAgentIds.has(agentId) && selectedAgentIds.size === 1) {
-          if (!isDoubleClick) {
-            setSelectedAgentIds(new Set());
-            lastSelectedIdRef.current = null;
-          } else {
-            lastSelectedIdRef.current = agentId;
-          }
-        } else {
-          setSelectedAgentIds(new Set([agentId]));
-          lastSelectedIdRef.current = agentId;
-        }
-      }
-  }, [filteredAgents, selectedAgentIds]);
-
-  const selectSingleAgent = useCallback((agentId: string) => {
-    setSelectedAgentIds((prev) => {
-      if (prev.size === 1 && prev.has(agentId)) {
-        return prev;
-      }
-      return new Set([agentId]);
+    const now = Date.now();
+    const isDoubleClick = Boolean(
+      lastClickRef.current
+      && lastClickRef.current.id === agentId
+      && now - lastClickRef.current.time < 450,
+    );
+    lastClickRef.current = { id: agentId, time: now };
+    if (isDoubleClick && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
+      setSelectedAgentIds(new Set([agentId]));
+      return;
+    }
+    selectAgent(agentId, {
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      shiftKey: e.shiftKey,
+      rangeAgentIds: filteredAgents.map((agent) => agent.session_id),
     });
-    lastSelectedIdRef.current = agentId;
-  }, []);
+  }, [filteredAgents, selectAgent, setSelectedAgentIds]);
 
   const handleMouseDown = (agentId: string) => setDraggedAgentId(agentId);
   const handleMouseEnterCard = (agentId: string) => {
@@ -597,12 +719,8 @@ function AppBody() {
 
     const nextAgents = [...remainingAgents];
     nextAgents.splice(targetIndex + (position === "after" ? 1 : 0), 0, draggedAgent);
-    setAgents(nextAgents);
-    try {
-      await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
-    } catch (err) {
-      console.error("Failed to reorder:", err);
-    }
+    try { await agentResources.reorder_agents(nextAgents.map((agent) => agent.session_id)); }
+    catch (err) { console.error("Failed to reorder:", err); }
   };
 
   const handleMouseUp = async () => {
@@ -649,8 +767,7 @@ function AppBody() {
             const updatedWatchlists = watchlists.map(l => l.id === activeListId ? { ...l, entries: newOrder.map(agentId => ({ type: "agent" as const, agentId })) } : l);
             await persistWatchlists(updatedWatchlists);
           } else {
-            setAgents(newDisplayList);
-            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (err) { console.error("Failed to reorder:", err); }
+            try { await agentResources.reorder_agents(newOrder); } catch (err) { console.error("Failed to reorder:", err); }
           }
         }
         wasDraggingRef.current = true;
@@ -671,53 +788,9 @@ function AppBody() {
     return () => window.removeEventListener("mouseup", cancelDrag);
   }, [draggedAgentId]);
 
-  const scrollToAgent = (agentId: string) => {
-    if (viewMode === "grid" && maximizedAgentId) {
-      setMaximizedAgentId(agentId);
-      return;
-    }
-    const el = document.getElementById(`agent-card-${agentId}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
-
-  const fetchAgents = async (spawnedAgent?: AgentConfig) => {
-    const requestId = ++fetchAgentsRequestRef.current;
-    try {
-      const list = await invoke<AgentConfig[]>("list_agents");
-      if (requestId !== fetchAgentsRequestRef.current) return;
-      const normalized = normalizeAgentConfigs(list);
-      const spawnedAgentId = spawnedAgent?.session_id;
-      const newAgentPosition = useSettingsStore.getState().watchlistNewAgentPosition;
-      const shouldPlaceNewAgent = Boolean(spawnedAgentId);
-      const nextAgents = shouldPlaceNewAgent
-        ? newAgentPosition === "bottom"
-          ? [
-              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
-              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
-            ]
-          : [
-              ...normalized.filter((agent) => agent.session_id === spawnedAgentId),
-              ...normalized.filter((agent) => agent.session_id !== spawnedAgentId),
-            ]
-        : normalized;
-      setAgents(nextAgents);
-      const newOffIds = new Set<string>();
-      for (const agent of nextAgents) if (agent.is_off) newOffIds.add(agent.session_id);
-      setOffAgentIds(newOffIds);
-      const orderChanged = nextAgents.some((agent, index) => agent.session_id !== normalized[index]?.session_id);
-      if (shouldPlaceNewAgent && orderChanged && nextAgents.some((agent) => agent.session_id === spawnedAgentId)) {
-        try {
-          await invoke("reorder_agents", { sessionIds: nextAgents.map((agent) => agent.session_id) });
-        } catch (error) {
-          console.error("Failed to place spawned agent in configured watchlist position:", error);
-        }
-      }
-    } catch (e) {
-      if (requestId === fetchAgentsRequestRef.current) {
-        console.error("Failed to fetch agents:", e);
-      }
-    }
-  };
+  const scrollToAgent = useCallback((agentId: string) => {
+    scrollAgentCardWithinOverview(agentId);
+  }, []);
 
   const fetchAgentClasses = async () => {
     try {
@@ -727,21 +800,9 @@ function AppBody() {
   };
 
   useEffect(() => {
-    fetchAgents();
     fetchAgentClasses();
     loadQueueItems();
     loadQueuePreferences();
-    const unlistenJson = listen<AgentJsonEvent>("agent-json-event", (event) => {
-      const { session_id, data } = event.payload;
-      appendAgentEvent(session_id, data as Record<string, unknown>);
-      const effect = classifyJsonEvent(data as Record<string, unknown>);
-      if (effect.type === "progress") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: effect.thought }));
-      } else if (effect.type === "clear_thought") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      }
-    });
-    const unlistenUpdate = listen("agents-updated", () => fetchAgents());
     const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
     // Class definitions (create/delete/reset) are now managed exclusively
     // from the Library's ClassDetail panel, which reports changes through
@@ -755,98 +816,16 @@ function AppBody() {
       fetchAgentClasses();
     });
     return () => {
-      unlistenJson.then(fn => fn());
-      unlistenUpdate.then(fn => fn());
       unlistenWatchlists.then(fn => fn());
       unlistenLibrary.then(fn => fn());
     };
-  }, [appendAgentEvent, loadQueueItems, loadQueuePreferences, loadWatchlistState]);
-
-  useEffect(() => {
-    const unlistenMetrics = listen<AgentTelemetry[]>('agent-metrics', (event) => {
-      const mapping: Record<string, AgentTelemetry> = {};
-      for (const m of event.payload) mapping[m.session_id] = m;
-      for (const [sessionId, metric] of Object.entries(mapping)) {
-        const previousStatus = agentStatusRef.current[sessionId];
-        if (previousStatus !== undefined) {
-          maybeFlushAgentQueueCompletion(sessionId, metric.current_status, previousStatus);
-          maybeAddActionNeededQueueItem(sessionId, metric.current_status, previousStatus);
-        }
-        agentStatusRef.current[sessionId] = metric.current_status;
-      }
-      setTelemetry(prev => {
-        const next = { ...prev };
-        const interactionUpdates: Record<string, string> = {};
-        for (const [sessionId, metric] of Object.entries(mapping)) {
-          const previousMetric = prev[sessionId];
-          const previousQueryCount = previousMetric?.query_count ?? 0;
-          const currentQueryCount = metric.query_count ?? 0;
-          const isTranscriptHydration =
-            previousMetric &&
-            previousQueryCount === 0 &&
-            currentQueryCount > 0 &&
-            metric.current_status === "Idle" &&
-            Boolean(metric.log_path);
-
-          if (previousMetric && currentQueryCount > previousQueryCount && !isTranscriptHydration) {
-            interactionUpdates[sessionId] = new Date().toISOString();
-          }
-          next[sessionId] = metric;
-        }
-        if (Object.keys(interactionUpdates).length > 0) {
-          setAgentInteractions(prevInteractions => {
-            const updated = { ...prevInteractions, ...interactionUpdates };
-            invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
-            return updated;
-          });
-        }
-        return next;
-      });
-    });
-    const unlistenAppMetrics = listen<AppTelemetry>('app-metrics', (event) => {
-      setAppTelemetry(event.payload);
-    });
-    const unlistenStatus = listen<AgentStatusUpdate>("agent-status-updated", (event) => {
-      const { session_id, current_status } = event.payload;
-      if (current_status === "Idle" || current_status === "Off" || current_status === "Action Needed") {
-        setCurrentThoughts(prev => ({ ...prev, [session_id]: "" }));
-      }
-      const previousStatus = agentStatusRef.current[session_id];
-      maybeFlushAgentQueueCompletion(session_id, current_status, previousStatus);
-      maybeAddActionNeededQueueItem(session_id, current_status, previousStatus);
-      agentStatusRef.current[session_id] = current_status;
-      setTelemetry(prev => {
-        return {
-          ...prev,
-          [session_id]: {
-            session_id,
-            cpu_usage: prev[session_id]?.cpu_usage ?? 0,
-            memory_mb: prev[session_id]?.memory_mb ?? 0,
-            uptime_seconds: prev[session_id]?.uptime_seconds ?? 0,
-            query_count: prev[session_id]?.query_count ?? 0,
-            init_timestamp: prev[session_id]?.init_timestamp ?? null,
-            current_status,
-            log_path: prev[session_id]?.log_path ?? null,
-          },
-        };
-      });
-    });
-    return () => {
-      unlistenMetrics.then(fn => fn());
-      unlistenAppMetrics.then(fn => fn());
-      unlistenStatus.then(fn => fn());
-    };
-  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
+  }, [loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
   async function sendCommand(sessionId: string, cmd: string) {
     try {
       await submitInputToAgent(sessionId, cmd);
       const timestamp = new Date().toISOString();
-      setAgentInteractions(prev => {
-        const updated = { ...prev, [sessionId]: timestamp };
-        invoke("save_agent_interactions", { interactions: updated }).catch(() => {});
-        return updated;
-      });
+      handleAgentInteractions({ [sessionId]: timestamp });
     } catch (e) {
       console.error(e);
     }
@@ -863,8 +842,7 @@ function AppBody() {
       return;
     }
     try {
-      await invoke("rename_agent", { sessionId, newName });
-      setAgents(prev => prev.map(a => a.session_id === sessionId ? { ...a, session_name: newName } : a));
+      await agentResources.rename_agent(sessionId, newName);
       setEditingAgentId(null);
     } catch (e: unknown) { 
       console.error(e);
@@ -890,9 +868,7 @@ function AppBody() {
 
   const onPause = async (id: string) => {
     try {
-      await invoke('pause_agent', { sessionId: id });
-      setOffAgentIds(prev => new Set(prev).add(id));
-      fetchAgents();
+      await agentResources.pause_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -900,13 +876,7 @@ function AppBody() {
 
   const onRestart = async (id: string) => {
     try {
-      await invoke('resume_agent', { sessionId: id });
-      setOffAgentIds(prev => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      fetchAgents();
+      await agentResources.resume_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -914,15 +884,7 @@ function AppBody() {
 
   const onClear = async (id: string) => {
     try {
-      await invoke('clear_agent_session', { sessionId: id });
-      setCurrentThoughts(prev => ({ ...prev, [id]: "" }));
-      setTerminalTitles(prev => ({ ...prev, [id]: "" }));
-      setOffAgentIds(prev => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      fetchAgents();
+      await agentResources.clear_agent(id);
     } catch (e) {
       console.error(e);
     }
@@ -935,14 +897,8 @@ function AppBody() {
     }
 
     try {
-      await invoke<AgentConfig>("clone_agent", {
-        req: {
-          source_session_id: id,
-          mode,
-        },
-      });
+      await agentResources.clone_agent(id, mode);
       await loadWatchlistState();
-      fetchAgents();
     } catch (e) {
       console.error(e);
       alert(`Failed to clone agent: ${e}`);
@@ -952,22 +908,17 @@ function AppBody() {
   const onDelete = async (id: string) => {
     if (await confirm('Delete this agent?')) {
       try {
-        await invoke('kill_agent', { sessionId: id });
+        const deletedIds = await agentResources.delete_agents([id]);
+        if (deletedIds.length === 0) return;
         await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
           { version: 2, watchlists, teams },
-          [id],
+          [...deletedIds],
         ));
-        setOffAgentIds(prev => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
         setSelectedAgentIds(prev => {
           const next = new Set(prev);
-          next.delete(id);
+          for (const deletedId of deletedIds) next.delete(deletedId);
           return next;
         });
-        fetchAgents();
       } catch (e) {
         console.error(e);
       }
@@ -983,67 +934,384 @@ function AppBody() {
 
     if (!(await confirm(message))) return;
 
-    const deletedIds = new Set<string>();
-
-    for (const id of ids) {
-      try {
-        await invoke('kill_agent', { sessionId: id });
-        deletedIds.add(id);
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    if (deletedIds.size === 0) return;
+    const deletedIds = await agentResources.delete_agents(ids);
+    if (deletedIds.length === 0) return;
 
     await persistWatchlistState(removeDeletedAgentsFromWatchlistState(
       { version: 2, watchlists, teams },
       [...deletedIds],
     ));
 
-    setOffAgentIds(prev => {
-      const next = new Set(prev);
-      for (const id of deletedIds) next.delete(id);
-      return next;
-    });
     setSelectedAgentIds(prev => {
       const next = new Set(prev);
       for (const id of deletedIds) next.delete(id);
       return next;
     });
-    fetchAgents();
   };
 
   const selectedUserTerminalWorkspace = selectedAgentIds.size === 1
     ? agents.find((agent) => agent.session_id === Array.from(selectedAgentIds)[0])?.folder?.trim() || null
     : null;
+  const selectedWorkbenchResourceKey = selectedAgentIds.size === 1
+    ? Array.from(selectedAgentIds)[0]
+    : undefined;
+
+  const openAuxiliarySurface = useCallback((request: OpenSurfaceRequest) => {
+    workbenchNavigation.open(request);
+  }, [workbenchNavigation]);
 
   const openWorkflowsView = useCallback(() => {
-    setActiveTab("workflows");
-    setViewMode("workflows");
-  }, []);
+    openAuxiliarySurface({ surface_type: "workflows" });
+  }, [openAuxiliarySurface]);
 
-  const openAgentFromQueue = useCallback((sessionId: string) => {
-    setViewMode("grid");
+  const openAgent = useCallback((sessionId: string) => {
+    workbenchNavigation.open({
+      surface_type: "agent-session",
+      resource_key: sessionId,
+    });
+  }, [workbenchNavigation]);
+
+  const openAgentToSide = useCallback((sessionId: string) => {
+    workbenchNavigation.open_to_side({
+      surface_type: "agent-session",
+      resource_key: sessionId,
+    });
+  }, [workbenchNavigation]);
+
+  const revealAgentInOverview = useCallback((sessionId: string) => {
     setSelectedAgentIds(new Set([sessionId]));
-    lastSelectedIdRef.current = sessionId;
-    window.setTimeout(() => scrollToAgent(sessionId), 0);
-  }, [scrollToAgent]);
-  const shouldRenderGraph = viewMode === "graph" || cachedCanvasViews.has("graph");
-  const shouldRenderGarden = viewMode === "garden" || cachedCanvasViews.has("garden");
+    const store = workbenchPersistence.store;
+    const snapshot = store.getState();
+    const overviewSurface = snapshot.surface_mru
+      .map((surfaceId) => snapshot.document.surfaces[surfaceId])
+      .find((surface) => surface?.surface_type === "agents-overview")
+      ?? Object.values(snapshot.document.surfaces)
+        .find((surface) => surface.surface_type === "agents-overview");
+
+    if (!overviewSurface) {
+      workbenchNavigation.open({
+        surface_type: "agents-overview",
+        state: {
+          ...normalizeAgentsOverviewSurfaceState(
+            workbenchRegistry.default_state("agents-overview"),
+          ),
+          focused_agent_id: sessionId,
+        },
+      });
+    } else {
+      const currentState = normalizeAgentsOverviewSurfaceState(overviewSurface.state);
+      workbenchNavigation.focus(overviewSurface.surface_id);
+      store.getState().apply_commands([{
+        type: "update_surface_state",
+        surface_id: overviewSurface.surface_id,
+        state_schema_version: overviewSurface.state_schema_version,
+        state: { ...currentState, focused_agent_id: sessionId },
+      }]);
+    }
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollAgentCardWithinOverview(sessionId);
+      });
+    });
+  }, [setSelectedAgentIds, workbenchNavigation, workbenchPersistence.store, workbenchRegistry]);
+
+  const workbenchNotice = [
+    workbenchPersistence.notice,
+    workbenchPersistence.safe_mode
+      ? "Workbench safe mode is active; the durable document is preserved."
+      : null,
+    workbenchPersistence.save_error,
+    workbenchPersistence.save_pending || workbenchPersistence.is_dirty
+      ? "Saving workbench changes…"
+      : null,
+  ].filter((message): message is string => Boolean(message)).join(" ") || null;
+
+  const exportLocalWorkbench = useCallback(() => {
+    const exported = workbenchPersistence.export_local_json();
+    const objectUrl = URL.createObjectURL(new Blob([exported.json], { type: exported.mime_type }));
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = exported.filename;
+    anchor.click();
+    URL.revokeObjectURL(objectUrl);
+  }, [workbenchPersistence]);
+
+  const openWorkbenchLauncher = useCallback(() => {
+    workbenchPersistence.store.getState().set_launcher_open(true);
+  }, [workbenchPersistence.store]);
+
+  const renderWorkbenchSurface: WorkbenchSurfaceRenderer = (surface, lifecycle) => {
+    const resolvedSurface = workbenchRegistry.resolve_surface(surface);
+    const restoreResult = resolvedSurface.restore_result;
+    if (resolvedSurface.missing_surface_type || !restoreResult.ok) {
+      const error = resolvedSurface.missing_surface_type
+        ? `Surface type “${resolvedSurface.missing_surface_type}” is not installed or registered. Its persisted state has been kept intact.`
+        : `Wardian could not restore this persisted state: ${restoreResult.ok ? "Unknown restore failure" : restoreResult.error}`;
+      const canRebind = surface.surface_type === "agent-session";
+      return (
+        <SurfaceRecoveryPlaceholder
+          surface={surface}
+          error={error}
+          on_retry={async () => {
+            if (canRebind) await fetchAgents();
+            setSurfaceRecoveryAttempt((attempt) => attempt + 1);
+          }}
+          on_reset={async () => { await workbenchNavigation.reset_surface(surface.surface_id); }}
+          on_close={async () => { await workbenchNavigation.close(surface.surface_id); }}
+          rebind_options={canRebind ? agents.map((agent) => ({
+            resource_key: agent.session_id,
+            label: agent.session_name,
+          })) : []}
+          {...(canRebind ? {
+            on_rebind: async (resourceKey: string) => {
+              await workbenchNavigation.rebind_resource(
+                surface.surface_id,
+                { surface_type: "agent-session", resource_key: resourceKey },
+              );
+            },
+          } : {})}
+        />
+      );
+    }
+    const restoredSurface = {
+      ...surface,
+      state: restoreResult.ok ? restoreResult.state : surface.state,
+    };
+
+    if (surface.surface_type === "agent-session") {
+      const resourceKey = surface.resource_key ?? "";
+      return (
+        <AgentSessionSurface
+          surface_id={surface.surface_id}
+          resource_key={resourceKey}
+          agent={agents.find((agent) => agent.session_id === resourceKey)}
+          theme={theme}
+          visibility={lifecycle?.visible === false ? "hidden" : "visible"}
+          render_state={lifecycle?.visible === false ? "suspended" : "mounted"}
+          on_title_change={handleTitleChange}
+          on_refresh_agents={() => { void fetchAgents(); }}
+          rebind_candidates={agents}
+          on_rebind_agent={(nextAgentId) => {
+            void workbenchNavigation.rebind_resource(surface.surface_id, {
+              surface_type: "agent-session",
+              resource_key: nextAgentId,
+            });
+          }}
+          on_reset_surface={() => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state: workbenchRegistry.default_state("agent-session"),
+            }]);
+          }}
+          on_close_surface={() => { void workbenchNavigation.close(surface.surface_id); }}
+        />
+      );
+    }
+
+    const visibility = lifecycle?.visible === false ? "hidden" : "visible";
+    if (surface.surface_type === "dashboard") {
+      return (
+        <DashboardSurface
+          surface_id={surface.surface_id}
+          state={{}}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          telemetry={telemetry}
+          terminalTitles={terminalTitles}
+          currentThoughts={currentThoughts}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          draggedAgentId={draggedAgentId}
+          dragOverAgentId={dragOverAgentId}
+          onMouseEnterCard={handleMouseEnterCard}
+          onMouseUp={handleMouseUp}
+          onMouseDown={handleMouseDown}
+          onCardClick={handleAgentCardClick}
+          onPause={onPause}
+          onRestart={onRestart}
+          onDelete={onDelete}
+          onQuery={sendCommand}
+          deriveCurrentThought={deriveCurrentThought}
+          getStatusColorClass={getStatusColorClass}
+        />
+      );
+    }
+
+    if (surface.surface_type === "queue") {
+      return (
+        <QueueSurface
+          surface_id={surface.surface_id}
+          state={{}}
+          visibility={visibility}
+          onOpenAgent={openAgent}
+          onSendAgentPrompt={sendCommand}
+        />
+      );
+    }
+
+    if (surface.surface_type === "graph") {
+      return (
+        <GraphSurface
+          surface_id={surface.surface_id}
+          state={normalizeGraphSurfaceState(restoredSurface)}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          allAgents={agents}
+          telemetry={telemetry}
+          terminalTitles={terminalTitles}
+          currentThoughts={currentThoughts}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          watchlists={watchlists}
+          activeList={activeList}
+          teams={teams}
+          interactions={agentInteractions}
+          onSelectionChange={setSelectedAgentIds}
+          onOpenAgent={openAgent}
+          on_state_change={(state) => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state,
+            }]);
+          }}
+          onInitiateRename={(id) => {
+            const agent = agents.find((candidate) => candidate.session_id === id);
+            workbenchNavigation.open({ surface_type: "agents-overview" });
+            setSelectedAgentIds(new Set([id]));
+            setEditingAgentId(id);
+            setTempName(agent?.session_name ?? "");
+          }}
+          onQuery={openAgent}
+          onPause={onPause}
+          onRestart={onRestart}
+          onClear={onClear}
+          onClone={onClone}
+          onAddToList={handleAddToList}
+          onRemoveFromList={handleRemoveFromList}
+          onAddAgentsToList={handleAddAgentsToList}
+          onRemoveAgentsFromList={handleRemoveAgentsFromList}
+          onDelete={onDelete}
+          onDeleteAgents={onDeleteAgents}
+          deriveCurrentThought={deriveCurrentThought}
+        />
+      );
+    }
+
+    if (surface.surface_type === "garden") {
+      return (
+        <GardenSurface
+          surface_id={surface.surface_id}
+          state={normalizeGardenSurfaceState(restoredSurface)}
+          visibility={visibility}
+          filteredAgents={filteredAgents}
+          telemetry={telemetry}
+          teams={teams}
+          activeList={activeList}
+          interactions={agentInteractions}
+          selectedAgentIds={selectedAgentIds}
+          offAgentIds={offAgentIds}
+          onSelectionChange={setSelectedAgentIds}
+          onOpenAgent={openAgent}
+          on_state_change={(state) => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 1,
+              state,
+            }]);
+          }}
+        />
+      );
+    }
+
+    if (surface.surface_type === "library") {
+      return (
+        <LibrarySurface
+          surface_id={surface.surface_id}
+          selectedAgentIds={selectedAgentIds}
+          onOpenWorkflowsView={openWorkflowsView}
+        />
+      );
+    }
+
+    if (surface.surface_type === "workflows") {
+      return (
+        <WorkflowsSurface
+          surface_id={surface.surface_id}
+          theme={theme}
+        />
+      );
+    }
+
+    if (surface.surface_type !== "agents-overview") {
+      return (
+        <section className="wardian-workbench-placeholder">
+          <h2>{surface.surface_type}</h2>
+          <p>This registered surface will adopt its Wardian view in the next migration slice.</p>
+        </section>
+      );
+    }
+
+    return (
+      <AgentsOverviewSurface
+        surface_id={surface.surface_id}
+        state={normalizeAgentsOverviewSurfaceState(restoredSurface.state)}
+        agents={roster.filteredAgents}
+        recentAgentIds={recentAgentIds}
+        telemetry={telemetry}
+        terminalTitles={terminalTitles}
+        currentThoughts={currentThoughts}
+        selectedAgentIds={selectedAgentIds}
+        offAgentIds={offAgentIds}
+        theme={theme}
+        visibility={visibility}
+        draggedAgentId={draggedAgentId}
+        dragOverAgentId={dragOverAgentId}
+        editingAgentId={editingAgentId}
+        tempName={tempName}
+        watchlists={watchlists}
+        onCardClick={handleAgentCardClick}
+        onDelete={onDelete}
+        onRename={renameAgent}
+        setEditingAgentId={setEditingAgentId}
+        setTempName={setTempName}
+        handleTitleChange={handleTitleChange}
+        getStatusColorClass={getStatusColorClass}
+        deriveCurrentThought={deriveCurrentThought}
+        onMouseEnterCard={handleMouseEnterCard}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onAddToList={handleAddToList}
+        onRemoveFromList={handleRemoveFromList}
+        onQuery={(agentId) => scrollToAgent(agentId)}
+        onPause={onPause}
+        onRestart={onRestart}
+        onClear={onClear}
+        onClone={onClone}
+        on_state_change={(state) => {
+          workbenchPersistence.store.getState().apply_commands([{
+            type: "update_surface_state",
+            surface_id: surface.surface_id,
+            state_schema_version: 1,
+            state,
+          }]);
+        }}
+      />
+    );
+  };
 
   return (
-    <div
-      data-testid="app-shell"
-      className="flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
-      style={{
-        width: `var(${NATIVE_WINDOW_WIDTH_VAR}, 100vw)`,
-        height: `var(${NATIVE_WINDOW_HEIGHT_VAR}, 100dvh)`,
-      }}
-    >
-      <CustomTitleBar
-        viewMode={viewMode}
-        setViewMode={setViewMode}
+    <AgentResourceContext.Provider value={agentResources}>
+      <RosterProvider value={roster}>
+        <AppShell
+          contentBusy={workbenchResetPending}
+          titlebar={<CustomTitleBar
+        workbenchBusy={workbenchResetPending}
         leftCollapsed={leftCollapsed}
         setLeftCollapsed={setLeftCollapsed}
         rightCollapsed={rightCollapsed}
@@ -1055,10 +1323,36 @@ function AppBody() {
         agents={agents}
         offAgentIds={offAgentIds}
         titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
-      />
+          />}
 
-      <div className="flex flex-1 overflow-hidden">
-        <SidebarIconRail
+          status={workbenchNotice ? (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="workbench-persistence-notice"
+          className="pointer-events-none fixed right-4 top-12 z-40 max-w-md rounded border px-3 py-2 text-xs shadow-lg"
+          style={{
+            background: "var(--color-wardian-card)",
+            borderColor: "var(--color-wardian-border)",
+            color: "var(--color-wardian-text-muted)",
+          }}
+        >
+          {workbenchNotice}
+        </div>
+          ) : null}
+
+          conflictDialog={(workbenchPersistence.conflict === "revision_conflict"
+          || workbenchPersistence.conflict === "future_schema") && (
+        <WorkbenchConflictDialog
+          mode={workbenchPersistence.conflict}
+          resolving={workbenchPersistence.resolving_conflict}
+          on_use_disk={() => { void workbenchPersistence.use_disk(); }}
+          on_replace_disk={() => { void workbenchPersistence.replace_disk(); }}
+          on_export_local={exportLocalWorkbench}
+        />
+          )}
+
+          leftRail={<SidebarIconRail
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           setCollapsed={setLeftCollapsed}
@@ -1068,8 +1362,8 @@ function AppBody() {
           sourceControlBusy={sourceControlStatus.loading}
           onToggleUserTerminal={toggleUserTerminal}
           onToggleSettings={toggleSettings}
-        />
-        <SidebarContentPane
+          />}
+          leftPane={<SidebarContentPane
           activeTab={activeTab}
           leftCollapsed={leftCollapsed}
           selectedAgentIds={selectedAgentIds}
@@ -1082,169 +1376,32 @@ function AppBody() {
           broadcastMessage={broadcastMessage}
           setBroadcastMessage={setBroadcastMessage}
           onBroadcast={broadcastInput}
-          onOpenWorkflowsView={openWorkflowsView}
-        />
+          onOpenSurface={openAuxiliarySurface}
+          />}
 
-        <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden relative">
-          <div 
-            className="flex-1 min-w-0 min-h-0 overflow-y-auto p-2 flex flex-col"
-            onClick={() => { setSelectedAgentIds(new Set()); lastSelectedIdRef.current = null; }}
-          >
-            {viewMode === "workflows" && (
-              <div className="flex-1 min-h-0 bg-wardian-bg">
-                <WorkflowsView theme={theme} />
-              </div>
-            )}
-
-            {viewMode === "library" && (
-              <LibraryView selectedAgentIds={selectedAgentIds} onOpenWorkflowsView={openWorkflowsView} />
-            )}
-
-            {viewMode === "queue" && (
-              <div className="flex-1 flex flex-col min-h-0">
-                <QueueView onOpenAgent={openAgentFromQueue} onSendAgentPrompt={sendCommand} />
-              </div>
-            )}
-
-            {shouldRenderGraph && (
-              <div
-                className={cachedCanvasPaneClass(viewMode === "graph")}
-                aria-hidden={viewMode !== "graph"}
-              >
-                <GraphView
-                  filteredAgents={filteredAgents}
-                  allAgents={agents}
-                  telemetry={telemetry}
-                  terminalTitles={terminalTitles}
-                  currentThoughts={currentThoughts}
-                  selectedAgentIds={selectedAgentIds}
-                  offAgentIds={offAgentIds}
-                  watchlists={watchlists}
-                  activeList={activeList}
-                  teams={teams}
-                  interactions={agentInteractions}
-                  onSelectionChange={setSelectedAgentIds}
-                  onOpenAgentInGrid={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                  onInitiateRename={(id) => {
-                    const agent = agents.find((candidate) => candidate.session_id === id);
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
-                    setEditingAgentId(id);
-                    setTempName(agent?.session_name ?? "");
-                  }}
-                  onQuery={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                  onPause={onPause}
-                  onRestart={onRestart}
-                  onClear={onClear}
-                  onClone={onClone}
-                  onAddToList={handleAddToList}
-                  onRemoveFromList={handleRemoveFromList}
-                  onAddAgentsToList={handleAddAgentsToList}
-                  onRemoveAgentsFromList={handleRemoveAgentsFromList}
-                  onDelete={onDelete}
-                  onDeleteAgents={onDeleteAgents}
-                  deriveCurrentThought={deriveCurrentThought}
-                />
-              </div>
-            )}
-
-            {shouldRenderGarden && (
-              <div
-                className={cachedCanvasPaneClass(viewMode === "garden")}
-                aria-hidden={viewMode !== "garden"}
-              >
-                <GardenView
-                  filteredAgents={filteredAgents}
-                  telemetry={telemetry}
-                  teams={teams}
-                  activeList={activeList}
-                  interactions={agentInteractions}
-                  selectedAgentIds={selectedAgentIds}
-                  offAgentIds={offAgentIds}
-                  onSelectionChange={setSelectedAgentIds}
-                  onOpenAgentInGrid={(id) => {
-                    setViewMode("grid");
-                    setSelectedAgentIds(new Set([id]));
-                    lastSelectedIdRef.current = id;
-                    window.setTimeout(() => scrollToAgent(id), 0);
-                  }}
-                />
-              </div>
-            )}
-
-            {viewMode === "grid" && (
-              <GridView 
-                filteredAgents={filteredAgents}
-                telemetry={telemetry}
-                terminalTitles={terminalTitles}
-                currentThoughts={currentThoughts}
-                selectedAgentIds={selectedAgentIds}
-                offAgentIds={offAgentIds}
-                maximizedAgentId={maximizedAgentId}
-                draggedAgentId={draggedAgentId}
-                dragOverAgentId={dragOverAgentId}
-                editingAgentId={editingAgentId}
-                tempName={tempName}
-                theme={theme}
-          watchlists={watchlists}
-          onAddToList={handleAddToList}
-                onRemoveFromList={handleRemoveFromList}
-                onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
-                onPause={onPause}
-                onRestart={onRestart}
-                onClear={onClear}
-                onClone={onClone}
-                onMouseEnterCard={handleMouseEnterCard}
-                onMouseUp={handleMouseUp}
-                onMouseDown={handleMouseDown}
-                onCardClick={handleAgentCardClick}
-                onTerminalFocus={selectSingleAgent}
-                onMaximize={setMaximizedAgentId}
-                onDelete={onDelete}
-                onRename={renameAgent}
-                setEditingAgentId={setEditingAgentId}
-                setTempName={setTempName}
-                handleTitleChange={handleTitleChange}
-                deriveCurrentThought={deriveCurrentThought}
-                getStatusColorClass={getStatusColorClass}
-              />
-            )}
-
-            {viewMode === "dashboard" && (
-              <DashboardView 
-                filteredAgents={filteredAgents}
-                telemetry={telemetry}
-                terminalTitles={terminalTitles}
-                currentThoughts={currentThoughts}
-                selectedAgentIds={selectedAgentIds}
-                offAgentIds={offAgentIds}
-                draggedAgentId={draggedAgentId}
-                dragOverAgentId={dragOverAgentId}
-                onMouseEnterCard={handleMouseEnterCard}
-                onMouseUp={handleMouseUp}
-                onMouseDown={handleMouseDown}
-                onCardClick={handleAgentCardClick}
-                onPause={onPause}
-                onRestart={onRestart}
-                onDelete={onDelete}
-                onQuery={sendCommand}
-                deriveCurrentThought={deriveCurrentThought}
-                getStatusColorClass={getStatusColorClass}
-              />
-            )}
-          </div>
-          <CustomCloneModal
+          mainContent={(
+            <WorkbenchHost
+              store={workbenchPersistence.store}
+              safe_mode={workbenchPersistence.safe_mode}
+              registry={workbenchRegistry}
+              navigation={workbenchNavigation}
+              root_ref={workbenchRootRef}
+              new_tab_action={resolvedWorkbenchNewTabAction}
+              on_quick_open={openWorkbenchLauncher}
+              resource_key={selectedWorkbenchResourceKey}
+              render_surface={renderWorkbenchSurface}
+              surface_title={(surface) => {
+                if (surface.surface_type === "agent-session" && surface.resource_key) {
+                  return agents.find((agent) => agent.session_id === surface.resource_key)
+                    ?.session_name ?? `Agent Session: ${surface.resource_key}`;
+                }
+                return workbenchRegistry.presentation(surface).title;
+              }}
+            />
+          )}
+          mainOverlays={<>
+            {dirtySurfacePrompt.dialog}
+            <CustomCloneModal
             sourceSessionId={customCloneSourceId ?? ""}
             agentClasses={agentClasses}
             isOpen={Boolean(customCloneSourceId)}
@@ -1252,10 +1409,10 @@ function AppBody() {
             onCloned={async () => {
               setCustomCloneSourceId(null);
               await loadWatchlistState();
-              fetchAgents();
+              await fetchAgents();
             }}
-          />
-          {userTerminalOpen && (
+            />
+            {userTerminalOpen && (
             <UserTerminalPanel
               theme={theme}
               height={userTerminalHeight}
@@ -1263,13 +1420,13 @@ function AppBody() {
               onHeightChange={setUserTerminalHeight}
               onHide={() => setUserTerminalOpen(false)}
             />
-          )}
-          {settingsOpen && (
+            )}
+            {settingsOpen && (
             <SettingsModal isOpen={true} onClose={() => setSettingsOpen(false)} />
-          )}
-        </main>
+            )}
+          </>}
 
-        <AgentWatchlist
+          roster={<AgentWatchlist
           agents={agents}
           telemetry={telemetry}
           terminalTitles={terminalTitles}
@@ -1277,14 +1434,17 @@ function AppBody() {
           selectedAgentIds={selectedAgentIds}
           offAgentIds={offAgentIds}
           onSelectionChange={setSelectedAgentIds}
-          onAgentClick={scrollToAgent}
+          filter={rosterFilter}
+          onFilterChange={setRosterFilter}
+          onSelectAgent={selectAgent}
+          onRevealAgent={revealAgentInOverview}
+          onOpenAgent={openAgent}
+          onOpenAgentToSide={openAgentToSide}
           onRename={renameAgent}
           onReorderAgents={async (newOrder) => {
-            const newAgents = [...agents].sort((a, b) => newOrder.indexOf(a.session_id) - newOrder.indexOf(b.session_id));
-            setAgents(newAgents);
-            try { await invoke("reorder_agents", { sessionIds: newOrder }); } catch (e) { console.error(e); }
+            try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }
           }}
-          onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
+          onQuery={scrollToAgent}
           onPause={onPause}
           onRestart={onRestart}
           onClear={onClear}
@@ -1311,9 +1471,10 @@ function AppBody() {
           prefs={watchlistPrefs}
           onPrefsChange={persistWatchlistPrefs}
           interactions={agentInteractions}
+          />}
         />
-      </div>
-    </div>
+      </RosterProvider>
+    </AgentResourceContext.Provider>
   );
 }
 

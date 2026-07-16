@@ -1,10 +1,8 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CustomTitleBar } from "./CustomTitleBar";
 
 const titlebarProps = {
-  viewMode: "grid" as const,
-  setViewMode: vi.fn(),
   leftCollapsed: false,
   setLeftCollapsed: vi.fn(),
   rightCollapsed: false,
@@ -42,5 +40,85 @@ describe("CustomTitleBar density", () => {
 
     expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("360px");
     expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("276px");
+  });
+
+  it("reserves only the explicit window-control chrome when the roster is collapsed", () => {
+    const { container } = render(<CustomTitleBar {...titlebarProps} rightCollapsed />);
+    const titlebar = container.firstElementChild as HTMLElement;
+
+    expect(titlebar).toHaveAttribute("data-right-collapsed", "true");
+    expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("184px");
+  });
+
+  it("reserves macOS traffic lights and the sidebar toggle when the left pane is collapsed", () => {
+    const userAgent = vi.spyOn(window.navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    const { container } = render(<CustomTitleBar {...titlebarProps} leftCollapsed />);
+    const titlebar = container.firstElementChild as HTMLElement;
+
+    expect(titlebar).toHaveAttribute("data-platform", "mac");
+    expect(titlebar).toHaveAttribute("data-left-collapsed", "true");
+    expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("112px");
+    expect(screen.getByRole("button", { name: "Show Left Sidebar" }).parentElement)
+      .toHaveStyle({ paddingLeft: "72px" });
+    userAgent.mockRestore();
+  });
+});
+
+describe("CustomTitleBar navigation", () => {
+  it("leaves the workbench center free for Dockview's real top-edge headers", () => {
+    render(<CustomTitleBar {...titlebarProps} />);
+
+    expect(screen.queryByTestId("titlebar-center")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Quick Open" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Commands" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Grid" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dashboard" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Queue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Graph" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Garden" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Library" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Workflows" })).not.toBeInTheDocument();
+  });
+
+  it("preserves telemetry, sidebar toggles, and window controls", () => {
+    const setLeftCollapsed = vi.fn();
+    const setRightCollapsed = vi.fn();
+    const { container } = render(
+      <CustomTitleBar
+        {...titlebarProps}
+        setLeftCollapsed={setLeftCollapsed}
+        setRightCollapsed={setRightCollapsed}
+      />,
+    );
+
+    expect(container.firstElementChild).not.toHaveAttribute("data-tauri-drag-region");
+    expect(screen.getByText("CPU 0.0%")).toBeInTheDocument();
+    expect(screen.getByText("MEM 0MB")).toBeInTheDocument();
+    expect(screen.getByText("0 Active")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide Left Sidebar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide Agent Roster" }));
+    expect(setLeftCollapsed).toHaveBeenCalledWith(true);
+    expect(setRightCollapsed).toHaveBeenCalledWith(true);
+
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+  });
+
+  it("disables sidebar toggles but preserves window controls during reset", () => {
+    render(
+      <CustomTitleBar
+        {...titlebarProps}
+        workbenchBusy
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Hide Left Sidebar" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Hide Agent Roster" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Minimize" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
   });
 });

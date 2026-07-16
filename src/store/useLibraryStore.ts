@@ -15,6 +15,17 @@ import {
 // param is kept on the wire for interface stability, but only `"library"` is
 // ever sent or expected here.
 const LIBRARY_WATCH_TYPE = 'library';
+const DEFAULT_LIBRARY_DETAIL_WIDTH = 480;
+const MIN_LIBRARY_DETAIL_WIDTH = 360;
+const MAX_LIBRARY_DETAIL_FRACTION = 0.7;
+
+function clampLibraryDetailWidth(px: number): number {
+  const maximum = Math.max(
+    MIN_LIBRARY_DETAIL_WIDTH,
+    Math.floor(window.innerWidth * MAX_LIBRARY_DETAIL_FRACTION),
+  );
+  return Math.max(MIN_LIBRARY_DETAIL_WIDTH, Math.min(maximum, Math.round(px)));
+}
 
 interface LibraryChangedEvent {
   library_type: string;
@@ -25,6 +36,16 @@ interface LibrarySubscription {
   disposed: boolean;
   unlisten?: () => void;
   listenPromise?: Promise<() => void>;
+}
+
+export interface LibraryEditorCloseActions {
+  save: () => Promise<boolean> | boolean;
+  discard: () => Promise<boolean> | boolean;
+}
+
+export interface LibraryEditorResource {
+  dirty: boolean;
+  actions: LibraryEditorCloseActions | null;
 }
 
 let librarySubscription: LibrarySubscription | null = null;
@@ -63,6 +84,7 @@ function errorMessage(e: unknown): string {
 }
 
 interface LibraryState {
+  libraryDetailWidth: number;
   index: LibraryIndex | null;
   isLoading: boolean;
   error: string | null;
@@ -78,11 +100,20 @@ interface LibraryState {
    * `selectedContent` or whether it must instead flag `contentStale` and
    * let the editor decide when to reload. Internal to this store. */
   _editorDirty: boolean;
+  /** Presentation-keyed bridges keep restored/explicit duplicate panes lossless. */
+  _editorResources: Record<string, LibraryEditorResource>;
+  setLibraryDetailWidth: (width: number) => void;
+  resetLibraryDetailWidth: () => void;
   setActiveSection: (s: LibrarySectionId) => void;
   select: (entryRef: string | null, opts?: { editorDirty?: boolean }) => Promise<void>;
   /** Cheap way for a future editor to flag dirty state without forcing a
    * redundant `read_library_item` round-trip via `select()`. */
   markEditorDirty: (dirty: boolean) => void;
+  markEditorSurfaceDirty: (surfaceId: string, dirty: boolean) => void;
+  registerEditorCloseActions: (surfaceId: string, actions: LibraryEditorCloseActions) => () => void;
+  isEditorSurfaceDirty: (surfaceId: string) => boolean;
+  saveEditorDraft: (surfaceId: string) => Promise<boolean>;
+  discardEditorDraft: (surfaceId: string) => Promise<boolean>;
   /** Reverts `selection` back to a previously-tracked entry WITHOUT
    * re-reading its content from disk (unlike `select()`), and marks the
    * editor dirty again. Used when the caller declines a discard-changes
@@ -120,6 +151,7 @@ interface LibraryState {
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
+  libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
   index: null,
   isLoading: false,
   error: null,
@@ -131,6 +163,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   selectedContent: null,
   contentStale: false,
   _editorDirty: false,
+  _editorResources: {},
+
+  setLibraryDetailWidth: (libraryDetailWidth) => set({
+    libraryDetailWidth: clampLibraryDetailWidth(libraryDetailWidth),
+  }),
+  resetLibraryDetailWidth: () => set({
+    libraryDetailWidth: DEFAULT_LIBRARY_DETAIL_WIDTH,
+  }),
 
   setActiveSection: (s) => set({ activeSection: s }),
 
@@ -154,6 +194,77 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   markEditorDirty: (dirty) => set({ _editorDirty: dirty }),
+
+  markEditorSurfaceDirty: (surfaceId, dirty) => {
+    set((state) => {
+      const current = state._editorResources[surfaceId];
+      const resources = {
+        ...state._editorResources,
+        [surfaceId]: { dirty, actions: current?.actions ?? null },
+      };
+      return {
+        _editorResources: resources,
+        _editorDirty: Object.values(resources).some((resource) => resource.dirty),
+      };
+    });
+  },
+
+  registerEditorCloseActions: (surfaceId, actions) => {
+    set((state) => ({
+      _editorResources: {
+        ...state._editorResources,
+        [surfaceId]: {
+          dirty: state._editorResources[surfaceId]?.dirty ?? false,
+          actions,
+        },
+      },
+    }));
+    return () => {
+      set((state) => {
+        if (state._editorResources[surfaceId]?.actions !== actions) return {};
+        const resources = { ...state._editorResources };
+        delete resources[surfaceId];
+        return {
+          _editorResources: resources,
+          _editorDirty: Object.values(resources).some((resource) => resource.dirty),
+        };
+      });
+    };
+  },
+
+  isEditorSurfaceDirty: (surfaceId) => get()._editorResources[surfaceId]?.dirty ?? false,
+
+  saveEditorDraft: async (surfaceId) => {
+    const before = get();
+    const resource = before._editorResources[surfaceId];
+    if (!resource?.dirty) return true;
+    const actions = resource.actions;
+    if (!actions) return false;
+    try {
+      if (!await actions.save()) return false;
+    } catch {
+      return false;
+    }
+    if (get()._editorResources[surfaceId]?.actions !== actions) return false;
+    get().markEditorSurfaceDirty(surfaceId, false);
+    return true;
+  },
+
+  discardEditorDraft: async (surfaceId) => {
+    const before = get();
+    const resource = before._editorResources[surfaceId];
+    if (!resource?.dirty) return true;
+    const actions = resource.actions;
+    if (!actions) return false;
+    try {
+      if (!await actions.discard()) return false;
+    } catch {
+      return false;
+    }
+    if (get()._editorResources[surfaceId]?.actions !== actions) return false;
+    get().markEditorSurfaceDirty(surfaceId, false);
+    return true;
+  },
 
   revertSelection: (entryRef) => {
     const { section } = parseEntryRef(entryRef);

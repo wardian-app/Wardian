@@ -2665,7 +2665,9 @@ describe("GitPanel", () => {
     const actionRow = commitInput.closest("div");
     if (!actionRow) throw new Error("Expected commit action row");
 
-    fireEvent.click(within(actionRow).getByRole("button", { name: "More Actions" }));
+    const moreActions = within(actionRow).getByRole("button", { name: "More Actions" });
+    await waitFor(() => expect(moreActions).toBeEnabled());
+    fireEvent.click(moreActions);
     fireEvent.click(await screen.findByRole("button", { name: "Undo Last Commit" }));
     expect(await screen.findByText("Undo last commit and keep its changes in the working tree?")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));

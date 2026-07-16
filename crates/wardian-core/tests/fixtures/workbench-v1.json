@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "revision": 0,
+  "saved_at": "1970-01-01T00:00:00.000Z",
+  "root": {
+    "kind": "split",
+    "node_id": "split-primary",
+    "direction": "horizontal",
+    "ratio": 0.6,
+    "first": {
+      "kind": "group",
+      "group_id": "group-main"
+    },
+    "second": {
+      "kind": "group",
+      "group_id": "group-plugin"
+    }
+  },
+  "groups": {
+    "group-main": {
+      "group_id": "group-main",
+      "surface_ids": [
+        "surface-overview"
+      ],
+      "active_surface_id": "surface-overview"
+    },
+    "group-plugin": {
+      "group_id": "group-plugin",
+      "surface_ids": [
+        "surface-missing-plugin"
+      ],
+      "active_surface_id": "surface-missing-plugin"
+    }
+  },
+  "surfaces": {
+    "surface-overview": {
+      "surface_id": "surface-overview",
+      "surface_type": "agents-overview",
+      "state_schema_version": 1,
+      "state": {
+        "mode": "auto",
+        "focused_agent_id": null
+      }
+    },
+    "surface-missing-plugin": {
+      "surface_id": "surface-missing-plugin",
+      "surface_type": "example-contribution",
+      "resource_key": "saved-query:open",
+      "state_schema_version": 7,
+      "state": {
+        "query": "status:open",
+        "columns": [
+          "name",
+          "status"
+        ],
+        "unicode_label": "Habitat 🌿"
+      }
+    }
+  },
+  "active_group_id": "group-main",
+  "recently_closed": [
+    {
+      "surface": {
+        "surface_id": "surface-dashboard",
+        "surface_type": "dashboard",
+        "state_schema_version": 1,
+        "state": {
+          "range": "24h"
+        }
+      },
+      "previous_group_id": "group-main",
+      "previous_index": 1
+    }
+  ],
+  "shell": {
+    "left_sidebar_collapsed": false,
+    "left_sidebar_width": 240,
+    "right_sidebar_collapsed": false,
+    "right_sidebar_width": 280,
+    "bottom_terminal_open": true,
+    "bottom_terminal_height": 360
+  }
+}

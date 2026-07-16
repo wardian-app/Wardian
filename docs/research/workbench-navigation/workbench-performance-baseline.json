@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-07-11T21:34:47.193Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "node": "v24.13.1",
+    "wardian_home": "isolated",
+    "renderer_build": "production",
+    "react_runtime": "react-dom/profiling",
+    "heavy_surface_hidden_grace_ms": 250
+  },
+  "scenario": {
+    "fixture": "settings/workbench-performance-fixture.json",
+    "groups": 4,
+    "tabs": 20,
+    "agents": 20,
+    "owner": 1,
+    "mirrors": 3
+  },
+  "bundle": {
+    "base_gzip_bytes": 711930,
+    "candidate_gzip_bytes": 804747,
+    "production_delta_gzip_bytes": 92817
+  },
+  "runtime": {
+    "startup_restore_ms": {
+      "samples": [
+        460,
+        481.47,
+        492.4,
+        507.84,
+        537.63
+      ],
+      "median": 492.4,
+      "p95": 537.63,
+      "max": 537.63
+    },
+    "tab_switch_ms": {
+      "samples": [
+        27.7,
+        28.7,
+        29,
+        29.4,
+        29.7,
+        29.8,
+        30.7,
+        30.7,
+        30.8,
+        31,
+        31.7,
+        32.2,
+        34.8,
+        46.7,
+        48.7,
+        50.6,
+        64.4,
+        64.5,
+        64.7,
+        117.1
+      ],
+      "median": 31,
+      "p95": 64.7,
+      "max": 117.1
+    },
+    "group_focus_ms": {
+      "samples": [
+        29.1,
+        30.1,
+        30.3,
+        40.6
+      ],
+      "median": 30.1,
+      "p95": 40.6,
+      "max": 40.6
+    },
+    "terminal_output_commit_ms": {
+      "samples": [
+        1.4,
+        1.4,
+        1.7,
+        1.8,
+        2.1,
+        2.3,
+        2.8,
+        3.4,
+        12.8,
+        13.5
+      ],
+      "median": 2.1,
+      "p95": 13.5,
+      "max": 13.5
+    },
+    "stream_gap_count": 0,
+    "overview_settle_ms": {
+      "samples": [
+        202.21,
+        213.56,
+        215.07,
+        215.99,
+        216.04,
+        216.35
+      ],
+      "median": 215.07,
+      "p95": 216.35,
+      "max": 216.35
+    },
+    "heavy_surface_resume_ms": {
+      "samples": [
+        46.6,
+        48.2,
+        63.8,
+        79.8
+      ],
+      "median": 48.2,
+      "p95": 79.8,
+      "max": 79.8
+    },
+    "react_commit_max_ms": 20.3,
+    "renderer_peaks": {
+      "xterm": 13,
+      "webgl": 3
+    }
+  },
+  "gates": {
+    "schema_version": 1,
+    "passed": true,
+    "checks": [
+      {
+        "metric": "restore_p95_ms",
+        "observed": 537.63,
+        "operator": "<=",
+        "limit": 1500,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "tab_switch_p95_ms",
+        "observed": 64.7,
+        "operator": "<=",
+        "limit": 100,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "group_focus_p95_ms",
+        "observed": 40.6,
+        "operator": "<=",
+        "limit": 75,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "terminal_output_commit_p95_ms",
+        "observed": 13.5,
+        "operator": "<=",
+        "limit": 50,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "stream_gap_count",
+        "observed": 0,
+        "operator": "<=",
+        "limit": 0,
+        "unit": "gaps",
+        "passed": true
+      },
+      {
+        "metric": "overview_settle_p95_ms",
+        "observed": 216.35,
+        "operator": "<=",
+        "limit": 300,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "heavy_surface_resume_p95_ms",
+        "observed": 79.8,
+        "operator": "<=",
+        "limit": 500,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "react_commit_max_ms",
+        "observed": 20.3,
+        "operator": "<=",
+        "limit": 50,
+        "unit": "ms",
+        "passed": true
+      },
+      {
+        "metric": "bundle_delta_gzip_bytes",
+        "observed": 92817,
+        "operator": "<=",
+        "limit": 256000,
+        "unit": "bytes",
+        "passed": true
+      },
+      {
+        "metric": "xterm_renderer_peak",
+        "observed": 13,
+        "operator": "<=",
+        "limit": 24,
+        "unit": "renderers",
+        "passed": true
+      },
+      {
+        "metric": "webgl_context_peak",
+        "observed": 3,
+        "operator": "<=",
+        "limit": 12,
+        "unit": "contexts",
+        "passed": true
+      }
+    ]
+  }
+}

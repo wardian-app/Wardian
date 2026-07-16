@@ -2,7 +2,7 @@ use crate::state::active_agent::ActiveAgent;
 use crate::state::conversation_archive::ConversationArchiveState;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
-use crate::state::terminal_attach::TerminalAttachState;
+use crate::state::terminal_session::TerminalSessionBroker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -22,6 +22,10 @@ pub struct ExplorerWatchRegistration {
 }
 
 pub struct AppState {
+    // Serializes workbench load/save/reset commands before the core's per-home
+    // disk CAS lock, keeping the async command boundary ordered without a
+    // synchronous mutex held across an await.
+    pub workbench_io_lock: Mutex<()>,
     // Map of session_id to ActiveAgent
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: Arc<Mutex<sysinfo::System>>,
@@ -29,17 +33,8 @@ pub struct AppState {
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    // Per-session PTY resize gates. They keep same-agent resize dedup checks
-    // and native resizes ordered without blocking unrelated agent state work.
-    pub pty_resize_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    // Process-wide native PTY resize gate. This prevents parallel ConPTY
-    // ResizePseudoConsole calls across different terminal sessions.
-    pub pty_native_resize_lock: Arc<Mutex<()>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     pub mailbox: Mutex<MailboxState>,
-    // Separate, lightweight map for stdin senders — completely independent from the
-    // agents lock. Uses std::sync::RwLock for zero-contention reads from any thread.
-    pub input_senders: RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
     // Map of workflow_id to a list of background trigger handles
     pub workflow_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     // Map of workflow_id to running execution handles
@@ -62,16 +57,12 @@ pub struct AppState {
     pub conversation_archive: ConversationArchiveState,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
-    // Last frontend-reported PTY size per session. Used to open a freshly-spawned
-    // PTY at the user's actual terminal dimensions instead of the 80x24 default,
-    // which otherwise causes deformed/duplicated TUI output across clear/resume.
-    pub pty_sizes: RwLock<HashMap<String, (u16, u16)>>,
     // Last frontend-reported effective theme. The frontend resolves "system"
     // before updating this so native PTY fallbacks can answer light/dark probes.
     pub terminal_theme: RwLock<String>,
-    // Lazy remote terminal attach state. This remains idle unless a remote
-    // terminal opens an interactive attachment for an agent.
-    pub terminal_attach: Arc<TerminalAttachState>,
+    // Authoritative per-runtime terminal actors. Presentations and feed
+    // consumers attach to this broker without owning PTY lifetime or queues.
+    pub terminal_sessions: Arc<TerminalSessionBroker>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,17 +109,8 @@ impl AppState {
             .clone()
     }
 
-    pub async fn pty_resize_lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.pty_resize_locks.lock().await;
-        locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
     pub async fn remove_agent_delivery_state(&self, target_session_id: &str) {
         self.delivery_locks.lock().await.remove(target_session_id);
-        self.pty_resize_locks.lock().await.remove(target_session_id);
         if let Ok(mut sequences) = self.status_observation_sequences.lock() {
             sequences.remove(target_session_id);
         }
@@ -176,17 +158,15 @@ impl Default for AppState {
         let mut sys = sysinfo::System::new_all();
         sys.refresh_all();
         Self {
+            workbench_io_lock: Mutex::new(()),
             agents: Mutex::new(HashMap::new()),
             system_metrics: Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
-            pty_resize_locks: Mutex::new(HashMap::new()),
-            pty_native_resize_lock: Arc::new(Mutex::new(())),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             mailbox: Mutex::new(MailboxState::default()),
-            input_senders: RwLock::new(HashMap::new()),
             workflow_triggers: Mutex::new(HashMap::new()),
             workflow_runs: Mutex::new(HashMap::new()),
             triggers_paused: std::sync::atomic::AtomicBool::new(false),
@@ -201,9 +181,8 @@ impl Default for AppState {
             interactions: InteractionState::default(),
             conversation_archive: ConversationArchiveState::default(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
-            pty_sizes: RwLock::new(HashMap::new()),
             terminal_theme: RwLock::new("dark".to_string()),
-            terminal_attach: Arc::new(TerminalAttachState::default()),
+            terminal_sessions: Arc::new(TerminalSessionBroker::default()),
         }
     }
 }
@@ -218,7 +197,12 @@ mod tests {
     fn app_state_constructs_without_panic() {
         let state = AppState::new();
         assert!(state.agent_order.blocking_lock().is_empty());
-        assert!(state.terminal_attach.snapshot("missing-agent").is_none());
+        assert!(state.workbench_io_lock.try_lock().is_ok());
+        assert!(state
+            .terminal_sessions
+            .subscribe_wakeups()
+            .try_recv()
+            .is_err());
         assert_eq!(state.terminal_theme(), "dark");
         assert!(!state
             .workflow_schedules_paused
