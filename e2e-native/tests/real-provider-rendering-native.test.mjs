@@ -1000,12 +1000,14 @@ function hasCompleteNumberedResponse(capture, max, minOccurrences = 1) {
 }
 
 // Providers that repaint a full-screen TUI in place and never push response
-// lines into xterm scrollback, so a "complete scrollable 1..N" check can never
-// pass for them. For these we assert a contiguous visible numbered tail instead.
+// lines into xterm scrollback, so a "complete scrollable 1..N" xterm check can
+// never pass for them. For these we assert a contiguous visible numbered tail.
+// OpenCode's own scrollbox, draft preservation, and selection are exercised by
+// opencode-native.test.mjs through its negotiated alternate-screen mouse mode.
 // Codex is here too: it home-anchors every repaint (ESC[H + overwrite) and
 // never scrolls content out, so once the synthetic-scrollback journal was
 // removed it behaves exactly like opencode.
-const NO_SCROLLBACK_PROVIDERS = new Set(["opencode", "codex"]);
+const NO_XTERM_SCROLLBACK_PROVIDERS = new Set(["opencode", "codex"]);
 
 /**
  * For in-place TUIs the viewport can only show the tail of the numbered
@@ -1145,7 +1147,7 @@ async function waitForScrollableNumberedResponse(driver, sessionId, max, timeout
     lastSeenCount: 0,
     lastProgressAt: Date.now(),
   };
-  const requireScrollback = !NO_SCROLLBACK_PROVIDERS.has(provider ?? "");
+  const requireScrollback = !NO_XTERM_SCROLLBACK_PROVIDERS.has(provider ?? "");
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     last = await readTerminalCapture(driver, sessionId);
@@ -1641,7 +1643,7 @@ async function scrollTerminalUserWheelUp(driver, sessionId) {
   // events to the provider instead of scrolling the xterm viewport, so an
   // unmoved viewport is the correct behavior there, not a failure.
   const wheelStats = after?.wheelStats ?? null;
-  if (wheelStats && (wheelStats.opencode_owned ?? 0) > 0 && (wheelStats.handled ?? 0) === 0) {
+  if (wheelStats && (wheelStats.tui_owned ?? 0) > 0 && (wheelStats.handled ?? 0) === 0) {
     return { before, after, tui_owned: true };
   }
   const dispatchDiagnostics = lastDispatch

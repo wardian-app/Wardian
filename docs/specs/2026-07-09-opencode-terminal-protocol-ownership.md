@@ -32,6 +32,8 @@ Wardian currently overrides that contract in several conflicting layers:
   alternate-screen provider scrollbox; and
 - Wardian strips synchronized-output controls and reports mode 2026 as
   unsupported even though the installed xterm 6 renderer supports it.
+- desktop text and binary callbacks can launch concurrent Tauri IPC requests,
+  allowing rapid keyboard or mouse bytes to reach the PTY out of order.
 
 This sequence explains why individual selection, wheel, and sizing fixes moved
 the symptom without restoring the behavior users get when running OpenCode in a
@@ -50,8 +52,9 @@ geometry, lifecycle, and narrowly scoped compatibility filtering.
 OpenCode mouse-mode DECSET and DECRST sequences must reach both the desktop
 renderer and the remote renderer. Complete SGR mouse reports must be forwarded
 unchanged so OpenTUI receives click, drag, hover, and wheel events. OpenCode's
-own selection is the supported selection surface; `Ctrl+C` copies that selection
-through OpenCode's clipboard behavior, matching a regular OpenCode terminal.
+own mouse handling is the supported selection surface. Wardian preserves press,
+button-held motion, and release reports in order and does not reinterpret
+OpenCode's clipboard or interrupt keybindings.
 
 The Windows compatibility guard remains only for malformed legacy passive
 motion that has previously arrived as printable coordinate bytes. It may drop a
@@ -84,6 +87,16 @@ Geometry decisions use terminal state rather than provider names. Alternate
 buffers use xterm's measured cell geometry. Normal buffers may use Wardian's
 rendered-row correction when needed to fill the host without blank bottom rows.
 Forced remount synchronization continues to ignore stale rendered-row DOM.
+
+### Input ordering
+
+Desktop text and binary input use one per-session FIFO before crossing Tauri
+IPC. The FIFO is independent of snapshot drains and geometry operations: input
+bytes cannot overtake one another, and slow rendering work cannot create an
+interactive input backlog. The final presentation waits for queued input before
+unregistering and rejects input submitted after teardown begins, preventing a
+remounted session client from overtaking bytes that were already accepted by
+its predecessor.
 
 ### Lifecycle and capability replay
 
@@ -133,8 +146,8 @@ Implementation follows red-green regression coverage in this order:
    rather than provider name.
 5. The native real-provider OpenCode test asserts an alternate buffer with
    active mouse tracking, verifies wheel input changes the conversation viewport
-   without changing a draft composer value, and verifies drag plus `Ctrl+C`
-   produces OpenCode's copied-selection confirmation.
+   without changing a draft composer value, and verifies ordered press, drag,
+   and release reports reach OpenCode.
 6. Frontend lint, unit tests, build, screenshot gate, backend checks, and the
    opt-in real OpenCode native target complete the PR verification.
 

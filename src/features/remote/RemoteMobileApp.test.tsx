@@ -2428,10 +2428,15 @@ describe("RemoteMobileApp", () => {
     const wheelListener = vi.fn();
     terminalHost.addEventListener("wheel", wheelListener);
 
-    fireEvent.touchStart(terminalHost, { touches: [{ clientY: 220 }] });
-    fireEvent.touchMove(terminalHost, { touches: [{ clientY: 184 }] });
+    fireEvent.touchStart(terminalHost, { touches: [{ clientX: 92, clientY: 220 }] });
+    fireEvent.touchMove(terminalHost, { touches: [{ clientX: 96, clientY: 184 }] });
 
     expect(wheelListener).toHaveBeenCalledTimes(1);
+    expect(wheelListener.mock.calls[0]?.[0]).toMatchObject({
+      clientX: 96,
+      clientY: 184,
+      deltaY: 36,
+    });
     expect(terminal.scrollLines).not.toHaveBeenCalled();
   });
 

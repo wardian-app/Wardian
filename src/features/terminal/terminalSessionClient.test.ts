@@ -1282,6 +1282,140 @@ describe("TerminalSessionClient", () => {
     });
   });
 
+  it("serializes text and binary input in dispatch order", async () => {
+    const firstInput = deferred<{
+      status: "accepted";
+      reason: null;
+      runtime_generation: number;
+      lease_epoch: number;
+      owner_presentation_id: string;
+    }>();
+    const dispatched: string[] = [];
+    const acceptedDecision = {
+      status: "accepted" as const,
+      reason: null,
+      runtime_generation: 1,
+      lease_epoch: 0,
+      owner_presentation_id: "pane-owner",
+    };
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "register_terminal_presentation") {
+        const result = registeredResult("pane-owner");
+        result.broker_state.owner_presentation_id = "pane-owner";
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const state = brokerState();
+        state.owner_presentation_id = "pane-owner";
+        return { broker_state: state, initial_snapshot: snapshot() };
+      }
+      if (command === "send_terminal_presentation_input") {
+        const input = (args as { request: { input: string } }).request.input;
+        dispatched.push(`text:${input}`);
+        return firstInput.promise;
+      }
+      if (command === "send_terminal_presentation_binary") {
+        const input = (args as { request: { input: number[] } }).request.input;
+        dispatched.push(`binary:${input.join(",")}`);
+        return acceptedDecision;
+      }
+      if (command === "unsubscribe_terminal_events") {
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-owner"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+
+    const textResult = client.sendText("pane-owner", "w");
+    await vi.waitFor(() => expect(dispatched).toEqual(["text:w"]));
+    const binaryResult = client.sendBinary("pane-owner", [97]);
+    await settle();
+    expect(dispatched).toEqual(["text:w"]);
+
+    firstInput.resolve(acceptedDecision);
+    await expect(textResult).resolves.toEqual(acceptedDecision);
+    await expect(binaryResult).resolves.toEqual(acceptedDecision);
+    expect(dispatched).toEqual(["text:w", "binary:97"]);
+  });
+
+  it("drains queued input before unregistering the final presentation", async () => {
+    const firstInput = deferred<{
+      status: "accepted";
+      reason: null;
+      runtime_generation: number;
+      lease_epoch: number;
+      owner_presentation_id: string;
+    }>();
+    const order: string[] = [];
+    const acceptedDecision = {
+      status: "accepted" as const,
+      reason: null,
+      runtime_generation: 1,
+      lease_epoch: 0,
+      owner_presentation_id: "pane-owner",
+    };
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "register_terminal_presentation") {
+        const result = registeredResult("pane-owner");
+        result.broker_state.owner_presentation_id = "pane-owner";
+        return result;
+      }
+      if (command === "subscribe_terminal_events") {
+        const state = brokerState();
+        state.owner_presentation_id = "pane-owner";
+        return { broker_state: state, initial_snapshot: snapshot() };
+      }
+      if (command === "send_terminal_presentation_input") {
+        const input = (args as { request: { input: string } }).request.input;
+        order.push(`input:${input}`);
+        return input === "a" ? firstInput.promise : acceptedDecision;
+      }
+      if (command === "unregister_terminal_presentation") {
+        order.push("unregister");
+        return brokerState();
+      }
+      if (command === "unsubscribe_terminal_events") {
+        order.push("unsubscribe");
+        return undefined;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-owner"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+
+    const first = client.sendText("pane-owner", "a");
+    await vi.waitFor(() => expect(order).toEqual(["input:a"]));
+    const second = client.sendText("pane-owner", "b");
+    const unregistering = client.unregisterPresentation("pane-owner");
+    const lateInput = client.sendText("pane-owner", "late");
+    await settle();
+    expect(order).toEqual(["input:a"]);
+    expect(terminalSessionClientFor("agent-1")).toBe(client);
+
+    firstInput.resolve(acceptedDecision);
+    await Promise.all([first, second, unregistering]);
+    await expect(lateInput).rejects.toThrow("Terminal presentation is closing");
+    expect(order).toEqual(["input:a", "input:b", "unregister", "unsubscribe"]);
+
+    const replacement = terminalSessionClientFor("agent-1");
+    expect(replacement).not.toBe(client);
+    await replacement.registerPresentation(registration("pane-owner"), {
+      applySnapshot: () => undefined,
+      applyEvents: () => undefined,
+    });
+    await replacement.sendText("pane-owner", "c");
+    expect(order[order.length - 1]).toBe("input:c");
+  });
+
   it("serializes accepted resize snapshots into the presentation barrier", async () => {
     const snapshots: number[] = [];
     const applied: number[][] = [];

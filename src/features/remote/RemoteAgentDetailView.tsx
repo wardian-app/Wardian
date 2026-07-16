@@ -209,7 +209,7 @@ function installTerminalScrollBridge(
   const terminalWithScroll = terminal as Terminal & { scrollLines?: (amount: number) => void };
   let wheelRemainder = 0;
   let touchRemainder = 0;
-  let lastTouchY: number | null = null;
+  let lastTouchPoint: { clientX: number; clientY: number } | null = null;
 
   const scrollByRows = (rows: number) => {
     const wholeRows = rows > 0 ? Math.floor(rows) : Math.ceil(rows);
@@ -236,19 +236,26 @@ function installTerminalScrollBridge(
 
   const onTouchStart = (event: TouchEvent) => {
     if (event.touches.length !== 1) return;
-    lastTouchY = event.touches[0]?.clientY ?? null;
+    const touch = event.touches[0];
+    lastTouchPoint = touch
+      ? { clientX: touch.clientX, clientY: touch.clientY }
+      : null;
     touchRemainder = 0;
   };
 
   const onTouchMove = (event: TouchEvent) => {
-    if (event.touches.length !== 1 || lastTouchY === null) return;
-    const nextY = event.touches[0]?.clientY ?? lastTouchY;
-    const deltaY = lastTouchY - nextY;
+    if (event.touches.length !== 1 || lastTouchPoint === null) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const nextTouchPoint = { clientX: touch.clientX, clientY: touch.clientY };
+    const deltaY = lastTouchPoint.clientY - nextTouchPoint.clientY;
     if (terminalOwnsMouseInteraction(terminal)) {
       (terminal.element ?? measureHost).dispatchEvent(
         new WheelEvent("wheel", {
           bubbles: true,
           cancelable: true,
+          clientX: nextTouchPoint.clientX,
+          clientY: nextTouchPoint.clientY,
           deltaMode: WheelEvent.DOM_DELTA_PIXEL,
           deltaY,
         }),
@@ -257,12 +264,12 @@ function installTerminalScrollBridge(
       const rowHeight = terminalRowPixelHeight(terminal, measureHost);
       touchRemainder = scrollByRows(touchRemainder + deltaY / rowHeight);
     }
-    lastTouchY = nextY;
+    lastTouchPoint = nextTouchPoint;
     event.preventDefault();
   };
 
   const onTouchEnd = () => {
-    lastTouchY = null;
+    lastTouchPoint = null;
     touchRemainder = 0;
   };
 
