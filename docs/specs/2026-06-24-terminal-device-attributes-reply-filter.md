@@ -77,6 +77,11 @@ scrolling does not reintroduce composer garbage characters.
 
 ## Update 2026-07-07: OpenCode mouse tracking suppressed for text selection
 
+> **Superseded 2026-07-09:** See
+> `2026-07-09-opencode-terminal-protocol-ownership.md`. OpenCode mouse tracking
+> is preserved so OpenTUI can own scrolling and native selection; the Windows
+> compatibility filter is narrowed to malformed legacy no-button motion.
+
 OpenCode can also enable xterm mouse-tracking modes with DECSET toggles such as
 `ESC[?1000h`, `ESC[?1002h`, `ESC[?1003h`, `ESC[?1006h`, and `ESC[?1016h`.
 When xterm.js enters those modes, plain drag gestures become mouse protocol

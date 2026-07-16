@@ -220,8 +220,14 @@ describe("RemoteMobileApp", () => {
     });
     vi.mocked(Terminal).mockImplementation(function MockTerminal(options) {
       const textarea = document.createElement("textarea");
-      return {
-        open: vi.fn(),
+      let terminalElement: HTMLElement | undefined;
+      const terminal = {
+        get element() {
+          return terminalElement;
+        },
+        open: vi.fn((element: HTMLElement) => {
+          terminalElement = element;
+        }),
         write: vi.fn((_data: string | Uint8Array, callback?: () => void) => callback?.()),
         resize: vi.fn(),
         clear: vi.fn(),
@@ -240,10 +246,13 @@ describe("RemoteMobileApp", () => {
         scrollToBottom: vi.fn(),
         scrollToTop: vi.fn(),
         textarea,
+        buffer: { active: { type: "normal" } },
+        modes: { mouseTrackingMode: "none" },
         options: { ...(options ?? {}) },
         cols: 80,
         rows: 24,
       } as unknown as Terminal;
+      return terminal;
     });
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(Element.prototype, "scrollIntoView", {
@@ -2384,6 +2393,53 @@ describe("RemoteMobileApp", () => {
     expect(terminalInstance.scrollLines).toHaveBeenCalledWith(2);
   });
 
+  it("leaves wheel events to an alternate-screen mouse session", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    const terminalSurface = await screen.findByTestId("remote-terminal-scroll-surface");
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminal = terminalResults[terminalResults.length - 1]?.value as Terminal & {
+      scrollLines: ReturnType<typeof vi.fn>;
+    };
+    (terminal.buffer.active as { type: "normal" | "alternate" }).type = "alternate";
+    (terminal.modes as { mouseTrackingMode: "none" | "any" }).mouseTrackingMode = "any";
+    terminal.scrollLines.mockClear();
+
+    fireEvent.wheel(terminalSurface, { deltaY: -120, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
+
+    expect(terminal.scrollLines).not.toHaveBeenCalled();
+  });
+
+  it("translates alternate-screen touch travel into a wheel event", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    const terminalHost = await screen.findByTestId("remote-terminal-attach");
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminal = terminalResults[terminalResults.length - 1]?.value as Terminal & {
+      scrollLines: ReturnType<typeof vi.fn>;
+    };
+    (terminal.buffer.active as { type: "normal" | "alternate" }).type = "alternate";
+    (terminal.modes as { mouseTrackingMode: "none" | "any" }).mouseTrackingMode = "any";
+    terminal.scrollLines.mockClear();
+    const wheelListener = vi.fn();
+    terminalHost.addEventListener("wheel", wheelListener);
+
+    fireEvent.touchStart(terminalHost, { touches: [{ clientX: 92, clientY: 220 }] });
+    fireEvent.touchMove(terminalHost, { touches: [{ clientX: 96, clientY: 184 }] });
+
+    expect(wheelListener).toHaveBeenCalledTimes(1);
+    expect(wheelListener.mock.calls[0]?.[0]).toMatchObject({
+      clientX: 96,
+      clientY: 184,
+      deltaY: 36,
+    });
+    expect(terminal.scrollLines).not.toHaveBeenCalled();
+  });
+
   it("maps captured terminal child touch drags to xterm scrollback", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
@@ -2598,6 +2654,232 @@ describe("RemoteMobileApp", () => {
         cols: 112,
         rows: 31,
       });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("uses rendered row geometry for normal-buffer remote terminal resize messages", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    mockRemoteAgentDetailFetch("opencode");
+
+    try {
+      render(<RemoteMobileApp />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+      act(() => {
+        MockWebSocket.instances[1]?.emit("open");
+        MockWebSocket.instances[1]?.emit("message", {
+          data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
+        });
+      });
+
+      const terminalHost = await screen.findByTestId("remote-terminal-attach");
+      const terminalSurface = screen.getByTestId("remote-terminal-scroll-surface");
+      Object.defineProperty(terminalSurface, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(terminalSurface, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+      Object.defineProperty(terminalHost, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(terminalHost, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+
+      const terminalResults = vi.mocked(Terminal).mock.results;
+      const terminalInstance = terminalResults[terminalResults.length - 1]?.value as {
+        _core?: unknown;
+        cols: number;
+        rows: number;
+      };
+      terminalInstance._core = {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 8, height: 20 },
+            },
+          },
+        },
+      };
+      terminalInstance.cols = 100;
+      terminalInstance.rows = 16;
+
+      const rowOne = document.createElement("div");
+      const rowTwo = document.createElement("div");
+      rowOne.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 16,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      rowTwo.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 16,
+            left: 0,
+            right: 800,
+            bottom: 32,
+            x: 0,
+            y: 16,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      const rows = document.createElement("div");
+      rows.className = "xterm-rows";
+      rows.append(rowOne, rowTwo);
+      terminalHost.append(rows);
+
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+
+      expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual(
+        expect.objectContaining({ type: "resize", cols: 100, rows: 20 }),
+      );
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("does not apply rendered row geometry to alternate-buffer remote terminals", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    mockRemoteAgentDetailFetch("opencode");
+
+    try {
+      render(<RemoteMobileApp />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+      await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+      act(() => {
+        MockWebSocket.instances[1]?.emit("open");
+        MockWebSocket.instances[1]?.emit("message", {
+          data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
+        });
+      });
+
+      const terminalHost = await screen.findByTestId("remote-terminal-attach");
+      const terminalSurface = screen.getByTestId("remote-terminal-scroll-surface");
+      Object.defineProperty(terminalSurface, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(terminalSurface, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+      Object.defineProperty(terminalHost, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(terminalHost, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+
+      const terminalResults = vi.mocked(Terminal).mock.results;
+      const terminalInstance = terminalResults[terminalResults.length - 1]?.value as {
+        _core?: unknown;
+        cols: number;
+        rows: number;
+      };
+      terminalInstance._core = {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 8, height: 20 },
+            },
+          },
+        },
+      };
+      terminalInstance.cols = 100;
+      terminalInstance.rows = 16;
+      ((terminalInstance as unknown as Terminal).buffer.active as { type: "normal" | "alternate" }).type =
+        "alternate";
+
+      const rowOne = document.createElement("div");
+      const rowTwo = document.createElement("div");
+      rowOne.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 16,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      rowTwo.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 16,
+            left: 0,
+            right: 800,
+            bottom: 32,
+            x: 0,
+            y: 16,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      const rows = document.createElement("div");
+      rows.className = "xterm-rows";
+      rows.append(rowOne, rowTwo);
+      terminalHost.append(rows);
+
+      act(() => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+
+      const resizeMessages = MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload));
+      expect(resizeMessages).toContainEqual(
+        expect.objectContaining({ type: "resize", cols: 100, rows: 16 }),
+      );
+      expect(resizeMessages).not.toContainEqual(
+        expect.objectContaining({ type: "resize", cols: 100, rows: 20 }),
+      );
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
@@ -3053,7 +3335,7 @@ describe("RemoteMobileApp", () => {
     ]);
   });
 
-  it("normalizes OpenCode synchronized-output noise from remote terminal live updates", async () => {
+  it("preserves OpenCode synchronized-output frames in remote terminal live updates", async () => {
     mockRemoteAgentDetailFetch("opencode");
 
     render(<RemoteMobileApp />);
@@ -3079,7 +3361,34 @@ describe("RemoteMobileApp", () => {
       });
     });
 
-    await waitFor(() => expect(terminalInstance.write).toHaveBeenLastCalledWith("hellotest", expect.any(Function)));
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenLastCalledWith(
+      "\u001b[?2026hhellotest\u001b[?2026l",
+      expect.any(Function),
+    ));
+  });
+
+  it("preserves OpenCode alternate-screen and mouse modes from the remote snapshot", async () => {
+    mockRemoteAgentDetailFetch("opencode");
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const terminalResults = vi.mocked(Terminal).mock.results;
+    const terminalInstance = terminalResults[terminalResults.length - 1]?.value as Terminal & {
+      write: ReturnType<typeof vi.fn>;
+    };
+    const startupFrame =
+      "\u001b[?1049h\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h" +
+      "\u001b[?2026hready\u001b[?2026l";
+
+    act(() => {
+      MockWebSocket.instances[1]?.emit("open");
+      MockWebSocket.instances[1]?.emit("message", {
+        data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: startupFrame })),
+      });
+    });
+
+    await waitFor(() => expect(terminalInstance.write).toHaveBeenCalledWith(startupFrame, expect.any(Function)));
   });
 
   it("answers OpenCode terminal capability probes on the remote terminal stream", async () => {

@@ -368,18 +368,6 @@
   scrollbar-width: none;
 }
 
-.wardian-terminal--tui-owned-scroll .xterm-viewport {
-  scrollbar-width: none;
-}
-
-.wardian-terminal--tui-owned-scroll .xterm-viewport::-webkit-scrollbar {
-  display: none;
-}
-
-.wardian-terminal--tui-owned-scroll .xterm-scrollable-element > .scrollbar {
-  display: none !important;
-}
-
 .remote-terminal-hide-composition .composition-view {
   display: none !important;
 }

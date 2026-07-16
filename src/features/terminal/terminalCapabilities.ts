@@ -3,7 +3,6 @@ const XTVERSION_QUERY = "\u001b[>0q";
 const KITTY_KEYBOARD_QUERY = "\u001b[?u";
 const LIGHT_DARK_QUERY = "\u001b[?996n";
 const DECRQM_QUERY = /\u001b\[\?(\d+)\$p/g;
-const SYNC_OUTPUT_TOGGLE = /\u001b\[\?2026[hl]/g;
 const OSC_PALETTE_QUERY = "\u001b]4;0;?\u0007";
 const OSC_FOREGROUND_QUERY_BEL = "\u001b]10;?\u0007";
 const OSC_BACKGROUND_QUERY_BEL = "\u001b]11;?\u0007";
@@ -22,7 +21,6 @@ const TERMINAL_DEVICE_ATTRIBUTES_REPLY = /\u001b\[\?\d+(?:;\d+)*c/g;
 const TERMINAL_COLOR_REPORT_REPLY =
   /\u001b\[\?997;\d+n|\u001b\[\?\d+(?:;\d+)*c|\u001b\]1[01];rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)|\u001b\]4;\d+;rgb:[0-9a-fA-F/]+(?:\u0007|\u001b\\)/g;
 const LEGACY_MOUSE_REPORT_PREFIX = "\u001b[M";
-const SGR_MOUSE_REPORT = /\u001b\[<(\d+);\d+;\d+[mM]/g;
 // The full set of terminal color / light-dark STATUS sequences in codex's OUTPUT:
 // the OSC 10/11/4 + CSI ?996n probes codex emits, plus the OSC 10/11/4 "rgb:..."
 // reports and the CSI ?997;<n>n light-dark report that the modern ConPTY answers
@@ -34,10 +32,9 @@ const SGR_MOUSE_REPORT = /\u001b\[<(\d+);\d+;\d+[mM]/g;
 // or an OSC color "set", so dropping these from its display stream is safe.
 const CODEX_TERMINAL_STATUS_SEQUENCE =
   /\u001b\[\?99[67](?:;\d+)?n|\u001b\]1[01];(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)|\u001b\]4;\d+;(?:\?|rgb:[0-9a-fA-F/]+)(?:\u0007|\u001b\\)/g;
-const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004]);
-const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2026, 2027, 2031]);
+const SUPPORTED_RESET_DECRQM_PARAMS = new Set([1004, 1016, 2004, 2026]);
+const UNSUPPORTED_RESET_DECRQM_PARAMS = new Set([2027, 2031]);
 const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
-const OPENCODE_MOUSE_TRACKING_TOGGLE = /\u001b\[\?(?:1000|1002|1003|1006|1016)[hl]/g;
 const CODEX_SCROLLBACK_ERASE = /\u001b\[3J/g;
 // Matches any SGR sequence so codex's chrome background can be remapped even when
 // it is COMBINED with a foreground/attributes in one SGR. Codex emits the active
@@ -128,8 +125,8 @@ export function stripProviderTerminalReportInputs(provider: string | undefined, 
   return stripTerminalColorReportInputs(data);
 }
 
-function isPassiveMouseMotionButtonCode(buttonCode: number) {
-  return Number.isFinite(buttonCode) && (buttonCode & 32) === 32;
+function isLegacyPassiveMouseMotionButtonCode(buttonCode: number) {
+  return Number.isFinite(buttonCode) && buttonCode === 35;
 }
 
 function isLegacyMousePayloadByte(value: number) {
@@ -143,7 +140,7 @@ function stripLegacyMouseMotionReports(data: string, options?: { binary?: boolea
   for (let index = 0; index < data.length;) {
     if (data.startsWith(LEGACY_MOUSE_REPORT_PREFIX, index) && index + 5 < data.length) {
       const buttonCode = data.charCodeAt(index + 3) - 32;
-      if (isPassiveMouseMotionButtonCode(buttonCode)) {
+      if (isLegacyPassiveMouseMotionButtonCode(buttonCode)) {
         index += 6;
         continue;
       }
@@ -158,7 +155,7 @@ function stripLegacyMouseMotionReports(data: string, options?: { binary?: boolea
         isLegacyMousePayloadByte(button) &&
         isLegacyMousePayloadByte(column) &&
         isLegacyMousePayloadByte(row) &&
-        isPassiveMouseMotionButtonCode(buttonCode)
+        isLegacyPassiveMouseMotionButtonCode(buttonCode)
       ) {
         index += 3;
         continue;
@@ -171,13 +168,6 @@ function stripLegacyMouseMotionReports(data: string, options?: { binary?: boolea
   return output;
 }
 
-function stripSgrMouseMotionReports(data: string) {
-  return data.replace(SGR_MOUSE_REPORT, (match: string, rawButtonCode: string) => {
-    const buttonCode = Number.parseInt(rawButtonCode, 10);
-    return isPassiveMouseMotionButtonCode(buttonCode) ? "" : match;
-  });
-}
-
 export function filterProviderTerminalInput(
   provider: string | undefined,
   data: string,
@@ -188,7 +178,7 @@ export function filterProviderTerminalInput(
     return reportStripped;
   }
 
-  return stripSgrMouseMotionReports(stripLegacyMouseMotionReports(reportStripped, options));
+  return stripLegacyMouseMotionReports(reportStripped, options);
 }
 
 function codexLightUserMessageBackground(backgroundRgb: string) {
@@ -299,9 +289,7 @@ export function normalizeOpenCodeOutput(
 
   return stripProviderScrollbackErase(data, provider)
     .replace(DECRQM_QUERY, "")
-    .replace(SYNC_OUTPUT_TOGGLE, "")
-    .replace(THEME_MODE_NOTIFICATION_TOGGLE, "")
-    .replace(OPENCODE_MOUSE_TRACKING_TOGGLE, "");
+    .replace(THEME_MODE_NOTIFICATION_TOGGLE, "");
 }
 
 export function normalizeTerminalOutputBatch(
