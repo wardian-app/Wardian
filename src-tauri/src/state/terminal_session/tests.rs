@@ -3,12 +3,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use wardian_core::models::*;
 
 #[derive(Default)]
 struct ManualTimer {
     sleepers: Mutex<Vec<(Duration, oneshot::Sender<()>)>>,
+    sleeper_registered: Notify,
 }
 
 impl ManualTimer {
@@ -50,13 +51,16 @@ impl ManualTimer {
     }
 
     async fn wait_for_sleep(&self, duration: Duration) {
-        for _ in 0..10_000 {
-            if self.has_sleep(duration) {
-                return;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.has_sleep(duration) {
+                    return;
+                }
+                self.sleeper_registered.notified().await;
             }
-            tokio::task::yield_now().await;
-        }
-        panic!("no sleeper registered for {duration:?}");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no sleeper registered for {duration:?}"));
     }
 }
 
@@ -67,6 +71,7 @@ impl TerminalTimer for ManualTimer {
             .lock()
             .expect("manual timer lock")
             .push((duration, tx));
+        self.sleeper_registered.notify_one();
         Box::pin(async move {
             let _ = rx.await;
         })
