@@ -93,6 +93,15 @@ struct FileResourceRuntimeInner {
     ticket_ttl: Duration,
     events: broadcast::Sender<FileResourceEventV1>,
     app_handle: RwLock<Option<tauri::AppHandle>>,
+    #[cfg(test)]
+    issue_ticket_after_validation_hook: Mutex<Option<IssueTicketAfterValidationHook>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct IssueTicketAfterValidationHook {
+    validation_reached: Arc<tokio::sync::Barrier>,
+    resume_publication: Arc<tokio::sync::Barrier>,
 }
 
 struct FileResourceEntry {
@@ -120,6 +129,7 @@ struct UserFileGrant {
 
 #[derive(Clone)]
 struct FileReadTicket {
+    issuance_id: Uuid,
     webview_label: Option<String>,
     renderer_lease: RendererLeaseKey,
     subscription_id: String,
@@ -139,6 +149,7 @@ struct RendererLeaseKey {
 
 #[derive(Clone)]
 struct RendererLease {
+    issuance_id: Uuid,
     subscription_id: String,
     expires_at: Instant,
 }
@@ -159,6 +170,8 @@ impl FileResourceRuntime {
                 ticket_ttl,
                 events,
                 app_handle: RwLock::new(None),
+                #[cfg(test)]
+                issue_ticket_after_validation_hook: Mutex::new(None),
             }),
         }
     }
@@ -749,6 +762,19 @@ impl FileResourceRuntime {
         let (authorized, descriptor, revision_token) = self
             .validated_authorized(resource_id, subscription_id, revision, current_agent_config)
             .await?;
+        #[cfg(test)]
+        {
+            let hook = self
+                .inner
+                .issue_ticket_after_validation_hook
+                .lock()
+                .await
+                .clone();
+            if let Some(hook) = hook {
+                hook.validation_reached.wait().await;
+                hook.resume_publication.wait().await;
+            }
+        }
         match descriptor.renderer_kind {
             FileRendererKind::Image | FileRendererKind::Pdf if descriptor.capabilities.stream => {}
             _ => {
@@ -760,6 +786,7 @@ impl FileResourceRuntime {
         };
         self.remove_expired_tickets().await;
         let ticket_id = Uuid::new_v4().to_string();
+        let issuance_id = Uuid::new_v4();
         let expires_at = Instant::now() + self.inner.ticket_ttl;
         let renderer_lease = RendererLeaseKey {
             webview_label: webview_label.map(str::to_string),
@@ -780,6 +807,7 @@ impl FileResourceRuntime {
             leases.insert(
                 renderer_lease.clone(),
                 RendererLease {
+                    issuance_id,
                     subscription_id: subscription_id.to_string(),
                     expires_at,
                 },
@@ -793,6 +821,7 @@ impl FileResourceRuntime {
                 .unwrap_or(u64::MAX),
         );
         let ticket = FileReadTicket {
+            issuance_id,
             webview_label: webview_label.map(str::to_string),
             renderer_lease,
             subscription_id: subscription_id.to_string(),
@@ -809,7 +838,7 @@ impl FileResourceRuntime {
             .await
             .insert(ticket_id.clone(), ticket.clone());
         if let Err(error) = self.ensure_ticket_lease_active(&ticket).await {
-            self.inner.read_tickets.lock().await.remove(&ticket_id);
+            self.rollback_ticket_publication(&ticket_id, &ticket).await;
             return Err(error);
         }
         Ok(FileResourceTicketV1 {
@@ -949,7 +978,9 @@ impl FileResourceRuntime {
             .await
             .get(&ticket.renderer_lease)
             .is_some_and(|lease| {
-                lease.subscription_id == ticket.subscription_id && lease.expires_at > Instant::now()
+                lease.issuance_id == ticket.issuance_id
+                    && lease.subscription_id == ticket.subscription_id
+                    && lease.expires_at > Instant::now()
             });
         let subscription_is_active = self
             .inner
@@ -965,6 +996,25 @@ impl FileResourceRuntime {
             ));
         }
         Ok(())
+    }
+
+    async fn rollback_ticket_publication(&self, ticket_id: &str, ticket: &FileReadTicket) {
+        let mut tickets = self.inner.read_tickets.lock().await;
+        if tickets
+            .get(ticket_id)
+            .is_some_and(|published| published.issuance_id == ticket.issuance_id)
+        {
+            tickets.remove(ticket_id);
+        }
+        drop(tickets);
+
+        let mut leases = self.inner.renderer_leases.lock().await;
+        if leases
+            .get(&ticket.renderer_lease)
+            .is_some_and(|published| published.issuance_id == ticket.issuance_id)
+        {
+            leases.remove(&ticket.renderer_lease);
+        }
     }
 
     pub async fn close_all(&self) {
@@ -1534,6 +1584,81 @@ mod tests {
                 .code(),
             "invalid_ticket"
         );
+    }
+
+    #[tokio::test]
+    async fn close_before_ticket_publication_rolls_back_ticket_and_renderer_lease() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("publication-race.pdf");
+        fs::write(&path, b"%PDF-1.7 publication race").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let subscription = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let hook = IssueTicketAfterValidationHook {
+            validation_reached: Arc::new(tokio::sync::Barrier::new(2)),
+            resume_publication: Arc::new(tokio::sync::Barrier::new(2)),
+        };
+        *runtime
+            .inner
+            .issue_ticket_after_validation_hook
+            .lock()
+            .await = Some(hook.clone());
+
+        let issuing_runtime = runtime.clone();
+        let issuing_config = config.clone();
+        let resource_id = subscription.resource_id.clone();
+        let subscription_id = subscription.subscription_id.clone();
+        let issuance = tokio::spawn(async move {
+            issuing_runtime
+                .issue_ticket_for_webview(
+                    &resource_id,
+                    &subscription_id,
+                    subscription.revision,
+                    Some(&issuing_config),
+                    "lease-a",
+                    Some("main"),
+                )
+                .await
+        });
+
+        hook.validation_reached.wait().await;
+        runtime
+            .close(&subscription.subscription_id)
+            .await
+            .expect("close completes while issuance is paused");
+        hook.resume_publication.wait().await;
+
+        let issue_error = issuance
+            .await
+            .expect("issuance task")
+            .expect_err("closed subscription cannot publish a ticket");
+        assert_eq!(issue_error.code(), "invalid_ticket");
+        assert!(runtime.inner.read_tickets.lock().await.is_empty());
+        assert!(runtime.inner.renderer_leases.lock().await.is_empty());
+
+        *runtime
+            .inner
+            .issue_ticket_after_validation_hook
+            .lock()
+            .await = None;
+        let reopened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("reopen");
+        runtime
+            .issue_ticket_for_webview(
+                &reopened.resource_id,
+                &reopened.subscription_id,
+                reopened.revision,
+                Some(&config),
+                "lease-a",
+                Some("main"),
+            )
+            .await
+            .expect("new subscription reuses renderer lease immediately");
     }
 
     #[tokio::test]
