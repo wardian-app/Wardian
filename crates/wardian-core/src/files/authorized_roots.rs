@@ -1,7 +1,10 @@
 use super::FileResourceErrorV1;
 use crate::models::AgentConfig;
 use std::fs;
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(windows)]
 use std::path::Component;
@@ -74,44 +77,226 @@ impl AuthorizedRootService {
         &self,
         requested: &Path,
     ) -> Result<AuthorizedPath, FileResourceErrorV1> {
-        let canonical_path = canonicalize(requested, "requested file")?;
-        if !fs::metadata(&canonical_path)
-            .map_err(|error| unavailable("requested file", error))?
-            .is_file()
-        {
+        let requested_path = absolute_path(requested)?;
+        let canonical_path = canonicalize(&requested_path, "requested file")?;
+        let root = self
+            .roots
+            .iter()
+            .find(|root| component_contains(root, &canonical_path))
+            .cloned()
+            .ok_or_else(|| unauthorized(requested))?;
+        let file =
+            File::open(&canonical_path).map_err(|error| unavailable("requested file", error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| unavailable("requested file", error))?;
+        if !metadata.is_file() {
             return Err(FileResourceErrorV1::new(
                 "unavailable_path",
                 format!("requested path is not a file: {}", requested.display()),
             ));
         }
+        let identity = FileIdentity::from_file(&file)
+            .map_err(|error| unavailable("requested file identity", error))?;
+        verify_binding(&requested_path, &canonical_path, &root, identity)?;
 
-        self.roots
-            .iter()
-            .find(|root| component_contains(root, &canonical_path))
-            .cloned()
-            .map(|root| AuthorizedPath {
-                canonical_path,
-                root,
-            })
-            .ok_or_else(|| {
-                FileResourceErrorV1::new(
-                    "unauthorized_path",
-                    format!(
-                        "requested file is outside the agent's authorized roots: {}",
-                        requested.display()
-                    ),
-                )
-            })
+        Ok(AuthorizedPath {
+            canonical_path: canonical_path.clone(),
+            root: root.clone(),
+            requested_path,
+            verified_canonical_path: canonical_path,
+            verified_root: root,
+            identity,
+            file: Arc::new(Mutex::new(file)),
+        })
     }
 }
 
-/// A canonical file path paired with the canonical root that authorized it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A canonical file path paired with the canonical root and open file identity
+/// that authorized it.
+#[derive(Debug, Clone)]
 pub struct AuthorizedPath {
     /// The fully resolved file path, with links and junctions eliminated.
     pub canonical_path: PathBuf,
     /// The canonical configured root that contains `canonical_path`.
     pub root: PathBuf,
+    requested_path: PathBuf,
+    verified_canonical_path: PathBuf,
+    verified_root: PathBuf,
+    identity: FileIdentity,
+    file: Arc<Mutex<File>>,
+}
+
+impl AuthorizedPath {
+    pub(super) fn verified_canonical_path(&self) -> &Path {
+        &self.verified_canonical_path
+    }
+
+    pub(super) fn lock_verified_file(&self) -> Result<MutexGuard<'_, File>, FileResourceErrorV1> {
+        let file = self.file.lock().map_err(|_| {
+            FileResourceErrorV1::new("unavailable_path", "authorized file handle is unavailable")
+        })?;
+        self.verify_current_binding(&file)?;
+        Ok(file)
+    }
+
+    pub(super) fn verify_current_binding(&self, file: &File) -> Result<(), FileResourceErrorV1> {
+        let metadata = file.metadata().map_err(|error| {
+            FileResourceErrorV1::new(
+                "unavailable_path",
+                format!("cannot read authorized file metadata: {error}"),
+            )
+        })?;
+        let current_identity = FileIdentity::from_file(file).map_err(|error| {
+            FileResourceErrorV1::new(
+                "unavailable_path",
+                format!("cannot read authorized file identity: {error}"),
+            )
+        })?;
+        if !metadata.is_file() || current_identity != self.identity {
+            return Err(FileResourceErrorV1::new(
+                "unauthorized_path",
+                "authorized file handle no longer identifies the approved file",
+            ));
+        }
+        verify_binding(
+            &self.requested_path,
+            &self.verified_canonical_path,
+            &self.verified_root,
+            self.identity,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    pub(super) fn from_file(file: &File) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = file.metadata()?;
+        Ok(Self {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+        })
+    }
+}
+
+#[cfg(windows)]
+impl FileIdentity {
+    pub(super) fn from_file(file: &File) -> io::Result<Self> {
+        use std::ffi::c_void;
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct FileTime {
+            dwLowDateTime: u32,
+            dwHighDateTime: u32,
+        }
+
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct ByHandleFileInformation {
+            dwFileAttributes: u32,
+            ftCreationTime: FileTime,
+            ftLastAccessTime: FileTime,
+            ftLastWriteTime: FileTime,
+            dwVolumeSerialNumber: u32,
+            nFileSizeHigh: u32,
+            nFileSizeLow: u32,
+            nNumberOfLinks: u32,
+            nFileIndexHigh: u32,
+            nFileIndexLow: u32,
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileInformationByHandle(
+                file: *mut c_void,
+                information: *mut ByHandleFileInformation,
+            ) -> i32;
+        }
+
+        let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+        // SAFETY: `file` is an open OS handle and Windows initializes the full
+        // output structure when the call reports success.
+        let succeeded =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the successful call above initialized `information`.
+        let information = unsafe { information.assume_init() };
+        Ok(Self {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            file: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+impl FileIdentity {
+    pub(super) fn from_file(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            volume: 0,
+            file: metadata.len(),
+        })
+    }
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, FileResourceErrorV1> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|error| unavailable("current directory", error))
+}
+
+fn verify_binding(
+    requested_path: &Path,
+    expected_canonical_path: &Path,
+    root: &Path,
+    expected_identity: FileIdentity,
+) -> Result<(), FileResourceErrorV1> {
+    let current_canonical_path = fs::canonicalize(requested_path)
+        .map(normalize_drive_letter)
+        .map_err(|_| unauthorized(requested_path))?;
+    if current_canonical_path != expected_canonical_path
+        || !component_contains(root, &current_canonical_path)
+    {
+        return Err(unauthorized(requested_path));
+    }
+    let current_file =
+        File::open(&current_canonical_path).map_err(|_| unauthorized(requested_path))?;
+    let current_metadata = current_file
+        .metadata()
+        .map_err(|_| unauthorized(requested_path))?;
+    let current_identity =
+        FileIdentity::from_file(&current_file).map_err(|_| unauthorized(requested_path))?;
+    if !current_metadata.is_file() || current_identity != expected_identity {
+        return Err(unauthorized(requested_path));
+    }
+    Ok(())
+}
+
+fn unauthorized(path: &Path) -> FileResourceErrorV1 {
+    FileResourceErrorV1::new(
+        "unauthorized_path",
+        format!(
+            "requested file is outside the agent's authorized roots or changed identity: {}",
+            path.display()
+        ),
+    )
 }
 
 fn canonicalize(path: &Path, label: &str) -> Result<PathBuf, FileResourceErrorV1> {

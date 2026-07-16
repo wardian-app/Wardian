@@ -1,12 +1,14 @@
+use super::authorized_roots::FileIdentity;
 use super::AuthorizedPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::time::UNIX_EPOCH;
 
 const SCAN_BUFFER_SIZE: usize = 64 * 1024;
 const SIGNATURE_PROBE_SIZE: usize = 1024 * 1024;
+const MINIMUM_DETECTION_BYTES: u64 = 32;
+const DESCRIPTOR_SCAN_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,94 +50,199 @@ impl FileContentDescriptorV1 {
     ///
     /// # Errors
     ///
-    /// Returns `unavailable_path` if the authorized path no longer resolves to
-    /// a readable file or its modification timestamp cannot be represented.
+    /// Returns `unauthorized_path` if the original path no longer resolves to
+    /// the authorized handle, `unstable_file` if no stable revision can be
+    /// scanned after retrying, `file_too_large` if the detected renderer's
+    /// centralized byte ceiling is exceeded, or `unavailable_path` for other
+    /// file access and metadata failures.
     pub fn from_authorized_path(
         authorized: &AuthorizedPath,
         limits: &FileResourceLimits,
     ) -> Result<Self, FileResourceErrorV1> {
-        let metadata = fs::metadata(&authorized.canonical_path).map_err(|error| {
-            FileResourceErrorV1::new(
-                "unavailable_path",
-                format!("cannot read file metadata: {error}"),
-            )
-        })?;
-        if !metadata.is_file() {
-            return Err(FileResourceErrorV1::new(
-                "unavailable_path",
-                "authorized path is not a file",
-            ));
-        }
-        let canonical_path = authorized.canonical_path.to_str().ok_or_else(|| {
-            FileResourceErrorV1::new(
-                "unavailable_path",
-                "canonical path cannot be represented losslessly as UTF-8",
-            )
-        })?;
+        Self::from_authorized_path_with_hook(authorized, limits, |_, _| {})
+    }
+
+    fn from_authorized_path_with_hook(
+        authorized: &AuthorizedPath,
+        limits: &FileResourceLimits,
+        mut after_read: impl FnMut(usize, u64),
+    ) -> Result<Self, FileResourceErrorV1> {
+        let mut file = authorized.lock_verified_file()?;
+        let canonical_path = authorized
+            .verified_canonical_path()
+            .to_str()
+            .ok_or_else(|| {
+                FileResourceErrorV1::new(
+                    "unavailable_path",
+                    "canonical path cannot be represented losslessly as UTF-8",
+                )
+            })?;
         let display_name = authorized
-            .canonical_path
+            .verified_canonical_path()
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(canonical_path)
             .to_string();
         let extension = authorized
-            .canonical_path
+            .verified_canonical_path()
             .extension()
             .and_then(|extension| extension.to_str())
             .map(str::to_ascii_lowercase);
-        let file = fs::File::open(&authorized.canonical_path).map_err(|error| {
-            FileResourceErrorV1::new("unavailable_path", format!("cannot open file: {error}"))
-        })?;
-        let scan =
-            scan_reader(&mut BufReader::new(file), SIGNATURE_PROBE_SIZE).map_err(|error| {
-                FileResourceErrorV1::new("unavailable_path", format!("cannot scan file: {error}"))
+        for attempt in 0..DESCRIPTOR_SCAN_ATTEMPTS {
+            authorized.verify_current_binding(&file)?;
+            let before = revision_metadata(&file)?;
+            file.seek(SeekFrom::Start(0)).map_err(|error| {
+                FileResourceErrorV1::new("unavailable_path", format!("cannot seek file: {error}"))
             })?;
-        let detected = detect_content(
-            &scan.probe,
-            extension.as_deref(),
-            scan.is_utf8_text,
-            scan.line_count,
-        );
-        let (capabilities, unavailable_reason) = capabilities_for(
-            detected.renderer_kind,
-            scan.size_bytes,
-            detected.line_count,
-            detected.image_pixels,
-            limits,
-        );
-        let modified_at_ms = metadata
-            .modified()
-            .and_then(|modified| {
-                modified
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-            })
-            .map_err(|error| {
-                FileResourceErrorV1::new(
-                    "unavailable_path",
-                    format!("cannot resolve modification time: {error}"),
-                )
-            })?
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
+            let scan = scan_reader_limited(
+                &mut BufReader::new(&mut *file),
+                SIGNATURE_PROBE_SIZE,
+                limits,
+                |bytes_read| after_read(attempt, bytes_read),
+            )?;
+            let after = revision_metadata(&file)?;
+            authorized.verify_current_binding(&file)?;
+            if before != after || scan.size_bytes != after.size_bytes {
+                continue;
+            }
 
-        Ok(Self {
-            schema: 1,
-            canonical_path: canonical_path.to_string(),
-            display_name,
-            extension,
-            mime_type: detected.mime_type.to_string(),
-            encoding: detected.line_count.map(|_| "utf-8".to_string()),
-            renderer_kind: detected.renderer_kind,
-            size_bytes: scan.size_bytes,
-            line_count: detected.line_count,
-            content_hash: scan.content_hash,
-            modified_at_ms,
-            capabilities,
-            unavailable_reason,
-        })
+            return descriptor_from_scan(
+                canonical_path,
+                display_name.clone(),
+                extension.clone(),
+                scan,
+                after.modified_at_ms,
+                limits,
+            );
+        }
+
+        Err(FileResourceErrorV1::new(
+            "unstable_file",
+            "file changed during every descriptor scan attempt",
+        ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileRevision {
+    identity: FileIdentity,
+    size_bytes: u64,
+    modified_at_ms: u64,
+    write_marker: i128,
+    change_marker: i128,
+}
+
+fn revision_metadata(file: &std::fs::File) -> Result<FileRevision, FileResourceErrorV1> {
+    let metadata = file.metadata().map_err(|error| {
+        FileResourceErrorV1::new(
+            "unavailable_path",
+            format!("cannot read file metadata: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(FileResourceErrorV1::new(
+            "unavailable_path",
+            "authorized handle is not a file",
+        ));
+    }
+    let identity = FileIdentity::from_file(file).map_err(|error| {
+        FileResourceErrorV1::new(
+            "unavailable_path",
+            format!("cannot read file identity: {error}"),
+        )
+    })?;
+    let modified_at_ms = metadata
+        .modified()
+        .and_then(|modified| {
+            modified
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .map_err(|error| {
+            FileResourceErrorV1::new(
+                "unavailable_path",
+                format!("cannot resolve modification time: {error}"),
+            )
+        })?
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+
+    let (write_marker, change_marker) = metadata_revision_markers(&metadata);
+    Ok(FileRevision {
+        identity,
+        size_bytes: metadata.len(),
+        modified_at_ms,
+        write_marker,
+        change_marker,
+    })
+}
+
+#[cfg(unix)]
+fn metadata_revision_markers(metadata: &std::fs::Metadata) -> (i128, i128) {
+    use std::os::unix::fs::MetadataExt;
+
+    (
+        (i128::from(metadata.mtime()) * 1_000_000_000) + i128::from(metadata.mtime_nsec()),
+        (i128::from(metadata.ctime()) * 1_000_000_000) + i128::from(metadata.ctime_nsec()),
+    )
+}
+
+#[cfg(windows)]
+fn metadata_revision_markers(metadata: &std::fs::Metadata) -> (i128, i128) {
+    use std::os::windows::fs::MetadataExt;
+
+    (i128::from(metadata.last_write_time()), 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_revision_markers(metadata: &std::fs::Metadata) -> (i128, i128) {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos() as i128)
+        .unwrap_or_default();
+    (modified, 0)
+}
+
+fn descriptor_from_scan(
+    canonical_path: &str,
+    display_name: String,
+    extension: Option<String>,
+    scan: ScannedFile,
+    modified_at_ms: u64,
+    limits: &FileResourceLimits,
+) -> Result<FileContentDescriptorV1, FileResourceErrorV1> {
+    let detected = detect_content(
+        &scan.probe,
+        extension.as_deref(),
+        scan.is_utf8_text,
+        scan.line_count,
+    );
+    let (capabilities, unavailable_reason) = capabilities_for(
+        detected.renderer_kind,
+        scan.size_bytes,
+        detected.line_count,
+        detected.image_pixels,
+        limits,
+    );
+
+    Ok(FileContentDescriptorV1 {
+        schema: 1,
+        canonical_path: canonical_path.to_string(),
+        display_name,
+        extension,
+        mime_type: detected.mime_type.to_string(),
+        encoding: detected.line_count.map(|_| "utf-8".to_string()),
+        renderer_kind: detected.renderer_kind,
+        size_bytes: scan.size_bytes,
+        line_count: detected.line_count,
+        content_hash: scan.content_hash,
+        modified_at_ms,
+        capabilities,
+        unavailable_reason,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +421,7 @@ fn detect_content(
     }
 }
 
+#[derive(Debug)]
 struct ScannedFile {
     probe: Vec<u8>,
     size_bytes: u64,
@@ -322,7 +430,17 @@ struct ScannedFile {
     line_count: Option<u64>,
 }
 
+#[cfg(test)]
 fn scan_reader(reader: &mut impl Read, probe_limit: usize) -> std::io::Result<ScannedFile> {
+    scan_reader_with_hook(reader, probe_limit, |_| {})
+}
+
+#[cfg(test)]
+fn scan_reader_with_hook(
+    reader: &mut impl Read,
+    probe_limit: usize,
+    mut after_read: impl FnMut(u64),
+) -> std::io::Result<ScannedFile> {
     let mut buffer = [0_u8; SCAN_BUFFER_SIZE];
     let mut probe = Vec::with_capacity(probe_limit.min(SCAN_BUFFER_SIZE));
     let mut size_bytes = 0_u64;
@@ -336,6 +454,7 @@ fn scan_reader(reader: &mut impl Read, probe_limit: usize) -> std::io::Result<Sc
         }
         let chunk = &buffer[..bytes_read];
         size_bytes = size_bytes.saturating_add(bytes_read.try_into().unwrap_or(u64::MAX));
+        after_read(size_bytes);
         hasher.update(chunk);
         if probe.len() < probe_limit {
             let remaining = probe_limit - probe.len();
@@ -353,6 +472,93 @@ fn scan_reader(reader: &mut impl Read, probe_limit: usize) -> std::io::Result<Sc
         is_utf8_text,
         line_count,
     })
+}
+
+fn scan_reader_limited(
+    reader: &mut impl Read,
+    probe_limit: usize,
+    limits: &FileResourceLimits,
+    mut after_read: impl FnMut(u64),
+) -> Result<ScannedFile, FileResourceErrorV1> {
+    let mut buffer = [0_u8; SCAN_BUFFER_SIZE];
+    let mut probe = Vec::with_capacity(probe_limit.min(SCAN_BUFFER_SIZE));
+    let mut size_bytes = 0_u64;
+    let mut scan_ceiling = None;
+    let mut hasher = Sha256::new();
+    let mut utf8 = Utf8TextAnalyzer::default();
+
+    loop {
+        let allowed_total = scan_ceiling
+            .map(|ceiling: u64| ceiling.saturating_add(1))
+            .unwrap_or(MINIMUM_DETECTION_BYTES);
+        let remaining = allowed_total.saturating_sub(size_bytes);
+        if remaining == 0 {
+            if let Some(ceiling) = scan_ceiling {
+                return Err(oversized_scan(ceiling));
+            }
+        }
+        let request_size = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let bytes_read = reader.read(&mut buffer[..request_size]).map_err(|error| {
+            FileResourceErrorV1::new("unavailable_path", format!("cannot scan file: {error}"))
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        let chunk = &buffer[..bytes_read];
+        size_bytes = size_bytes.saturating_add(bytes_read.try_into().unwrap_or(u64::MAX));
+        after_read(size_bytes);
+        hasher.update(chunk);
+        if probe.len() < probe_limit {
+            let remaining = probe_limit - probe.len();
+            probe.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        utf8.push(chunk);
+
+        if scan_ceiling.is_none() && size_bytes >= MINIMUM_DETECTION_BYTES {
+            scan_ceiling = Some(content_scan_ceiling(&probe, limits));
+        }
+        if scan_ceiling.is_some_and(|ceiling| size_bytes > ceiling) {
+            return Err(oversized_scan(scan_ceiling.unwrap_or_default()));
+        }
+    }
+
+    let ceiling = scan_ceiling.unwrap_or_else(|| content_scan_ceiling(&probe, limits));
+    if size_bytes > ceiling {
+        return Err(oversized_scan(ceiling));
+    }
+    let (is_utf8_text, line_count) = utf8.finish();
+    let digest = hasher.finalize();
+    Ok(ScannedFile {
+        probe,
+        size_bytes,
+        content_hash: format!("sha256:{digest:x}"),
+        is_utf8_text,
+        line_count,
+    })
+}
+
+fn content_scan_ceiling(probe: &[u8], limits: &FileResourceLimits) -> u64 {
+    if probe.starts_with(b"\x89PNG\r\n\x1a\n")
+        || probe.starts_with(&[0xff, 0xd8, 0xff])
+        || probe.starts_with(b"GIF87a")
+        || probe.starts_with(b"GIF89a")
+        || (probe.starts_with(b"RIFF") && probe.get(8..12) == Some(b"WEBP"))
+    {
+        limits.image_max_size_bytes
+    } else if probe.starts_with(b"%PDF-") {
+        limits.pdf_max_size_bytes
+    } else {
+        limits.monaco_max_size_bytes
+    }
+}
+
+fn oversized_scan(ceiling: u64) -> FileResourceErrorV1 {
+    FileResourceErrorV1::new(
+        "file_too_large",
+        format!("file exceeds the detected renderer scan ceiling of {ceiling} bytes"),
+    )
 }
 
 #[derive(Default)]
@@ -600,21 +806,122 @@ fn read_u24_le(bytes: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::files::AuthorizedPath;
+    use crate::files::AuthorizedRootService;
+    use crate::models::AgentConfig;
     use serde_json::json;
     use std::fs;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::Path;
 
     fn describe(name: &str, bytes: &[u8]) -> FileContentDescriptorV1 {
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join(name);
         fs::write(&path, bytes).expect("fixture file");
-        let canonical_path = path.canonicalize().expect("canonical fixture");
-        let authorized = AuthorizedPath {
-            canonical_path,
-            root: temp.path().canonicalize().expect("canonical root"),
-        };
+        let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+            folder: temp.path().to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        })
+        .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized fixture");
         FileContentDescriptorV1::from_authorized_path(&authorized, &FileResourceLimits::default())
             .expect("descriptor")
+    }
+
+    #[test]
+    fn descriptor_rejects_ancestor_link_swap_after_authorization() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        let safe = workspace.join("safe");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&safe).expect("safe directory");
+        fs::create_dir_all(&outside).expect("outside directory");
+        fs::write(safe.join("report.txt"), "authorized").expect("safe file");
+        fs::write(outside.join("report.txt"), "secret").expect("outside file");
+
+        let alias = workspace.join("alias");
+        create_directory_link(&safe, &alias);
+        let config = AgentConfig {
+            folder: workspace.to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        };
+        let service = AuthorizedRootService::from_agent_config(&config).expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&alias.join("report.txt"))
+            .expect("initially authorized file");
+
+        replace_directory_link(&outside, &alias);
+
+        assert_eq!(
+            FileContentDescriptorV1::from_authorized_path(
+                &authorized,
+                &FileResourceLimits::default(),
+            )
+            .expect_err("retargeted ancestor must fail closed")
+            .code(),
+            "unauthorized_path"
+        );
+    }
+
+    #[test]
+    fn descriptor_reports_file_that_changes_during_every_scan_attempt() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("changing.txt");
+        fs::write(&path, vec![b'a'; SCAN_BUFFER_SIZE * 2]).expect("fixture file");
+        let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+            folder: temp.path().to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        })
+        .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized fixture");
+        let mut last_mutated_attempt = None;
+
+        let error = FileContentDescriptorV1::from_authorized_path_with_hook(
+            &authorized,
+            &FileResourceLimits::default(),
+            |attempt, bytes_read| {
+                if bytes_read > 0 && last_mutated_attempt != Some(attempt) {
+                    let mut writer = OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .expect("mutation handle");
+                    writer.write_all(b"x").expect("mutate during scan");
+                    writer.sync_data().expect("persist mutation");
+                    last_mutated_attempt = Some(attempt);
+                }
+            },
+        )
+        .expect_err("every attempted revision changed");
+
+        assert_eq!(error.code(), "unstable_file");
+        assert_eq!(last_mutated_attempt, Some(DESCRIPTOR_SCAN_ATTEMPTS - 1));
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        junction::create(target, link).expect("directory junction");
+    }
+
+    #[cfg(unix)]
+    fn replace_directory_link(target: &Path, link: &Path) {
+        fs::remove_file(link).expect("remove directory symlink");
+        create_directory_link(target, link);
+    }
+
+    #[cfg(windows)]
+    fn replace_directory_link(target: &Path, link: &Path) {
+        junction::delete(link).expect("remove directory junction");
+        fs::remove_dir(link).expect("remove empty junction directory");
+        create_directory_link(target, link);
     }
 
     #[test]
@@ -758,6 +1065,71 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_scan_stops_at_the_detected_renderer_byte_ceiling() {
+        use std::io::{Cursor, Read};
+
+        struct GuardedReader {
+            inner: Cursor<Vec<u8>>,
+            total_read: u64,
+        }
+
+        impl Read for GuardedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let bytes_read = self.inner.read(buffer)?;
+                self.total_read += bytes_read as u64;
+                Ok(bytes_read)
+            }
+        }
+
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: 128,
+            monaco_max_line_count: u64::MAX,
+            diff_max_size_bytes_per_side: 128,
+            diff_max_line_count: u64::MAX,
+            image_max_size_bytes: 256,
+            image_max_pixels: u64::MAX,
+            pdf_max_size_bytes: 512,
+        };
+        let cases: &[(&str, &[u8], u64)] = &[
+            ("text", b"plain text", limits.monaco_max_size_bytes),
+            ("image", b"\x89PNG\r\n\x1a\n", limits.image_max_size_bytes),
+            ("pdf", b"%PDF-1.7\n", limits.pdf_max_size_bytes),
+        ];
+
+        for (kind, signature, ceiling) in cases {
+            let mut bytes = signature.to_vec();
+            bytes.resize(4_096, b'a');
+            let mut reader = GuardedReader {
+                inner: Cursor::new(bytes),
+                total_read: 0,
+            };
+
+            let error = scan_reader_limited(&mut reader, SIGNATURE_PROBE_SIZE, &limits, |_| {})
+                .expect_err("content beyond its renderer ceiling must stop");
+
+            assert_eq!(error.code(), "file_too_large", "{kind}");
+            assert!(
+                reader.total_read <= ceiling + 1,
+                "{kind} read {} bytes past a {ceiling} byte ceiling",
+                reader.total_read,
+            );
+        }
+
+        let tiny_limits = FileResourceLimits {
+            monaco_max_size_bytes: 8,
+            ..limits
+        };
+        let mut reader = GuardedReader {
+            inner: Cursor::new(vec![b'a'; 4_096]),
+            total_read: 0,
+        };
+        let error = scan_reader_limited(&mut reader, SIGNATURE_PROBE_SIZE, &tiny_limits, |_| {})
+            .expect_err("detection allowance must remain bounded");
+        assert_eq!(error.code(), "file_too_large");
+        assert_eq!(reader.total_read, MINIMUM_DETECTION_BYTES);
+    }
+
+    #[test]
     fn streaming_utf8_validation_handles_split_scalars_and_incomplete_input() {
         let mut valid = Utf8TextAnalyzer::default();
         valid.push(&[0xf0, 0x9f]);
@@ -782,10 +1154,14 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join(OsString::from_vec(vec![b'f', 0xff]));
         fs::write(&path, b"text").expect("fixture file");
-        let authorized = AuthorizedPath {
-            canonical_path: path.canonicalize().expect("canonical fixture"),
-            root: temp.path().canonicalize().expect("canonical root"),
-        };
+        let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+            folder: temp.path().to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        })
+        .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized fixture");
 
         assert_eq!(
             FileContentDescriptorV1::from_authorized_path(
