@@ -573,6 +573,81 @@ describe("AgentTerminal scrollback", () => {
     )).toHaveLength(snapshotCount);
   });
 
+  it("reveals only after the fitted initial snapshot write has settled", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-first-paint";
+      if (command === "register_terminal_presentation") return registrationGate.promise;
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-first-paint"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+
+    const host = screen.getByTestId("agent-terminal-host");
+    const renderer = getLatestTerminalInstance();
+    const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    };
+    let settleSnapshotWrite: (() => void) | undefined;
+    renderer.write.mockImplementation((data: string, callback?: () => void) => {
+      if (data.includes("settled first paint")) {
+        settleSnapshotWrite = callback;
+        return;
+      }
+      callback?.();
+    });
+
+    const registration = modernRegistrationResult("pane-first-paint");
+    registration.initial_snapshot = {
+      ...modernSnapshot(),
+      visible_grid: "settled first paint",
+    };
+    registrationGate.resolve(registration);
+
+    await waitFor(() => expect(settleSnapshotWrite).toBeTypeOf("function"));
+    expect(host).toHaveStyle({ visibility: "hidden" });
+    expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    const snapshotWriteOrder = renderer.write.mock.invocationCallOrder.find(
+      (_order: number, index: number) =>
+        String(renderer.write.mock.calls[index]?.[0] ?? "").includes("settled first paint"),
+    );
+    expect(fitAddon.proposeDimensions.mock.invocationCallOrder[0]).toBeLessThan(snapshotWriteOrder!);
+
+    await act(async () => {
+      settleSnapshotWrite?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(host).toHaveStyle({ visibility: "visible" });
+      expect(window.__wardianTerminalDebug?.snapshot("pane-first-paint")?.renderer).toMatchObject({
+        ready: true,
+        cols: 80,
+        rows: 24,
+      });
+    });
+  });
+
   it("settles an in-flight broker snapshot write before disposing its retired renderer", async () => {
     const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
@@ -652,6 +727,7 @@ describe("AgentTerminal scrollback", () => {
       await waitFor(() => expect(renderer.dispose).toHaveBeenCalledTimes(1));
 
       expect(screen.queryByText("Terminal Initialization Fatal Error:")).not.toBeInTheDocument();
+      expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "hidden" });
       expect(lifecycle).toEqual(["write-started", "write-settled", "disposed"]);
       expect(consoleError).not.toHaveBeenCalledWith(
         "AgentTerminal Init Error:",
@@ -2016,7 +2092,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("suspends the broker again when restoration fails after mounting the presentation", async () => {
+  it("keeps the broker suspended when restoration cannot fit before remount", async () => {
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: Record<string, unknown> } | undefined)?.request;
       const presentationId = String(request?.presentation_id ?? "failure-after-mount");
@@ -2067,8 +2143,8 @@ describe("AgentTerminal scrollback", () => {
     const renderStates = mockInvoke.mock.calls
       .filter(([command]) => command === "update_terminal_presentation")
       .map(([, payload]) => (payload as { request: { render_state: string } }).request.render_state);
-    expect(renderStates).toContain("mounted");
-    expect(renderStates[renderStates.length - 1]).toBe("suspended");
+    expect(renderStates).not.toContain("mounted");
+    expect(renderStates).toEqual(["suspended"]);
   });
 
   it("reports mirror viewport geometry without resizing the native PTY", async () => {
@@ -2922,7 +2998,7 @@ describe("AgentTerminal scrollback", () => {
     expect(openConnectedStates).toEqual([true]);
   });
 
-  it("fits the connected terminal before activating the WebGL renderer", async () => {
+  it("settles the WebGL backend before fitting the connected terminal", async () => {
     render(<AgentTerminal sessionId="codex-fit-before-webgl" theme="dark" />);
 
     await waitFor(() => {
@@ -2933,8 +3009,8 @@ describe("AgentTerminal scrollback", () => {
       proposeDimensions: ReturnType<typeof vi.fn>;
     };
     expect(fitAddon.proposeDimensions).toHaveBeenCalled();
-    expect(fitAddon.proposeDimensions.mock.invocationCallOrder[0]).toBeLessThan(
-      mockWebglAddon.mock.invocationCallOrder[0],
+    expect(mockWebglAddon.mock.invocationCallOrder[0]).toBeLessThan(
+      fitAddon.proposeDimensions.mock.invocationCallOrder[0],
     );
   });
 
@@ -2960,12 +3036,16 @@ describe("AgentTerminal scrollback", () => {
       expect(mockWebglAddon).not.toHaveBeenCalled();
 
       const host = screen.getByTestId("agent-terminal-host");
+      expect(host).toHaveStyle({ visibility: "hidden" });
       act(() => intersectionCallback?.([{
         isIntersecting: true,
         target: host,
       } as unknown as IntersectionObserverEntry], {} as IntersectionObserver));
 
-      await waitFor(() => expect(mockWebglAddon).toHaveBeenCalledTimes(1));
+      await waitFor(() => {
+        expect(mockWebglAddon).toHaveBeenCalledTimes(1);
+        expect(host).toHaveStyle({ visibility: "visible" });
+      });
     } finally {
       globalThis.IntersectionObserver = originalIntersectionObserver;
     }
@@ -3262,6 +3342,7 @@ describe("AgentTerminal scrollback", () => {
       expect(fitAddon.proposeDimensions).toHaveBeenCalled();
     });
     const baselineFitCalls = fitAddon.proposeDimensions.mock.calls.length;
+    const baselineRefreshCalls = instance.refresh.mock.calls.length;
 
     act(() => {
       useSettingsStore.getState().setTerminalFontSize(12);
@@ -3269,8 +3350,8 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       expect(instance.options.fontSize).toBe(12);
-      expect(instance.refresh).toHaveBeenCalledWith(0, 23);
       expect(fitAddon.proposeDimensions.mock.calls.length).toBeGreaterThan(baselineFitCalls);
+      expect(instance.refresh).toHaveBeenCalledTimes(baselineRefreshCalls);
     });
   });
 
@@ -3311,6 +3392,7 @@ describe("AgentTerminal scrollback", () => {
       expect(fitAddon.proposeDimensions).toHaveBeenCalled();
     });
     const baselineFitCalls = fitAddon.proposeDimensions.mock.calls.length;
+    const baselineRefreshCalls = instance.refresh.mock.calls.length;
 
     act(() => {
       useSettingsStore.getState().setTerminalFontFamily("Consolas, monospace");
@@ -3318,8 +3400,8 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       expect(instance.options.fontFamily).toBe("Consolas, monospace");
-      expect(instance.refresh).toHaveBeenCalledWith(0, 23);
       expect(fitAddon.proposeDimensions.mock.calls.length).toBeGreaterThan(baselineFitCalls);
+      expect(instance.refresh).toHaveBeenCalledTimes(baselineRefreshCalls);
     });
   });
 
@@ -3765,13 +3847,20 @@ describe("AgentTerminal scrollback", () => {
 
       const terminalInstance = getLatestTerminalInstance();
       const baselineCalls = terminalInstance.resize.mock.calls.length;
+      const baselineRefreshCalls = terminalInstance.refresh.mock.calls.length;
+      const baselineFitCount = window.__wardianTerminalDebug?.snapshot("gemini-resize")?.fitCount;
+      mockInvoke.mockClear();
 
       expect(resizeCallback).toBeDefined();
+      resizeCallback!([], {} as ResizeObserver);
       resizeCallback!([], {} as ResizeObserver);
       resizeCallback!([], {} as ResizeObserver);
       await new Promise((resolve) => setTimeout(resolve, 40));
 
       expect(terminalInstance.resize.mock.calls.length).toBe(baselineCalls);
+      expect(terminalInstance.refresh.mock.calls.length).toBe(baselineRefreshCalls);
+      expect(window.__wardianTerminalDebug?.snapshot("gemini-resize")?.fitCount).toBe(baselineFitCount);
+      expect(mockInvoke).not.toHaveBeenCalledWith("resize_agent_terminal", expect.anything());
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }

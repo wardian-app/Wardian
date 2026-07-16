@@ -33,6 +33,12 @@ export type TerminalPresentationCallbacks = {
   onLifecycle?: (notification: TerminalSessionLifecycleNotification) => void;
 };
 
+export type TerminalPresentationRegistrationOptions = {
+  beforeInitialSnapshot?: (
+    result: TerminalPresentationRegistrationResult,
+  ) => void | Promise<void>;
+};
+
 type PresentationBinding = {
   callbacks: TerminalPresentationCallbacks;
   registration: TerminalPresentationRegistration;
@@ -119,6 +125,7 @@ export class TerminalSessionClient {
   async registerPresentation(
     registration: TerminalPresentationRegistration,
     callbacks: TerminalPresentationCallbacks,
+    options?: TerminalPresentationRegistrationOptions,
   ) {
     if (registration.session_id !== this.sessionId) {
       throw new Error("Presentation registration targets a different terminal session");
@@ -148,6 +155,10 @@ export class TerminalSessionClient {
         }
         binding.state = result.presentation;
         this.#setBrokerState(result.broker_state);
+        await options?.beforeInitialSnapshot?.(result);
+        if (this.#presentations.get(registration.presentation_id) !== binding) {
+          return result;
+        }
         await this.#applySnapshot(binding, result.initial_snapshot);
         await this.#ensureSubscription(result.broker_state.runtime_generation);
         return result;

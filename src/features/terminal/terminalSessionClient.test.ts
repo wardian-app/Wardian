@@ -282,6 +282,59 @@ describe("TerminalSessionClient", () => {
     expect(__terminalSessionClientTesting.clientCount()).toBe(0);
   });
 
+  it("runs the pre-snapshot hook inside the serialized registration transaction", async () => {
+    const hookGate = deferred<void>();
+    const order: string[] = [];
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        order.push("registered");
+        return registeredResult("pane-a");
+      }
+      if (command === "subscribe_terminal_events") {
+        order.push("subscribed");
+        return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      }
+      if (command === "unregister_terminal_presentation") {
+        order.push("unregistered");
+        return brokerState();
+      }
+      if (command === "unsubscribe_terminal_events") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    const registering = client.registerPresentation(
+      registration("pane-a"),
+      {
+        applySnapshot: () => {
+          order.push("snapshot");
+        },
+        applyEvents: () => undefined,
+      },
+      {
+        beforeInitialSnapshot: async () => {
+          order.push("hook-start");
+          await hookGate.promise;
+          order.push("hook-end");
+        },
+      },
+    );
+    const unregistering = client.unregisterPresentation("pane-a");
+
+    await vi.waitFor(() => expect(order).toEqual(["registered", "hook-start"]));
+    hookGate.resolve();
+    await Promise.all([registering, unregistering]);
+
+    expect(order).toEqual([
+      "registered",
+      "hook-start",
+      "hook-end",
+      "snapshot",
+      "subscribed",
+      "unregistered",
+    ]);
+  });
+
   it("drains bounded batches to caught-up and acknowledges only applied sequences", async () => {
     const applied: number[][] = [];
     const reads: number[] = [];
