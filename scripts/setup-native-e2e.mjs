@@ -68,7 +68,8 @@ export function resolveCommand(command, env = process.env) {
 export function nativeDriverCandidates(platform = process.platform) {
   if (platform === "win32") {
     return [
-      ...localWindowsNativeDriverCandidates(),
+      path.join(nativeToolsDir, "msedgedriver.exe"),
+      path.join(nativeToolsDir, "chromedriver.exe"),
       "msedgedriver",
       "chromedriver",
     ];
@@ -79,13 +80,6 @@ export function nativeDriverCandidates(platform = process.platform) {
   }
 
   return ["chromedriver", "geckodriver"];
-}
-
-export function localWindowsNativeDriverCandidates() {
-  return [
-    path.join(nativeToolsDir, "msedgedriver.exe"),
-    path.join(nativeToolsDir, "chromedriver.exe"),
-  ];
 }
 
 function existingDriver(candidates) {
@@ -154,13 +148,9 @@ export function msEdgeDriverToolInstallArgs() {
 function ensureWindowsEdgeDriver() {
   fs.mkdirSync(nativeToolsDir, { recursive: true });
 
-  // Tauri automates the embedded WebView2 runtime, which can differ from the
-  // standalone Edge browser installed on a CI image. Only reuse a driver that
-  // Wardian provisioned from the local WebView2 runtime; accepting a runner's
-  // PATH driver can produce DevToolsActivePort failures after image rollovers.
-  const existing = existingDriver(localWindowsNativeDriverCandidates());
+  const existing = existingDriver(nativeDriverCandidates("win32"));
   if (existing) {
-    console.log(`WebView2-matched native WebDriver already available at ${existing}`);
+    console.log(`Native WebDriver already available at ${existing}`);
     return;
   }
 
@@ -202,14 +192,14 @@ function ensureNativeDriver(options) {
     return;
   }
 
-  if (process.platform === "win32") {
-    ensureWindowsEdgeDriver();
-    return;
-  }
-
   const existing = existingDriver(nativeDriverCandidates());
   if (existing) {
     console.log(`Native WebDriver already available at ${existing}`);
+    return;
+  }
+
+  if (process.platform === "win32") {
+    ensureWindowsEdgeDriver();
     return;
   }
 
