@@ -378,7 +378,7 @@ test("workflow run dialog scrolls parameter-heavy forms within the viewport", as
   await dialog.screenshot({ path: "e2e/screenshots/workflow-run-dialog/scrollable-parameter-form.png" });
 });
 
-test("workflow monitor contains wide activity columns inside a narrow surface", async ({ page }) => {
+test("workflow monitor fits an adaptive activity card inside a narrow restored workbench surface", async ({ page }) => {
   await installWorkflowsIpcMock(page);
   await page.setViewportSize({ width: 1200, height: 700 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -403,27 +403,36 @@ test("workflow monitor contains wide activity columns inside a narrow surface", 
   });
   await page.getByTestId("workflow-monitor").getByRole("button", { name: /^history$/i }).click();
 
-  const scroller = page.getByRole("region", { name: "Workflow activity" });
-  const table = page.getByTestId("workflow-activity-table");
-  await expect(table).toBeVisible();
+  const activityRegion = page.getByRole("region", { name: "Workflow activity" });
+  const historyCard = activityRegion.getByTestId("workflow-history-run-run-monitor-overflow");
+  await expect(activityRegion).toBeVisible();
+  await expect(historyCard).toBeVisible();
+  await expect(historyCard).toHaveAttribute("data-mode", "history");
+  await expect(historyCard).toContainText("Ran");
+  await expect(historyCard).toContainText("Outcome");
 
-  const geometry = await scroller.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-    documentClientWidth: document.documentElement.clientWidth,
-    documentScrollWidth: document.documentElement.scrollWidth,
-  }));
-  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
-  expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.documentClientWidth);
-  expect(await table.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(960);
-
-  await scroller.evaluate((element) => {
-    element.scrollLeft = element.scrollWidth - element.clientWidth;
+  const geometry = await activityRegion.evaluate((element) => {
+    const card = element.querySelector('[data-testid="workflow-history-run-run-monitor-overflow"]');
+    if (!card) return null;
+    const regionRect = element.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      regionClientWidth: element.clientWidth,
+      regionScrollWidth: element.scrollWidth,
+      regionLeft: regionRect.left,
+      regionRight: regionRect.right,
+      cardLeft: cardRect.left,
+      cardRight: cardRect.right,
+      documentClientWidth: document.documentElement.clientWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+    };
   });
-  await expect.poll(() => scroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
-
-  fs.mkdirSync("e2e/screenshots/workflow-monitor-horizontal-overflow", { recursive: true });
-  await page.getByTestId("workflow-monitor").screenshot({
-    path: "e2e/screenshots/workflow-monitor-horizontal-overflow/narrow-pane.png",
-  });
+  expect(geometry).not.toBeNull();
+  const horizontalTolerance = 2;
+  expect(geometry!.regionScrollWidth).toBeLessThanOrEqual(geometry!.regionClientWidth + horizontalTolerance);
+  expect(geometry!.regionLeft).toBeGreaterThanOrEqual(-horizontalTolerance);
+  expect(geometry!.regionRight).toBeLessThanOrEqual(geometry!.documentClientWidth + horizontalTolerance);
+  expect(geometry!.cardLeft).toBeGreaterThanOrEqual(geometry!.regionLeft - horizontalTolerance);
+  expect(geometry!.cardRight).toBeLessThanOrEqual(geometry!.regionRight + horizontalTolerance);
+  expect(geometry!.documentScrollWidth).toBeLessThanOrEqual(geometry!.documentClientWidth + horizontalTolerance);
 });
