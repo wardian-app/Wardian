@@ -886,7 +886,8 @@ test("remote gateway authenticates broker ownership transitions across desktop a
       );
       return {
         ok: value.presentation.presentation_id === desktopPresentationId
-          && value.broker_state.runtime_generation === replacementGeneration,
+          && value.broker_state.runtime_generation === replacementGeneration
+          && value.broker_state.owner_presentation_id === desktopPresentationId,
         value,
       };
     },
