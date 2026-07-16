@@ -135,6 +135,7 @@ export function WorkflowActivityCard({
     : [];
   const run = activity.latestRun;
   const compactHistory = virtualized && activity.section === 'history';
+  const compactCollapsedAssignments = compactHistory && !expandedAssignments;
   const cardActionClass = compactHistory ? compactActionClass : actionClass;
   const testId = activity.section === 'history' && run
     ? `workflow-history-run-${run.run_id}`
@@ -192,7 +193,10 @@ export function WorkflowActivityCard({
         </div>
       </header>
 
-      <div className={virtualized ? 'mt-2' : 'mt-3'}>
+      <div
+        data-virtual-assignments={compactCollapsedAssignments ? 'single-line' : undefined}
+        className={`${virtualized ? 'mt-2' : 'mt-3'} ${compactCollapsedAssignments ? '[&>div>div]:h-5 [&>div>div]:flex-nowrap [&>div>div>span]:min-w-0 [&>div>div>button]:shrink-0' : ''}`}
+      >
         <WorkflowAssignmentSummary
           workflowName={activity.name}
           items={assignments}

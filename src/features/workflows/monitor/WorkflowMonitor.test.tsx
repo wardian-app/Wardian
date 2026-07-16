@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkflowMonitor } from './WorkflowMonitor';
 import { buildActivities, buildMonitorModel } from './monitorModel';
@@ -657,14 +657,30 @@ describe('WorkflowMonitor', () => {
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
   });
 
-  it('marks history rows for offscreen rendering containment while scrolling', () => {
+  it('keeps collapsed history rows compact and contained while scrolling', () => {
     const failure = 'Provider returned a long failure message that must remain available without increasing the collapsed card height';
+    scheduleState.schedules = [{
+      id: 'schedule-contained',
+      blueprint_id: 'audit',
+      name: 'Scheduled Audit',
+      input: {},
+      bindings: {},
+      assignments: {
+        analyst: { target_type: 'temporary_provider', provider: 'codex' },
+        reviewer: { target_type: 'temporary_provider', provider: 'gemini' },
+        publisher: { target_type: 'temporary_provider', provider: 'opencode' },
+      },
+      schedule: { schedule_type: 'interval', interval_minutes: 60, active: true },
+      is_paused: false,
+    }];
     runState.runs = [{
       run_id: 'run-contained',
       blueprint_id: 'audit',
+      schedule_id: 'schedule-contained',
       status: 'failed',
       node_count: 2,
       path: '/runs/contained',
+      started_at: '2026-06-01T15:59:00Z',
       updated_at: '2026-06-01T16:00:00Z',
       failure,
     }];
@@ -673,6 +689,8 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
     const card = screen.getByTestId('workflow-history-run-run-contained');
+    const assignmentToggle = within(card).getByRole('button', { name: /show 1 more agent/i });
+    const compactAssignments = card.querySelector('[data-virtual-assignments]');
     expect(card).toHaveStyle({
       contentVisibility: 'auto',
       containIntrinsicSize: '132px',
@@ -684,6 +702,9 @@ describe('WorkflowMonitor', () => {
       failureTitle: screen.getByRole('alert').getAttribute('title'),
       footer: card.querySelector('footer')?.className,
       compactMeta: card.querySelector('[data-virtual-meta]')?.className,
+      assignments: compactAssignments?.getAttribute('data-virtual-assignments'),
+      assignmentClass: compactAssignments?.className,
+      assignmentExpanded: assignmentToggle.getAttribute('aria-expanded'),
     }).toEqual({
       layout: 'compact',
       details: expect.stringContaining('grid-cols-3'),
@@ -691,7 +712,16 @@ describe('WorkflowMonitor', () => {
       failureTitle: failure,
       footer: expect.stringContaining('flex-nowrap'),
       compactMeta: expect.stringContaining('items-center'),
+      assignments: 'single-line',
+      assignmentClass: expect.stringContaining('flex-nowrap'),
+      assignmentExpanded: 'false',
     });
+    expect(card).toHaveTextContent('analyst · Temporary Codex');
+    expect(card).toHaveTextContent('publisher · Temporary OpenCode');
+    expect(card).toHaveTextContent('Ran');
+    expect(card).toHaveTextContent('Outcome');
+    expect(card).toHaveTextContent('Duration');
+    expect(card).toHaveTextContent('1m');
   });
 
   it('keeps expanded history rendering bounded', async () => {
