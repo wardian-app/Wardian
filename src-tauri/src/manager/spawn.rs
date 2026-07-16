@@ -200,26 +200,21 @@ use super::{
     create_kill_on_close_job,
 };
 
-pub(super) fn capture_codex_init_resume_session(
-    provider_name: &str,
-    session_id: &str,
-    config: &mut AgentConfig,
-) -> bool {
-    let session_id = session_id.trim();
-    if provider_name != "codex"
-        || session_id.is_empty()
-        || config
-            .resume_session
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || codex_provider_session_is_excluded(session_id, &codex_cleared_provider_sessions(config))
-    {
-        return false;
+pub(super) fn capture_init_timestamp(
+    event: &AgentEvent,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let AgentEvent::Init { timestamp, .. } = event else {
+        return;
+    };
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    if let Ok(mut current) = init_timestamp.lock() {
+        if current.is_none() {
+            *current = Some(timestamp.clone());
+        }
     }
-
-    config.resume_session = Some(session_id.to_string());
-    clear_codex_cleared_provider_sessions(config);
-    true
 }
 
 fn codex_status_log_session(
@@ -317,6 +312,10 @@ pub async fn spawn_agent(
     is_restored: bool,
     initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
+    super::validate_session_values_for_launch(
+        &config.session_id,
+        config.resume_session.as_deref(),
+    )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
 
@@ -463,10 +462,10 @@ pub async fn spawn_agent(
 
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
-        "[Wardian] PTY spawn: provider={} exe={} args={:?} cwd={}",
+        "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
         config.provider,
         launch_spec.executable,
-        launch_spec.args,
+        launch_spec.args.len(),
         provider_cwd.display()
     ));
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
@@ -521,12 +520,14 @@ pub async fn spawn_agent(
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
 
-    let resume_id = config.resume_session.as_deref().unwrap_or("");
     log_debug(&format!(
-        "[Wardian] Spawning {} agent. Session: {}, Resume ID: {}, Restored: {}",
+        "[Wardian] Spawning {} agent. Session: {}, Resume: {}, Restored: {}",
         provider.name(),
         config.session_id,
-        resume_id,
+        config
+            .resume_session
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
         is_restored
     ));
 
@@ -632,7 +633,6 @@ pub async fn spawn_agent(
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
     let terminal_theme_for_pty = app_state.terminal_theme();
-    let config_lock_clone = config_lock.clone();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
     std::thread::spawn(move || {
@@ -731,44 +731,8 @@ pub async fn spawn_agent(
                     // Use a simple line-based approach for stream-json events
                     for line in text.lines() {
                         if let Some(event) = pty_provider.parse_output(line) {
+                            capture_init_timestamp(&event, &init_timestamp_clone);
                             if provider_name_for_pty == "claude" {
-                                if let AgentEvent::Init {
-                                    session_id,
-                                    timestamp,
-                                } = &event
-                                {
-                                    if let Some(ts) = timestamp {
-                                        let mut it = init_timestamp_clone.lock().unwrap();
-                                        if it.is_none() {
-                                            *it = Some(ts.clone());
-                                        }
-                                    }
-                                    if !session_id.trim().is_empty() {
-                                        let needs_save = {
-                                            let mut config = config_lock_clone.lock().unwrap();
-                                            if config.resume_session.as_deref()
-                                                != Some(session_id.as_str())
-                                            {
-                                                config.resume_session = Some(session_id.clone());
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        if needs_save {
-                                            log_debug(&format!(
-                                                "[Wardian] Session ID mapped for {}: {}",
-                                                sid_for_pty, session_id
-                                            ));
-                                            let _ = pty_emit_app.emit("agents-updated", ());
-                                            let _ = pty_emit_app.emit(
-                                                "agent-pty-output-ready",
-                                                serde_json::json!({ "session_id": sid_for_pty }),
-                                            );
-                                            save_agent_state_after_session_capture(&pty_emit_app);
-                                        }
-                                    }
-                                }
                                 apply_agent_status_event_with_policy(
                                     &pty_app,
                                     &sid_for_pty,
@@ -777,53 +741,6 @@ pub async fn spawn_agent(
                                     ProviderStatusEventPolicy::PreserveActionRequired,
                                 );
                                 continue;
-                            }
-
-                            if let AgentEvent::Init {
-                                session_id,
-                                timestamp,
-                            } = &event
-                            {
-                                if let Some(ts) = timestamp {
-                                    let mut it = init_timestamp_clone.lock().unwrap();
-                                    if it.is_none() {
-                                        *it = Some(ts.clone());
-                                    }
-                                }
-                                if !session_id.trim().is_empty() {
-                                    let needs_save = {
-                                        let mut config = config_lock_clone.lock().unwrap();
-                                        if capture_codex_init_resume_session(
-                                            &provider_name_for_pty,
-                                            session_id,
-                                            &mut config,
-                                        ) {
-                                            true
-                                        } else if provider_name_for_pty != "codex"
-                                            && config.resume_session.as_deref()
-                                                != Some(session_id.as_str())
-                                        {
-                                            config.resume_session = Some(session_id.clone());
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if needs_save {
-                                        log_debug(&format!(
-                                            "[Wardian] Session ID mapped for {}: {}",
-                                            sid_for_pty, session_id
-                                        ));
-
-                                        // Notify UI that metadata (resume_session ID) has changed
-                                        let _ = pty_emit_app.emit("agents-updated", ());
-                                        let _ = pty_emit_app.emit(
-                                            "agent-pty-output-ready",
-                                            serde_json::json!({ "session_id": sid_for_pty }),
-                                        );
-                                        save_agent_state_after_session_capture(&pty_emit_app);
-                                    }
-                                }
                             }
                             let current = current_status_clone
                                 .lock()
@@ -930,56 +847,7 @@ pub async fn spawn_agent(
                                         }
                                     }
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
-                                        if let AgentEvent::Init {
-                                            ref session_id,
-                                            ref timestamp,
-                                        } = event
-                                        {
-                                            if let Some(ts) = timestamp {
-                                                let mut it = init_timestamp_clone.lock().unwrap();
-                                                if it.is_none() {
-                                                    *it = Some(ts.clone());
-                                                }
-                                            }
-                                            if !session_id.trim().is_empty() {
-                                                let needs_save = {
-                                                    let mut config =
-                                                        config_lock_clone.lock().unwrap();
-                                                    if capture_codex_init_resume_session(
-                                                        &provider_name_for_pty,
-                                                        session_id,
-                                                        &mut config,
-                                                    ) {
-                                                        true
-                                                    } else if provider_name_for_pty != "codex"
-                                                        && config.resume_session.as_deref()
-                                                            != Some(session_id.as_str())
-                                                    {
-                                                        config.resume_session =
-                                                            Some(session_id.clone());
-                                                        true
-                                                    } else {
-                                                        false
-                                                    }
-                                                };
-
-                                                if needs_save {
-                                                    log_debug(&format!(
-                                                        "[Wardian] Session ID mapped for {}: {}",
-                                                        sid_for_pty, session_id
-                                                    ));
-                                                    // Notify UI that metadata (resume_session ID) has changed
-                                                    let _ = pty_emit_app.emit("agents-updated", ());
-                                                    let _ = pty_emit_app.emit(
-                                                        "agent-pty-output-ready",
-                                                        serde_json::json!({ "session_id": sid_for_pty }),
-                                                    );
-                                                    save_agent_state_after_session_capture(
-                                                        &pty_emit_app,
-                                                    );
-                                                }
-                                            }
-                                        }
+                                        capture_init_timestamp(&event, &init_timestamp_clone);
 
                                         let status_policy = if provider_name_for_pty == "claude"
                                             || provider_name_for_pty == "codex"

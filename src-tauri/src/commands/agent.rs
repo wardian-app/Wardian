@@ -1845,6 +1845,12 @@ fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
 
+    if manager::clear_credential_resume_session(config) {
+        manager::log_debug(
+            "[WARDIAN] Cleared a credential-valued provider resume session before launch.",
+        );
+    }
+
     let settings = crate::utils::load_shell_settings().unwrap_or_default();
     let resolved_persistence = match config.session_persistence {
         AgentSessionPersistenceOverride::Default => settings.agent_session_persistence,
@@ -1915,6 +1921,12 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
 }
 
 pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Result<(), String> {
+    if manager::clear_credential_resume_session(config) {
+        manager::log_debug(
+            "[WARDIAN] Cleared a credential-valued provider resume session from restored state.",
+        );
+    }
+
     if config.is_off {
         return Ok(());
     }
@@ -2021,8 +2033,8 @@ async fn register_new_agent(
                     clear_codex_cleared_provider_sessions(&mut cfg);
                 }
                 manager::log_debug(&format!(
-                    "[WARDIAN] Adopted live Codex session id {} for Wardian session {}",
-                    provider_session_id, session_id
+                    "[WARDIAN] Adopted discovered Codex session for Wardian session {}",
+                    session_id
                 ));
                 break;
             }
@@ -2132,8 +2144,8 @@ pub async fn spawn_agent(
             {
                 Ok(real_sid) => {
                     manager::log_debug(&format!(
-                        "[WARDIAN] Intercepted stream-json session ID for {}: {}",
-                        provider_name, real_sid
+                        "[WARDIAN] Discovered bootstrap session identity for {}.",
+                        provider_name
                     ));
                     // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
                     session_id = Some(real_sid.clone());
@@ -2307,8 +2319,8 @@ pub async fn clone_agent(
                 format!("Failed to initialize the provider session: {}", e)
             })?;
         manager::log_debug(&format!(
-            "[WARDIAN] Intercepted stream-json clone session ID for {}: {}",
-            provider_name, real_sid
+            "[WARDIAN] Discovered bootstrap clone session identity for {}.",
+            provider_name
         ));
         actual_resume = Some(real_sid.clone());
         real_sid
@@ -2866,8 +2878,8 @@ async fn clear_agent_session_inner(
         match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config)).await {
             Ok(new_session_id) if !new_session_id.is_empty() => {
                 manager::log_debug(&format!(
-                    "[WARDIAN] clear_agent_session: obtained fresh {} session ID: {}",
-                    config.provider, new_session_id
+                    "[WARDIAN] clear_agent_session: discovered a fresh {} session identity.",
+                    config.provider
                 ));
                 config.resume_session = Some(new_session_id);
             }

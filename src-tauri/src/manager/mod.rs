@@ -3,6 +3,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod headless;
 pub(crate) mod opencode;
+pub(crate) mod session_identity;
 pub(crate) mod spawn;
 #[cfg(test)]
 mod spawn_tests;
@@ -26,6 +27,9 @@ pub use opencode::{
     opencode_extract_created_session_id, opencode_extract_created_session_id_for_agent,
 };
 pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
+pub(crate) use session_identity::{
+    clear_credential_resume_session, validate_session_values_for_launch,
+};
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 

@@ -14,6 +14,14 @@ In spawn, custom clone, and agent configuration forms, Wardian lists the support
 
 Wardian does not install provider accounts, complete browser sign-in, create provider billing, or repair shell startup files. Do those steps in a normal terminal before spawning an agent.
 
+## Credential and Session Identity Safety
+
+Wardian keeps its stable agent UUID separate from the provider's conversation identifier. Structured initialization events from provider CLIs are treated as telemetry and cannot replace the persisted resume identifier. Wardian obtains resumable provider identities from provider-specific trusted sources, such as a Wardian-assigned session UUID or the provider's local session files and database.
+
+Before a provider starts, Wardian rejects session identifiers that match credential-bearing environment values such as API keys, tokens, secrets, or passwords. Restored state containing such a resume value is cleared before the normal provider-specific recovery path runs. Wardian also records launch argument counts and resume presence in debug logs instead of raw arguments or provider-supplied identifiers.
+
+If Wardian reports that a session identifier matches a credential environment value, stop the affected agent, rotate the exposed credential if it may have been persisted by an older Wardian version, and launch the agent again. Wardian does not print the matching value in the error.
+
 ## Basic Workflow
 
 1. Install one provider CLI.

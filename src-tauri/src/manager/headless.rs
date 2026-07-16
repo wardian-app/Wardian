@@ -259,6 +259,7 @@ pub async fn run_headless_with_options(
     options: HeadlessRunOptions<'_>,
 ) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
+    super::validate_session_values_for_launch(options.wardian_session_id, options.resume_session)?;
     let cwd = options.cwd;
     let prompt = options.prompt;
     let wardian_session_id = options.wardian_session_id;
@@ -368,8 +369,10 @@ pub async fn run_headless_with_options(
         output_format
     ));
     log_debug(&format!(
-        "[Wardian] run_headless args: exe={} args={:?}",
-        launch_spec.executable, launch_spec.args
+        "[Wardian] run_headless launch: exe={}, arg_count={}, resume={}",
+        launch_spec.executable,
+        launch_spec.args.len(),
+        resume_session.is_some_and(|value| !value.trim().is_empty())
     ));
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -420,7 +423,10 @@ pub async fn run_headless_with_options(
     let status = child.wait().await.map_err(|error| error.to_string())?;
 
     if !err_output.is_empty() {
-        log_debug(&format!("[Wardian] Headless stderr: {}", err_output.trim()));
+        log_debug(&format!(
+            "[Wardian] Headless provider wrote {} stderr bytes.",
+            err_output.len()
+        ));
     }
     if !status.success() {
         let detail = if !err_output.trim().is_empty() {
@@ -672,9 +678,9 @@ pub async fn obtain_session_id(
         provider_name
     ));
     log_debug(&format!(
-        "[WARDIAN-DEBUG] obtain_session_id launch: exe={} args={:?} cwd={}",
+        "[WARDIAN-DEBUG] obtain_session_id launch: exe={} arg_count={} cwd={}",
         launch_spec.executable,
-        launch_spec.args,
+        launch_spec.args.len(),
         command_cwd.display()
     ));
     match cmd.spawn() {
@@ -685,7 +691,7 @@ pub async fn obtain_session_id(
 
             let timeout = tokio::time::Duration::from_secs(60);
             let read_future = async {
-                let mut session_id: Option<String> = None;
+                let session_id: Option<String> = None;
                 if let Some(stdout) = child.stdout.take() {
                     let mut reader = BufReader::new(stdout);
                     let mut line = String::new();
@@ -697,28 +703,12 @@ pub async fn obtain_session_id(
                         let trimmed = line.trim();
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
-                            if provider_name == "opencode" {
-                                if let Ok(parsed) =
-                                    serde_json::from_str::<serde_json::Value>(json_part)
-                                {
-                                    if session_id.is_none() {
-                                        session_id = parsed
-                                            .get("sessionID")
-                                            .and_then(|value| value.as_str())
-                                            .map(|value| value.to_string());
-                                    }
-                                }
-                            }
                             if let Some(evt) = provider.parse_output(json_part) {
                                 match evt {
-                                    AgentEvent::Init {
-                                        session_id: sid, ..
-                                    } if !sid.is_empty() => {
-                                        log_debug(&format!(
-                                            "[WARDIAN-DEBUG] Found session_id: {}",
-                                            sid
-                                        ));
-                                        session_id = Some(sid);
+                                    AgentEvent::Init { .. } => {
+                                        log_debug(
+                                            "[WARDIAN-DEBUG] Ignored provider initialization identifier.",
+                                        );
                                     }
                                     // ModelResponse means the prompt completed and the session
                                     // has been persisted to disk — safe to stop reading.
@@ -768,8 +758,8 @@ pub async fn obtain_session_id(
             let _ = child.wait().await;
             if session_id_res.is_none() && !stderr_output.trim().is_empty() {
                 log_debug(&format!(
-                    "[WARDIAN-DEBUG] obtain_session_id stderr: {}",
-                    stderr_output.trim()
+                    "[WARDIAN-DEBUG] obtain_session_id received {} stderr bytes.",
+                    stderr_output.len()
                 ));
             }
             if provider_name == "codex" {
@@ -787,8 +777,8 @@ pub async fn obtain_session_id(
                 }
             }
             log_debug(&format!(
-                "[WARDIAN-DEBUG] Returning session_id: {:?}",
-                session_id_res
+                "[WARDIAN-DEBUG] Returning session identifier: found={}",
+                session_id_res.is_some()
             ));
             session_id_res.ok_or_else(|| {
                 if stderr_output.trim().is_empty() {
@@ -797,7 +787,10 @@ pub async fn obtain_session_id(
                         provider_name
                     )
                 } else {
-                    stderr_output.trim().to_string()
+                    format!(
+                        "Provider {} failed during session initialization.",
+                        provider_name
+                    )
                 }
             })
         }

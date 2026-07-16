@@ -1,54 +1,19 @@
-use super::spawn::capture_codex_init_resume_session;
-use wardian_core::models::AgentConfig;
+use super::spawn::capture_init_timestamp;
+use std::sync::{Arc, Mutex};
+use wardian_core::models::AgentEvent;
 
 #[test]
-fn codex_init_session_id_sets_empty_resume_session() {
-    let mut config = AgentConfig {
-        provider: "codex".to_string(),
-        resume_session: None,
-        ..Default::default()
-    };
-
-    let changed = capture_codex_init_resume_session(
-        "codex",
-        "019db2f3-22de-7861-8bc6-1b86db1686db",
-        &mut config,
+fn init_event_only_captures_timestamp() {
+    let timestamp = Arc::new(Mutex::new(None));
+    capture_init_timestamp(
+        &AgentEvent::Init {
+            session_id: "00000000-0000-4000-8000-0000000000aa".into(),
+            timestamp: Some("2026-07-16T12:00:00Z".into()),
+        },
+        &timestamp,
     );
-
-    assert!(changed);
     assert_eq!(
-        config.resume_session.as_deref(),
-        Some("019db2f3-22de-7861-8bc6-1b86db1686db")
+        timestamp.lock().unwrap().as_deref(),
+        Some("2026-07-16T12:00:00Z")
     );
-}
-
-#[test]
-fn codex_init_session_id_does_not_replace_existing_resume_session() {
-    let mut config = AgentConfig {
-        provider: "codex".to_string(),
-        resume_session: Some("existing-codex-thread".to_string()),
-        ..Default::default()
-    };
-
-    let changed = capture_codex_init_resume_session("codex", "new-codex-thread", &mut config);
-
-    assert!(!changed);
-    assert_eq!(
-        config.resume_session.as_deref(),
-        Some("existing-codex-thread")
-    );
-}
-
-#[test]
-fn non_codex_init_session_id_does_not_use_codex_capture_path() {
-    let mut config = AgentConfig {
-        provider: "claude".to_string(),
-        resume_session: None,
-        ..Default::default()
-    };
-
-    let changed = capture_codex_init_resume_session("claude", "claude-thread", &mut config);
-
-    assert!(!changed);
-    assert_eq!(config.resume_session, None);
 }

@@ -492,7 +492,7 @@ log_debug(&format!(
 
 - [ ] **Step 4: Harden legacy bootstrap diagnostics and return path**
 
-Before using/returning `session_id_res`, validate its candidate. Replace raw arguments, session ID, `Option<String>`, and stderr logs with:
+Do not assign `session_id_res` from parsed initialization events, including the legacy OpenCode `sessionID` shortcut. Log that the initialization identifier was ignored. Replace raw arguments, session ID, `Option<String>`, and stderr logs with:
 
 ```rust
 log_debug(&format!(
@@ -506,9 +506,6 @@ if !stderr_output.trim().is_empty() {
         "[WARDIAN-DEBUG] obtain_session_id provider stderr bytes={}",
         stderr_output.len()
     ));
-}
-if let Some(candidate) = session_id_res.as_deref() {
-    super::validate_session_values_for_launch(candidate, Some(candidate))?;
 }
 log_debug(&format!(
     "[WARDIAN-DEBUG] obtain_session_id completed: found_session_id={}",
