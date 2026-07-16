@@ -707,7 +707,7 @@ describe('WorkflowMonitor', () => {
       assignmentExpanded: assignmentToggle.getAttribute('aria-expanded'),
     }).toEqual({
       layout: 'compact',
-      details: expect.stringContaining('grid-cols-3'),
+      details: expect.stringContaining('workflow-activity-card__details'),
       failure: expect.stringContaining('truncate'),
       failureTitle: failure,
       footer: expect.stringContaining('flex-nowrap'),

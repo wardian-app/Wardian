@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openSurface } from "../fixtures/workbench";
-import { makeWorkbenchDocument } from "../fixtures/workbenchIpcMock";
+import { openSurface, surfacePanel } from "../fixtures/workbench";
+import { makeWorkbenchDocument, makeWorkbenchSurface } from "../fixtures/workbenchIpcMock";
 import fs from "node:fs";
 
 type BlueprintNode = {
@@ -94,8 +94,11 @@ const events = [
   { seq: 5, ts: "t5", kind: "run_completed" },
 ];
 
-async function installWorkflowsIpcMock(page: Page, blueprintFixture = blueprint) {
-  const workbenchDocument = makeWorkbenchDocument();
+async function installWorkflowsIpcMock(
+  page: Page,
+  blueprintFixture = blueprint,
+  workbenchDocument = makeWorkbenchDocument(),
+) {
   await page.addInitScript(({ blueprintFixture, eventFixture, workbenchDocument }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
@@ -379,20 +382,84 @@ test("workflow run dialog scrolls parameter-heavy forms within the viewport", as
 });
 
 test("workflow monitor fits an adaptive activity card inside a narrow restored workbench surface", async ({ page }) => {
-  await installWorkflowsIpcMock(page);
-  await page.setViewportSize({ width: 1200, height: 700 });
+  const referenceSurface = makeWorkbenchSurface("reference-home", "new-tab");
+  const workflowsSurface = makeWorkbenchSurface("narrow-workflows", "workflows");
+  const restoredDocument = makeWorkbenchDocument({
+    revision: 7,
+    root: {
+      kind: "split",
+      node_id: "workflow-monitor-narrow-split",
+      direction: "horizontal",
+      ratio: 0.72,
+      first: { kind: "group", group_id: "group-reference" },
+      second: { kind: "group", group_id: "group-monitor" },
+    },
+    groups: {
+      "group-reference": {
+        group_id: "group-reference",
+        surface_ids: [referenceSurface.surface_id],
+        active_surface_id: referenceSurface.surface_id,
+      },
+      "group-monitor": {
+        group_id: "group-monitor",
+        surface_ids: [workflowsSurface.surface_id],
+        active_surface_id: workflowsSurface.surface_id,
+      },
+    },
+    surfaces: [referenceSurface, workflowsSurface],
+    active_group_id: "group-monitor",
+    shell: {
+      left_sidebar_collapsed: true,
+      right_sidebar_collapsed: true,
+    },
+  });
+  await installWorkflowsIpcMock(page, blueprint, restoredDocument);
+  await page.setViewportSize({ width: 1440, height: 800 });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-  await openSurface(page, "workflows");
-  await page.getByTestId("workflows-view").getByRole("button", { name: /^monitor$/i }).click();
+  const workflowsPane = surfacePanel(page, "workflows");
+  await expect(workflowsPane).toBeVisible();
+  await expect(page.getByTestId("workbench-group")).toHaveCount(2);
   await page.evaluate(async () => {
     const { useRunStore } = await import("/src/features/workflows/run/useRunStore.ts");
+    const { useSchedulesStore } = await import("/src/store/useSchedulesStore.ts");
+    useSchedulesStore.setState({
+      load: async () => undefined,
+      schedules: [
+        {
+          id: "schedule-monitor-primary",
+          blueprint_id: "wf",
+          name: "Primary restored-pane workflow",
+          input: {},
+          bindings: {},
+          assignments: {
+            analyst: { target_type: "temporary_provider", provider: "codex" },
+            reviewer: { target_type: "temporary_provider", provider: "gemini" },
+            publisher: { target_type: "temporary_provider", provider: "opencode" },
+          },
+          schedule: { schedule_type: "interval", interval_minutes: 60, active: true },
+          is_paused: false,
+          next_run_epoch_ms: 1784304000000,
+        },
+        {
+          id: "schedule-monitor-secondary",
+          blueprint_id: "wf-secondary",
+          name: "Secondary restored-pane workflow",
+          input: {},
+          bindings: {},
+          schedule: { schedule_type: "interval", interval_minutes: 120, active: true },
+          is_paused: false,
+          next_run_epoch_ms: 1784307600000,
+        },
+      ],
+    });
     useRunStore.setState({
       loadRuns: async () => undefined,
       runs: [{
         run_id: "run-monitor-overflow",
         blueprint_id: "wf",
+        schedule_id: "schedule-monitor-primary",
         status: "completed",
         node_count: 3,
         failure: null,
@@ -401,9 +468,27 @@ test("workflow monitor fits an adaptive activity card inside a narrow restored w
       }],
     });
   });
-  await page.getByTestId("workflow-monitor").getByRole("button", { name: /^history$/i }).click();
+  await workflowsPane.getByRole("button", { name: /^monitor$/i }).click();
 
-  const activityRegion = page.getByRole("region", { name: "Workflow activity" });
+  const monitor = workflowsPane.getByTestId("workflow-monitor");
+  const activityRegion = monitor.getByRole("region", { name: "Workflow activity" });
+  const scheduledCards = activityRegion.locator('[data-mode="scheduled"]');
+  await expect(scheduledCards).toHaveCount(2);
+  const restoredGeometry = await workflowsPane.evaluate((pane) => ({
+    viewportWidth: document.documentElement.clientWidth,
+    paneWidth: pane.getBoundingClientRect().width,
+  }));
+  expect(restoredGeometry.viewportWidth).toBeGreaterThanOrEqual(1280);
+  expect(restoredGeometry.paneWidth).toBeGreaterThanOrEqual(320);
+  expect(restoredGeometry.paneWidth).toBeLessThanOrEqual(480);
+  const activityWidth = await activityRegion.evaluate((element) => element.clientWidth);
+  const scheduledCardWidth = await scheduledCards.first().evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  expect(scheduledCardWidth).toBeGreaterThan(activityWidth * 0.8);
+
+  await monitor.getByRole("button", { name: /^history$/i }).click();
+
   const historyCard = activityRegion.getByTestId("workflow-history-run-run-monitor-overflow");
   await expect(activityRegion).toBeVisible();
   await expect(historyCard).toBeVisible();
@@ -416,6 +501,10 @@ test("workflow monitor fits an adaptive activity card inside a narrow restored w
     if (!card) return null;
     const regionRect = element.getBoundingClientRect();
     const cardRect = card.getBoundingClientRect();
+    const requiredContent = Array.from(card.querySelectorAll(
+      "header, [data-virtual-assignments], dl, [data-virtual-meta]",
+    ));
+    const requiredContentRects = requiredContent.map((content) => content.getBoundingClientRect());
     return {
       regionClientWidth: element.clientWidth,
       regionScrollWidth: element.scrollWidth,
@@ -423,6 +512,13 @@ test("workflow monitor fits an adaptive activity card inside a narrow restored w
       regionRight: regionRect.right,
       cardLeft: cardRect.left,
       cardRight: cardRect.right,
+      cardBottom: cardRect.bottom,
+      requiredContentBottom: Math.max(...requiredContentRects.map((rect) => rect.bottom)),
+      requiredContentLeft: Math.min(...requiredContentRects.map((rect) => rect.left)),
+      requiredContentRight: Math.max(...requiredContentRects.map((rect) => rect.right)),
+      requiredContentFitsOwnWidth: requiredContent.every(
+        (content) => content.scrollWidth <= content.clientWidth + 2,
+      ),
       documentClientWidth: document.documentElement.clientWidth,
       documentScrollWidth: document.documentElement.scrollWidth,
     };
@@ -434,5 +530,9 @@ test("workflow monitor fits an adaptive activity card inside a narrow restored w
   expect(geometry!.regionRight).toBeLessThanOrEqual(geometry!.documentClientWidth + horizontalTolerance);
   expect(geometry!.cardLeft).toBeGreaterThanOrEqual(geometry!.regionLeft - horizontalTolerance);
   expect(geometry!.cardRight).toBeLessThanOrEqual(geometry!.regionRight + horizontalTolerance);
+  expect(geometry!.requiredContentLeft).toBeGreaterThanOrEqual(geometry!.cardLeft - horizontalTolerance);
+  expect(geometry!.requiredContentRight).toBeLessThanOrEqual(geometry!.cardRight + horizontalTolerance);
+  expect(geometry!.requiredContentBottom).toBeLessThanOrEqual(geometry!.cardBottom + horizontalTolerance);
+  expect(geometry!.requiredContentFitsOwnWidth).toBe(true);
   expect(geometry!.documentScrollWidth).toBeLessThanOrEqual(geometry!.documentClientWidth + horizontalTolerance);
 });

@@ -62,7 +62,7 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
       <dt className="text-[9px] font-bold uppercase tracking-wide text-muted">{label}</dt>
-      <dd className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-text)]">{children}</dd>
+      <dd className="workflow-activity-card__detail-value mt-0.5 truncate text-[10px] text-[var(--color-wardian-text)]">{children}</dd>
     </div>
   );
 }
@@ -74,11 +74,12 @@ function ModeDetails({ activity, schedule, now, compact = false }: {
   compact?: boolean;
 }) {
   const run = activity.latestRun;
+  const detailsClass = `workflow-activity-card__details grid gap-2${compact ? ' workflow-activity-card__details--compact' : ''}`;
   if (activity.section === 'scheduled') {
     const nextRun = schedule?.is_paused ? 'Paused' : schedule?.next_run_epoch_ms;
     const lastRun = schedule?.last_run_epoch_ms ?? (run ? runTimestampValue(run) : null);
     return (
-      <dl className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <dl className={detailsClass}>
         <Detail label="Next run">{timeValue(nextRun, now, 'Not scheduled')}</Detail>
         <Detail label="Cadence">{schedule ? cadenceLabel(schedule.schedule) : 'Manual only'}</Detail>
         <Detail label="Last run">{timeValue(lastRun, now, 'Never run')}</Detail>
@@ -89,7 +90,7 @@ function ModeDetails({ activity, schedule, now, compact = false }: {
   if (activity.section === 'history') {
     const duration = run ? formatRunDuration(run) : null;
     return (
-      <dl className={compact ? 'grid grid-cols-3 gap-2' : 'grid grid-cols-1 gap-2 sm:grid-cols-3'}>
+      <dl className={detailsClass}>
         <Detail label="Ran">{timeValue(run ? runTimestampValue(run) : null, now, 'Unknown')}</Detail>
         <Detail label="Outcome">{activity.statusLabel}</Detail>
         {duration ? <Detail label="Duration">{duration}</Detail> : null}
@@ -99,7 +100,7 @@ function ModeDetails({ activity, schedule, now, compact = false }: {
 
   if (activity.section === 'running') {
     return (
-      <dl className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <dl className={detailsClass}>
         <Detail label="Started">{timeValue(run?.started_at, now, 'Unknown')}</Detail>
         <Detail label="Updated">{timeValue(run?.updated_at, now, 'Unknown')}</Detail>
         <Detail label="Status">{activity.statusLabel}</Detail>
@@ -108,7 +109,7 @@ function ModeDetails({ activity, schedule, now, compact = false }: {
   }
 
   return (
-    <dl className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+    <dl className={detailsClass}>
       <Detail label="Action required">{activity.issue ?? activity.statusLabel}</Detail>
       <Detail label="Updated">{timeValue(run?.updated_at, now, 'Unknown')}</Detail>
       <Detail label="Status">{activity.statusLabel}</Detail>
@@ -149,8 +150,8 @@ export function WorkflowActivityCard({
       className={`min-w-0 rounded border border-wardian-border bg-[var(--color-wardian-bg)] hover:bg-[color-mix(in_srgb,var(--color-wardian-card),transparent_45%)] ${virtualized ? 'h-full overflow-hidden p-2' : 'p-3'}`}
       style={virtualized ? virtualizedStyle : undefined}
     >
-      <header className="flex items-start justify-between gap-3">
-        <div className={compactHistory ? 'flex min-w-0 flex-1 items-center gap-2' : 'min-w-0'}>
+      <header className="workflow-activity-card__header flex items-start justify-between gap-3">
+        <div className={`workflow-activity-card__identity ${compactHistory ? 'flex min-w-0 flex-1 items-center gap-2' : 'min-w-0'}`}>
           <h5 className="min-w-0 truncate text-xs font-bold text-[var(--color-wardian-text)]" title={activity.name}>
             {activity.name}
           </h5>
@@ -159,7 +160,7 @@ export function WorkflowActivityCard({
             <span>{activity.statusLabel}</span>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="workflow-activity-card__actions flex shrink-0 items-center gap-1.5">
           {run ? (
             <button
               type="button"
@@ -206,7 +207,7 @@ export function WorkflowActivityCard({
         />
       </div>
 
-      <div className={`${virtualized ? 'mt-2 pt-1' : 'mt-3 pt-2'} border-t border-wardian-border`}>
+      <div className={`workflow-activity-card__details-shell ${virtualized ? 'mt-2 pt-1' : 'mt-3 pt-2'} border-t border-wardian-border`}>
         <ModeDetails activity={activity} schedule={schedule} now={now} compact={compactHistory} />
       </div>
 

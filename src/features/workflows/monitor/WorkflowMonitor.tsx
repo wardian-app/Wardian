@@ -112,7 +112,7 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
     >
       <div
         data-testid="workflow-monitor-stats"
-        className="grid shrink-0 grid-cols-5 gap-2 rounded border border-wardian-border bg-[var(--color-wardian-card)] p-2"
+        className="workflow-monitor__stats grid shrink-0 gap-2 rounded border border-wardian-border bg-[var(--color-wardian-card)] p-2"
       >
         <MonitorStat label="failed" value={failedCount} tone={failedCount > 0 ? 'error' : 'muted'} />
         <MonitorStat label="running" value={runningCount} tone={runningCount > 0 ? 'active' : 'muted'} />
@@ -123,12 +123,12 @@ export function WorkflowMonitor({ onOpenRun, onEditSchedule }: WorkflowMonitorPr
       {error ? <div className="shrink-0 text-[11px] text-[var(--color-wardian-error)]">{error}</div> : null}
 
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-wardian-border bg-[var(--color-wardian-bg)]">
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3 py-2">
+        <div className="workflow-monitor__toolbar flex shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3 py-2">
           <div className="min-w-0">
             <h3 className="text-xs font-bold text-[var(--color-wardian-text)]">Activity</h3>
             <div className="mt-0.5 truncate text-[10px] text-muted">{activities.length} workflows tracked</div>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="workflow-monitor__filters flex shrink-0 items-center gap-1">
             {FILTERS.map((item) => (
               <button
                 key={item.id}
@@ -236,7 +236,7 @@ function ActivitySection({
         <h4 className="text-xs font-bold text-muted">{title}</h4>
         <span className="font-mono text-[10px] text-muted">{visibleCount}</span>
       </div>
-      <div className={section === 'history' ? 'select-text space-y-2' : 'grid select-text gap-2 xl:grid-cols-2'}>
+      <div className={section === 'history' ? 'select-text space-y-2' : 'workflow-monitor__activity-grid grid select-text gap-2'}>
         {activities.map((activity) => (
           <WorkflowActivityCard
             key={activity.activityId}
