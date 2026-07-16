@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { WorkflowMonitorGlance } from './WorkflowMonitorGlance';
+import type { AgentConfig } from '../../../types';
 import type { WorkflowSchedule } from '../../../types/workflow';
 import type { RunSummary } from '../run/runTypes';
 
@@ -38,6 +39,24 @@ const pausedSchedule: WorkflowSchedule = {
   is_paused: true,
 };
 
+const assignedSchedule: WorkflowSchedule = {
+  ...heartbeatSchedule,
+  id: 'schedule-editorial',
+  blueprint_id: 'editorial-review',
+  name: 'Editorial Review',
+  assignments: {
+    writer: { target_type: 'agent', agent_id: 'agent-librarian', conversation: 'current' },
+    reviewer: { target_type: 'agent', agent_id: 'agent-reviewer', conversation: 'fresh_background' },
+    publisher: { target_type: 'agent', agent_id: 'agent-publisher', conversation: 'current' },
+  },
+};
+
+const agents: AgentConfig[] = [
+  { session_id: 'agent-librarian', session_name: 'Librarian', agent_class: 'Writer', folder: '/workspace', is_off: false, provider: 'claude' },
+  { session_id: 'agent-reviewer', session_name: 'Paper Reviewer', agent_class: 'Reviewer', folder: '/workspace', is_off: false, provider: 'codex' },
+  { session_id: 'agent-publisher', session_name: 'Publisher', agent_class: 'Publisher', folder: '/workspace', is_off: false, provider: 'opencode' },
+];
+
 const run: RunSummary = {
   run_id: 'run-1',
   blueprint_id: 'heartbeat',
@@ -66,6 +85,7 @@ describe('WorkflowMonitorGlance', () => {
   it('shows active and scheduled counts', () => {
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[heartbeatSchedule]}
         activeRuns={[run]}
         onOpenRun={() => {}}
@@ -82,6 +102,7 @@ describe('WorkflowMonitorGlance', () => {
   it('uses operational status chips and fixed-width compact rows', () => {
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[heartbeatSchedule, failedSchedule, pausedSchedule]}
         activeRuns={[run, approvalRun]}
         onOpenRun={() => {}}
@@ -106,6 +127,7 @@ describe('WorkflowMonitorGlance', () => {
   it('prioritizes attention items before active and upcoming work', () => {
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[heartbeatSchedule, failedSchedule]}
         activeRuns={[run, approvalRun, failedRun]}
         onOpenRun={() => {}}
@@ -127,6 +149,7 @@ describe('WorkflowMonitorGlance', () => {
   it('filters runs and schedules from one search field', () => {
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[heartbeatSchedule, failedSchedule]}
         activeRuns={[run, approvalRun]}
         onOpenRun={() => {}}
@@ -145,6 +168,46 @@ describe('WorkflowMonitorGlance', () => {
     expect(screen.queryByText('approval-gate')).toBeNull();
   });
 
+  it('shows two resolved role assignments and an accessible overflow control', () => {
+    render(
+      <WorkflowMonitorGlance
+        agents={agents}
+        schedules={[assignedSchedule]}
+        activeRuns={[]}
+        onOpenRun={() => {}}
+        onOpenMonitor={() => {}}
+        onPauseSchedule={() => {}}
+        onResumeSchedule={() => {}}
+        onRunScheduleNow={() => {}}
+      />,
+    );
+
+    const card = screen.getByTestId('workflow-glance-row-schedule-editorial');
+    expect(within(card).getByText('publisher · Publisher · OpenCode')).toBeVisible();
+    expect(within(card).getByText('reviewer · Paper Reviewer · Codex')).toBeVisible();
+    expect(within(card).getByRole('button', { name: /show 1 more agents for editorial review/i })).toHaveTextContent('+1 agents');
+  });
+
+  it('finds an owning workflow by its resolved agent label', () => {
+    render(
+      <WorkflowMonitorGlance
+        agents={agents}
+        schedules={[heartbeatSchedule, assignedSchedule]}
+        activeRuns={[]}
+        onOpenRun={() => {}}
+        onOpenMonitor={() => {}}
+        onPauseSchedule={() => {}}
+        onResumeSchedule={() => {}}
+        onRunScheduleNow={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText(/search workflows/i), { target: { value: 'Paper Reviewer · Codex' } });
+
+    expect(screen.getByText('Editorial Review')).toBeInTheDocument();
+    expect(screen.queryByText('Passive Heartbeat')).toBeNull();
+  });
+
   it('exposes per-schedule pause resume and run-now controls', () => {
     const pause = vi.fn();
     const resume = vi.fn();
@@ -152,6 +215,7 @@ describe('WorkflowMonitorGlance', () => {
 
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[heartbeatSchedule, pausedSchedule]}
         activeRuns={[]}
         onOpenRun={() => {}}
@@ -178,6 +242,7 @@ describe('WorkflowMonitorGlance', () => {
     const onOpenMonitor = vi.fn();
     render(
       <WorkflowMonitorGlance
+        agents={[]}
         schedules={[]}
         activeRuns={[]}
         onOpenRun={() => {}}
