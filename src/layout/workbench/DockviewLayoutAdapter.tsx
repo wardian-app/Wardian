@@ -695,15 +695,6 @@ function DockviewEmptyGroup({ group }: IWatermarkPanelProps) {
 
 const DOCKVIEW_COMPONENTS = { "wardian-surface": DockviewSurfacePanel };
 
-function repairDockviewGroupHeader(group: ReturnType<DockviewApi["addGroup"]>) {
-  if (group.header.hidden) {
-    group.header.hidden = false;
-  }
-  if (group.api.getHeaderPosition() !== "top") {
-    group.api.setHeaderPosition("top");
-  }
-}
-
 function ensureGroups(
   api: DockviewApi,
   node: DeepReadonly<WorkbenchNodeV1>,
@@ -735,9 +726,6 @@ function ensureGroups(
       if (added) groups.set(placement.group_id, added);
       continue;
     }
-    // Header chrome is canonical Wardian state. Dockview owns its DOM, but
-    // retained library-local state must not hide or relocate the tab strip.
-    repairDockviewGroupHeader(existing);
     if (repairExisting && referenceGroup && placement.direction) {
       existing.api.moveTo({
         group: referenceGroup,
@@ -1333,9 +1321,6 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
       scheduleActivation(group.id, group.activePanel?.id ?? null);
     });
     const layoutDisposable = api.onDidLayoutChange(() => {
-      for (const group of api.groups) {
-        repairDockviewGroupHeader(group);
-      }
       if (projectionGuardRef.current > 0) return;
       const previousSize = lastApiSizeRef.current;
       const currentSize = { width: api.width, height: api.height };

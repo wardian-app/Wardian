@@ -3,19 +3,19 @@
 ## Decision
 
 Every canonical Wardian pane always exposes its surface tab strip at the top of
-the pane. Dockview may retain group-local header state while panels move,
-maximize, resize, or reconcile. That library-local state is not authoritative:
-Wardian repairs a retained group's header to visible and top-positioned during
-both canonical document projection and Dockview-only layout changes.
+the pane. Dockview's pane viewport is structural layout, not a surface scroll
+container. Its overflow remains locked while each surface provides the scroll
+region appropriate to its content.
 
-The repair runs even while Wardian's projection guard is active. The guard may
-suppress layout feedback into the persisted split model, but it must never
-suppress restoration of required window chrome.
+Agent reveal and query navigation scroll the Agents overview container
+directly. They must not call `scrollIntoView()` on an agent card because that
+API may scroll every eligible ancestor, including Dockview's pane viewport.
+When the pane viewport scrolls by the tab-strip height, both the tab strip and
+the keep-alive overlay move, making the overlay appear to replace the tabs.
 
 ## Verification
 
-- A retained group whose header is hidden and moved away from the top recovers
-  on a Dockview layout event without a Wardian document mutation.
-- Canonical reconciliation continues to create every group with a visible top
-  header.
-- The active surface remains mounted while its tab strip is repaired.
+- Revealing a distant agent leaves the Dockview pane viewport at `scrollTop = 0`.
+- The active keep-alive overlay remains aligned with the pane content below the
+  36px tab strip.
+- Repeated keep-alive tab changes and viewport resizes preserve that alignment.

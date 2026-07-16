@@ -44,6 +44,11 @@
   height: 100%;
 }
 
+/* Dockview owns pane geometry; each surface owns its own scrolling region. */
+.dockview-theme-wardian .dv-view {
+  overflow: clip;
+}
+
 .dockview-theme-wardian {
   --dv-tabs-and-actions-container-height: var(--topbar-height);
   --dv-active-sash-color: var(--color-wardian-accent);

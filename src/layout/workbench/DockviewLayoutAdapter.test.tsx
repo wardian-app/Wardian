@@ -278,46 +278,6 @@ describe("DockviewLayoutAdapter", () => {
     }
   });
 
-  it("repairs a retained group's tab strip after a Dockview-only layout change", async () => {
-    const documentModel = makeSingleGroupDocument([
-      makeSurface("surface-1", { surface_type: "agents-overview" }),
-    ]);
-    const addGroup = DockviewApi.prototype.addGroup;
-    let projectedGroup: DockviewGroupPanel | undefined;
-    const addGroupSpy = vi.spyOn(DockviewApi.prototype, "addGroup")
-      .mockImplementation(function captureGroup(
-        this: DockviewApi,
-        options?: Parameters<DockviewApi["addGroup"]>[0],
-      ) {
-        const group = addGroup.call(this, options);
-        if (group.id === "group-1") projectedGroup = group;
-        return group;
-      });
-
-    try {
-      render(<DockviewLayoutAdapter document={documentModel} />);
-      await screen.findByRole("tab", { name: /agents overview/i });
-      if (!projectedGroup) throw new Error("expected canonical Dockview group");
-
-      act(() => {
-        projectedGroup!.header.hidden = true;
-        projectedGroup!.api.setHeaderPosition("bottom");
-      });
-      expect(projectedGroup.header.hidden).toBe(true);
-      expect(projectedGroup.api.getHeaderPosition()).toBe("bottom");
-
-      act(() => {
-        projectedGroup!.api.setSize({ width: 700, height: 500 });
-      });
-
-      await waitFor(() => expect(projectedGroup?.header.hidden).toBe(false));
-      expect(projectedGroup.api.getHeaderPosition()).toBe("top");
-      expect(screen.getByRole("tab", { name: /agents overview/i })).toBeVisible();
-    } finally {
-      addGroupSpy.mockRestore();
-    }
-  });
-
   it("recreates a canonical empty group after Dockview removes its final panel", async () => {
     const surface = makeSurface("surface-1", { surface_type: "agents-overview" });
     const initial = makeSingleGroupDocument([surface]);

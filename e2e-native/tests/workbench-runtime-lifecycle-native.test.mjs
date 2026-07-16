@@ -111,6 +111,38 @@ async function waitForAgentSessionHost(driver) {
   }
 }
 
+async function waitForActiveWorkbenchOverlayAlignment(driver, label) {
+  return await waitFor(label, 30000, async () => (
+    driver.executeScript(() => {
+      const group = document.querySelector('[data-testid="workbench-group"][data-active="true"]');
+      const header = group?.querySelector(':scope > .dv-tabs-and-actions-container');
+      const content = group?.querySelector(':scope > .dv-content-container');
+      const activePanel = group?.querySelector('[role="tab"][aria-selected="true"]');
+      const surfaceId = activePanel?.getAttribute("data-surface-id");
+      const overlay = surfaceId
+        ? [...document.querySelectorAll('.dv-render-overlay')].find((candidate) => (
+          candidate.querySelector(`[data-surface-id="${CSS.escape(surfaceId)}"]`)
+        ))
+        : null;
+      const headerRect = header?.getBoundingClientRect();
+      const contentRect = content?.getBoundingClientRect();
+      const overlayRect = overlay?.getBoundingClientRect();
+      return {
+        ok: headerRect !== undefined
+          && contentRect !== undefined
+          && overlayRect !== undefined
+          && Math.abs(contentRect.top - (headerRect.top + headerRect.height)) <= 1
+          && Math.abs(overlayRect.top - contentRect.top) <= 1
+          && Math.abs(overlayRect.height - contentRect.height) <= 1,
+        header: headerRect && { top: headerRect.top, height: headerRect.height },
+        content: contentRect && { top: contentRect.top, height: contentRect.height },
+        overlay: overlayRect && { top: overlayRect.top, height: overlayRect.height },
+        surface_id: surfaceId ?? null,
+      };
+    })
+  ));
+}
+
 async function waitForWorkbenchFile(filePath, predicate) {
   return await waitFor("persisted split workbench", 30000, async () => {
     if (!fs.existsSync(filePath)) return { ok: false, reason: "missing" };
@@ -195,6 +227,7 @@ test(
       `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
     )), 20000);
     await driver.wait(until.elementIsVisible(agentsTerminalHost), 20000);
+    await waitForActiveWorkbenchOverlayAlignment(driver, "initial Agents overlay alignment");
     const initialAgentsFit = await waitFor("fitted Agents terminal first paint", 30000, async () => (
       await driver.executeScript((host) => {
         const rendererHost = host.firstElementChild;
@@ -265,6 +298,7 @@ test(
     const recoveredAgentsTerminalHost = await driver.findElement(By.css(
       `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
     ));
+    await waitForActiveWorkbenchOverlayAlignment(driver, "Agents overlay alignment after clear");
     await waitFor("recovered Agents presentation", 10000, async () => (
       driver.executeScript((host) => {
         const presentationId = host.getAttribute("data-terminal-presentation-id");

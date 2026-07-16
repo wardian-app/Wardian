@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { EventCallback } from "@tauri-apps/api/event";
-import App from "./App";
+import App, { scrollAgentCardWithinOverview } from "./App";
 import type { AgentConfig, AgentClassDefinition, AgentClonePreview, ProviderReadiness } from "../types";
 import type { AgentTelemetry } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
@@ -327,6 +327,46 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
   });
   mockListen.mockImplementation(() => Promise.resolve(() => {}));
 }
+
+describe("Agents overview scroll ownership", () => {
+  it("centers a card by scrolling only the overview viewport", () => {
+    const pane = document.createElement("div");
+    const overview = document.createElement("div");
+    const card = document.createElement("div");
+    overview.dataset.testid = "agents-overview-container";
+    card.id = "agent-card-agent-far";
+    pane.append(overview);
+    overview.append(card);
+    document.body.append(pane);
+
+    pane.scrollTop = 37;
+    overview.scrollTop = 400;
+    Object.defineProperties(overview, {
+      clientHeight: { value: 300, configurable: true },
+      scrollHeight: { value: 1_200, configurable: true },
+    });
+    overview.getBoundingClientRect = () => ({
+      x: 0, y: 100, top: 100, left: 0, right: 600, bottom: 400,
+      width: 600, height: 300, toJSON: () => ({}),
+    });
+    card.getBoundingClientRect = () => ({
+      x: 0, y: 650, top: 650, left: 0, right: 600, bottom: 730,
+      width: 600, height: 80, toJSON: () => ({}),
+    });
+    const scrollTo = vi.fn();
+    overview.scrollTo = scrollTo;
+
+    expect(scrollAgentCardWithinOverview("agent-far")).toBe(true);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 840, behavior: "smooth" });
+    expect(pane.scrollTop).toBe(37);
+
+    pane.remove();
+  });
+
+  it("does nothing when the card is not owned by an Agents overview", () => {
+    expect(scrollAgentCardWithinOverview("missing-agent")).toBe(false);
+  });
+});
 
 function setupDefaultMocksWithWatchlists(
   agents: AgentConfig[],

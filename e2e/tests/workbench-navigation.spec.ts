@@ -248,6 +248,92 @@ test("uses real top-edge tab groups as responsive window chrome", async ({ page 
   expect(separation).toBeLessThanOrEqual(8);
 });
 
+test("keeps keep-alive surface overlays inside the pane content below its tab strip", async ({ page }) => {
+  const agents = makeWorkbenchSurface("agents-1", "agents-overview");
+  const workflows = makeWorkbenchSurface("workflows-1", "workflows");
+  await bootWorkbench(page, makeWorkbenchDocument({
+    groups: {
+      "group-1": {
+        group_id: "group-1",
+        surface_ids: [agents.surface_id, workflows.surface_id],
+        active_surface_id: agents.surface_id,
+      },
+    },
+    surfaces: [agents, workflows],
+  }), [ALPHA_AGENT, BETA_AGENT]);
+
+  const group = workbenchGroup(page, "group-1");
+  const header = group.locator(":scope > .dv-tabs-and-actions-container");
+  const content = group.locator(":scope > .dv-content-container");
+
+  const expectActiveOverlayAligned = async (): Promise<void> => {
+    await expect.poll(async () => {
+      const [headerBox, contentBox, overlayBox] = await Promise.all([
+        header.boundingBox(),
+        content.boundingBox(),
+        page.locator(".dv-render-overlay:visible").boundingBox(),
+      ]);
+      if (!headerBox || !contentBox || !overlayBox) return null;
+      return {
+        header_height: Math.round(headerBox.height),
+        content_from_header: Math.round(contentBox.y - (headerBox.y + headerBox.height)),
+        overlay_from_content: Math.round(overlayBox.y - contentBox.y),
+        overlay_height_delta: Math.round(overlayBox.height - contentBox.height),
+      };
+    }).toEqual({
+      header_height: 36,
+      content_from_header: 0,
+      overlay_from_content: 0,
+      overlay_height_delta: 0,
+    });
+  };
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expectActiveOverlayAligned();
+  for (let index = 0; index < 8; index += 1) {
+    await surfaceTab(page, "workflows").click();
+    await expectActiveOverlayAligned();
+    await surfaceTab(page, "agents-overview").click();
+    await expectActiveOverlayAligned();
+    await page.setViewportSize({ width: index % 2 === 0 ? 1180 : 1280, height: 720 });
+    await expectActiveOverlayAligned();
+  }
+});
+
+test("reveals a distant agent without scrolling the Dockview pane or covering its tabs", async ({ page }) => {
+  const agentsSurface = makeWorkbenchSurface("agents-1", "agents-overview");
+  const agents = Array.from({ length: 30 }, (_, index): WorkbenchAgentFixture => ({
+    ...ALPHA_AGENT,
+    session_id: `agent-${index}`,
+    session_name: `Agent ${index}`,
+  }));
+  await bootWorkbench(
+    page,
+    makeWorkbenchDocument({ surfaces: [agentsSurface] }),
+    agents,
+  );
+
+  const group = workbenchGroup(page, "group-1");
+  const paneViewport = group.locator("xpath=ancestor::*[contains(@class, 'dv-view')][1]");
+  const header = group.locator(":scope > .dv-tabs-and-actions-container");
+  const content = group.locator(":scope > .dv-content-container");
+
+  await page.locator('[aria-label="Agent Agent 29"]').dblclick();
+  await expect(page.locator("#agent-card-agent-29")).toBeVisible();
+  await expect.poll(() => paneViewport.evaluate((element) => element.scrollTop)).toBe(0);
+
+  const [headerBox, contentBox, overlayBox] = await Promise.all([
+    header.boundingBox(),
+    content.boundingBox(),
+    page.locator(".dv-render-overlay:visible").boundingBox(),
+  ]);
+  expect(headerBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
+  expect(overlayBox).not.toBeNull();
+  expect(Math.abs(contentBox!.y - (headerBox!.y + headerBox!.height))).toBeLessThanOrEqual(1);
+  expect(Math.abs(overlayBox!.y - contentBox!.y)).toBeLessThanOrEqual(1);
+});
+
 test("keeps the top tab strip stable when its empty chrome drags the window", async ({ page }) => {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   await bootWorkbench(page, makeWorkbenchDocument({ surfaces: [dashboard] }));

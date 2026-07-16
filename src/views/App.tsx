@@ -205,6 +205,33 @@ function applyNativeWindowSizeFromOuterWindow() {
   });
 }
 
+/** Scrolls only the Agents surface viewport, never Dockview's pane wrapper. */
+export function scrollAgentCardWithinOverview(
+  agentId: string,
+  ownerDocument: Document = document,
+): boolean {
+  const card = ownerDocument.getElementById(`agent-card-${agentId}`);
+  const scrollRegion = card?.closest<HTMLElement>('[data-testid="agents-overview-container"]');
+  if (!card || !scrollRegion) return false;
+
+  const cardBounds = card.getBoundingClientRect();
+  const regionBounds = scrollRegion.getBoundingClientRect();
+  const centeredTop = scrollRegion.scrollTop
+    + cardBounds.top
+    - regionBounds.top
+    - ((scrollRegion.clientHeight - cardBounds.height) / 2);
+  const top = Math.max(0, Math.min(
+    centeredTop,
+    Math.max(0, scrollRegion.scrollHeight - scrollRegion.clientHeight),
+  ));
+  if (typeof scrollRegion.scrollTo === "function") {
+    scrollRegion.scrollTo({ top, behavior: "smooth" });
+  } else {
+    scrollRegion.scrollTop = top;
+  }
+  return true;
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -762,8 +789,7 @@ function AppBody() {
   }, [draggedAgentId]);
 
   const scrollToAgent = useCallback((agentId: string) => {
-    const el = document.getElementById(`agent-card-${agentId}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    scrollAgentCardWithinOverview(agentId);
   }, []);
 
   const fetchAgentClasses = async () => {
@@ -985,10 +1011,7 @@ function AppBody() {
 
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        document.getElementById(`agent-card-${sessionId}`)?.scrollIntoView?.({
-          behavior: "smooth",
-          block: "center",
-        });
+        scrollAgentCardWithinOverview(sessionId);
       });
     });
   }, [setSelectedAgentIds, workbenchNavigation, workbenchPersistence.store, workbenchRegistry]);
@@ -1421,7 +1444,7 @@ function AppBody() {
           onReorderAgents={async (newOrder) => {
             try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }
           }}
-          onQuery={(id) => { const el = document.getElementById(`agent-card-${id}`); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
+          onQuery={scrollToAgent}
           onPause={onPause}
           onRestart={onRestart}
           onClear={onClear}
