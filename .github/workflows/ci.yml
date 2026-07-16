@@ -164,6 +164,7 @@ jobs:
         env:
           WARDIAN_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
           WARDIAN_E2E_NATIVE_HOME: ${{ github.workspace }}\.tmp\e2e-native\wardian-e2e-native-workbench
+          VITE_WARDIAN_TERMINAL_DEBUG: "1"
       - name: Configure elevated WebView2 automation
         shell: pwsh
         run: |

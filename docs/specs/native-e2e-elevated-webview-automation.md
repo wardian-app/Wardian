@@ -9,6 +9,11 @@ Wardian's Windows native-E2E job configures the machine-level WebView2
 This policy is limited to the ephemeral CI worker. Wardian's production build
 does not ship with remote debugging enabled.
 
+The same CI-only debug build enables `VITE_WARDIAN_TERMINAL_DEBUG=1` because
+the focused lifecycle assertions inspect renderer registrations through that
+compile-time diagnostic surface. Setting the variable only when launching a
+prebuilt application cannot expose a hook that Vite omitted during bundling.
+
 ## Context
 
 WebView2 Runtime 150 added security hardening for elevated host processes. It

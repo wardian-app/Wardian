@@ -193,24 +193,48 @@ export async function openWorkbenchSurface(
     await selectAgentResource(driver, normalized.resourceKey, timeoutMs);
   }
 
-  const targetGroupId = await driver.wait(async () => await driver.executeScript(() => {
-    const activeGroup = document.querySelector('[data-testid="workbench-group"][data-active="true"]')
-      ?? document.querySelector('[data-testid="workbench-group"]');
-    const launcher = activeGroup?.querySelector('button[aria-label="Open Surface"]')
-      ?? [...(activeGroup?.querySelectorAll("button") ?? [])]
-        .find((button) => button.textContent?.trim() === "Open Surface");
-    if (!launcher) return false;
-    launcher.click();
-    return activeGroup?.getAttribute("data-group-id") ?? false;
-  }), timeoutMs);
+  const targetGroupId = await driver.wait(async () => await driver.executeScript(
+    (openDirectly) => {
+      const activeGroup = document.querySelector('[data-testid="workbench-group"][data-active="true"]')
+        ?? document.querySelector('[data-testid="workbench-group"]');
+      if (!activeGroup) return false;
+      if (openDirectly) {
+        activeGroup.focus();
+        return activeGroup.getAttribute("data-group-id") ?? false;
+      }
+      const launcher = activeGroup.querySelector('button[aria-label="Open Surface"]')
+        ?? [...activeGroup.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Open Surface");
+      if (!launcher) return false;
+      launcher.click();
+      return activeGroup.getAttribute("data-group-id") ?? false;
+    },
+    toSide,
+  ), timeoutMs);
+
+  if (toSide) {
+    // Open-to-Side is one canonical navigation action. Enter its searchable
+    // launcher directly so the helper does not first persist an unrelated
+    // inline New Tab and make persistence assertions depend on debounce timing.
+    const platform = await driver.executeScript(() => navigator.platform);
+    const primaryKey = /Mac|iPhone|iPad/.test(String(platform)) ? Key.COMMAND : Key.CONTROL;
+    await driver.actions()
+      .keyDown(primaryKey)
+      .keyDown(Key.SHIFT)
+      .sendKeys("o")
+      .keyUp(Key.SHIFT)
+      .keyUp(primaryKey)
+      .perform();
+  }
 
   // The tab-strip plus creates a canonical inline New Tab. Choose its direct
-  // card when possible; resource-backed and Open-to-Side requests continue
-  // through Browse all surfaces because those controls live in the palette.
+  // card when possible; resource-backed requests continue through Browse all
+  // surfaces because those controls live in the palette.
   const launcherResult = await driver.wait(async () => await driver.executeScript(
     (requestedSurfaceType, requestedToSide, requestedGroupId) => {
     const palette = document.querySelector('[role="dialog"][aria-label="Open Surface"]');
     if (palette) return "palette";
+    if (requestedToSide) return false;
     const targetGroup = [...document.querySelectorAll('[data-testid="workbench-group"]')]
       .find((group) => group.getAttribute("data-group-id") === requestedGroupId);
     const home = targetGroup?.querySelector(".wardian-workbench-home");

@@ -891,7 +891,11 @@ test("remote gateway authenticates broker ownership transitions across desktop a
       };
     },
   );
-  assert.equal(replacementDesktop.value.broker_state.owner_presentation_id, null);
+  assert.equal(
+    replacementDesktop.value.broker_state.owner_presentation_id,
+    desktopPresentationId,
+    "the mounted desktop presentation must reclaim input ownership after runtime replacement",
+  );
 
   const replacementEvents = await inbox.next(
     (message) => message.type === "events"
