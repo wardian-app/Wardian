@@ -1,6 +1,6 @@
 # Files and Artifact Review Surface
 
-- **Status:** Proposed
+- **Status:** Approved
 - **Date:** 2026-07-16
 - **Primary issue:** [#392](https://github.com/wardian-app/Wardian/issues/392)
 - **Related issues:** [#393](https://github.com/wardian-app/Wardian/issues/393), [#395](https://github.com/wardian-app/Wardian/issues/395), [#513](https://github.com/wardian-app/Wardian/issues/513)
