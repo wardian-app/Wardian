@@ -14,6 +14,12 @@ the focused lifecycle assertions inspect renderer registrations through that
 compile-time diagnostic surface. Setting the variable only when launching a
 prebuilt application cannot expose a hook that Vite omitted during bundling.
 
+Native session startup retains its bounded two-attempt policy. Transport
+failures reported while `tauri-driver` is connecting to the newly launched
+WebView2 driver, including `ECONNRESET` and `tcp connect error`, are startup
+failures and receive the same retry as `SessionNotCreatedError`. Application
+assertion failures remain non-retryable.
+
 ## Context
 
 WebView2 Runtime 150 added security hardening for elevated host processes. It
@@ -37,4 +43,5 @@ Upstream context:
 The Windows native-workbench job must reach and pass its focused native suite
 on WebView2 Runtime 150 or newer. A successful build alone is insufficient;
 the suite proves that `tauri-driver` attached to the native WebView and ran the
-workbench lifecycle assertions.
+workbench lifecycle assertions. Harness unit coverage must also distinguish
+retryable startup transport failures from application test failures.
