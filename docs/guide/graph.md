@@ -2,6 +2,11 @@
 
 The Graph view is the control surface for the communication topology. Use it to build and inspect your agent network: create and delete manual connections between agents, visualize communication activity, and understand the default communication boundaries that shape CLI behavior and agent visibility.
 
+Pan by dragging the canvas and zoom with the mouse wheel or trackpad. Graph
+nodes, topology edges, and animated communication activity share the same
+camera frame, so overlays remain attached to their endpoints throughout the
+gesture.
+
 ![Wardian Graph view showing status-colored agent nodes, relationship lenses, and the inspector](../assets/screenshots/graph/graph-view.png)
 
 ## What the Graph Shows

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
     animatedReset: vi.fn(),
     kill: vi.fn(),
     refresh: vi.fn(),
+    setGraph: vi.fn(),
     setSetting: vi.fn(),
     loseContext: vi.fn(),
     webglCanvasCount: 3,
@@ -51,6 +52,7 @@ vi.mock("sigma", () => ({
       }),
       kill: mocks.kill,
       refresh: mocks.refresh,
+      setGraph: mocks.setGraph,
       setSetting: mocks.setSetting,
       getNodeDisplayData: (node: string) => ({ x: 10, y: 10, size: 6, node }),
       framedGraphToViewport: (coords: { x: number; y: number }) => coords,
@@ -107,6 +109,7 @@ describe("GraphCanvas", () => {
     mocks.animatedReset.mockClear();
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
+    mocks.setGraph.mockClear();
     mocks.setSetting.mockClear();
     mocks.loseContext.mockClear();
     mocks.graphology.clear.mockClear();
@@ -135,7 +138,7 @@ describe("GraphCanvas", () => {
     );
 
     expect(screen.getByTestId("graph-canvas")).toBeInTheDocument();
-    expect(mocks.graphology.clear).toHaveBeenCalled();
+    expect(mocks.setGraph).toHaveBeenCalledTimes(1);
     expect(mocks.graphology.addNode).toHaveBeenCalledWith("a", expect.objectContaining({
       label: "Alpha",
       color: "var(--color-wardian-success)",
@@ -144,11 +147,12 @@ describe("GraphCanvas", () => {
     expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledWith("a--b", "a", "b", expect.objectContaining({
       label: "same team",
     }));
-    // Label color must be re-applied on render so labels track theme changes
-    // in lockstep with edge colors.
-    expect(mocks.setSetting).toHaveBeenCalledWith(
-      "labelColor",
-      expect.objectContaining({ color: expect.any(String) }),
+    expect(vi.mocked(Sigma)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(HTMLElement),
+      expect.objectContaining({
+        labelColor: expect.objectContaining({ color: expect.any(String) }),
+      }),
     );
   });
 
@@ -326,8 +330,8 @@ describe("GraphCanvas", () => {
     );
 
     expect(vi.mocked(Sigma)).toHaveBeenCalledTimes(1);
-    expect(mocks.graphology.clear).toHaveBeenCalledTimes(2);
-    expect(mocks.refresh).toHaveBeenCalledTimes(2);
+    expect(mocks.setGraph).toHaveBeenCalledTimes(2);
+    expect(mocks.graphology.clear).not.toHaveBeenCalled();
     expect(mocks.kill).not.toHaveBeenCalled();
   });
 
@@ -367,8 +371,7 @@ describe("GraphCanvas", () => {
       />,
     );
 
-    expect(mocks.graphology.clear).toHaveBeenCalledTimes(1);
-    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.setGraph).toHaveBeenCalledTimes(1);
   });
 
   it("resets the sigma camera when the reset signal changes", () => {
@@ -708,6 +711,9 @@ describe("GraphCanvas", () => {
   });
 
   it("re-renders theme-derived colors when the root data-theme attribute changes", async () => {
+    const root = document.documentElement;
+    const previousColor = root.style.getPropertyValue("--color-wardian-text");
+    root.style.setProperty("--color-wardian-text", "#111111");
     render(
       <GraphCanvas
         projection={projection}
@@ -717,22 +723,32 @@ describe("GraphCanvas", () => {
       />,
     );
 
-    const rebuildsBefore = mocks.graphology.clear.mock.calls.length;
-    const previous = document.documentElement.getAttribute("data-theme");
-    document.documentElement.setAttribute(
-      "data-theme",
-      previous === "dark" ? "light" : "dark",
-    );
+    const rebuildsBefore = mocks.setGraph.mock.calls.length;
+    const previous = root.getAttribute("data-theme");
+    await act(async () => {
+      root.style.setProperty("--color-wardian-text", "#eeeeee");
+      root.setAttribute("data-theme", previous === "dark" ? "light" : "dark");
+      await Promise.resolve();
+    });
 
     // MutationObserver delivery is async; the render effect must re-run and
     // rebuild the graph so node/edge/label colors re-resolve under the new theme.
     await vi.waitFor(() => {
-      expect(mocks.graphology.clear.mock.calls.length).toBeGreaterThan(rebuildsBefore);
+      expect(mocks.setGraph.mock.calls.length).toBeGreaterThan(rebuildsBefore);
+      expect(mocks.setSetting).toHaveBeenCalledWith(
+        "labelColor",
+        expect.objectContaining({ color: expect.any(String) }),
+      );
     });
     if (previous === null) {
-      document.documentElement.removeAttribute("data-theme");
+      root.removeAttribute("data-theme");
     } else {
-      document.documentElement.setAttribute("data-theme", previous);
+      root.setAttribute("data-theme", previous);
+    }
+    if (previousColor) {
+      root.style.setProperty("--color-wardian-text", previousColor);
+    } else {
+      root.style.removeProperty("--color-wardian-text");
     }
   });
 

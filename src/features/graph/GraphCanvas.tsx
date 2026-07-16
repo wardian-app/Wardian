@@ -56,6 +56,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
   const rendererRef = useRef<Sigma | null>(null);
+  const labelColorRef = useRef<string | null>(null);
   const projectionRef = useRef(projection);
   const handlersRef = useRef({ onSelectAgent, onOpenAgent, onContextMenu, onSelectEdge, onConnect });
   const dragSourceRef = useRef<string | null>(null);
@@ -93,6 +94,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const graph = new Graph();
     const container = containerRef.current;
     const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
+    labelColorRef.current = labelColor;
     const renderer = new Sigma(graph, container, {
       allowInvalidContainer: true,
       enableEdgeEvents: true,
@@ -211,13 +213,15 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
   }, []);
 
   useEffect(() => {
-    const graph = graphRef.current;
     const renderer = rendererRef.current;
     const container = containerRef.current;
-    if (!graph || !renderer || !container) return;
+    if (!renderer || !container) return;
     const currentProjection = projectionRef.current;
 
-    graph.clear();
+    // Build off-renderer, then swap once. Mutating Sigma's live Graphology
+    // instance emits a refresh for clear and every add; those intermediate
+    // frames fight an in-progress camera animation and make wheel zoom jitter.
+    const graph = new Graph();
     const hasSelectedNode = currentProjection.nodes.some((node) => node.selected);
 
     for (const node of currentProjection.nodes) {
@@ -267,9 +271,13 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
 
     // Re-resolve label color for theme changes (matches edge color re-resolution above)
     const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
-    renderer.setSetting("labelColor", { color: labelColor });
+    if (labelColorRef.current !== labelColor) {
+      labelColorRef.current = labelColor;
+      renderer.setSetting("labelColor", { color: labelColor });
+    }
 
-    renderer.refresh();
+    graphRef.current = graph;
+    renderer.setGraph(graph);
   }, [renderSignature, selectedEdgeId, themeVersion]);
 
   const previousResetSignalRef = useRef(resetSignal);
