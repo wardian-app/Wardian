@@ -63,6 +63,7 @@ export type FilePreviewProps = {
   client: FileResourceClient;
   lifecycle: { visible: boolean };
   registry: RendererRegistry;
+  on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
 };
@@ -72,6 +73,7 @@ export function FilePreview({
   client,
   lifecycle,
   registry,
+  on_open_file,
   on_open_with,
   on_reveal,
 }: FilePreviewProps) {
@@ -96,6 +98,7 @@ export function FilePreview({
           snapshot={snapshot}
           client={client}
           lifecycle={lifecycle}
+          on_open_file={on_open_file}
           on_open_with={on_open_with}
           on_reveal={on_reveal}
         />

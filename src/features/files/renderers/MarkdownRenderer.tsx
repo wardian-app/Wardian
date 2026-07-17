@@ -1,0 +1,173 @@
+import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+import { markdownUrlTransform, safeMarkdownUrl } from "../../grid/markdown/markdownSafety";
+import type { FileRendererProps } from "../rendererRegistry";
+
+const MARKDOWN_MAX_SIZE_BYTES = 16 * 1024 * 1024;
+const MARKDOWN_MAX_LINE_COUNT = 200_000;
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function canRenderMarkdown(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
+  return descriptor.renderer_kind === "markdown"
+    && descriptor.encoding === "utf-8"
+    && descriptor.capabilities.preview
+    && descriptor.unavailable_reason === null
+    && descriptor.size_bytes <= MARKDOWN_MAX_SIZE_BYTES
+    && descriptor.line_count !== null
+    && descriptor.line_count <= MARKDOWN_MAX_LINE_COUNT;
+}
+
+function isLocalTarget(raw: string) {
+  return raw.startsWith("file:")
+    || /^[A-Za-z]:[\\/]/.test(raw)
+    || raw.startsWith("/")
+    || raw.startsWith("./")
+    || raw.startsWith("../")
+    || (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) && !raw.startsWith("#"));
+}
+
+export function resolveLocalMarkdownTarget(sourcePath: string, rawTarget: string) {
+  if (rawTarget.startsWith("file:")) {
+    const url = new URL(rawTarget);
+    const decoded = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
+    return decoded.replace(/\\/g, "/");
+  }
+  const normalizedTarget = rawTarget.replace(/\\/g, "/").split(/[?#]/, 1)[0] ?? "";
+  if (/^[A-Za-z]:\//.test(normalizedTarget) || normalizedTarget.startsWith("/")) {
+    return normalizedTarget;
+  }
+  const sourceParts = sourcePath.replace(/\\/g, "/").split("/");
+  sourceParts.pop();
+  for (const part of normalizedTarget.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (sourceParts.length > 1) sourceParts.pop();
+    } else {
+      sourceParts.push(part);
+    }
+  }
+  return sourceParts.join("/");
+}
+
+function SafeLink({
+  href,
+  children,
+  sourcePath,
+  onOpenFile,
+  onError,
+}: {
+  href?: string;
+  children: ReactNode;
+  sourcePath: string;
+  onOpenFile: (path: string) => Promise<void> | void;
+  onError: (message: string) => void;
+}) {
+  const safe = safeMarkdownUrl(href);
+  if (!safe) return <span>{children}</span>;
+  const local = href ? isLocalTarget(href) : false;
+  const activate = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (local && href) {
+      try {
+        void Promise.resolve(onOpenFile(resolveLocalMarkdownTarget(sourcePath, href)))
+          .catch((cause) => onError(errorMessage(cause)));
+      } catch (cause) {
+        onError(errorMessage(cause));
+      }
+    } else {
+      void openUrl(safe).catch(() => window.open(safe, "_blank", "noopener,noreferrer"));
+    }
+  };
+  return (
+    <a
+      href={safe}
+      onClick={activate}
+      rel="noreferrer"
+      target={local ? undefined : "_blank"}
+    >
+      {children}
+    </a>
+  );
+}
+
+export default function MarkdownRenderer({
+  snapshot,
+  client,
+  lifecycle,
+  on_open_file,
+}: FileRendererProps) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retryToken, setRetryToken] = useState(0);
+  const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+
+  useEffect(() => {
+    if (!lifecycle.visible) return;
+    const descriptor = snapshot.descriptor;
+    if (!canRenderMarkdown(descriptor)) return;
+    let cancelled = false;
+    setText(null);
+    setError(null);
+    void client.readText(snapshot.resource_id, snapshot.revision).then((resource) => {
+      if (!cancelled && resource.revision === snapshot.revision) setText(resource.text);
+    }).catch((cause) => {
+      if (!cancelled) setError(errorMessage(cause));
+    });
+    return () => { cancelled = true; };
+  }, [client, lifecycle.visible, retryToken, snapshot]);
+
+  if (!lifecycle.visible) {
+    return <div className="files-resource-state" role="status">Markdown preview suspended.</div>;
+  }
+  if (!canRenderMarkdown(snapshot.descriptor)) {
+    return (
+      <div className="files-resource-state" role="status">
+        {snapshot.descriptor.unavailable_reason ?? "markdown_preview_unavailable"}
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <section className="files-resource-state" role="alert">
+        <h2>Markdown preview unavailable</h2>
+        <p>{error}</p>
+        <button type="button" onClick={retry}>Retry</button>
+      </section>
+    );
+  }
+  if (text === null) return <div className="files-resource-state" role="status">Loading Markdown…</div>;
+  return (
+    <article className="files-markdown-renderer">
+      <Markdown
+        components={{
+          a: ({ href, children }) => (
+            <SafeLink
+              href={href}
+              sourcePath={snapshot.descriptor.canonical_path}
+              onOpenFile={on_open_file}
+              onError={setError}
+            >
+              {children}
+            </SafeLink>
+          ),
+          img: ({ alt, src }) => {
+            const safe = safeMarkdownUrl(src);
+            return <span className="files-markdown-image-link">{alt || "Image"}{safe ? `: ${safe}` : ""}</span>;
+          },
+        }}
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+        skipHtml
+        urlTransform={markdownUrlTransform}
+      >
+        {text}
+      </Markdown>
+    </article>
+  );
+}

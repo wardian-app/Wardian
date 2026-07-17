@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { viteDevServerHeaders } from "./src/config/viteDevServerHeaders";
@@ -10,44 +10,10 @@ const host = process.env.TAURI_DEV_HOST;
 const workspaceRoot = process.cwd();
 const realWorkspaceRoot = fs.realpathSync.native(workspaceRoot);
 
-function emitFilesRendererWorkers(): Plugin {
-  const publicId = "virtual:wardian-files-renderer-workers";
-  const resolvedId = `\0${publicId}`;
-  return {
-    name: "wardian-files-renderer-workers",
-    apply: "build",
-    resolveId(id) {
-      return id === publicId ? resolvedId : undefined;
-    },
-    load(id) {
-      if (id !== resolvedId) return undefined;
-      return [
-        'import MonacoEditorWorker from "monaco-editor/esm/vs/editor/editor.worker.js?worker";',
-        'import PdfJsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";',
-        "export const filesRendererWorkers = { MonacoEditorWorker, PdfJsWorker };",
-      ].join("\n");
-    },
-    transformIndexHtml: {
-      order: "pre",
-      handler() {
-        return [{
-          tag: "script",
-          attrs: { type: "module" },
-          children: [
-            `import { filesRendererWorkers } from "${publicId}";`,
-            "void filesRendererWorkers;",
-          ].join("\n"),
-          injectTo: "head",
-        }];
-      },
-    },
-  };
-}
-
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   root: workspaceRoot,
-  plugins: [react(), tailwindcss(), emitFilesRendererWorkers()],
+  plugins: [react(), tailwindcss()],
   resolve: {
     preserveSymlinks: true,
     alias: {
@@ -79,10 +45,19 @@ export default defineConfig(async () => ({
     minify: "terser",
     rollupOptions: {
       output: {
+        onlyExplicitManualChunks: true,
         manualChunks(id) {
           const normalized = id.replace(/\\/g, "/");
           if (!normalized.includes("/node_modules/")) {
             return undefined;
+          }
+          if (normalized.includes("/node_modules/monaco-editor/")) {
+            if (normalized.includes("?worker")) return undefined;
+            return "vendor-files-monaco";
+          }
+          if (normalized.includes("/node_modules/pdfjs-dist/")) {
+            if (normalized.includes("?worker")) return undefined;
+            return "vendor-files-pdf";
           }
           if (normalized.includes("/node_modules/@xterm/addon-webgl/")) {
             return "vendor-terminal-webgl";

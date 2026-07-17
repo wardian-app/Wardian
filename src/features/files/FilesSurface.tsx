@@ -21,6 +21,7 @@ export type FilesSurfaceProps = {
   lifecycle: { visible: boolean };
   client?: FileResourceClient;
   registry?: RendererRegistry;
+  on_open_file?: (path: string) => Promise<void> | void;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
 };
@@ -49,6 +50,7 @@ type ActiveFilesSurfaceProps = Required<Pick<
   FilesSurfaceProps,
   "surface_id" | "resource_key" | "state" | "lifecycle" | "client" | "registry"
 >> & {
+  on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
   action_error: string | null;
@@ -111,6 +113,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             client={props.client}
             lifecycle={props.lifecycle}
             registry={props.registry}
+            on_open_file={props.on_open_file}
             on_open_with={props.on_open_with}
             on_reveal={props.on_reveal}
           />
@@ -123,6 +126,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
 export function FilesSurface({
   client = fileResourceClient,
   registry = defaultRendererRegistry,
+  on_open_file = () => undefined,
   on_open_with = openWithConfiguredEditor,
   on_reveal = revealPath,
   ...props
@@ -169,6 +173,7 @@ export function FilesSurface({
       {...props}
       client={client}
       registry={registry}
+      on_open_file={on_open_file}
       on_open_with={guardedOpenWith}
       on_reveal={guardedReveal}
       action_error={actionError}

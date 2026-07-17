@@ -78,6 +78,19 @@ describe("RendererRegistry", () => {
     })).renderer_id).toBe("unsupported");
   });
 
+  it("keeps active HTML and SVG unavailable without invoking a content renderer", () => {
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "text/html",
+      encoding: "utf-8",
+    })).renderer_id).toBe("unsupported");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "image/svg+xml",
+      encoding: "utf-8",
+    })).renderer_id).toBe("unsupported");
+  });
+
   it("uses validated MIME fallback in the real production registry", () => {
     expect(defaultRendererRegistry.resolve(descriptor({
       renderer_kind: "unsupported",

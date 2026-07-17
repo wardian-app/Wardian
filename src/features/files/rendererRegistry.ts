@@ -7,6 +7,7 @@ export type FileRendererProps = {
   snapshot: FileResourceSnapshotV1;
   client: FileResourceClient;
   lifecycle: { visible: boolean };
+  on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
 };
@@ -82,6 +83,8 @@ export class RendererRegistry {
     if (descriptor.unavailable_reason !== null || !descriptor.capabilities.preview) {
       return unsupported;
     }
+    const mime = descriptor.mime_type.trim().toLowerCase();
+    if (mime === "text/html" || mime === "image/svg+xml") return unsupported;
 
     if (descriptor.renderer_kind !== "unsupported") {
       const explicit = this.#definitionsById.get(descriptor.renderer_kind);
@@ -101,14 +104,12 @@ export class RendererRegistry {
   }
 }
 
-function createPendingRenderer() {
-  return lazy(() => import("./UnsupportedRenderer"));
-}
-
-function pendingDefinition(
+function rendererDefinition(
   renderer_id: string,
   capabilities: FileRendererDefinition["capabilities"],
+  load: () => Promise<{ default: ComponentType<FileRendererProps> }>,
 ): FileRendererDefinition {
+  const createRenderer = () => lazy(load);
   return {
     renderer_id,
     matches: (descriptor) => (
@@ -116,40 +117,40 @@ function pendingDefinition(
       || rendererIdForValidatedMime(descriptor) === renderer_id
     ),
     capabilities,
-    render: createPendingRenderer(),
-    create_renderer: createPendingRenderer,
+    render: createRenderer(),
+    create_renderer: createRenderer,
   };
 }
 
 export const defaultRendererRegistry = new RendererRegistry([
-  pendingDefinition("text", {
+  rendererDefinition("text", {
     preview: true,
     changes: "line",
     draft: true,
     annotations: "line_range",
-  }),
-  pendingDefinition("markdown", {
+  }, () => import("./renderers/MonacoTextRenderer")),
+  rendererDefinition("markdown", {
     preview: true,
     changes: "line",
     draft: true,
     annotations: "line_range",
-  }),
-  pendingDefinition("image", {
+  }, () => import("./renderers/MarkdownRenderer")),
+  rendererDefinition("image", {
     preview: true,
     changes: "version",
     draft: false,
     annotations: "spatial",
-  }),
-  pendingDefinition("pdf", {
+  }, () => import("./renderers/ImageRenderer")),
+  rendererDefinition("pdf", {
     preview: true,
     changes: "version",
     draft: false,
     annotations: "spatial",
-  }),
-  pendingDefinition("unsupported", {
+  }, () => import("./renderers/PdfRenderer")),
+  rendererDefinition("unsupported", {
     preview: false,
     changes: "none",
     draft: false,
     annotations: "general",
-  }),
+  }, () => import("./UnsupportedRenderer")),
 ]);

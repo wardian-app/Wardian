@@ -235,6 +235,29 @@ describe("FilesSurface", () => {
     expect(screen.getByRole("button", { name: "Reveal" })).toBeInTheDocument();
   });
 
+  it("keeps active HTML metadata-only with the live renderer reason and no text read", async () => {
+    const client = new FileResourceClient();
+    const readText = vi.spyOn(client, "readText");
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(descriptor({
+        display_name: "demo.html",
+        extension: "html",
+        mime_type: "text/html",
+        encoding: "utf-8",
+        renderer_kind: "text",
+        capabilities: { preview: true, changes: true, draft: true, stream: false },
+      })),
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(<FilesSurface {...props({ client })} />);
+
+    expect(await screen.findByText("live_renderer_not_activated")).toBeInTheDocument();
+    expect(readText).not.toHaveBeenCalled();
+  });
+
   it("retries a rejected lazy renderer with a fresh loader attempt", async () => {
     let attempt = 0;
     const retryingDefinition: FileRendererDefinition = {

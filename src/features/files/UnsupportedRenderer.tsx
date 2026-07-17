@@ -6,7 +6,10 @@ export default function UnsupportedRenderer({
   on_reveal,
 }: FileRendererProps) {
   const { descriptor } = snapshot;
-  const reason = descriptor.unavailable_reason ?? "renderer_not_activated";
+  const liveDocument = descriptor.mime_type === "text/html"
+    || descriptor.mime_type === "image/svg+xml";
+  const reason = descriptor.unavailable_reason
+    ?? (liveDocument ? "live_renderer_not_activated" : "renderer_not_activated");
   return (
     <section className="files-resource-state" role="status" aria-label="Preview unavailable">
       <h2>Preview unavailable</h2>
