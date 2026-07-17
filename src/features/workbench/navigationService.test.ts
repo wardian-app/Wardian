@@ -888,6 +888,53 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["alias-first"]);
   });
 
+  it.each([
+    ["explicit-first", ["side-alias", "ordinary-alias"]],
+    ["normal-first", ["ordinary-alias", "side-alias"]],
+  ] as const)(
+    "retains an explicit side pane across %s concurrent canonicalization",
+    async (_ordering, surfaceOrder) => {
+      const registry = createCoreWorkbenchSurfaceRegistry();
+      const ordinaryAlias = makeSurface("ordinary-alias", {
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      });
+      const store = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([ordinaryAlias]),
+      });
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+      });
+      const canonicalRequest = {
+        surface_type: "files" as const,
+        resource_key: "file:C:/real/report.md",
+        state: filesState(false),
+      };
+
+      expect(navigation.open_to_side({
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      })).toBe("side-alias");
+      await expect(Promise.all(surfaceOrder.map(
+        (surfaceId) => navigation.canonicalize_resource(surfaceId, canonicalRequest),
+      ))).resolves.toEqual(["allow", "allow"]);
+
+      expect(Object.keys(store.getState().document.surfaces).sort())
+        .toEqual(["ordinary-alias", "side-alias"]);
+      expect(Object.values(store.getState().document.surfaces).map(
+        (surface) => surface.resource_key,
+      )).toEqual(["file:C:/real/report.md", "file:C:/real/report.md"]);
+      expect(store.getState().document.groups["group-1"].surface_ids)
+        .toEqual(["ordinary-alias"]);
+      expect(store.getState().document.groups["side-group"].surface_ids)
+        .toEqual(["side-alias"]);
+    },
+  );
+
   it("preserves an explicit Open to Side duplicate through canonical rekeying", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const canonical = makeSurface("canonical", {

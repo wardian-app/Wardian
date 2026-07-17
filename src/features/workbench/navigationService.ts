@@ -47,6 +47,10 @@ export interface WorkbenchNavigationService {
 }
 
 type SurfaceGuardResult = "allow" | "cancel" | "stale";
+type ExplicitDuplicateProvenance = {
+  partner_surface_id: string | null;
+  provisional_resource_key: string | undefined;
+};
 const MAX_CANONICALIZE_ATTEMPTS = 8;
 
 function defaultCreateId(kind: WorkbenchIdKind): string {
@@ -72,7 +76,16 @@ export function createWorkbenchNavigationService(
 ): WorkbenchNavigationService {
   const { registry, store } = options;
   const createId = options.create_id ?? defaultCreateId;
-  const explicitDuplicateSurfaceIds = new Set<string>();
+  const explicitDuplicateProvenance = new Map<string, ExplicitDuplicateProvenance>();
+
+  const discardDuplicateProvenance = (surfaceId: string): void => {
+    explicitDuplicateProvenance.delete(surfaceId);
+    for (const [duplicateId, provenance] of explicitDuplicateProvenance) {
+      if (provenance.partner_surface_id === surfaceId) {
+        explicitDuplicateProvenance.delete(duplicateId);
+      }
+    }
+  };
 
   const apply = (commands: readonly WorkbenchCommand[]): void => {
     const result = store.getState().apply_commands(commands);
@@ -299,14 +312,14 @@ export function createWorkbenchNavigationService(
     open_to_side: (request, direction = "horizontal") => {
       const definition = registry.require(request.surface_type);
       const document = store.getState().document;
+      const duplicatePartnerId = registry.resolve_existing(
+        { ...request, duplicate: false },
+        Object.values(document.surfaces),
+      );
       if (definition.open_policy === "singleton") {
-        const existingId = registry.resolve_existing(
-          { ...request, duplicate: false },
-          Object.values(document.surfaces),
-        );
-        if (existingId) {
-          apply([{ type: "focus_surface", surface_id: existingId }]);
-          return existingId;
+        if (duplicatePartnerId) {
+          apply([{ type: "focus_surface", surface_id: duplicatePartnerId }]);
+          return duplicatePartnerId;
         }
       }
       const sourceGroupId = request.group_id ?? document.active_group_id;
@@ -331,7 +344,10 @@ export function createWorkbenchNavigationService(
         },
         { type: "open_surface", surface, group_id: groupId },
       ]);
-      explicitDuplicateSurfaceIds.add(surfaceId);
+      explicitDuplicateProvenance.set(surfaceId, {
+        partner_surface_id: duplicatePartnerId ?? null,
+        provisional_resource_key: surface.resource_key,
+      });
       return surfaceId;
     },
 
@@ -352,7 +368,7 @@ export function createWorkbenchNavigationService(
         );
 
         if (!source) {
-          explicitDuplicateSurfaceIds.delete(surfaceId);
+          discardDuplicateProvenance(surfaceId);
           if (!existingId) return "allow";
           const focusResult = store.getState().compare_and_apply_commands(
             snapshotState.transaction_version,
@@ -365,11 +381,19 @@ export function createWorkbenchNavigationService(
 
         const replacement = createSurface(request, surfaceId);
         if (replacement.resource_key === source.resource_key) {
-          explicitDuplicateSurfaceIds.delete(surfaceId);
+          discardDuplicateProvenance(surfaceId);
           return "allow";
         }
 
-        const preserveExplicitDuplicate = explicitDuplicateSurfaceIds.has(surfaceId);
+        const sourceProvenance = explicitDuplicateProvenance.get(surfaceId);
+        const existingProvenance = existingId
+          ? explicitDuplicateProvenance.get(existingId)
+          : undefined;
+        const completesExplicitDuplicate = existingProvenance !== undefined
+          && existingProvenance.partner_surface_id === surfaceId
+          && existingProvenance.provisional_resource_key === source.resource_key;
+        const preserveExplicitDuplicate = sourceProvenance !== undefined
+          || completesExplicitDuplicate;
         let commands: WorkbenchCommand[];
         let guardedSurfaceIds = [surfaceId];
 
@@ -413,7 +437,20 @@ export function createWorkbenchNavigationService(
           commands,
         );
         if (result.accepted) {
-          explicitDuplicateSurfaceIds.delete(surfaceId);
+          const currentDocument = store.getState().document;
+          if (sourceProvenance) {
+            const partner = sourceProvenance.partner_surface_id
+              ? currentDocument.surfaces[sourceProvenance.partner_surface_id]
+              : undefined;
+            if (partner?.resource_key !== sourceProvenance.provisional_resource_key) {
+              explicitDuplicateProvenance.delete(surfaceId);
+            }
+          } else {
+            explicitDuplicateProvenance.delete(surfaceId);
+          }
+          if (completesExplicitDuplicate || !(surfaceId in currentDocument.surfaces)) {
+            discardDuplicateProvenance(surfaceId);
+          }
           return "allow";
         }
         if (result.stale) continue;
@@ -475,7 +512,7 @@ export function createWorkbenchNavigationService(
         snapshotState.transaction_version,
         [{ type: "close_surface", surface_id: surfaceId }],
       ));
-      if (decision === "allow") explicitDuplicateSurfaceIds.delete(surfaceId);
+      if (decision === "allow") discardDuplicateProvenance(surfaceId);
       return decision;
     },
 
@@ -494,7 +531,7 @@ export function createWorkbenchNavigationService(
       ));
       if (decision === "allow") {
         for (const surfaceId of group.surface_ids) {
-          explicitDuplicateSurfaceIds.delete(surfaceId);
+          discardDuplicateProvenance(surfaceId);
         }
       }
       return decision;
@@ -516,7 +553,7 @@ export function createWorkbenchNavigationService(
         const decision = await options.reset_document(snapshotState.transaction_version)
           ? "allow"
           : "cancel";
-        if (decision === "allow") explicitDuplicateSurfaceIds.clear();
+        if (decision === "allow") explicitDuplicateProvenance.clear();
         return decision;
       }
       const result = store.getState().compare_and_reset_document(
@@ -524,7 +561,7 @@ export function createWorkbenchNavigationService(
       );
       if (!result.accepted && result.stale) return "cancel";
       if (!result.accepted) throw commandFailure(result.errors);
-      explicitDuplicateSurfaceIds.clear();
+      explicitDuplicateProvenance.clear();
       return "allow";
     },
   };

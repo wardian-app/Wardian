@@ -108,8 +108,9 @@ its backend-owned `resource_id`. The visible Files surface then applies
 `canonicalize_resource` as one Workbench transaction. A normal alias open
 focuses and removes itself in favor of an existing canonical presentation,
 even when that presentation is in another pane. Only `open_to_side` carries
-ephemeral explicit-duplicate provenance through this first rekey; its two
-presentations converge to the same canonical key and remain in separate panes.
+ephemeral explicit-duplicate provenance through the rekey of both it and its
+matching source presentation; the pair converges to the same canonical key and
+remains in separate panes regardless of which response publishes first.
 The frontend never resolves symlinks, junctions, or filesystem authority.
 Canonicalization re-resolves the current Workbench document after a stale
 compare-and-swap. A close guard cancellation remains a user veto, while a
