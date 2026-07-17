@@ -221,11 +221,13 @@ describe("AgentTerminal scrollback", () => {
         }),
         buffer: {
           active: {
+            type: "normal",
             baseY: 10,
             viewportY: 10,
             getLine: vi.fn(() => ({ translateToString: () => "src/App.tsx:12" })),
           },
         },
+        modes: { mouseTrackingMode: "none" },
         refresh: vi.fn(),
         cols: 80,
         rows: 24,
@@ -2612,6 +2614,31 @@ describe("AgentTerminal scrollback", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it("selects rendered row geometry from the active buffer type", () => {
+    const terminal = {
+      buffer: { active: { type: "normal" } },
+    } as unknown as Terminal;
+
+    expect(__terminalTesting.shouldUseRenderedRowGeometry(terminal, false)).toBe(true);
+    (terminal.buffer.active as { type: "normal" | "alternate" }).type = "alternate";
+    expect(__terminalTesting.shouldUseRenderedRowGeometry(terminal, false)).toBe(false);
+    expect(__terminalTesting.shouldUseRenderedRowGeometry(terminal, true)).toBe(false);
+  });
+
+  it("recognizes alternate-screen mouse ownership from xterm modes", () => {
+    const terminal = {
+      buffer: { active: { type: "alternate" } },
+      modes: { mouseTrackingMode: "any" },
+    } as unknown as Terminal;
+
+    expect(__terminalTesting.terminalOwnsMouseInteraction(terminal)).toBe(true);
+    (terminal.modes as { mouseTrackingMode: "none" | "any" }).mouseTrackingMode = "none";
+    expect(__terminalTesting.terminalOwnsMouseInteraction(terminal)).toBe(false);
+    (terminal.buffer.active as { type: "normal" | "alternate" }).type = "normal";
+    (terminal.modes as { mouseTrackingMode: "none" | "any" }).mouseTrackingMode = "any";
+    expect(__terminalTesting.terminalOwnsMouseInteraction(terminal)).toBe(false);
+  });
+
   it("releases WebGL1 fallback contexts (not just webgl2) on disposal", async () => {
     // @xterm/addon-webgl silently falls back to a WebGL1 context when webgl2 is
     // unavailable (common once the browser nears its context cap). Probing only
@@ -3202,14 +3229,6 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("marks OpenCode terminals as TUI-owned scroll surfaces", async () => {
-    render(<AgentTerminal sessionId="opencode-scroll-owner" provider="opencode" theme="dark" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("agent-terminal-host")).toHaveClass("wardian-terminal--tui-owned-scroll");
-    });
-  });
-
   it("reports terminal focus while still focusing the xterm instance on click", async () => {
     const onTerminalFocus = vi.fn();
     render(<AgentTerminal sessionId="codex-focus" theme="dark" onTerminalFocus={onTerminalFocus} />);
@@ -3224,20 +3243,6 @@ describe("AgentTerminal scrollback", () => {
 
     expect(onTerminalFocus).toHaveBeenCalledTimes(1);
     expect(getLatestTerminalInstance().focus).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the OpenCode xterm viewport scrollable while hiding terminal scroll chrome", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { cwd } = await import("node:process");
-    const appStyles = readFileSync(`${cwd()}/src/styles/App.css`, "utf8") as string;
-    const selector = ".wardian-terminal--tui-owned-scroll .xterm-viewport";
-    const ruleStart = appStyles.indexOf(selector);
-    const ruleEnd = appStyles.indexOf("}", ruleStart);
-    const viewportRule = appStyles.slice(ruleStart, ruleEnd);
-
-    expect(ruleStart).toBeGreaterThanOrEqual(0);
-    expect(viewportRule).toContain("scrollbar-width: none");
-    expect(viewportRule).not.toContain("overflow-y: hidden");
   });
 
   it("scrolls provider redraw terminals through the user wheel surface", async () => {
@@ -3264,6 +3269,33 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.scrollLines.mock.calls[0][0]).toBeLessThan(0);
     expect(instance.buffer.active.viewportY).toBeLessThan(27);
     expect(parser.scrollToLine).toHaveBeenCalledWith(instance.buffer.active.viewportY);
+    expect(instance.refresh).not.toHaveBeenCalled();
+  });
+
+  it("leaves alternate-screen OpenCode wheel input to xterm's mouse protocol", async () => {
+    render(<AgentTerminal sessionId="opencode-wheel-scroll" provider="opencode" theme="dark" />);
+
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalled();
+    });
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.type = "alternate";
+    instance.buffer.active.baseY = 0;
+    instance.buffer.active.viewportY = 0;
+    instance.modes.mouseTrackingMode = "any";
+    instance.scrollLines.mockClear();
+    instance.refresh.mockClear();
+    const parser = getLatestHeadlessTerminalInstance();
+    parser.scrollToLine.mockClear();
+
+    fireEvent.wheel(screen.getByTestId("agent-terminal-host"), {
+      deltaY: -240,
+      deltaMode: 0,
+    });
+
+    expect(instance.scrollLines).not.toHaveBeenCalled();
+    expect(parser.scrollToLine).not.toHaveBeenCalled();
     expect(instance.refresh).not.toHaveBeenCalled();
   });
 
@@ -3866,6 +3898,93 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
+  it("does not resize from stale rendered rows when a preserved renderer remounts", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+
+    globalThis.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      const firstRender = render(
+        <AgentTerminal sessionId="codex-preserved-renderer-remount" provider="codex" theme="dark" />,
+      );
+
+      await waitFor(() => {
+        expect(mockTerminal).toHaveBeenCalled();
+      });
+
+      const instance = getLatestTerminalInstance();
+      Object.defineProperty(instance.element, "clientWidth", {
+        configurable: true,
+        value: 800,
+      });
+      Object.defineProperty(instance.element, "clientHeight", {
+        configurable: true,
+        value: 320,
+      });
+      instance._core = {
+        _renderService: {
+          dimensions: {
+            css: {
+              cell: { width: 8, height: 20 },
+            },
+          },
+        },
+      };
+      instance.cols = 100;
+      instance.rows = 16;
+
+      const rowOne = document.createElement("div");
+      const rowTwo = document.createElement("div");
+      rowOne.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 16,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      rowTwo.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            width: 800,
+            height: 16,
+            top: 16,
+            left: 0,
+            right: 800,
+            bottom: 32,
+            x: 0,
+            y: 16,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      const rows = document.createElement("div");
+      rows.className = "xterm-rows";
+      rows.append(rowOne, rowTwo);
+      instance.element.append(rows);
+
+      firstRender.unmount();
+      instance.resize.mockClear();
+
+      render(<AgentTerminal sessionId="codex-preserved-renderer-remount" provider="codex" theme="dark" />);
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(instance.resize).not.toHaveBeenCalled();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it("coalesces bursty ResizeObserver fits before resizing the xterm grid", async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
     let resizeCallback: ResizeObserverCallback | undefined;
@@ -4457,7 +4576,7 @@ describe("AgentTerminal scrollback", () => {
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
-      input: "\u001b[?2026;0$y",
+      input: "\u001b[?2026;2$y",
     });
     expect(mockInvoke).toHaveBeenCalledWith("send_input_to_agent", {
       sessionId: "opencode-1",
@@ -4840,7 +4959,7 @@ describe("AgentTerminal scrollback", () => {
     expect(replacementRenderer.refresh).not.toHaveBeenCalled();
   });
 
-  it("strips OpenCode synchronized-output toggles before writing to xterm", async () => {
+  it("preserves OpenCode synchronized-output toggles when writing to xterm", async () => {
     let readCount = 0;
     mockInvoke.mockImplementation(async (cmd: string) => {
       switch (cmd) {
@@ -4858,7 +4977,10 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith("hello", expect.any(Function));
+      expect(instance.write).toHaveBeenCalledWith(
+        "\u001b[?2026hhello\u001b[?2026l",
+        expect.any(Function),
+      );
     });
   });
 

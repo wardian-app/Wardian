@@ -47,6 +47,7 @@ import {
   terminalThemeForProvider,
   type WardianTerminalTheme,
 } from "./terminalThemes";
+import { proposeTerminalRows, renderedTerminalRowHeight } from "./terminalSizing";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
 const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
@@ -273,7 +274,7 @@ declare global {
         wheelStats: {
           events: number;
           handled: number;
-          opencode_owned: number;
+          tui_owned: number;
           no_scrollback: number;
           zero_rows: number;
           viewport_unchanged: number;
@@ -840,7 +841,7 @@ function wheelEventRows(
 type WheelDebugStats = {
   events: number;
   handled: number;
-  opencode_owned: number;
+  tui_owned: number;
   no_scrollback: number;
   zero_rows: number;
   viewport_unchanged: number;
@@ -876,7 +877,7 @@ function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) 
   const stats = wheelDebugStats.get(sessionId) ?? {
     events: 0,
     handled: 0,
-    opencode_owned: 0,
+    tui_owned: 0,
     no_scrollback: 0,
     zero_rows: 0,
     viewport_unchanged: 0,
@@ -885,9 +886,12 @@ function recordWheel(sessionId: string | undefined, key: keyof WheelDebugStats) 
   wheelDebugStats.set(sessionId, stats);
 }
 
+function terminalOwnsMouseInteraction(term: Terminal) {
+  return term.buffer.active.type === "alternate" && term.modes.mouseTrackingMode !== "none";
+}
+
 function scrollTerminalFromWheel(
   term: Terminal,
-  provider: string | undefined,
   event: {
     deltaMode: number;
     deltaY: number;
@@ -898,11 +902,10 @@ function scrollTerminalFromWheel(
   sessionId?: string,
 ) {
   recordWheel(sessionId, "events");
-  if (provider === "opencode") {
-    recordWheel(sessionId, "opencode_owned");
+  if (terminalOwnsMouseInteraction(term)) {
+    recordWheel(sessionId, "tui_owned");
     return false;
   }
-
   const buffer = term.buffer.active;
   if ((buffer.baseY ?? 0) <= 0) {
     recordWheel(sessionId, "no_scrollback");
@@ -1354,9 +1357,8 @@ function proposeTerminalDimensions(
     const hostHeight = renderer.host.clientHeight;
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
-      const renderedRowHeight = options?.useRenderedRowGeometry === false
-        ? null
-        : renderedTerminalRowHeight(renderer);
+      const renderedRowHeight =
+        options?.useRenderedRowGeometry === false ? null : renderedTerminalRowHeight(renderer.term.element);
       const rows = proposeTerminalRows(hostHeight, cellHeight, renderedRowHeight);
       if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
         return { cols, rows };
@@ -1376,40 +1378,8 @@ function geometryForRenderer(renderer: TerminalRendererEntry) {
   };
 }
 
-function renderedTerminalRowHeight(renderer: TerminalRendererEntry) {
-  const rowElements = renderer.term.element?.querySelectorAll<HTMLElement>(".xterm-rows > div");
-  const first = rowElements?.[0];
-  if (!first) {
-    return null;
-  }
-
-  const firstRect = first.getBoundingClientRect();
-  const secondRect = rowElements?.[1]?.getBoundingClientRect();
-  const rowStep = secondRect ? secondRect.top - firstRect.top : 0;
-  if (Number.isFinite(rowStep) && rowStep > 0) {
-    return rowStep;
-  }
-  if (Number.isFinite(firstRect.height) && firstRect.height > 0) {
-    return firstRect.height;
-  }
-  return null;
-}
-
-function proposeTerminalRows(
-  hostHeight: number,
-  xtermCellHeight: number,
-  renderedRowHeight: number | null,
-) {
-  const rowsFromXterm = Math.floor(hostHeight / xtermCellHeight);
-  if (!renderedRowHeight || renderedRowHeight <= 0 || renderedRowHeight >= xtermCellHeight) {
-    return rowsFromXterm;
-  }
-
-  const rowsFromRenderedGeometry = Math.floor(hostHeight / renderedRowHeight);
-  const visibleGap = hostHeight - rowsFromXterm * renderedRowHeight;
-  return rowsFromRenderedGeometry > rowsFromXterm && visibleGap >= renderedRowHeight
-    ? rowsFromRenderedGeometry
-    : rowsFromXterm;
+function shouldUseRenderedRowGeometry(term: Terminal, force: boolean) {
+  return !force && term.buffer.active.type === "normal";
 }
 
 async function fitTerminalToContainer(
@@ -1443,7 +1413,7 @@ async function fitTerminalToContainer(
       // A forced fit runs during mount/remount before the browser has painted
       // fresh row DOM. Preserved rows can report stale heights and create a
       // resize -> repaint -> resize cascade, so use xterm's cell metrics only.
-      useRenderedRowGeometry: !force,
+      useRenderedRowGeometry: shouldUseRenderedRowGeometry(renderer.term, force),
     });
     entry.fitCount += 1;
     if (!proposedDimensions) {
@@ -2280,7 +2250,7 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   host.addEventListener(
     "wheel",
     (event) => {
-      if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainder, terminalKey)) {
+      if (scrollTerminalFromWheel(term, event, wheelRowRemainder, terminalKey)) {
         syncParserViewportToRenderer(entry);
       }
     },
@@ -2931,7 +2901,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!entry || !term) {
       return;
     }
-    if (scrollTerminalFromWheel(term, entry.provider, event, wheelRowRemainderRef, terminalKey)) {
+    if (scrollTerminalFromWheel(term, event, wheelRowRemainderRef, terminalKey)) {
       syncParserViewportToRenderer(entry);
     }
   }, [terminalKey]);
@@ -3650,9 +3620,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               ? "visible"
               : "hidden",
         }}
-        className={`w-full h-full overflow-hidden ${
-          provider === "opencode" ? "wardian-terminal--tui-owned-scroll" : ""
-        }`}
+        className="w-full h-full overflow-hidden"
       />
     </div>
   );
@@ -3667,6 +3635,8 @@ export const __terminalTesting = {
   proposeTerminalDimensions,
   removeSnapshotOverlay,
   resizeParser,
+  shouldUseRenderedRowGeometry,
+  terminalOwnsMouseInteraction,
   isProviderViewportRedraw,
   syntheticScrollbackRowsForViewportRedraw,
   trimOverlappingScrollbackBeforeViewport,

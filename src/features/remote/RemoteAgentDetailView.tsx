@@ -51,6 +51,7 @@ import {
 } from "../terminal/terminalCapabilities";
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
 import { calculateTerminalMirrorFit } from "../terminal/terminalRendererBudget";
+import { proposeTerminalRows, renderedTerminalRowHeight } from "../terminal/terminalSizing";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -196,6 +197,10 @@ function terminalRowPixelHeight(terminal: Terminal, measureHost: HTMLDivElement)
   return Number.isFinite(measured) && measured > 0 ? measured : 18;
 }
 
+function terminalOwnsMouseInteraction(terminal: Terminal) {
+  return terminal.buffer.active.type === "alternate" && terminal.modes.mouseTrackingMode !== "none";
+}
+
 function installTerminalScrollBridge(
   terminal: Terminal,
   eventSurface: HTMLDivElement,
@@ -204,7 +209,7 @@ function installTerminalScrollBridge(
   const terminalWithScroll = terminal as Terminal & { scrollLines?: (amount: number) => void };
   let wheelRemainder = 0;
   let touchRemainder = 0;
-  let lastTouchY: number | null = null;
+  let lastTouchPoint: { clientX: number; clientY: number } | null = null;
 
   const scrollByRows = (rows: number) => {
     const wholeRows = rows > 0 ? Math.floor(rows) : Math.ceil(rows);
@@ -215,6 +220,9 @@ function installTerminalScrollBridge(
   };
 
   const onWheel = (event: WheelEvent) => {
+    if (terminalOwnsMouseInteraction(terminal)) {
+      return;
+    }
     const rowHeight = terminalRowPixelHeight(terminal, measureHost);
     const rows =
       event.deltaMode === WheelEvent.DOM_DELTA_LINE
@@ -228,21 +236,40 @@ function installTerminalScrollBridge(
 
   const onTouchStart = (event: TouchEvent) => {
     if (event.touches.length !== 1) return;
-    lastTouchY = event.touches[0]?.clientY ?? null;
+    const touch = event.touches[0];
+    lastTouchPoint = touch
+      ? { clientX: touch.clientX, clientY: touch.clientY }
+      : null;
     touchRemainder = 0;
   };
 
   const onTouchMove = (event: TouchEvent) => {
-    if (event.touches.length !== 1 || lastTouchY === null) return;
-    const nextY = event.touches[0]?.clientY ?? lastTouchY;
-    const rowHeight = terminalRowPixelHeight(terminal, measureHost);
-    touchRemainder = scrollByRows(touchRemainder + (lastTouchY - nextY) / rowHeight);
-    lastTouchY = nextY;
+    if (event.touches.length !== 1 || lastTouchPoint === null) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    const nextTouchPoint = { clientX: touch.clientX, clientY: touch.clientY };
+    const deltaY = lastTouchPoint.clientY - nextTouchPoint.clientY;
+    if (terminalOwnsMouseInteraction(terminal)) {
+      (terminal.element ?? measureHost).dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: nextTouchPoint.clientX,
+          clientY: nextTouchPoint.clientY,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          deltaY,
+        }),
+      );
+    } else {
+      const rowHeight = terminalRowPixelHeight(terminal, measureHost);
+      touchRemainder = scrollByRows(touchRemainder + deltaY / rowHeight);
+    }
+    lastTouchPoint = nextTouchPoint;
     event.preventDefault();
   };
 
   const onTouchEnd = () => {
-    lastTouchY = null;
+    lastTouchPoint = null;
     touchRemainder = 0;
   };
 
@@ -329,6 +356,7 @@ function proposedRemoteViewport(
   terminal: Terminal,
   host: HTMLDivElement,
   scrollSurface: HTMLDivElement,
+  options?: { useRenderedRowGeometry?: boolean },
 ) {
   const viewport = scrollSurface.getBoundingClientRect();
   const viewportWidth = viewport.width || scrollSurface.clientWidth;
@@ -350,7 +378,16 @@ function proposedRemoteViewport(
   ) {
     return {
       cols: Math.max(1, Math.floor(viewportWidth / cellWidth)),
-      rows: Math.max(1, Math.floor(viewportHeight / cellHeight)),
+      rows: Math.max(
+        1,
+        proposeTerminalRows(
+          viewportHeight,
+          cellHeight,
+          options?.useRenderedRowGeometry === false || terminal.buffer.active.type !== "normal"
+            ? null
+            : renderedTerminalRowHeight(host),
+        ),
+      ),
     };
   }
   const saved = {
@@ -747,16 +784,24 @@ function TerminalPane({
       const state = terminalSession?.state;
       const brokerState = state?.broker_state;
       if (!state || !brokerState) return;
-      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface);
       if (state.mode !== "owner") {
+        const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface, {
+          useRenderedRowGeometry: false,
+        });
         reportViewport(brokerState.runtime_generation, proposed.cols, proposed.rows);
         applyRemoteMirrorLayout(terminal, host, scrollSurface, brokerState.geometry);
         return;
       }
       resetRemoteOwnerLayout(host, scrollSurface);
       fitAddon.fit?.();
-      const cols = terminal.cols || proposed.cols;
-      const rows = terminal.rows || proposed.rows;
+      const proposed = proposedRemoteViewport(fitAddon, terminal, host, scrollSurface, {
+        useRenderedRowGeometry: true,
+      });
+      const cols = proposed.cols;
+      const rows = proposed.rows;
+      if (terminal.cols !== cols || terminal.rows !== rows) {
+        terminal.resize(cols, rows);
+      }
       reportViewport(brokerState.runtime_generation, cols, rows);
       if (
         lastOwnerResize.runtimeGeneration !== brokerState.runtime_generation

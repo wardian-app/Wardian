@@ -251,6 +251,7 @@ let statusStreamReconnectTimer: number | null = null;
 let statusStreamReconnectAttempts = 0;
 let lastActiveAgentRefreshKey: string | null = null;
 let terminalRefreshRequestSerial = 0;
+let chatRefreshRequestSerial = 0;
 let suppressNextStatusStreamReconnect = false;
 
 const clearBackgroundChatRefresh = () => {
@@ -843,18 +844,21 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   async refreshActiveAgentChat(options) {
     const activeAgentId = get().activeAgentId;
     if (!activeAgentId) return;
+    const requestSerial = (chatRefreshRequestSerial += 1);
     if (!options?.background) {
       set({ chatLoading: true, chatError: "" });
     }
     try {
       const chatEvents = await remoteClient.loadAgentChat(activeAgentId);
       set((state) => {
+        if (requestSerial !== chatRefreshRequestSerial) return {};
         if (state.activeAgentId !== activeAgentId) return { chatLoading: false };
         const mergedChatEvents = mergeOptimisticChatEvents(chatEvents, state.chatEvents);
         if (chatEventsEqual(state.chatEvents, mergedChatEvents)) return { chatLoading: false, chatError: "" };
         return { chatEvents: mergedChatEvents, chatLoading: false, chatError: "" };
       });
     } catch (error) {
+      if (requestSerial !== chatRefreshRequestSerial) return;
       set({
         chatLoading: false,
         chatError: error instanceof Error ? error.message : String(error),
