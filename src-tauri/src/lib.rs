@@ -553,6 +553,7 @@ pub fn run() {
             commands::files::close_file_resource,
             commands::files::read_file_resource_text,
             commands::files::issue_file_resource_ticket,
+            commands::files::close_file_renderer_lease,
             commands::files::pick_file_resource,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,

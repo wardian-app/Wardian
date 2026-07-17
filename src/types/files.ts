@@ -100,6 +100,12 @@ export type IssueFileResourceTicketRequestV1 = {
   renderer_lease_id: string;
 };
 
+export type CloseFileRendererLeaseRequestV1 = {
+  resource_id: string;
+  subscription_id: string;
+  renderer_lease_id: string;
+};
+
 export type PickFileResourceRequestV1 = {
   title: string | null;
 };

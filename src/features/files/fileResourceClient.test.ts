@@ -84,6 +84,7 @@ describe("FileResourceClient", () => {
     await expect(
       client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-1"),
     ).resolves.toEqual(ticket);
+    await client.closeRendererLease(snapshot.resource_id, "preview-pane-1");
     await client.close(snapshot.subscription_id);
 
     expect(mockInvoke.mock.calls).toEqual([
@@ -106,6 +107,13 @@ describe("FileResourceClient", () => {
           resource_id: snapshot.resource_id,
           subscription_id: snapshot.subscription_id,
           revision: snapshot.revision,
+          renderer_lease_id: "preview-pane-1",
+        },
+      }],
+      ["close_file_renderer_lease", {
+        request: {
+          resource_id: snapshot.resource_id,
+          subscription_id: snapshot.subscription_id,
           renderer_lease_id: "preview-pane-1",
         },
       }],

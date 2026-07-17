@@ -898,6 +898,82 @@ impl FileResourceRuntime {
         })
     }
 
+    /// Releases one renderer-scoped stream capability without closing the
+    /// file subscription shared by other panes and renderers.
+    pub async fn close_renderer_lease(
+        &self,
+        resource_id: &str,
+        subscription_id: &str,
+        renderer_lease_id: &str,
+        webview_label: Option<&str>,
+    ) -> Result<(), FileResourceErrorV1> {
+        if renderer_lease_id.trim().is_empty() {
+            return Err(error(
+                "invalid_request",
+                "renderer lease id must not be empty",
+            ));
+        }
+        let key = RendererLeaseKey {
+            webview_label: webview_label.map(str::to_string),
+            renderer_lease_id: renderer_lease_id.to_string(),
+        };
+        let issuance_id = {
+            let leases = self.inner.renderer_leases.lock().await;
+            let Some(lease) = leases.get(&key) else {
+                return Ok(());
+            };
+            if lease.subscription_id != subscription_id {
+                return Err(error(
+                    "unauthorized_ticket",
+                    "renderer lease belongs to another file subscription",
+                ));
+            }
+            lease.issuance_id
+        };
+        let subscription_matches = self
+            .inner
+            .subscription_resources
+            .lock()
+            .await
+            .get(subscription_id)
+            .is_some_and(|current| current == resource_id);
+        if !subscription_matches {
+            // Closing the resource concurrently already revokes the lease.
+            let lease_still_exists = self
+                .inner
+                .renderer_leases
+                .lock()
+                .await
+                .get(&key)
+                .is_some_and(|lease| lease.issuance_id == issuance_id);
+            if lease_still_exists {
+                return Err(error(
+                    "invalid_ticket",
+                    "renderer lease file subscription is no longer active",
+                ));
+            }
+            return Ok(());
+        }
+        let removed = {
+            let mut leases = self.inner.renderer_leases.lock().await;
+            if leases
+                .get(&key)
+                .is_some_and(|lease| lease.issuance_id == issuance_id)
+            {
+                leases.remove(&key);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.inner.read_tickets.lock().await.retain(|_, ticket| {
+                ticket.renderer_lease != key || ticket.issuance_id != issuance_id
+            });
+        }
+        Ok(())
+    }
+
     pub async fn read_ticket_range(
         &self,
         ticket_id: &str,
@@ -1629,6 +1705,60 @@ mod tests {
                 .expect_err("closed subscription must revoke its lease")
                 .code(),
             "invalid_ticket"
+        );
+    }
+
+    #[tokio::test]
+    async fn renderer_lease_can_be_released_without_closing_shared_subscription() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("release.pdf");
+        fs::write(&path, b"%PDF-1.7 release payload").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let snapshot = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        runtime
+            .issue_ticket(
+                &snapshot.resource_id,
+                &snapshot.subscription_id,
+                snapshot.revision,
+                Some(&config),
+                "renderer-release",
+            )
+            .await
+            .expect("ticket");
+
+        runtime
+            .close_renderer_lease(
+                &snapshot.resource_id,
+                &snapshot.subscription_id,
+                "renderer-release",
+                None,
+            )
+            .await
+            .expect("release");
+        runtime
+            .close_renderer_lease(
+                &snapshot.resource_id,
+                &snapshot.subscription_id,
+                "renderer-release",
+                None,
+            )
+            .await
+            .expect("idempotent release");
+
+        assert_eq!(runtime.ticket_count().await, 0);
+        assert!(runtime.inner.renderer_leases.lock().await.is_empty());
+        assert_eq!(runtime.watcher_count().await, 1);
+        assert_eq!(
+            runtime
+                .snapshot(&snapshot.resource_id)
+                .await
+                .expect("subscription remains open")
+                .subscription_id,
+            snapshot.subscription_id
         );
     }
 

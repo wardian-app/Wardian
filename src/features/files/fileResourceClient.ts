@@ -55,6 +55,16 @@ export class FileResourceClient {
     });
   }
 
+  closeRendererLease(resource_id: string, renderer_lease_id: string): Promise<void> {
+    return invoke<void>("close_file_renderer_lease", {
+      request: {
+        resource_id,
+        subscription_id: this.#subscription(resource_id),
+        renderer_lease_id,
+      },
+    });
+  }
+
   listenForRevisions(
     callback: (event: FileResourceEventV1) => void,
   ): Promise<UnlistenFn> {

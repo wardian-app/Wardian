@@ -40,6 +40,14 @@ pub struct IssueFileResourceTicketRequestV1 {
     pub renderer_lease_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CloseFileRendererLeaseRequestV1 {
+    pub resource_id: String,
+    pub subscription_id: String,
+    pub renderer_lease_id: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PickFileResourceRequestV1 {
@@ -178,6 +186,23 @@ pub async fn issue_file_resource_ticket(
             &request.subscription_id,
             request.revision,
             config.as_ref(),
+            &request.renderer_lease_id,
+            Some(webview.label()),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn close_file_renderer_lease(
+    request: CloseFileRendererLeaseRequestV1,
+    state: tauri::State<'_, AppState>,
+    webview: tauri::WebviewWindow,
+) -> Result<(), FileResourceErrorV1> {
+    state
+        .file_resources
+        .close_renderer_lease(
+            &request.resource_id,
+            &request.subscription_id,
             &request.renderer_lease_id,
             Some(webview.label()),
         )
@@ -472,6 +497,14 @@ mod tests {
         }))
         .expect("ticket request");
         assert_eq!(issue.renderer_lease_id, "renderer-lease-b");
+
+        let close_lease: CloseFileRendererLeaseRequestV1 = serde_json::from_value(json!({
+            "resource_id": "file:/workspace/figure.pdf",
+            "subscription_id": "subscription-b",
+            "renderer_lease_id": "renderer-lease-b"
+        }))
+        .expect("close renderer lease request");
+        assert_eq!(close_lease.subscription_id, "subscription-b");
     }
 
     #[tokio::test]
