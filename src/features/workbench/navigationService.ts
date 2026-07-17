@@ -87,6 +87,26 @@ export function createWorkbenchNavigationService(
     }
   };
 
+  const pruneSettledDuplicateProvenance = (
+    document: ReturnType<WorkbenchStore["getState"]>["document"],
+    surfaceId: string,
+  ): void => {
+    for (const [duplicateId, provenance] of explicitDuplicateProvenance) {
+      if (duplicateId !== surfaceId && provenance.partner_surface_id !== surfaceId) continue;
+      const duplicate = document.surfaces[duplicateId];
+      const partner = provenance.partner_surface_id
+        ? document.surfaces[provenance.partner_surface_id]
+        : undefined;
+      const duplicateIsProvisional = duplicate?.resource_key
+        === provenance.provisional_resource_key;
+      const partnerIsProvisional = partner?.resource_key
+        === provenance.provisional_resource_key;
+      if (!duplicate || !partner || duplicateIsProvisional === partnerIsProvisional) {
+        explicitDuplicateProvenance.delete(duplicateId);
+      }
+    }
+  };
+
   const apply = (commands: readonly WorkbenchCommand[]): void => {
     const result = store.getState().apply_commands(commands);
     if (!result.accepted) throw commandFailure(result.errors);
@@ -381,7 +401,7 @@ export function createWorkbenchNavigationService(
 
         const replacement = createSurface(request, surfaceId);
         if (replacement.resource_key === source.resource_key) {
-          discardDuplicateProvenance(surfaceId);
+          pruneSettledDuplicateProvenance(snapshot, surfaceId);
           return "allow";
         }
 
@@ -438,19 +458,7 @@ export function createWorkbenchNavigationService(
         );
         if (result.accepted) {
           const currentDocument = store.getState().document;
-          if (sourceProvenance) {
-            const partner = sourceProvenance.partner_surface_id
-              ? currentDocument.surfaces[sourceProvenance.partner_surface_id]
-              : undefined;
-            if (partner?.resource_key !== sourceProvenance.provisional_resource_key) {
-              explicitDuplicateProvenance.delete(surfaceId);
-            }
-          } else {
-            explicitDuplicateProvenance.delete(surfaceId);
-          }
-          if (completesExplicitDuplicate || !(surfaceId in currentDocument.surfaces)) {
-            discardDuplicateProvenance(surfaceId);
-          }
+          pruneSettledDuplicateProvenance(currentDocument, surfaceId);
           return "allow";
         }
         if (result.stale) continue;

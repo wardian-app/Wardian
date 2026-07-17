@@ -935,6 +935,59 @@ describe("workbench navigation service", () => {
     },
   );
 
+  it.each([
+    ["side then same-side then partner", ["side-alias", "side-alias", "ordinary-alias"]],
+    ["normal then same-normal then side", ["ordinary-alias", "ordinary-alias", "side-alias"]],
+  ] as const)(
+    "retains and then cleans pair provenance for %s callbacks",
+    async (_ordering, surfaceOrder) => {
+      const registry = createCoreWorkbenchSurfaceRegistry();
+      const ordinaryAlias = makeSurface("ordinary-alias", {
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      });
+      const store = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([ordinaryAlias]),
+      });
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+      });
+      const canonicalRequest = {
+        surface_type: "files" as const,
+        resource_key: "file:C:/real/report.md",
+        state: filesState(false),
+      };
+
+      expect(navigation.open_to_side({
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      })).toBe("side-alias");
+      for (const surfaceId of surfaceOrder) {
+        await expect(navigation.canonicalize_resource(surfaceId, canonicalRequest))
+          .resolves.toBe("allow");
+      }
+
+      expect(Object.keys(store.getState().document.surfaces).sort())
+        .toEqual(["ordinary-alias", "side-alias"]);
+      expect(Object.values(store.getState().document.surfaces).map(
+        (surface) => surface.resource_key,
+      )).toEqual(["file:C:/real/report.md", "file:C:/real/report.md"]);
+
+      await expect(navigation.rebind_resource("side-alias", {
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      })).resolves.toBe("allow");
+      await expect(navigation.canonicalize_resource("side-alias", canonicalRequest))
+        .resolves.toBe("allow");
+      expect(Object.keys(store.getState().document.surfaces)).toEqual(["ordinary-alias"]);
+    },
+  );
+
   it("preserves an explicit Open to Side duplicate through canonical rekeying", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const canonical = makeSurface("canonical", {
@@ -1049,6 +1102,54 @@ describe("workbench navigation service", () => {
     });
 
     expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
+  });
+
+  it("prunes retained pair provenance when the matching partner is already missing", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const ordinaryAlias = makeSurface("ordinary-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([ordinaryAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([
+        "side-group",
+        "side-node",
+        "side-alias",
+        "canonical-copy",
+      ]),
+    });
+    const canonicalRequest = {
+      surface_type: "files" as const,
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    };
+    navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+
+    expect(store.getState().apply_commands([{
+      type: "close_surface",
+      surface_id: "ordinary-alias",
+    }]).accepted).toBe(true);
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+    await navigation.rebind_resource("side-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    expect(navigation.open(canonicalRequest)).toBe("canonical-copy");
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical-copy"]);
   });
 
   it("does not reuse a transient Files surface from another group", () => {
