@@ -307,6 +307,84 @@ describe('FileTree Component', () => {
     expect(src).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('restores one keyboard target when refresh removes the active item or repopulates an empty tree', async () => {
+    let rootNodes = [
+      { name: 'a.md', path: '/test/a.md', is_dir: false, extension: 'md' },
+      { name: 'b.md', path: '/test/b.md', is_dir: false, extension: 'md' },
+    ];
+    vi.mocked(invoke).mockImplementation(async (_command, args) => (
+      (args as { path: string }).path === '/test' ? rootNodes : []
+    ));
+    const onOpen = vi.fn();
+    const { rerender } = render(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={0}
+        changedPaths={[]}
+        onOpen={onOpen}
+      />,
+    );
+
+    const a = await screen.findByRole('treeitem', { name: 'a.md' });
+    a.focus();
+    expect(a).toHaveFocus();
+    expect(a).toHaveAttribute('tabindex', '0');
+
+    rootNodes = [
+      { name: 'b.md', path: '/test/b.md', is_dir: false, extension: 'md' },
+    ];
+    rerender(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={1}
+        changedPaths={['/test/a.md']}
+        onOpen={onOpen}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByRole('treeitem', { name: 'a.md' })).not.toBeInTheDocument());
+    const b = screen.getByRole('treeitem', { name: 'b.md' });
+    expect(screen.getAllByRole('treeitem').filter((item) => item.tabIndex === 0)).toEqual([b]);
+    await userEvent.tab();
+    expect(b).toHaveFocus();
+    fireEvent.keyDown(b, { key: 'Enter' });
+    expect(onOpen).toHaveBeenLastCalledWith('/test/b.md', false);
+
+    rootNodes = [];
+    rerender(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={2}
+        changedPaths={['/test/b.md']}
+        onOpen={onOpen}
+      />,
+    );
+    await waitFor(() => expect(screen.queryAllByRole('treeitem')).toHaveLength(0));
+
+    rootNodes = [
+      { name: 'c.md', path: '/test/c.md', is_dir: false, extension: 'md' },
+    ];
+    rerender(
+      <FileTree
+        path="/test"
+        explorerRoot="/test"
+        refreshToken={3}
+        changedPaths={['/test/c.md']}
+        onOpen={onOpen}
+      />,
+    );
+
+    const c = await screen.findByRole('treeitem', { name: 'c.md' });
+    expect(screen.getAllByRole('treeitem').filter((item) => item.tabIndex === 0)).toEqual([c]);
+    await userEvent.tab();
+    expect(c).toHaveFocus();
+    fireEvent.keyDown(c, { key: 'Enter' });
+    expect(onOpen).toHaveBeenLastCalledWith('/test/c.md', false);
+  });
+
   it('keeps directories as accessible expand/collapse items without opening Files', async () => {
     vi.mocked(invoke).mockImplementation(async (_command, args) => {
       return (args as { path: string }).path === '/test'

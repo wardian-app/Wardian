@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
 import { normalizeExplorerPathForCompare } from './pathUtils';
@@ -130,11 +130,20 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
     return () => { isMounted = false; };
   }, [changedPaths, fetchTree, path, refreshToken]);
 
-  useEffect(() => {
-    if (nodes.length > 0 && interaction.activePath === null) {
-      interaction.setActivePath(nodes[0].path);
+  useLayoutEffect(() => {
+    const visibleItems = Array.from(
+      interaction.treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [],
+    );
+    const activeIsVisible = interaction.activePath !== null && visibleItems.some(
+      (item) => item.dataset.fileTreePath === interaction.activePath,
+    );
+    const nextActivePath = activeIsVisible
+      ? interaction.activePath
+      : visibleItems[0]?.dataset.fileTreePath ?? null;
+    if (nextActivePath !== interaction.activePath) {
+      interaction.setActivePath(nextActivePath);
     }
-  }, [interaction, nodes]);
+  }, [error, expanded, interaction, loading, nodes]);
 
   const toggleFolder = (nodePath: string) => {
     setExpanded(prev => ({ ...prev, [nodePath]: !prev[nodePath] }));
