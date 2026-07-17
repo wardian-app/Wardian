@@ -76,8 +76,15 @@ function renderWindow(
   return pages;
 }
 
-function virtualHeight(pageCount: number, pageHeight: number) {
-  const requested = pageCount * (pageHeight + PDF_PAGE_GAP);
+function virtualHeight(
+  pageCount: number,
+  pageHeight: number,
+  measuredHeights: ReadonlyMap<number, number>,
+) {
+  let requested = pageCount * (pageHeight + PDF_PAGE_GAP);
+  for (const measuredHeight of measuredHeights.values()) {
+    requested += measuredHeight - pageHeight;
+  }
   return Math.max(pageHeight, Math.min(PDF_MAX_VIRTUAL_HEIGHT, requested));
 }
 
@@ -86,16 +93,42 @@ function virtualPageTop(pageNumber: number, pageCount: number, totalHeight: numb
   return ((pageNumber - 1) / (pageCount - 1)) * Math.max(0, totalHeight - pageHeight);
 }
 
-function virtualWindowPageTop(
-  pageNumber: number,
+function virtualWindowPageTops(
+  pages: readonly number[],
   centerPage: number,
   pageCount: number,
   totalHeight: number,
-  pageHeight: number,
+  pageHeightFor: (pageNumber: number) => number,
 ) {
-  const anchor = virtualPageTop(centerPage, pageCount, totalHeight, pageHeight);
-  const requested = anchor + (pageNumber - centerPage) * (pageHeight + PDF_PAGE_GAP);
-  return Math.max(0, Math.min(totalHeight - pageHeight, requested));
+  const rawTops = new Map<number, number>([[centerPage, 0]]);
+  const firstPage = pages[0] ?? centerPage;
+  const lastPage = pages[pages.length - 1] ?? centerPage;
+  let cursor = 0;
+  for (let page = centerPage + 1; page <= lastPage; page += 1) {
+    cursor += pageHeightFor(page - 1) + PDF_PAGE_GAP;
+    rawTops.set(page, cursor);
+  }
+  cursor = 0;
+  for (let page = centerPage - 1; page >= firstPage; page -= 1) {
+    cursor -= pageHeightFor(page) + PDF_PAGE_GAP;
+    rawTops.set(page, cursor);
+  }
+  const minimumTop = Math.min(...pages.map((page) => rawTops.get(page) ?? 0));
+  const maximumBottom = Math.max(...pages.map((page) => (
+    (rawTops.get(page) ?? 0) + pageHeightFor(page)
+  )));
+  const minimumTranslation = -minimumTop;
+  const maximumTranslation = totalHeight - maximumBottom;
+  const requestedTranslation = virtualPageTop(
+    centerPage,
+    pageCount,
+    totalHeight,
+    pageHeightFor(centerPage),
+  );
+  const translation = maximumTranslation < minimumTranslation
+    ? minimumTranslation
+    : Math.max(minimumTranslation, Math.min(maximumTranslation, requestedTranslation));
+  return new Map(pages.map((page) => [page, (rawTops.get(page) ?? 0) + translation]));
 }
 
 function pageAtScroll(
@@ -155,11 +188,13 @@ function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, 
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pageWidth, setPageWidth] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     setError(null);
+    setPageWidth(null);
     void document.getPage(pageNumber).then((page) => {
       if (cancelled) return;
       const canvas = canvasRef.current;
@@ -170,6 +205,7 @@ function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, 
       canvas.height = Math.max(1, Math.floor(geometry.cssHeight * geometry.outputScale));
       canvas.style.width = `${geometry.cssWidth}px`;
       canvas.style.height = `${geometry.cssHeight}px`;
+      setPageWidth(geometry.cssWidth);
       onMeasuredHeight(pageNumber, scale, geometry.cssHeight + 32);
       renderTask = page.render({
         canvas,
@@ -193,7 +229,18 @@ function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, 
   }, [document, onFatalError, onMeasuredHeight, pageNumber, scale]);
 
   return (
-    <figure className="files-pdf-page" data-page-number={pageNumber} style={{ top: `${Math.round(top)}px` }}>
+    <figure
+      className="files-pdf-page"
+      data-page-number={pageNumber}
+      style={{
+        top: `${Math.round(top)}px`,
+        left: pageWidth === null
+          ? "50%"
+          : `max(0px, calc((100% - ${pageWidth}px) / 2))`,
+        width: pageWidth === null ? "min(320px, 100%)" : `${pageWidth}px`,
+        transform: pageWidth === null ? "translateX(-50%)" : "none",
+      }}
+    >
       <figcaption>Page {pageNumber}</figcaption>
       {error ? <div role="alert">{error}</div> : <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />}
     </figure>
@@ -213,6 +260,7 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const [centerPage, setCenterPage] = useState(1);
   const [estimatedPageHeight, setEstimatedPageHeight] = useState(PDF_ESTIMATED_PAGE_HEIGHT);
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [measurementVersion, setMeasurementVersion] = useState(0);
   const estimatedPageHeightRef = useRef(PDF_ESTIMATED_PAGE_HEIGHT);
   const pendingAnchorPageRef = useRef<number | null>(null);
   const centerPageRef = useRef(1);
@@ -265,6 +313,7 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     estimatedPageHeightRef.current = PDF_ESTIMATED_PAGE_HEIGHT;
     pendingAnchorPageRef.current = null;
     measuredPageHeightsRef.current.clear();
+    setMeasurementVersion((version) => version + 1);
 
     void (async () => {
       try {
@@ -380,8 +429,16 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   }, [document, failPdf, query]);
 
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const measuredPageHeights = useMemo(() => {
+    const measured = new Map<number, number>();
+    const prefix = `${scale}:`;
+    for (const [key, height] of measuredPageHeightsRef.current) {
+      if (key.startsWith(prefix)) measured.set(Number(key.slice(prefix.length)), height);
+    }
+    return measured;
+  }, [measurementVersion, scale]);
   const totalVirtualHeight = document
-    ? virtualHeight(document.numPages, estimatedPageHeight)
+    ? virtualHeight(document.numPages, estimatedPageHeight, measuredPageHeights)
     : estimatedPageHeight;
   centerPageRef.current = centerPage;
   scaleRef.current = scale;
@@ -398,6 +455,22 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
       : [],
     [centerPage, document, estimatedPageHeight, viewportHeight],
   );
+  const pageTops = useMemo(() => document
+    ? virtualWindowPageTops(
+        pages,
+        centerPage,
+        document.numPages,
+        totalVirtualHeight,
+        (pageNumber) => measuredPageHeights.get(pageNumber) ?? estimatedPageHeight,
+      )
+    : new Map<number, number>(), [
+      centerPage,
+      document,
+      estimatedPageHeight,
+      measuredPageHeights,
+      pages,
+      totalVirtualHeight,
+    ]);
   const onPdfScroll = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport || !document) return;
@@ -428,7 +501,11 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     setEstimatedPageHeight(measured);
   }, []);
   const onMeasuredHeight = useCallback((pageNumber: number, measuredScale: number, height: number) => {
-    measuredPageHeightsRef.current.set(`${measuredScale}:${pageNumber}`, height);
+    const key = `${measuredScale}:${pageNumber}`;
+    if (measuredPageHeightsRef.current.get(key) !== height) {
+      measuredPageHeightsRef.current.set(key, height);
+      setMeasurementVersion((version) => version + 1);
+    }
     if (pageNumber === centerPageRef.current && measuredScale === scaleRef.current) {
       applyMeasuredHeight(height);
     }
@@ -550,13 +627,7 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
                   scale={scale}
                   onFatalError={failPdf}
                   onMeasuredHeight={onMeasuredHeight}
-                  top={virtualWindowPageTop(
-                    pageNumber,
-                    centerPage,
-                    document.numPages,
-                    totalVirtualHeight,
-                    estimatedPageHeight,
-                  )}
+                  top={pageTops.get(pageNumber) ?? 0}
                 />
               ))}
             </div>

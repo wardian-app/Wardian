@@ -11,6 +11,7 @@ import { FileResourceClient } from "./fileResourceClient";
 import { useFileResource } from "./useFileResource";
 
 vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: vi.fn((path: string) => path),
   invoke: vi.fn(),
 }));
 
@@ -490,12 +491,28 @@ describe("useFileResource", () => {
 
   it("keeps an older controller usable after a newer authorization unmounts", async () => {
     let openCount = 0;
-    mockInvoke.mockImplementation((command) => {
+    mockInvoke.mockImplementation((command, args) => {
       if (command === "open_file_resource") {
         openCount += 1;
         return Promise.resolve({
           ...snapshot,
           subscription_id: `subscription-${openCount}`,
+        });
+      }
+      if (command === "issue_file_resource_ticket") {
+        const issue = args as { request: {
+          resource_id: string;
+          revision: number;
+          renderer_lease_id: string;
+        } };
+        return Promise.resolve({
+          schema: 1,
+          ticket_id: `ticket-${issue.request.renderer_lease_id}`,
+          url: `wardian-resource://localhost/ticket-${issue.request.renderer_lease_id}`,
+          resource_id: issue.request.resource_id,
+          revision: issue.request.revision,
+          renderer_lease_id: issue.request.renderer_lease_id,
+          expires_at_ms: Date.now() + 60_000,
         });
       }
       return Promise.resolve(undefined);

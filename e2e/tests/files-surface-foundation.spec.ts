@@ -13,6 +13,31 @@ import {
 const ROOT = "/workspace/project";
 const ALPHA_PATH = `${ROOT}/alpha.md`;
 const BETA_PATH = `${ROOT}/beta.md`;
+const WIDE_PDF_PATH = `${ROOT}/wide.pdf`;
+
+function blankPdfDataUrl(width: number, height: number) {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources <<>> /Contents 4 0 R >>`,
+    "<< /Length 0 >>\nstream\n\nendstream",
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  pdf += offsets.slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("");
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+  return `data:application/pdf;base64,${Buffer.from(pdf, "ascii").toString("base64")}`;
+}
 
 function filesTab(page: Page, filePath: string): Locator {
   return page.getByRole("tab").and(page.locator(
@@ -41,6 +66,13 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
     files: [
       { path: ALPHA_PATH, content: "# Alpha document\n\nFirst file." },
       { path: BETA_PATH, content: "# Beta document\n\nSecond file." },
+      {
+        path: WIDE_PDF_PATH,
+        content: "wide PDF fixture",
+        mime_type: "application/pdf",
+        renderer_kind: "pdf",
+        stream_url: blankPdfDataUrl(1_000, 400),
+      },
     ],
     load_result: {
       source: "primary",
@@ -130,4 +162,61 @@ test("routes Explorer files through transient, permanent, and side Workbench pre
     "e2e/screenshots/files-surface/2026-07-16T2305Z/explorer-files-tabs.png",
   );
   await page.screenshot({ path: screenshotPath, fullPage: true });
+});
+
+test("keeps oversized PDF page origins reachable and centers pages that fit", async ({ page }) => {
+  await page.setViewportSize({ width: 1800, height: 900 });
+  await bootFilesWorkbench(page);
+  await page.getByRole("treeitem", { name: "wide.pdf" }).click();
+
+  const surface = page.getByTestId("files-surface");
+  const viewport = page.getByRole("region", { name: "PDF document viewport" });
+  const canvas = page.getByLabel("PDF page 1");
+  await expect(canvas).toBeVisible();
+
+  for (const paneWidth of [100, 300]) {
+    await surface.evaluate((element, width) => {
+      element.style.width = `${width}px`;
+      element.style.maxWidth = `${width}px`;
+      element.style.flex = `0 0 ${width}px`;
+    }, paneWidth);
+    await expect.poll(async () => viewport.evaluate((element) => element.clientWidth))
+      .toBe(paneWidth);
+    const geometry = await viewport.evaluate((viewportElement) => {
+      const pageElement = document.querySelector<HTMLElement>('.files-pdf-page[data-page-number="1"]');
+      const canvasElement = document.querySelector<HTMLElement>('[aria-label="PDF page 1"]');
+      if (!pageElement || !canvasElement) throw new Error("PDF page geometry is unavailable");
+      const viewportRect = viewportElement.getBoundingClientRect();
+      const pageRect = pageElement.getBoundingClientRect();
+      const canvasRect = canvasElement.getBoundingClientRect();
+      return {
+        viewport_left: viewportRect.left,
+        page_left: pageRect.left,
+        canvas_left: canvasRect.left,
+        client_width: viewportElement.clientWidth,
+        scroll_width: viewportElement.scrollWidth,
+      };
+    });
+    expect(geometry.page_left).toBeGreaterThanOrEqual(geometry.viewport_left - 0.5);
+    expect(geometry.canvas_left).toBeGreaterThanOrEqual(geometry.viewport_left - 0.5);
+    expect(geometry.scroll_width).toBeGreaterThan(geometry.client_width);
+  }
+
+  await surface.evaluate((element) => {
+    element.style.width = "1400px";
+    element.style.maxWidth = "1400px";
+    element.style.flex = "0 0 1400px";
+  });
+  await expect.poll(async () => viewport.evaluate((element) => element.clientWidth)).toBe(1400);
+  const centered = await viewport.evaluate((viewportElement) => {
+    const pageElement = document.querySelector<HTMLElement>('.files-pdf-page[data-page-number="1"]');
+    if (!pageElement) throw new Error("PDF page geometry is unavailable");
+    const viewportRect = viewportElement.getBoundingClientRect();
+    const pageRect = pageElement.getBoundingClientRect();
+    return {
+      actual_left: pageRect.left - viewportRect.left,
+      expected_left: (viewportRect.width - pageRect.width) / 2,
+    };
+  });
+  expect(Math.abs(centered.actual_left - centered.expected_left)).toBeLessThan(1);
 });

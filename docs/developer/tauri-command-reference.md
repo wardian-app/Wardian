@@ -243,6 +243,12 @@ with the `wardian-resource` protocol. Image and PDF renderers consume only that
 converted client result; already usable HTTP(S), blob, data, and test URLs are
 left unchanged rather than converted twice.
 
+Coverage is intentionally layered: frontend tests assert the adapter call and
+the exact URL consumed by both binary renderers, while native Files E2E reloads
+a persisted Files image surface and waits for the real `ImageRenderer` to
+decode bytes through the converted custom-protocol URL. The same native test
+also probes `GET`, `HEAD`, and range responses directly.
+
 Ticket issuance copies and verifies the requested revision into an immutable,
 backend-owned snapshot before returning the URL. Later source edits, atomic
 file replacement, or deletion do not change bytes served by that ticket. A

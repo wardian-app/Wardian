@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { By, until } from "selenium-webdriver";
 
 import { fileResourceUrlConversion } from "../../src/features/files/resourceTicketUrl.mjs";
 
@@ -50,6 +51,7 @@ function createFixtures(harness) {
   const pickerFile = path.join(external, "selected.txt");
   const pickerSibling = path.join(external, "sibling.txt");
   const pdfFile = path.join(primary, "artifact.pdf");
+  const imageFile = path.join(primary, "artifact.png");
   const pdfBytes = Buffer.from(
     "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF\n",
     "utf8",
@@ -60,6 +62,10 @@ function createFixtures(harness) {
   fs.writeFileSync(pickerFile, "selected only\n");
   fs.writeFileSync(pickerSibling, "must stay denied\n");
   fs.writeFileSync(pdfFile, pdfBytes);
+  fs.writeFileSync(imageFile, Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xf6iAAAAAElFTkSuQmCC",
+    "base64",
+  ));
 
   return {
     fixtureRoot,
@@ -72,6 +78,7 @@ function createFixtures(harness) {
     pickerSibling,
     pdfFile,
     pdfBytes,
+    imageFile,
   };
 }
 
@@ -329,7 +336,6 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
 
   const full = await fetchResource(driver, ticket.url);
   assert.equal(full.ok, true, JSON.stringify(full));
-  assert.notEqual(full.fetch_url, ticket.url, "production ticket conversion path was bypassed");
   assert.deepEqual(
     { status: full.status, body_base64: full.body_base64 },
     { status: 200, body_base64: fixtures.pdfBytes.toString("base64") },
@@ -410,6 +416,72 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
   assert.equal(retainedStats.ticket_count, 0);
   assert.equal(retainedStats.renderer_lease_count, 0);
   assert.equal(retainedStats.user_grant_count, 1);
+
+  // Persist and reload a real Files surface so this native layer crosses the
+  // production FileResourceClient -> ImageRenderer URL conversion boundary.
+  // Removing that client conversion makes the image decode fail and this
+  // element never reaches a nonzero natural size.
+  const loadedWorkbench = await invokeTauri(driver, "load_workbench_state");
+  assert.ok(loadedWorkbench.document);
+  assert.equal(typeof loadedWorkbench.durable_token, "string");
+  const nextRevision = loadedWorkbench.durable_revision + 1;
+  const surfaceId = `native-files-image-${RUN_ID}`;
+  const groupId = `native-files-group-${RUN_ID}`;
+  const savedWorkbench = await invokeTauri(driver, "save_workbench_state", {
+    document: {
+      schema_version: 1,
+      revision: nextRevision,
+      saved_at: new Date().toISOString(),
+      root: { kind: "group", group_id: groupId },
+      groups: {
+        [groupId]: {
+          group_id: groupId,
+          surface_ids: [surfaceId],
+          active_surface_id: surfaceId,
+        },
+      },
+      surfaces: {
+        [surfaceId]: {
+          surface_id: surfaceId,
+          surface_type: "files",
+          resource_key: `file:${fixtures.imageFile.replace(/\\/g, "/")}`,
+          state_schema_version: 1,
+          state: {
+            resource_kind: "file",
+            mode: "preview",
+            transient_preview: false,
+            review_drawer_open: false,
+            selected_version_id: null,
+            optional_checkpoint_id: null,
+          },
+        },
+      },
+      active_group_id: groupId,
+      recently_closed: [],
+      shell: {
+        ...loadedWorkbench.document.shell,
+        left_sidebar_collapsed: true,
+        right_sidebar_collapsed: true,
+        bottom_terminal_open: false,
+      },
+    },
+    expected_revision: loadedWorkbench.durable_revision,
+    expected_token: loadedWorkbench.durable_token,
+    request_id: `native-files-renderer-${RUN_ID}`,
+  });
+  assert.equal(savedWorkbench.outcome, "saved");
+  await driver.navigate().refresh();
+  await waitForAppShell(driver, 20_000);
+  const renderedImage = await driver.wait(
+    until.elementLocated(By.css('img[alt="artifact.png"]')),
+    20_000,
+  );
+  await driver.wait(async () => driver.executeScript(
+    "return arguments[0].complete && arguments[0].naturalWidth > 0;",
+    renderedImage,
+  ), 20_000);
+  const renderedSource = await renderedImage.getAttribute("src");
+  assert.equal(renderedSource.startsWith("wardian-resource://"), false);
   const finalTitle = await driver.getTitle();
   assert.equal(typeof finalTitle, "string");
   t.diagnostic("native Files runtime remained live through final cleanup assertion");

@@ -449,13 +449,13 @@ describe("PdfRenderer", () => {
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
   });
 
-  it("uses only the anchor page measurement when mixed page sizes resolve out of order", async () => {
+  it("uses per-page measurements to place short, tall, and short pages without overlap", async () => {
     const pageResolvers = new Map<number, (page: object) => void>();
     const getPage = vi.fn().mockImplementation((pageNumber: number) => new Promise((resolvePage) => {
       pageResolvers.set(pageNumber, resolvePage);
     }));
     getDocument.mockReturnValue({
-      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      promise: Promise.resolve({ numPages: 3, destroy: vi.fn(), getPage }),
       destroy: vi.fn().mockResolvedValue(undefined),
     });
     const client = {
@@ -468,21 +468,34 @@ describe("PdfRenderer", () => {
     } as unknown as FileResourceClient;
     render(<PdfRenderer {...props(client)} />);
 
-    await waitFor(() => expect(pageResolvers.has(1) && pageResolvers.has(2)).toBe(true));
+    await screen.findByText("Page 1");
+    const viewport = screen.getByRole("region", { name: "PDF document viewport" });
+    Object.defineProperty(viewport, "clientHeight", { value: 2_000, configurable: true });
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(
+      pageResolvers.has(1) && pageResolvers.has(2) && pageResolvers.has(3),
+    ).toBe(true));
     const page = (height: number) => ({
       getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: height * scale }),
       getTextContent: vi.fn().mockResolvedValue({ items: [] }),
       render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
     });
     pageResolvers.get(2)?.(page(900));
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 0));
-    expect((document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height)
-      .toBe("97600px");
+    pageResolvers.get(3)?.(page(200));
+    pageResolvers.get(1)?.(page(200));
+    await waitFor(() => expect(screen.getAllByLabelText(/^PDF page /)).toHaveLength(3));
 
-    pageResolvers.get(1)?.(page(600));
-    await waitFor(() => expect(
-      (document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height,
-    ).toBe("64800px"));
+    const figures = [1, 2, 3].map((pageNumber) => (
+      document.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`)!
+    ));
+    const tops = figures.map((figure) => Number(figure.style.top.replace("px", "")));
+    expect(tops[1]! - tops[0]!).toBe(248);
+    expect(tops[2]! - tops[1]!).toBe(948);
+    expect(tops[0]).toBeGreaterThanOrEqual(0);
+    expect(tops[2]! + 232).toBeLessThanOrEqual(Number(
+      (document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height
+        .replace("px", ""),
+    ));
   });
 
   it("tracks pane resize and keeps toolbar controls contained at narrow widths", async () => {

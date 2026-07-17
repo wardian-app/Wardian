@@ -46,6 +46,20 @@ function modeBar(overrides: {
 }
 
 describe("FilesModeBar actions menu", () => {
+  it("opens from the trigger at the directional edge requested by the arrow key", async () => {
+    const user = userEvent.setup();
+    render(modeBar());
+    const trigger = screen.getByRole("button", { name: "File actions" });
+    trigger.focus();
+
+    await user.keyboard("{ArrowUp}");
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Reveal" })).toHaveFocus());
+    await user.keyboard("{Escape}");
+    expect(trigger).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Open With" })).toHaveFocus());
+  });
+
   it("focuses and cycles menu items, then restores the trigger on Escape", async () => {
     const user = userEvent.setup();
     render(modeBar());

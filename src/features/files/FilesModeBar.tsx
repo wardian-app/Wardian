@@ -41,6 +41,7 @@ export function FilesModeBar({
   const overflowRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const initialMenuItemRef = useRef(0);
   const path = descriptor?.canonical_path ?? resourcePath(resource_key);
   const parts = useMemo(() => breadcrumbParts(path), [path]);
   const changesReasonId = `${unavailableReasonId}-changes`;
@@ -53,7 +54,8 @@ export function FilesModeBar({
   }, []);
   useEffect(() => {
     if (!menuOpen) return;
-    itemRefs.current[0]?.focus();
+    itemRefs.current[initialMenuItemRef.current]?.focus();
+    initialMenuItemRef.current = 0;
     const dismissOutside = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && !overflowRef.current?.contains(target)) closeMenu();
@@ -138,10 +140,14 @@ export function FilesModeBar({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           aria-controls={menuOpen ? menuId : undefined}
-          onClick={() => setMenuOpen((open) => !open)}
+          onClick={() => {
+            initialMenuItemRef.current = 0;
+            setMenuOpen((open) => !open);
+          }}
           onKeyDown={(event) => {
             if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
             event.preventDefault();
+            initialMenuItemRef.current = event.key === "ArrowUp" ? 1 : 0;
             setMenuOpen(true);
           }}
         >•••</button>

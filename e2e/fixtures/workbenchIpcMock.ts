@@ -42,7 +42,8 @@ export type WorkbenchFileFixture = {
   path: string;
   content: string;
   mime_type?: string;
-  renderer_kind?: "text" | "markdown";
+  renderer_kind?: "text" | "markdown" | "image" | "pdf";
+  stream_url?: string;
   revision?: number;
 };
 
@@ -207,19 +208,20 @@ export async function installWorkbenchIpcMock(
         const extension = displayName.includes(".") ? displayName.split(".").pop() ?? null : null;
         const lines = file.content === "" ? 0 : file.content.split(/\r?\n/).length;
         const rendererKind = file.renderer_kind ?? (extension === "md" ? "markdown" : "text");
+        const streamed = rendererKind === "image" || rendererKind === "pdf";
         return {
           schema: 1,
           canonical_path: normalizedPath,
           display_name: displayName,
           extension,
           mime_type: file.mime_type ?? (rendererKind === "markdown" ? "text/markdown" : "text/plain"),
-          encoding: "utf-8",
+          encoding: streamed ? null : "utf-8",
           renderer_kind: rendererKind,
           size_bytes: new TextEncoder().encode(file.content).byteLength,
-          line_count: lines,
+          line_count: streamed ? null : lines,
           content_hash: `mock-hash-${file.revision}`,
           modified_at_ms: 1_752_624_000_000 + file.revision,
-          capabilities: { preview: true, changes: false, draft: false, stream: false },
+          capabilities: { preview: true, changes: false, draft: false, stream: streamed },
           unavailable_reason: null,
         };
       };
@@ -434,6 +436,34 @@ export async function installWorkbenchIpcMock(
               text: file.content,
             };
           }
+          if (command === "issue_file_resource_ticket") {
+            const request = args?.request as {
+              resource_id?: string;
+              subscription_id?: string;
+              revision?: number;
+              renderer_lease_id?: string;
+            } | undefined;
+            const subscriptionId = String(request?.subscription_id ?? "");
+            const path = fileSubscriptions.get(subscriptionId);
+            const file = path ? fileFixtures.get(path) : undefined;
+            if (
+              !path
+              || !file
+              || !file.stream_url
+              || request?.resource_id !== resourceIdFor(path)
+              || request.revision !== file.revision
+            ) throw new Error("mock streamed file subscription is not active");
+            return {
+              schema: 1,
+              ticket_id: `mock-ticket-${subscriptionId}`,
+              url: file.stream_url,
+              resource_id: resourceIdFor(path),
+              revision: file.revision,
+              renderer_lease_id: String(request.renderer_lease_id ?? ""),
+              expires_at_ms: Date.now() + 60_000,
+            };
+          }
+          if (command === "close_file_renderer_lease") return null;
           if (command === "close_file_resource") {
             const request = args?.request as { subscription_id?: string } | undefined;
             const subscriptionId = String(request?.subscription_id ?? "");

@@ -392,13 +392,9 @@
 
 .files-pdf-page {
   position: absolute;
-  left: 50%;
-  min-width: 320px;
-  min-height: 480px;
-  max-width: 100%;
+  min-width: 0;
   margin: 0;
   box-shadow: var(--shadow-wardian-accent);
-  transform: translateX(-50%);
 }
 
 .files-pdf-virtual-spacer {
