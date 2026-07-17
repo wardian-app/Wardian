@@ -206,22 +206,33 @@ test("switches Markdown source without reopening the resource and preserves it p
   await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
   await expect(page.getByRole("button", { name: "View rendered" })).toBeVisible();
 
-  const surface = page.getByTestId("files-surface").filter({
-    has: page.getByRole("button", { name: "View rendered" }),
-  });
+  const surface = page.locator('[data-testid="files-surface"]:not([data-suspended="true"])');
   await surface.evaluate((element) => {
     element.style.width = "220px";
     element.style.maxWidth = "220px";
     element.style.flex = "0 0 220px";
   });
+  const keyboardOpenCount = (await ipc.calls("open_file_resource")).length;
   const toggle = surface.getByRole("button", { name: "View rendered" });
-  await toggle.focus();
+  const fileActions = surface.getByRole("button", { name: "File actions" });
+  await fileActions.focus();
+  await expect(fileActions).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(toggle).toBeFocused();
   const [toggleBox, surfaceBox] = await Promise.all([toggle.boundingBox(), surface.boundingBox()]);
   expect(toggleBox).not.toBeNull();
   expect(surfaceBox).not.toBeNull();
   expect(toggleBox!.x).toBeGreaterThanOrEqual(surfaceBox!.x - 0.5);
   expect(toggleBox!.x + toggleBox!.width).toBeLessThanOrEqual(surfaceBox!.x + surfaceBox!.width + 0.5);
+
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Alpha document" })).toBeVisible();
+  const keyboardViewSource = surface.getByRole("button", { name: "View source" });
+  await expect(keyboardViewSource).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
+  await expect(surface.getByRole("button", { name: "View rendered" })).toBeFocused();
+  expect((await ipc.calls("open_file_resource")).length).toBe(keyboardOpenCount);
 
   await page.screenshot({
     path: path.resolve(
