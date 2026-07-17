@@ -14,6 +14,7 @@ export const FILE_RESOURCE_REVISION_EVENT = "file-resource://revision";
 export class FileResourceClient {
   readonly #subscriptionsByResource = new Map<string, Map<string, number>>();
   readonly #resourceBySubscription = new Map<string, string>();
+  readonly #rendererLeaseOwners = new Map<string, Map<string, string>>();
   readonly #closeBySubscription = new Map<string, Promise<void>>();
   #openSequence = 0;
 
@@ -40,29 +41,45 @@ export class FileResourceClient {
     });
   }
 
-  issueTicket(
+  async issueTicket(
     resource_id: string,
     revision: number,
     purpose: string,
   ): Promise<FileResourceTicketV1> {
-    return invoke<FileResourceTicketV1>("issue_file_resource_ticket", {
+    const subscription_id = this.#subscription(resource_id);
+    const ticket = await invoke<FileResourceTicketV1>("issue_file_resource_ticket", {
       request: {
         resource_id,
-        subscription_id: this.#subscription(resource_id),
+        subscription_id,
         revision,
         renderer_lease_id: purpose,
       },
     });
+    let owners = this.#rendererLeaseOwners.get(resource_id);
+    if (!owners) {
+      owners = new Map();
+      this.#rendererLeaseOwners.set(resource_id, owners);
+    }
+    owners.set(purpose, subscription_id);
+    return ticket;
   }
 
-  closeRendererLease(resource_id: string, renderer_lease_id: string): Promise<void> {
-    return invoke<void>("close_file_renderer_lease", {
+  async closeRendererLease(resource_id: string, renderer_lease_id: string): Promise<void> {
+    const owners = this.#rendererLeaseOwners.get(resource_id);
+    const subscription_id = owners?.get(renderer_lease_id) ?? this.#subscription(resource_id);
+    await invoke<void>("close_file_renderer_lease", {
       request: {
         resource_id,
-        subscription_id: this.#subscription(resource_id),
+        subscription_id,
         renderer_lease_id,
       },
     });
+    if (owners?.get(renderer_lease_id) === subscription_id) {
+      owners.delete(renderer_lease_id);
+      if (owners.size === 0) {
+        this.#rendererLeaseOwners.delete(resource_id);
+      }
+    }
   }
 
   listenForRevisions(
@@ -90,6 +107,16 @@ export class FileResourceClient {
         }
       }
       this.#resourceBySubscription.delete(subscription_id);
+      for (const [lease_resource_id, owners] of this.#rendererLeaseOwners) {
+        for (const [renderer_lease_id, owner] of owners) {
+          if (owner === subscription_id) {
+            owners.delete(renderer_lease_id);
+          }
+        }
+        if (owners.size === 0) {
+          this.#rendererLeaseOwners.delete(lease_resource_id);
+        }
+      }
     }).catch((error) => {
       if (this.#closeBySubscription.get(subscription_id) === closing) {
         this.#closeBySubscription.delete(subscription_id);

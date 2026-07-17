@@ -859,6 +859,11 @@ impl FileResourceRuntime {
                 },
             );
         }
+        self.inner
+            .read_tickets
+            .lock()
+            .await
+            .retain(|_, ticket| ticket.renderer_lease != renderer_lease);
         let expires_at_ms = now_epoch_ms().saturating_add(
             self.inner
                 .ticket_ttl
@@ -1633,6 +1638,7 @@ mod tests {
             .await
             .expect_err("one renderer lease cannot cross subscriptions");
         assert_eq!(reused_lease.code(), "unauthorized_ticket");
+        assert_eq!(runtime.ticket_count().await, 1);
 
         let wrong_webview = runtime
             .read_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=0-3"), Some("secondary"))
@@ -1763,7 +1769,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_before_ticket_publication_rolls_back_ticket_and_renderer_lease() {
+    async fn reissuing_renderer_lease_purges_superseded_tickets() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("reissue.pdf");
+        fs::write(&path, b"%PDF-1.7 reissue payload").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let subscription = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        let first = runtime
+            .issue_ticket(
+                &subscription.resource_id,
+                &subscription.subscription_id,
+                subscription.revision,
+                Some(&config),
+                "renderer-reissue",
+            )
+            .await
+            .expect("first ticket");
+        let second = runtime
+            .issue_ticket(
+                &subscription.resource_id,
+                &subscription.subscription_id,
+                subscription.revision,
+                Some(&config),
+                "renderer-reissue",
+            )
+            .await
+            .expect("replacement ticket");
+
+        assert_eq!(runtime.ticket_count().await, 1);
+        assert_eq!(
+            runtime
+                .read_ticket_range(&first.ticket_id, Some("bytes=0-3"))
+                .await
+                .expect_err("superseded ticket must be purged")
+                .code(),
+            "invalid_ticket"
+        );
+        assert_eq!(
+            runtime
+                .read_ticket_range(&second.ticket_id, Some("bytes=0-3"))
+                .await
+                .expect("replacement ticket remains active")
+                .bytes,
+            b"%PDF"
+        );
+
+        runtime
+            .close_renderer_lease(
+                &subscription.resource_id,
+                &subscription.subscription_id,
+                "renderer-reissue",
+                None,
+            )
+            .await
+            .expect("close replacement lease");
+        runtime
+            .close_renderer_lease(
+                &subscription.resource_id,
+                &subscription.subscription_id,
+                "renderer-reissue",
+                None,
+            )
+            .await
+            .expect("idempotent repeated close");
+        assert_eq!(runtime.ticket_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn reissuing_after_subscription_close_rolls_back_ticket_and_renderer_lease() {
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join("publication-race.pdf");
         fs::write(&path, b"%PDF-1.7 publication race").expect("fixture");
@@ -1773,6 +1851,18 @@ mod tests {
             .open_agent_file("agent-a", &config, &path, None)
             .await
             .expect("open");
+        runtime
+            .issue_ticket_for_webview(
+                &subscription.resource_id,
+                &subscription.subscription_id,
+                subscription.revision,
+                Some(&config),
+                "lease-a",
+                Some("main"),
+            )
+            .await
+            .expect("initial ticket");
+        assert_eq!(runtime.ticket_count().await, 1);
         let hook = IssueTicketAfterValidationHook {
             validation_reached: Arc::new(tokio::sync::Barrier::new(2)),
             resume_publication: Arc::new(tokio::sync::Barrier::new(2)),

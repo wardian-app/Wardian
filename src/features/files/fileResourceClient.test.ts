@@ -258,6 +258,122 @@ describe("FileResourceClient", () => {
       .toThrow(`File resource is not open: ${snapshot.resource_id}`);
   });
 
+  it("closes a renderer lease with the subscription that successfully issued it", async () => {
+    const issuing = { ...snapshot, subscription_id: "subscription-issuing" };
+    const newer = { ...snapshot, subscription_id: "subscription-newer" };
+    const ticket = {
+      schema: 1,
+      ticket_id: "ticket-issued",
+      url: "wardian-resource://localhost/ticket-issued",
+      resource_id: snapshot.resource_id,
+      revision: snapshot.revision,
+      renderer_lease_id: "preview-pane-owned",
+      expires_at_ms: 1_700_000_060_000,
+    } satisfies FileResourceTicketV1;
+    mockInvoke
+      .mockResolvedValueOnce(issuing)
+      .mockResolvedValueOnce(ticket)
+      .mockResolvedValueOnce(newer)
+      .mockRejectedValueOnce(new Error("lease reissue denied"))
+      .mockRejectedValueOnce(new Error("transient lease close failure"))
+      .mockResolvedValueOnce(undefined);
+
+    const client = new FileResourceClient();
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-issuing",
+      user_file_capability_id: null,
+    });
+    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned");
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-newer",
+      user_file_capability_id: null,
+    });
+    await expect(
+      client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned"),
+    ).rejects.toThrow("lease reissue denied");
+
+    await expect(client.closeRendererLease(snapshot.resource_id, "preview-pane-owned"))
+      .rejects.toThrow("transient lease close failure");
+    await expect(client.closeRendererLease(snapshot.resource_id, "preview-pane-owned"))
+      .resolves.toBeUndefined();
+
+    const leaseCloses = mockInvoke.mock.calls.filter(
+      ([command]) => command === "close_file_renderer_lease",
+    );
+    expect(leaseCloses).toEqual([
+      ["close_file_renderer_lease", {
+        request: {
+          resource_id: snapshot.resource_id,
+          subscription_id: issuing.subscription_id,
+          renderer_lease_id: "preview-pane-owned",
+        },
+      }],
+      ["close_file_renderer_lease", {
+        request: {
+          resource_id: snapshot.resource_id,
+          subscription_id: issuing.subscription_id,
+          renderer_lease_id: "preview-pane-owned",
+        },
+      }],
+    ]);
+  });
+
+  it("forgets renderer lease ownership only after its subscription closes successfully", async () => {
+    const issuing = { ...snapshot, subscription_id: "subscription-issuing" };
+    const newer = { ...snapshot, subscription_id: "subscription-newer" };
+    mockInvoke
+      .mockResolvedValueOnce(issuing)
+      .mockResolvedValueOnce({
+        schema: 1,
+        ticket_id: "ticket-issued",
+        url: "wardian-resource://localhost/ticket-issued",
+        resource_id: snapshot.resource_id,
+        revision: snapshot.revision,
+        renderer_lease_id: "preview-pane-owned",
+        expires_at_ms: 1_700_000_060_000,
+      } satisfies FileResourceTicketV1)
+      .mockResolvedValueOnce(newer)
+      .mockRejectedValueOnce(new Error("transient resource close failure"))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    const client = new FileResourceClient();
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-issuing",
+      user_file_capability_id: null,
+    });
+    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned");
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-newer",
+      user_file_capability_id: null,
+    });
+
+    await expect(client.close(issuing.subscription_id))
+      .rejects.toThrow("transient resource close failure");
+    await client.closeRendererLease(snapshot.resource_id, "preview-pane-owned");
+    expect(mockInvoke).toHaveBeenLastCalledWith("close_file_renderer_lease", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: issuing.subscription_id,
+        renderer_lease_id: "preview-pane-owned",
+      },
+    });
+
+    await client.close(issuing.subscription_id);
+    await client.closeRendererLease(snapshot.resource_id, "preview-pane-owned");
+    expect(mockInvoke).toHaveBeenLastCalledWith("close_file_renderer_lease", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: newer.subscription_id,
+        renderer_lease_id: "preview-pane-owned",
+      },
+    });
+  });
+
   it("retries a rejected close while keeping successful close idempotence", async () => {
     mockInvoke
       .mockResolvedValueOnce(snapshot)
