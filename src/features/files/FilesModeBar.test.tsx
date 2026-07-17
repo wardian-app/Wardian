@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
 import { FilesModeBar } from "./FilesModeBar";
@@ -46,6 +48,18 @@ function modeBar(overrides: {
 }
 
 describe("FilesModeBar actions menu", () => {
+  it("keeps narrow-pane modes scrollable and constrains actions to the pane", () => {
+    const { container } = render(modeBar());
+    expect(screen.getByRole("navigation", { name: "File location" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "File mode" })).toHaveClass("files-mode-tabs");
+    expect(screen.getByRole("button", { name: "File actions" })).toBeInTheDocument();
+
+    const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
+    expect(css).toMatch(/\.files-overflow-menu\s*\{[^}]*max-width:\s*calc\(100cqw - 8px\)/s);
+    expect(css).toMatch(/@container \(max-width:\s*220px\)[\s\S]*\.files-mode-tabs\s*\{[^}]*overflow-x:\s*auto/s);
+    expect(container.querySelector(".files-mode-bar")).toBeInTheDocument();
+  });
+
   it("opens from the trigger at the directional edge requested by the arrow key", async () => {
     const user = userEvent.setup();
     render(modeBar());

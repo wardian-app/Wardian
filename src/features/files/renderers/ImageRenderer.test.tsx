@@ -180,6 +180,27 @@ describe("ImageRenderer", () => {
     expect(viewport.scrollLeft).toBe(left);
   });
 
+  it("marks the complete image control set as horizontally reachable in narrow panes", async () => {
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 1, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<ImageRenderer {...props(client)} />);
+
+    await screen.findByRole("img", { name: "figure.png" });
+    const toolbar = screen.getByRole("toolbar", { name: "Image controls" });
+    expect(toolbar).toHaveClass("files-renderer-toolbar", "files-image-toolbar");
+    expect(screen.getByRole("button", { name: "Fit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "100%" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Zoom out" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Zoom in" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Image zoom" })).toBeInTheDocument();
+  });
+
   it("releases decode failures immediately and retries with a fresh lease", async () => {
     const issuedLeases: string[] = [];
     const client = {

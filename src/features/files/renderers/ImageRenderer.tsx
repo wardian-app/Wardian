@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type FocusEvent,
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
@@ -141,6 +142,9 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     event.preventDefault();
   };
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const revealToolbarControl = (event: FocusEvent<HTMLButtonElement>) => {
+    event.currentTarget.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  };
   const failImage = useCallback(() => {
     disposeAttemptRef.current();
     setUrl(null);
@@ -168,12 +172,16 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
   }
   return (
     <section className="files-binary-renderer" aria-label="Image preview">
-      <div className="files-renderer-toolbar" role="toolbar" aria-label="Image controls">
-        <button type="button" aria-pressed={fit} onClick={() => setFit(true)}>Fit</button>
-        <button type="button" aria-pressed={!fit && zoom === 1} onClick={() => { setFit(false); setZoom(1); }}>100%</button>
-        <button type="button" aria-label="Zoom out" onClick={() => { setFit(false); setZoom((value) => Math.max(0.25, value - 0.25)); }}>−</button>
+      <div
+        className="files-renderer-toolbar files-image-toolbar"
+        role="toolbar"
+        aria-label="Image controls"
+      >
+        <button type="button" aria-pressed={fit} onFocus={revealToolbarControl} onClick={() => setFit(true)}>Fit</button>
+        <button type="button" aria-pressed={!fit && zoom === 1} onFocus={revealToolbarControl} onClick={() => { setFit(false); setZoom(1); }}>100%</button>
+        <button type="button" aria-label="Zoom out" onFocus={revealToolbarControl} onClick={() => { setFit(false); setZoom((value) => Math.max(0.25, value - 0.25)); }}>−</button>
         <output aria-label="Image zoom">{Math.round(zoom * 100)}%</output>
-        <button type="button" aria-label="Zoom in" onClick={() => { setFit(false); setZoom((value) => Math.min(8, value + 0.25)); }}>+</button>
+        <button type="button" aria-label="Zoom in" onFocus={revealToolbarControl} onClick={() => { setFit(false); setZoom((value) => Math.min(8, value + 0.25)); }}>+</button>
       </div>
       <div
         ref={viewportRef}

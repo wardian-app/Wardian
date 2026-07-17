@@ -14,6 +14,9 @@ const ROOT = "/workspace/project";
 const ALPHA_PATH = `${ROOT}/alpha.md`;
 const BETA_PATH = `${ROOT}/beta.md`;
 const WIDE_PDF_PATH = `${ROOT}/wide.pdf`;
+const IMAGE_PATH = `${ROOT}/figure.png`;
+
+const ONE_PIXEL_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function blankPdfDataUrl(width: number, height: number) {
   const objects = [
@@ -72,6 +75,13 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
         mime_type: "application/pdf",
         renderer_kind: "pdf",
         stream_url: blankPdfDataUrl(1_000, 400),
+      },
+      {
+        path: IMAGE_PATH,
+        content: "image fixture",
+        mime_type: "image/png",
+        renderer_kind: "image",
+        stream_url: ONE_PIXEL_PNG,
       },
     ],
     load_result: {
@@ -219,4 +229,92 @@ test("keeps oversized PDF page origins reachable and centers pages that fit", as
     };
   });
   expect(Math.abs(centered.actual_left - centered.expected_left)).toBeLessThan(1);
+});
+
+test("keeps Files chrome and image controls reachable in 100px and 300px panes", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await bootFilesWorkbench(page);
+  await page.getByRole("treeitem", { name: "figure.png" }).click();
+
+  const surface = page.getByTestId("files-surface");
+  const breadcrumb = page.getByRole("navigation", { name: "File location" });
+  const modeTabs = page.getByRole("tablist", { name: "File mode" });
+  const actions = page.getByRole("button", { name: "File actions" });
+  const imageToolbar = page.getByRole("toolbar", { name: "Image controls" });
+  await expect(page.getByRole("img", { name: "figure.png" })).toBeVisible();
+
+  for (const paneWidth of [100, 300]) {
+    await surface.evaluate((element, width) => {
+      element.style.width = `${width}px`;
+      element.style.maxWidth = `${width}px`;
+      element.style.flex = `0 0 ${width}px`;
+    }, paneWidth);
+    await expect.poll(async () => surface.evaluate((element) => element.clientWidth))
+      .toBe(paneWidth);
+
+    const chromeGeometry = await surface.evaluate((surfaceElement) => {
+      const breadcrumbElement = surfaceElement.querySelector<HTMLElement>(".files-breadcrumb");
+      const actionsElement = surfaceElement.querySelector<HTMLElement>(".files-overflow-trigger");
+      if (!breadcrumbElement || !actionsElement) throw new Error("Files chrome is unavailable");
+      const surfaceRect = surfaceElement.getBoundingClientRect();
+      const breadcrumbRect = breadcrumbElement.getBoundingClientRect();
+      const actionsRect = actionsElement.getBoundingClientRect();
+      return {
+        surface_left: surfaceRect.left,
+        surface_right: surfaceRect.right,
+        breadcrumb_left: breadcrumbRect.left,
+        breadcrumb_right: breadcrumbRect.right,
+        breadcrumb_width: breadcrumbRect.width,
+        actions_left: actionsRect.left,
+        actions_right: actionsRect.right,
+      };
+    });
+    expect(chromeGeometry.breadcrumb_width).toBeGreaterThan(0);
+    expect(chromeGeometry.breadcrumb_left).toBeGreaterThanOrEqual(chromeGeometry.surface_left - 0.5);
+    expect(chromeGeometry.breadcrumb_right).toBeLessThanOrEqual(chromeGeometry.surface_right + 0.5);
+    expect(chromeGeometry.actions_left).toBeGreaterThanOrEqual(chromeGeometry.surface_left - 0.5);
+    expect(chromeGeometry.actions_right).toBeLessThanOrEqual(chromeGeometry.surface_right + 0.5);
+
+    for (const mode of ["Preview", "Changes", "Draft"]) {
+      const tab = page.getByRole("tab", { name: mode });
+      await tab.focus();
+      await expect(tab).toBeFocused();
+      const [tabBox, tabsBox] = await Promise.all([tab.boundingBox(), modeTabs.boundingBox()]);
+      expect(tabBox).not.toBeNull();
+      expect(tabsBox).not.toBeNull();
+      expect(tabBox!.x).toBeGreaterThanOrEqual(tabsBox!.x - 0.5);
+      expect(tabBox!.x + tabBox!.width).toBeLessThanOrEqual(tabsBox!.x + tabsBox!.width + 0.5);
+    }
+
+    await actions.click();
+    const menu = page.getByRole("menu", { name: "File actions" });
+    await expect(menu).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Open With" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Reveal" })).toBeVisible();
+    const [menuBox, surfaceBox] = await Promise.all([menu.boundingBox(), surface.boundingBox()]);
+    expect(menuBox).not.toBeNull();
+    expect(surfaceBox).not.toBeNull();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(surfaceBox!.x - 0.5);
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(surfaceBox!.x + surfaceBox!.width + 0.5);
+    await page.keyboard.press("Escape");
+
+    const toolbarMetrics = await imageToolbar.evaluate((element) => ({
+      client_width: element.clientWidth,
+      scroll_width: element.scrollWidth,
+    }));
+    expect(toolbarMetrics.client_width).toBeLessThanOrEqual(paneWidth);
+    if (paneWidth === 100) expect(toolbarMetrics.scroll_width).toBeGreaterThan(toolbarMetrics.client_width);
+    for (const control of ["Fit", "100%", "Zoom out", "Zoom in"]) {
+      const button = page.getByRole("button", { name: control, exact: true });
+      await button.focus();
+      await expect(button).toBeFocused();
+      const [buttonBox, toolbarBox] = await Promise.all([button.boundingBox(), imageToolbar.boundingBox()]);
+      expect(buttonBox).not.toBeNull();
+      expect(toolbarBox).not.toBeNull();
+      expect(buttonBox!.x).toBeGreaterThanOrEqual(toolbarBox!.x - 0.5);
+      expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(toolbarBox!.x + toolbarBox!.width + 0.5);
+    }
+  }
+
+  await expect(breadcrumb).toContainText("figure.png");
 });

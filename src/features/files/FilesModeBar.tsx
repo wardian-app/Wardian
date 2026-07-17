@@ -87,6 +87,9 @@ export function FilesModeBar({
     if (next instanceof Node && event.currentTarget.contains(next)) return;
     closeMenu();
   };
+  const revealModeTab = (event: FocusEvent<HTMLButtonElement>) => {
+    event.currentTarget.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  };
   const runAction = (action: (path: string) => Promise<void> | void) => {
     closeMenu(true);
     try {
@@ -107,7 +110,7 @@ export function FilesModeBar({
         ))}
       </nav>
       <div className="files-mode-tabs" role="tablist" aria-label="File mode">
-        <button type="button" role="tab" aria-selected="true">Preview</button>
+        <button type="button" role="tab" aria-selected="true" onFocus={revealModeTab}>Preview</button>
         <button
           type="button"
           role="tab"
@@ -115,6 +118,7 @@ export function FilesModeBar({
           aria-disabled="true"
           aria-describedby={changesReasonId}
           title={changesReason}
+          onFocus={revealModeTab}
         >Changes</button>
         <button
           type="button"
@@ -123,6 +127,7 @@ export function FilesModeBar({
           aria-disabled="true"
           aria-describedby={draftReasonId}
           title={draftReason}
+          onFocus={revealModeTab}
         >Draft</button>
         <span id={changesReasonId} className="files-visually-hidden">
           {changesReason}
