@@ -1864,6 +1864,32 @@ fn prepare_resume_config_for_runtime(
     prepare_resume_config(config)
 }
 
+pub(crate) async fn prepare_provider_owned_fresh_identity(
+    config: &mut AgentConfig,
+) -> Result<(), String> {
+    if config.is_off
+        || !provider_needs_obtain_session_id_on_clear(&config.provider)
+        || config
+            .resume_session
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+
+    let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+    let provider_session_id = manager::obtain_session_id(
+        &cwd,
+        Some(&config.agent_class),
+        Some(config),
+    )
+    .await
+    .map_err(|error| format!("Failed to initialize the provider session: {error}"))?;
+    let provider = config.provider.clone();
+    manager::apply_provider_identity(&provider, config, &provider_session_id)?;
+    Ok(())
+}
+
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
@@ -2445,6 +2471,7 @@ pub async fn resume_agent(
 
     let mut config = snapshot.config;
     prepare_resume_config_for_runtime(&mut config, snapshot.query_count)?;
+    prepare_provider_owned_fresh_identity(&mut config).await?;
     let mut new_active = manager::spawn_agent(
         app.clone(),
         config.clone(),

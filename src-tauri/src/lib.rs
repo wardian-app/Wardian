@@ -393,7 +393,6 @@ pub fn run() {
                                     );
                                     continue;
                                 }
-
                                 let (last_status, last_pid, last_born) = db_status_map
                                     .get(&config.session_id)
                                     .cloned()
@@ -434,20 +433,27 @@ pub fn run() {
                                 RESTORE_SPAWN_CONCURRENCY,
                             ));
                             let mut restore_tasks = tokio::task::JoinSet::new();
-                            for (config, last_born) in pending_spawns {
+                            for (mut config, last_born) in pending_spawns {
                                 let app_handle = app_handle.clone();
                                 let restore_slots = restore_slots.clone();
                                 restore_tasks.spawn(async move {
                                     let Ok(_permit) = restore_slots.acquire_owned().await else {
                                         return;
                                     };
-                                    let spawn_result = manager::spawn_agent(
-                                        app_handle.clone(),
-                                        config.clone(),
-                                        true,
-                                        last_born.clone(),
+                                    let spawn_result = match commands::agent::prepare_provider_owned_fresh_identity(
+                                        &mut config,
                                     )
-                                    .await;
+                                    .await
+                                    {
+                                        Ok(()) => manager::spawn_agent(
+                                            app_handle.clone(),
+                                            config.clone(),
+                                            true,
+                                            last_born.clone(),
+                                        )
+                                        .await,
+                                        Err(error) => Err(error),
+                                    };
                                     let agent = match spawn_result {
                                         Ok(agent) => agent,
                                         Err(error) => {

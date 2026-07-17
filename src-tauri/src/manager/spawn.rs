@@ -224,6 +224,16 @@ pub(super) fn handle_provider_init_event(
         let mut config = config
             .lock()
             .map_err(|_| format!("{provider} session configuration is unavailable"))?;
+        if matches!(provider, "codex" | "opencode" | "antigravity")
+            && config
+                .resume_session
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "{provider} initialization has no pre-bound provider identity"
+            ));
+        }
         apply_provider_identity(provider, &mut config, session_id)?
     };
     capture_init_timestamp(event, init_timestamp);

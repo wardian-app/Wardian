@@ -88,3 +88,14 @@ fn malformed_fresh_codex_init_does_not_capture_identity_or_timestamp() {
     assert_eq!(config.lock().unwrap().resume_session, None);
     assert_eq!(*timestamp.lock().unwrap(), None);
 }
+
+#[test]
+fn valid_unbound_codex_init_cannot_become_persisted_identity() {
+    let config = config("codex", "wardian-id", None, None);
+    let timestamp = Arc::new(Mutex::new(None));
+    let thread_id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+
+    assert!(handle_provider_init_event("codex", &init(thread_id), &config, &timestamp).is_err());
+    assert_eq!(config.lock().unwrap().resume_session, None);
+    assert_eq!(*timestamp.lock().unwrap(), None);
+}
