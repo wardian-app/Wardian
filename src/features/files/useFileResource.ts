@@ -22,6 +22,7 @@ const controllersByClient = new WeakMap<
   FileResourceClient,
   Map<string, FileResourceController>
 >();
+const MAX_PRE_SNAPSHOT_REOPENS = 2;
 
 function requestIdentity(request: OpenFileResourceRequestV1) {
   return JSON.stringify([
@@ -126,24 +127,30 @@ class FileResourceController {
     const generation = ++this.#loadGeneration;
     this.#publish({ ...this.#state, status: "loading", error: null });
     try {
-      const snapshot = await this.#client.open(this.#request);
-      if (this.#disposed || generation !== this.#loadGeneration) {
-        await this.#client.close(snapshot.subscription_id).catch(() => undefined);
+      for (let reopenAttempt = 0; ; reopenAttempt += 1) {
+        const snapshot = await this.#client.open(this.#request);
+        if (this.#disposed || generation !== this.#loadGeneration) {
+          await this.#client.close(snapshot.subscription_id).catch(() => undefined);
+          return;
+        }
+        const observed = this.#preSnapshotRevisions.get(snapshot.resource_id);
+        if (observed) this.#preSnapshotRevisions.delete(snapshot.resource_id);
+        if (
+          observed
+          && observed.revision > snapshot.revision
+          && reopenAttempt < MAX_PRE_SNAPSHOT_REOPENS
+        ) {
+          await this.#client.close(snapshot.subscription_id).catch(() => undefined);
+          continue;
+        }
+
+        const previousSubscription = this.#state.snapshot?.subscription_id;
+        this.#preSnapshotRevisions.clear();
+        this.#publish({ status: "ready", snapshot, error: null });
+        if (previousSubscription && previousSubscription !== snapshot.subscription_id) {
+          await this.#client.close(previousSubscription).catch(() => undefined);
+        }
         return;
-      }
-      const previousSubscription = this.#state.snapshot?.subscription_id;
-      const observed = this.#preSnapshotRevisions.get(snapshot.resource_id);
-      this.#preSnapshotRevisions.clear();
-      const reconciledSnapshot = observed && observed.revision > snapshot.revision
-        ? {
-            ...snapshot,
-            revision: observed.revision,
-            descriptor: observed.descriptor,
-          }
-        : snapshot;
-      this.#publish({ status: "ready", snapshot: reconciledSnapshot, error: null });
-      if (previousSubscription && previousSubscription !== snapshot.subscription_id) {
-        await this.#client.close(previousSubscription).catch(() => undefined);
       }
     } catch (error) {
       if (!this.#disposed && generation === this.#loadGeneration) {

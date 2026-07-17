@@ -111,6 +111,10 @@ even when that presentation is in another pane. Only `open_to_side` carries
 ephemeral explicit-duplicate provenance through this first rekey; its two
 presentations converge to the same canonical key and remain in separate panes.
 The frontend never resolves symlinks, junctions, or filesystem authority.
+Canonicalization re-resolves the current Workbench document after a stale
+compare-and-swap. A close guard cancellation remains a user veto, while a
+concurrent transaction is retried with fresh aliases so restored tabs converge
+without retaining a permanently provisional identity.
 
 ### Render policies
 

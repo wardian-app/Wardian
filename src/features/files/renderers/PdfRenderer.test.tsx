@@ -14,10 +14,10 @@ vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?worker", () => ({
   default: class TestPdfWorker {},
 }));
 
-function snapshot(revision = 3): FileResourceSnapshotV1 {
+function snapshot(revision = 3, subscriptionId = "subscription-pdf"): FileResourceSnapshotV1 {
   return {
     resource_id: "file:C:/work/report.pdf",
-    subscription_id: "subscription-pdf",
+    subscription_id: subscriptionId,
     revision,
     descriptor: {
       schema: 1,
@@ -37,9 +37,9 @@ function snapshot(revision = 3): FileResourceSnapshotV1 {
   };
 }
 
-function props(client: FileResourceClient, revision = 3) {
+function props(client: FileResourceClient, revision = 3, subscriptionId = "subscription-pdf") {
   return {
-    snapshot: snapshot(revision),
+    snapshot: snapshot(revision, subscriptionId),
     client,
     lifecycle: { visible: true },
     on_open_file: vi.fn(),
@@ -102,6 +102,43 @@ describe("PdfRenderer", () => {
     view.unmount();
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledOnce());
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
+  });
+
+  it("rolls the renderer lease when the subscription changes at the same revision", async () => {
+    const issuedLeases: string[] = [];
+    const client = {
+      issueTicket: vi.fn().mockImplementation(async (
+        owner: FileResourceSnapshotV1,
+        lease: string,
+      ) => {
+        issuedLeases.push(lease);
+        return {
+          schema: 1,
+          ticket_id: `${owner.subscription_id}:${lease}`,
+          url: `wardian-resource://localhost/${owner.subscription_id}`,
+          resource_id: owner.resource_id,
+          revision: owner.revision,
+          renderer_lease_id: lease,
+          expires_at_ms: Date.now() + 60_000,
+        };
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    const firstSnapshot = snapshot(3, "subscription-a");
+    const secondSnapshot = snapshot(3, "subscription-b");
+    const view = render(<PdfRenderer {...props(client, 3, "subscription-a")} />);
+
+    await screen.findByText("Page 1");
+    view.rerender(<PdfRenderer {...props(client, 3, "subscription-b")} />);
+
+    await waitFor(() => expect(client.issueTicket).toHaveBeenCalledTimes(2));
+    expect(client.closeRendererLease).toHaveBeenCalledWith(firstSnapshot, issuedLeases[0]);
+    expect(client.issueTicket).toHaveBeenLastCalledWith(secondSnapshot, issuedLeases[1]);
+    view.unmount();
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledWith(
+      secondSnapshot,
+      issuedLeases[1],
+    ));
   });
 
   it("does not issue or load a PDF that is unavailable or over its limit", () => {

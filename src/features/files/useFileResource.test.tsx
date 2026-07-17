@@ -83,21 +83,36 @@ beforeEach(() => {
 });
 
 describe("useFileResource", () => {
-  it("reconciles the highest revision observed before the open snapshot is published", async () => {
-    const revisedDescriptor = {
+  it("reopens authoritatively when a newer revision arrives before the snapshot", async () => {
+    const eventDescriptor = {
       ...descriptor,
-      content_hash: "hash-2",
+      content_hash: "untrusted-event-hash",
       modified_at_ms: descriptor.modified_at_ms + 1,
     };
+    const authoritativeDescriptor = {
+      ...descriptor,
+      content_hash: "authoritative-hash-2",
+      modified_at_ms: descriptor.modified_at_ms + 2,
+    };
+    let openCount = 0;
     mockInvoke.mockImplementation((command) => {
       if (command === "open_file_resource") {
-        emitRevision({
-          schema: 1,
-          resource_id: snapshot.resource_id,
+        openCount += 1;
+        if (openCount === 1) {
+          emitRevision({
+            schema: 1,
+            resource_id: snapshot.resource_id,
+            revision: 2,
+            descriptor: eventDescriptor,
+          });
+          return Promise.resolve(snapshot);
+        }
+        return Promise.resolve({
+          ...snapshot,
+          subscription_id: "subscription-2",
           revision: 2,
-          descriptor: revisedDescriptor,
+          descriptor: authoritativeDescriptor,
         });
-        return Promise.resolve(snapshot);
       }
       return Promise.resolve(undefined);
     });
@@ -107,14 +122,73 @@ describe("useFileResource", () => {
     await waitFor(() => expect(resource.result.current.status).toBe("ready"));
     expect(resource.result.current.snapshot).toEqual({
       ...snapshot,
+      subscription_id: "subscription-2",
       revision: 2,
-      descriptor: revisedDescriptor,
+      descriptor: authoritativeDescriptor,
     });
     expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
-      .toHaveLength(1);
+      .toHaveLength(2);
+    expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+      request: { subscription_id: snapshot.subscription_id },
+    });
 
     resource.unmount();
-    await waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+        request: { subscription_id: "subscription-2" },
+      });
+      expect(unlisten).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("consumes a pre-snapshot ABA signal when authoritative reopen fails", async () => {
+    let openCount = 0;
+    mockInvoke.mockImplementation((command) => {
+      if (command !== "open_file_resource") return Promise.resolve(undefined);
+      openCount += 1;
+      if (openCount === 1) {
+        emitRevision({
+          schema: 1,
+          resource_id: snapshot.resource_id,
+          revision: 9,
+          descriptor: { ...descriptor, content_hash: "old-incarnation-hash" },
+        });
+        return Promise.resolve({ ...snapshot, subscription_id: "subscription-new-1" });
+      }
+      if (openCount === 2) return Promise.reject(new Error("authoritative reopen failed"));
+      return Promise.resolve({
+        ...snapshot,
+        subscription_id: "subscription-new-3",
+        revision: 1,
+        descriptor: { ...descriptor, content_hash: "new-incarnation-hash" },
+      });
+    });
+    const client = new FileResourceClient();
+    const resource = renderHook(() => useFileResource(request, client));
+
+    await waitFor(() => expect(resource.result.current.status).toBe("error"));
+    expect(resource.result.current.error?.message).toBe("authoritative reopen failed");
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
+      .toHaveLength(2);
+    expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+      request: { subscription_id: "subscription-new-1" },
+    });
+
+    await act(async () => resource.result.current.retry());
+    await waitFor(() => expect(resource.result.current.status).toBe("ready"));
+    expect(resource.result.current.snapshot).toEqual({
+      ...snapshot,
+      subscription_id: "subscription-new-3",
+      revision: 1,
+      descriptor: { ...descriptor, content_hash: "new-incarnation-hash" },
+    });
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
+      .toHaveLength(3);
+
+    resource.unmount();
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+      request: { subscription_id: "subscription-new-3" },
+    }));
   });
 
   it("shares one controller, applies only matching newer revisions, and releases last", async () => {

@@ -270,7 +270,15 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
         disposeAttemptRef.current = () => undefined;
       }
     };
-  }, [allowed, client, lifecycle.visible, retryToken, snapshot.resource_id, snapshot.revision]);
+  }, [
+    allowed,
+    client,
+    lifecycle.visible,
+    retryToken,
+    snapshot.resource_id,
+    snapshot.revision,
+    snapshot.subscription_id,
+  ]);
 
   useEffect(() => {
     const normalizedQuery = query.trim();

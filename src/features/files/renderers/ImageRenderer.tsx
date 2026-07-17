@@ -94,7 +94,15 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
         disposeAttemptRef.current = () => undefined;
       }
     };
-  }, [allowed, client, lifecycle.visible, retryToken, snapshot.resource_id, snapshot.revision]);
+  }, [
+    allowed,
+    client,
+    lifecycle.visible,
+    retryToken,
+    snapshot.resource_id,
+    snapshot.revision,
+    snapshot.subscription_id,
+  ]);
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     const viewport = viewportRef.current;

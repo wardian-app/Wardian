@@ -855,6 +855,39 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.groups.right.active_surface_id).toBe("canonical");
   });
 
+  it("re-resolves concurrent restored aliases after a stale canonicalization CAS", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const firstAlias = makeSurface("alias-first", {
+      surface_type: "files",
+      resource_key: "file:C:/link-a/report.md",
+      state: filesState(false),
+    });
+    const secondAlias = makeSurface("alias-second", {
+      surface_type: "files",
+      resource_key: "file:C:/link-b/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([firstAlias, secondAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+    const canonicalRequest = {
+      surface_type: "files" as const,
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    };
+
+    await expect(Promise.all([
+      navigation.canonicalize_resource(firstAlias.surface_id, canonicalRequest),
+      navigation.canonicalize_resource(secondAlias.surface_id, canonicalRequest),
+    ])).resolves.toEqual(["allow", "allow"]);
+
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["alias-first"]);
+    expect(store.getState().document.surfaces["alias-first"].resource_key)
+      .toBe("file:C:/real/report.md");
+    expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["alias-first"]);
+  });
+
   it("preserves an explicit Open to Side duplicate through canonical rekeying", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const canonical = makeSurface("canonical", {

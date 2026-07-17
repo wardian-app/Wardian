@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import type { FilesSurfaceStateV1 } from "../../types";
+import type { CloseDecision, FilesSurfaceStateV1 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FilePreview } from "./FilePreview";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
@@ -21,7 +21,9 @@ export type FilesSurfaceProps = {
   lifecycle: { visible: boolean };
   client?: FileResourceClient;
   registry?: RendererRegistry;
-  on_canonical_resource?: (resource_key: string) => Promise<void> | void;
+  on_canonical_resource?: (
+    resource_key: string,
+  ) => CloseDecision | void | Promise<CloseDecision | void>;
   on_open_file?: (path: string) => Promise<void> | void;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
@@ -51,7 +53,9 @@ type ActiveFilesSurfaceProps = Required<Pick<
   FilesSurfaceProps,
   "surface_id" | "resource_key" | "state" | "lifecycle" | "client" | "registry"
 >> & {
-  on_canonical_resource: (resource_key: string) => Promise<void> | void;
+  on_canonical_resource: (
+    resource_key: string,
+  ) => CloseDecision | void | Promise<CloseDecision | void>;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -60,11 +64,18 @@ type ActiveFilesSurfaceProps = Required<Pick<
 
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const notifiedCanonicalSnapshot = useRef<string | null>(null);
+  const canonicalCallback = useRef(props.on_canonical_resource);
+  const canonicalRetryCount = useRef(0);
+  const [canonicalRetryToken, setCanonicalRetryToken] = useState(0);
   const resource = useFileResource({
     path: pathFromResourceKey(props.resource_key),
     agent_id: null,
     user_file_capability_id: null,
   }, props.client);
+
+  useEffect(() => {
+    canonicalCallback.current = props.on_canonical_resource;
+  }, [props.on_canonical_resource]);
 
   useEffect(() => {
     const canonicalResourceKey = resource.snapshot?.resource_id;
@@ -73,8 +84,23 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     const notificationKey = `${subscriptionId}\0${canonicalResourceKey}`;
     if (notifiedCanonicalSnapshot.current === notificationKey) return;
     notifiedCanonicalSnapshot.current = notificationKey;
-    void props.on_canonical_resource(canonicalResourceKey);
-  }, [props.on_canonical_resource, resource.snapshot?.resource_id, resource.snapshot?.subscription_id]);
+    let active = true;
+    void Promise.resolve(canonicalCallback.current(canonicalResourceKey)).then((decision) => {
+      if (!active) return;
+      if (decision === "cancel") {
+        if (notifiedCanonicalSnapshot.current === notificationKey) {
+          notifiedCanonicalSnapshot.current = null;
+        }
+        if (canonicalRetryCount.current < 3) {
+          canonicalRetryCount.current += 1;
+          setCanonicalRetryToken((value) => value + 1);
+        }
+      } else {
+        canonicalRetryCount.current = 0;
+      }
+    });
+    return () => { active = false; };
+  }, [canonicalRetryToken, resource.snapshot?.resource_id, resource.snapshot?.subscription_id]);
 
   useEffect(() => {
     useFilesPresentationStore.getState().setPresentation(props.surface_id, {
@@ -139,7 +165,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
 export function FilesSurface({
   client = fileResourceClient,
   registry = defaultRendererRegistry,
-  on_canonical_resource = () => undefined,
+  on_canonical_resource = () => "allow",
   on_open_file = () => undefined,
   on_open_with = openWithConfiguredEditor,
   on_reveal = revealPath,
@@ -148,10 +174,14 @@ export function FilesSurface({
   const [actionError, setActionError] = useState<string | null>(null);
   const guardedCanonicalResource = useCallback(async (resourceKey: string) => {
     try {
-      await on_canonical_resource(resourceKey);
-      setActionError(null);
+      const decision = await on_canonical_resource(resourceKey);
+      setActionError(decision === "cancel"
+        ? "File identity update was interrupted and will be retried."
+        : null);
+      return decision;
     } catch (error) {
       setActionError(`File identity update failed: ${error instanceof Error ? error.message : String(error)}`);
+      return "cancel" as const;
     }
   }, [on_canonical_resource]);
   const guardedOpenWith = useCallback(async (path: string) => {

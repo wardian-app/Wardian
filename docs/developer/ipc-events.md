@@ -150,10 +150,12 @@ request fails with `stale_revision`.
 
 Listener readiness alone does not close the response-publication race. While
 the initial open is pending, the controller coalesces the highest event per
-resource. Before publishing the returned snapshot, it combines that snapshot's
-owning subscription with any higher observed revision and descriptor. This
-prevents a stable event delivered between backend response formation and React
-snapshot publication from being discarded.
+resource. When that event is newer than the returned snapshot, the controller
+closes the just-opened subscription and opens the resource again instead of
+grafting event fields onto a snapshot owned by another subscription. The
+bounded reopen publishes only an authoritative backend snapshot. Its event
+signal is consumed before a retry, so an old-incarnation revision cannot keep a
+new revision-one resource in a reopen loop.
 
 The backend owns one watcher per canonical file, shared by every subscription.
 Closing a renderer lease revokes only its stream tickets. Closing the last file

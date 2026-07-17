@@ -5,10 +5,14 @@ import type { FileResourceSnapshotV1 } from "../../../types";
 import type { FileResourceClient } from "../fileResourceClient";
 import ImageRenderer from "./ImageRenderer";
 
-function snapshot(revision = 1, preview = true): FileResourceSnapshotV1 {
+function snapshot(
+  revision = 1,
+  preview = true,
+  subscriptionId = "subscription-1",
+): FileResourceSnapshotV1 {
   return {
     resource_id: "file:C:/work/figure.png",
-    subscription_id: "subscription-1",
+    subscription_id: subscriptionId,
     revision,
     descriptor: {
       schema: 1,
@@ -71,6 +75,43 @@ describe("ImageRenderer", () => {
     await screen.findByRole("img", { name: "figure.png" });
     view.unmount();
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledTimes(2));
+  });
+
+  it("rolls the renderer lease when the subscription changes at the same revision", async () => {
+    const issuedLeases: string[] = [];
+    const client = {
+      issueTicket: vi.fn().mockImplementation(async (
+        owner: FileResourceSnapshotV1,
+        lease: string,
+      ) => {
+        issuedLeases.push(lease);
+        return {
+          schema: 1,
+          ticket_id: `${owner.subscription_id}:${lease}`,
+          url: `wardian-resource://localhost/${owner.subscription_id}`,
+          resource_id: owner.resource_id,
+          revision: owner.revision,
+          renderer_lease_id: lease,
+          expires_at_ms: Date.now() + 60_000,
+        };
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    const firstSnapshot = snapshot(1, true, "subscription-a");
+    const secondSnapshot = snapshot(1, true, "subscription-b");
+    const view = render(<ImageRenderer {...props(client, firstSnapshot)} />);
+
+    await screen.findByRole("img", { name: "figure.png" });
+    view.rerender(<ImageRenderer {...props(client, secondSnapshot)} />);
+
+    await waitFor(() => expect(client.issueTicket).toHaveBeenCalledTimes(2));
+    expect(client.closeRendererLease).toHaveBeenCalledWith(firstSnapshot, issuedLeases[0]);
+    expect(client.issueTicket).toHaveBeenLastCalledWith(secondSnapshot, issuedLeases[1]);
+    view.unmount();
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledWith(
+      secondSnapshot,
+      issuedLeases[1],
+    ));
   });
 
   it("does not issue a ticket for an oversized, pixel-rejected, or suspended image", () => {

@@ -1125,7 +1125,7 @@ function AppBody() {
           lifecycle={{ visible: lifecycle?.visible !== false }}
           client={fileResourceClient}
           on_canonical_resource={async (resourceKey) => {
-            await workbenchNavigation.canonicalize_resource(surface.surface_id, {
+            return await workbenchNavigation.canonicalize_resource(surface.surface_id, {
               surface_type: "files",
               resource_key: resourceKey,
               state: restoredSurface.state as FilesSurfaceStateV1,

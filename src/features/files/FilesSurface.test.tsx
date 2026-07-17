@@ -196,6 +196,20 @@ describe("FilesSurface", () => {
     expect(onCanonicalResource).toHaveBeenCalledOnce();
   });
 
+  it("retries an interrupted canonicalization instead of permanently marking it handled", async () => {
+    const onCanonicalResource = vi.fn()
+      .mockResolvedValueOnce("cancel")
+      .mockResolvedValueOnce("allow");
+    render(<FilesSurface {...props({
+      on_canonical_resource: onCanonicalResource,
+    })} />);
+
+    await waitFor(() => expect(onCanonicalResource).toHaveBeenCalledTimes(2));
+    expect(onCanonicalResource).toHaveBeenNthCalledWith(1, "file:C:/work/docs/report.pdf");
+    expect(onCanonicalResource).toHaveBeenNthCalledWith(2, "file:C:/work/docs/report.pdf");
+    await waitFor(() => expect(screen.queryByText(/identity update was interrupted/i)).toBeNull());
+  });
+
   it("keeps breadcrumb identity visible while metadata and actions live in overflow", () => {
     const view = render(<FilesSurface {...props()} />);
 
