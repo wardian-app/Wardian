@@ -199,13 +199,18 @@ contract.
 The Rust lifecycle is:
 
 1. `open_file_resource` canonicalizes and authorizes the path, creates a
-   subscription, and shares one watcher per canonical file.
+   subscription, and shares one watcher per canonical file. Each subscription
+   retains its own access claim and exact requested-path authorization; the
+   shared resource never lends one subscriber's provenance to another.
 2. A stable content change is debounced for 150 ms, becomes the next monotonic
    revision, and emits `file-resource://revision`. An unchanged hash emits
    nothing. Atomic replacement is accepted only when the original requested
    path still resolves to the same canonical target under the same authorized
-   root. Persistent unreadable or unstable scans publish one typed unavailable
-   revision and recover through the same revision stream.
+   root. Refresh tries active subscription authorizations in deterministic
+   requested-path and subscription-ID order. A failed alias candidate cannot
+   poison a valid direct candidate, and a typed unavailable revision is
+   published only when every active candidate fails. Persistent unreadable or
+   unstable scans recover through the same revision stream.
 3. Text reads are bound to the subscription and current revision. Image/PDF
    streams require a short-lived ticket bound to the subscription, WebView,
    renderer lease, and revision. Renderer calls carry the exact owning
@@ -225,7 +230,10 @@ no frontend capability selects a current matching agent primary workspace or
 `include_directories`, in deterministic agent order, then an exact live picker
 grant. `system_include_directories`, sibling paths, and canonical symlink or
 junction escapes are denied. A saved Workbench document cannot restore access
-that the backend no longer grants.
+that the backend no longer grants. If an alias and a direct pathname share one
+canonical resource, removing or retargeting the alias revokes only subscriptions
+opened through that alias; direct subscriptions retain reads, tickets, refresh,
+and the shared watcher.
 
 Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
 5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for

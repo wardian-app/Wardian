@@ -110,6 +110,13 @@ Supplying both is invalid. Trusted restore scans current agent primary and
 additional roots in deterministic agent order, then exact live picker grants;
 it never trusts persisted frontend state.
 
+The returned subscription retains the exact requested pathname and its own
+authorization claim even when another pathname resolves to the same canonical
+`resource_id`. Reads and tickets revalidate that subscription-local provenance.
+An alias subscription therefore fails after its symlink or junction is removed
+or retargeted, while a direct subscription to the same resource remains valid.
+All subscriptions still share one canonical watcher and revision stream.
+
 Request:
 
 ```json
@@ -264,7 +271,8 @@ Response: `null`.
 ### `close_file_resource`
 
 Releases one subscription. It is idempotent; the shared watcher is removed only
-after the final subscription closes.
+after the final subscription closes. Closing does not remove or replace another
+subscription's authorization provenance.
 
 ```json
 {
@@ -282,6 +290,8 @@ Opens the native picker and records a backend-owned grant for the exact selected
 canonical file. The grant does not authorize a sibling or parent directory.
 Picker grants are deduplicated by canonical target and bounded to 128 entries;
 dormant least-recently-used grants are evicted before a new grant is rejected.
+Deduplication does not widen an open subscription: each open retains the exact
+picker-selected pathname it used, including an alias spelling.
 
 ```json
 {

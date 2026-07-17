@@ -131,6 +131,14 @@ pub struct AuthorizedPath {
 }
 
 impl AuthorizedPath {
+    /// Returns the exact pathname whose provenance was authorized. Unlike
+    /// [`Self::canonical_path`], this retains an alias, symlink, or junction
+    /// spelling so callers can revalidate that specific access path.
+    #[must_use]
+    pub fn requested_path(&self) -> &Path {
+        &self.requested_path
+    }
+
     /// Reopens the originally requested pathname after an editor-style atomic
     /// replacement while preserving the authorization boundary that approved
     /// it.

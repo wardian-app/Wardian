@@ -76,7 +76,10 @@ file tab is resolved again by the Rust backend against current agent primary
 and additional directory grants, or an exact live native-picker grant. Layout
 state never confers filesystem authority. If two spellings resolve to the same
 file, normal opens focus one canonical tab; an explicit **Open to Side** keeps
-the intentional second presentation.
+the intentional second presentation. Each presentation keeps the pathname that
+authorized it. If a symlink or junction used by one presentation is removed or
+retargeted, that presentation loses access without disrupting another
+presentation opened through the still-valid direct path.
 
 PDF text search is deliberately bounded so a very large document cannot lock
 the Workbench. It searches at most 128 pages or for two seconds per query and

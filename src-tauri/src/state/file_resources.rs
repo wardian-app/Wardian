@@ -108,6 +108,8 @@ struct FileResourceRuntimeInner {
     ticket_publication_hook: Mutex<Option<TicketPublicationHook>>,
     #[cfg(test)]
     forced_refresh_error: Mutex<Option<FileResourceErrorV1>>,
+    #[cfg(test)]
+    open_after_entry_miss_hook: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 #[cfg(test)]
@@ -127,13 +129,24 @@ struct TicketPublicationHook {
 
 struct FileResourceEntry {
     _watcher: notify::RecommendedWatcher,
-    authorized: AuthorizedPath,
     revision_token: FileRevisionToken,
     descriptor: FileContentDescriptorV1,
     revision: u64,
     incarnation_id: Uuid,
-    subscribers: HashMap<String, FileAccessClaim>,
+    subscribers: HashMap<String, FileSubscriptionAccess>,
     debounce_generation: u64,
+}
+
+#[derive(Clone)]
+struct FileSubscriptionAccess {
+    claim: FileAccessClaim,
+    authorized: AuthorizedPath,
+}
+
+#[derive(Clone)]
+struct FileRefreshCandidate {
+    subscription_id: String,
+    authorized: AuthorizedPath,
 }
 
 #[derive(Clone)]
@@ -278,6 +291,8 @@ impl FileResourceRuntime {
                 ticket_publication_hook: Mutex::new(None),
                 #[cfg(test)]
                 forced_refresh_error: Mutex::new(None),
+                #[cfg(test)]
+                open_after_entry_miss_hook: Mutex::new(None),
             }),
         }
     }
@@ -309,6 +324,7 @@ impl FileResourceRuntime {
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 ticket_publication_hook: Mutex::new(None),
                 forced_refresh_error: Mutex::new(None),
+                open_after_entry_miss_hook: Mutex::new(None),
             }),
         }
     }
@@ -356,25 +372,7 @@ impl FileResourceRuntime {
         &self,
         selected_path: &Path,
     ) -> Result<UserFileGrantV1, FileResourceErrorV1> {
-        let parent = selected_path.parent().ok_or_else(|| {
-            error(
-                "unavailable_path",
-                "selected file does not have an authorizable parent directory",
-            )
-        })?;
-        let parent = parent.to_str().ok_or_else(|| {
-            error(
-                "unavailable_path",
-                "selected file parent cannot be represented losslessly as UTF-8",
-            )
-        })?;
-        let config = AgentConfig {
-            session_id: "native-picker".to_string(),
-            folder: parent.to_string(),
-            ..AgentConfig::default()
-        };
-        let authorized = AuthorizedRootService::from_agent_config(&config)?
-            .authorize_existing_file(selected_path)?;
+        let authorized = authorize_user_file_path(selected_path)?;
         let snapshot = verified_snapshot(authorized.clone(), self.inner.limits.clone()).await?;
         let canonical_path = snapshot.descriptor().canonical_path.clone();
         let capability_id = self
@@ -408,7 +406,7 @@ impl FileResourceRuntime {
                 "selected file cannot be represented losslessly as UTF-8",
             )
         })?;
-        let authorized = {
+        {
             let mut grants = self.inner.user_file_grants.lock().await;
             let grant = grants
                 .get_mut(capability_id)
@@ -420,15 +418,21 @@ impl FileResourceRuntime {
                 ));
             }
             grant.in_flight_uses = grant.in_flight_uses.saturating_add(1);
-            grant.authorized.clone()
-        };
-        let authorized = match authorized.reauthorize_same_target() {
+        }
+        let authorized = match authorize_user_file_path(path) {
             Ok(authorized) => authorized,
             Err(error) => {
                 self.finish_user_grant_open(capability_id, None).await;
                 return Err(error);
             }
         };
+        if authorized.canonical_path != Path::new(requested) {
+            self.finish_user_grant_open(capability_id, None).await;
+            return Err(error(
+                "unauthorized_path",
+                "selected path changed while its exact capability was being opened",
+            ));
+        }
         {
             let mut grants = self.inner.user_file_grants.lock().await;
             let current = grants
@@ -440,7 +444,9 @@ impl FileResourceRuntime {
                     "user file capability changed while it was being opened",
                 ));
             }
-            current.authorized = authorized.clone();
+            if current.authorized.requested_path() == authorized.requested_path() {
+                current.authorized = authorized.clone();
+            }
             current.last_used_at = Instant::now();
         }
         let result = self
@@ -465,7 +471,9 @@ impl FileResourceRuntime {
         if let Some(grant) = grants.get_mut(capability_id) {
             grant.in_flight_uses = grant.in_flight_uses.saturating_sub(1);
             if let Some(authorized) = authorized {
-                grant.authorized = authorized;
+                if grant.authorized.requested_path() == authorized.requested_path() {
+                    grant.authorized = authorized;
+                }
                 grant.last_used_at = Instant::now();
             }
         }
@@ -481,7 +489,7 @@ impl FileResourceRuntime {
             entries
                 .values()
                 .flat_map(|entry| entry.subscribers.values())
-                .filter_map(|claim| match claim {
+                .filter_map(|access| match &access.claim {
                     FileAccessClaim::User { capability_id } => Some(capability_id.clone()),
                     FileAccessClaim::Agent { .. } => None,
                 })
@@ -591,7 +599,10 @@ impl FileResourceRuntime {
         {
             let mut entries = self.inner.entries.lock().await;
             if let Some(entry) = entries.get_mut(&resource_id) {
-                entry.subscribers.insert(subscription_id.clone(), claim);
+                entry.subscribers.insert(
+                    subscription_id.clone(),
+                    FileSubscriptionAccess { claim, authorized },
+                );
                 let result = FileResourceSnapshotV1 {
                     resource_id: resource_id.clone(),
                     subscription_id: subscription_id.clone(),
@@ -608,6 +619,14 @@ impl FileResourceRuntime {
             }
         }
 
+        #[cfg(test)]
+        let open_after_entry_miss_hook =
+            { self.inner.open_after_entry_miss_hook.lock().await.clone() };
+        #[cfg(test)]
+        if let Some(hook) = open_after_entry_miss_hook {
+            hook.wait().await;
+        }
+
         let incarnation_id = Uuid::new_v4();
         let pending_event = Arc::new(AtomicBool::new(false));
         let watcher = self.create_watcher(
@@ -621,7 +640,10 @@ impl FileResourceRuntime {
         let result = {
             let mut entries = self.inner.entries.lock().await;
             if let Some(entry) = entries.get_mut(&resource_id) {
-                entry.subscribers.insert(subscription_id.clone(), claim);
+                entry.subscribers.insert(
+                    subscription_id.clone(),
+                    FileSubscriptionAccess { claim, authorized },
+                );
                 FileResourceSnapshotV1 {
                     resource_id: resource_id.clone(),
                     subscription_id: subscription_id.clone(),
@@ -630,12 +652,14 @@ impl FileResourceRuntime {
                 }
             } else {
                 let mut subscribers = HashMap::new();
-                subscribers.insert(subscription_id.clone(), claim);
+                subscribers.insert(
+                    subscription_id.clone(),
+                    FileSubscriptionAccess { claim, authorized },
+                );
                 entries.insert(
                     resource_id.clone(),
                     FileResourceEntry {
                         _watcher: watcher,
-                        authorized,
                         revision_token,
                         descriptor: descriptor.clone(),
                         revision: 1,
@@ -739,7 +763,7 @@ impl FileResourceRuntime {
     }
 
     async fn refresh_if_stable(&self, resource_id: &str, incarnation_id: Uuid, generation: u64) {
-        let authorized = {
+        let candidates = {
             let entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get(resource_id) else {
                 return;
@@ -747,57 +771,87 @@ impl FileResourceRuntime {
             if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
                 return;
             }
-            entry.authorized.clone()
+            let mut candidates = entry
+                .subscribers
+                .iter()
+                .map(|(subscription_id, access)| FileRefreshCandidate {
+                    subscription_id: subscription_id.clone(),
+                    authorized: access.authorized.clone(),
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                left.authorized
+                    .requested_path()
+                    .cmp(right.authorized.requested_path())
+                    .then_with(|| left.subscription_id.cmp(&right.subscription_id))
+            });
+            candidates
         };
-        let (authorized, snapshot) = match self.refresh_verified_snapshot(authorized.clone()).await
-        {
-            Ok(snapshot) => (authorized, snapshot),
-            Err(initial_error)
-                if matches!(
-                    initial_error.code(),
-                    "unauthorized_path" | "unavailable_path"
-                ) =>
+        if candidates.is_empty() {
+            return;
+        }
+        let mut expected_subscriptions = candidates
+            .iter()
+            .map(|candidate| candidate.subscription_id.clone())
+            .collect::<Vec<_>>();
+        expected_subscriptions.sort();
+
+        let mut first_failure = None;
+        let mut refreshed = None;
+        for candidate in &candidates {
+            match self
+                .refresh_from_authorization(candidate.authorized.clone())
+                .await
             {
-                let replacement = match authorized.reauthorize_same_target() {
-                    Ok(replacement) => {
-                        match self.refresh_verified_snapshot(replacement.clone()).await {
-                            Ok(snapshot) => Some((replacement, snapshot)),
-                            Err(error) => {
-                                self.publish_refresh_failure(
-                                    resource_id,
-                                    incarnation_id,
-                                    generation,
-                                    &error,
-                                )
-                                .await;
-                                None
-                            }
-                        }
+                Ok((authorized, snapshot)) => {
+                    refreshed = Some((candidate.subscription_id.clone(), authorized, snapshot));
+                    break;
+                }
+                Err(failure) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(failure);
                     }
-                    Err(error) => {
-                        self.publish_refresh_failure(
-                            resource_id,
-                            incarnation_id,
-                            generation,
-                            &error,
-                        )
-                        .await;
-                        None
-                    }
-                };
-                let Some(replacement) = replacement else {
-                    return;
-                };
-                replacement
+                }
             }
-            Err(error) => {
-                self.publish_refresh_failure(resource_id, incarnation_id, generation, &error)
-                    .await;
-                return;
-            }
+        }
+        let Some((winning_subscription_id, winning_authorized, snapshot)) = refreshed else {
+            let failure = first_failure.unwrap_or_else(|| {
+                error(
+                    "unavailable_path",
+                    "no active subscription authorization can refresh the file resource",
+                )
+            });
+            self.publish_refresh_failure(
+                resource_id,
+                incarnation_id,
+                generation,
+                &expected_subscriptions,
+                &failure,
+            )
+            .await;
+            return;
         };
         let (descriptor, revision_token) = snapshot.into_parts();
-        let (event, user_capability_ids) = {
+        let refreshed_authorizations = candidates
+            .iter()
+            .filter_map(|candidate| {
+                if candidate.subscription_id == winning_subscription_id {
+                    return Some((
+                        candidate.subscription_id.clone(),
+                        winning_authorized.clone(),
+                    ));
+                }
+                candidate
+                    .authorized
+                    .reauthorize_same_target()
+                    .ok()
+                    .filter(|authorized| {
+                        authorized.canonical_path == Path::new(&descriptor.canonical_path)
+                    })
+                    .map(|authorized| (candidate.subscription_id.clone(), authorized))
+            })
+            .collect::<HashMap<_, _>>();
+        let application = {
             let mut entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get_mut(resource_id) else {
                 return;
@@ -805,48 +859,86 @@ impl FileResourceRuntime {
             if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
                 return;
             }
-            entry.authorized = authorized.clone();
-            entry.revision_token = revision_token;
-            let availability_changed =
-                entry.descriptor.unavailable_reason != descriptor.unavailable_reason;
-            let content_changed = entry.descriptor.content_hash != descriptor.content_hash;
-            let user_capability_ids = entry
-                .subscribers
-                .values()
-                .filter_map(|claim| match claim {
-                    FileAccessClaim::User { capability_id } => Some(capability_id.clone()),
-                    FileAccessClaim::Agent { .. } => None,
-                })
-                .collect::<Vec<_>>();
-            if !content_changed && !availability_changed {
-                entry.descriptor = descriptor;
-                (None, user_capability_ids)
+            if !same_subscriptions(entry, &expected_subscriptions) {
+                None
             } else {
-                entry.revision = entry.revision.saturating_add(1);
-                entry.descriptor = descriptor.clone();
-                (
-                    Some(FileResourceEventV1 {
-                        schema: 1,
-                        resource_id: resource_id.to_string(),
-                        revision: entry.revision,
-                        descriptor,
-                    }),
-                    user_capability_ids,
-                )
+                for (subscription_id, authorized) in &refreshed_authorizations {
+                    if let Some(access) = entry.subscribers.get_mut(subscription_id) {
+                        access.authorized = authorized.clone();
+                    }
+                }
+                let user_grant_updates = refreshed_authorizations
+                    .iter()
+                    .filter_map(|(subscription_id, authorized)| {
+                        let access = entry.subscribers.get(subscription_id)?;
+                        match &access.claim {
+                            FileAccessClaim::User { capability_id } => {
+                                Some((capability_id.clone(), authorized.clone()))
+                            }
+                            FileAccessClaim::Agent { .. } => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                entry.revision_token = revision_token;
+                let availability_changed =
+                    entry.descriptor.unavailable_reason != descriptor.unavailable_reason;
+                let content_changed = entry.descriptor.content_hash != descriptor.content_hash;
+                if !content_changed && !availability_changed {
+                    entry.descriptor = descriptor;
+                    Some((None, user_grant_updates))
+                } else {
+                    entry.revision = entry.revision.saturating_add(1);
+                    entry.descriptor = descriptor.clone();
+                    Some((
+                        Some(FileResourceEventV1 {
+                            schema: 1,
+                            resource_id: resource_id.to_string(),
+                            revision: entry.revision,
+                            descriptor,
+                        }),
+                        user_grant_updates,
+                    ))
+                }
             }
         };
-        if !user_capability_ids.is_empty() {
+        let Some((event, user_grant_updates)) = application else {
+            self.schedule_refresh_for_incarnation(resource_id.to_string(), incarnation_id);
+            return;
+        };
+        if !user_grant_updates.is_empty() {
             let now = Instant::now();
             let mut grants = self.inner.user_file_grants.lock().await;
-            for capability_id in user_capability_ids {
+            for (capability_id, authorized) in user_grant_updates {
                 if let Some(grant) = grants.get_mut(&capability_id) {
-                    grant.authorized = authorized.clone();
-                    grant.last_used_at = now;
+                    if grant.authorized.requested_path() == authorized.requested_path() {
+                        grant.authorized = authorized;
+                        grant.last_used_at = now;
+                    }
                 }
             }
         }
         if let Some(event) = event {
             self.emit(event);
+        }
+    }
+
+    async fn refresh_from_authorization(
+        &self,
+        authorized: AuthorizedPath,
+    ) -> Result<(AuthorizedPath, VerifiedFileSnapshot), FileResourceErrorV1> {
+        match self.refresh_verified_snapshot(authorized.clone()).await {
+            Ok(snapshot) => Ok((authorized, snapshot)),
+            Err(initial_error)
+                if matches!(
+                    initial_error.code(),
+                    "unauthorized_path" | "unavailable_path"
+                ) =>
+            {
+                let replacement = authorized.reauthorize_same_target()?;
+                let snapshot = self.refresh_verified_snapshot(replacement.clone()).await?;
+                Ok((replacement, snapshot))
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -866,9 +958,10 @@ impl FileResourceRuntime {
         resource_id: &str,
         incarnation_id: Uuid,
         generation: u64,
+        expected_subscriptions: &[String],
         failure: &FileResourceErrorV1,
     ) {
-        let event = {
+        let (event, reschedule) = {
             let mut entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get_mut(resource_id) else {
                 return;
@@ -876,25 +969,35 @@ impl FileResourceRuntime {
             if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
                 return;
             }
-            if entry.descriptor.unavailable_reason.as_deref() == Some(failure.code()) {
-                return;
-            }
-            let mut descriptor = entry.descriptor.clone();
-            descriptor.capabilities.preview = false;
-            descriptor.capabilities.changes = false;
-            descriptor.capabilities.draft = false;
-            descriptor.capabilities.stream = false;
-            descriptor.unavailable_reason = Some(failure.code().to_string());
-            entry.revision = entry.revision.saturating_add(1);
-            entry.descriptor = descriptor.clone();
-            FileResourceEventV1 {
-                schema: 1,
-                resource_id: resource_id.to_string(),
-                revision: entry.revision,
-                descriptor,
+            if !same_subscriptions(entry, expected_subscriptions) {
+                (None, true)
+            } else if entry.descriptor.unavailable_reason.as_deref() == Some(failure.code()) {
+                (None, false)
+            } else {
+                let mut descriptor = entry.descriptor.clone();
+                descriptor.capabilities.preview = false;
+                descriptor.capabilities.changes = false;
+                descriptor.capabilities.draft = false;
+                descriptor.capabilities.stream = false;
+                descriptor.unavailable_reason = Some(failure.code().to_string());
+                entry.revision = entry.revision.saturating_add(1);
+                entry.descriptor = descriptor.clone();
+                (
+                    Some(FileResourceEventV1 {
+                        schema: 1,
+                        resource_id: resource_id.to_string(),
+                        revision: entry.revision,
+                        descriptor,
+                    }),
+                    false,
+                )
             }
         };
-        self.emit(event);
+        if reschedule {
+            self.schedule_refresh_for_incarnation(resource_id.to_string(), incarnation_id);
+        } else if let Some(event) = event {
+            self.emit(event);
+        }
     }
 
     fn emit(&self, event: FileResourceEventV1) {
@@ -952,7 +1055,7 @@ impl FileResourceRuntime {
         let subscription_id = entry
             .subscribers
             .keys()
-            .next()
+            .min()
             .cloned()
             .ok_or_else(|| error("resource_not_found", "file resource has no subscriber"))?;
         Ok(FileResourceSnapshotV1 {
@@ -969,7 +1072,7 @@ impl FileResourceRuntime {
         subscription_id: &str,
     ) -> Result<Option<String>, FileResourceErrorV1> {
         let entries = self.inner.entries.lock().await;
-        let claim = entries
+        let access = entries
             .get(resource_id)
             .and_then(|entry| entry.subscribers.get(subscription_id))
             .ok_or_else(|| {
@@ -978,7 +1081,7 @@ impl FileResourceRuntime {
                     "subscription does not grant the requested resource",
                 )
             })?;
-        Ok(match claim {
+        Ok(match &access.claim {
             FileAccessClaim::Agent { agent_id } => Some(agent_id.clone()),
             FileAccessClaim::User { .. } => None,
         })
@@ -992,7 +1095,7 @@ impl FileResourceRuntime {
         current_agent_config: Option<&AgentConfig>,
     ) -> Result<(AuthorizedPath, FileContentDescriptorV1, FileRevisionToken), FileResourceErrorV1>
     {
-        let (claim, authorized, expected, revision_token) = {
+        let (access, expected, revision_token) = {
             let entries = self.inner.entries.lock().await;
             let entry = entries
                 .get(resource_id)
@@ -1003,7 +1106,7 @@ impl FileResourceRuntime {
                     "requested revision is no longer current",
                 ));
             }
-            let claim = entry
+            let access = entry
                 .subscribers
                 .get(subscription_id)
                 .cloned()
@@ -1014,14 +1117,13 @@ impl FileResourceRuntime {
                     )
                 })?;
             (
-                claim,
-                entry.authorized.clone(),
+                access,
                 entry.descriptor.clone(),
                 entry.revision_token.clone(),
             )
         };
 
-        match claim {
+        let authorized = match &access.claim {
             FileAccessClaim::Agent { agent_id } => {
                 let config = current_agent_config.ok_or_else(|| {
                     error(
@@ -1029,20 +1131,22 @@ impl FileResourceRuntime {
                         "current agent authorization is unavailable",
                     )
                 })?;
-                if config.session_id != agent_id {
+                if &config.session_id != agent_id {
                     return Err(error(
                         "unauthorized_path",
                         "current agent authorization does not match the subscription",
                     ));
                 }
+                access.authorized.reauthorize_same_target()?;
                 let current = AuthorizedRootService::from_agent_config(config)?
-                    .authorize_existing_file(Path::new(&expected.canonical_path))?;
-                if current.canonical_path != authorized.canonical_path {
+                    .authorize_existing_file(access.authorized.requested_path())?;
+                if current.canonical_path != Path::new(&expected.canonical_path) {
                     return Err(error(
                         "unauthorized_path",
                         "current agent authorization resolves to another file",
                     ));
                 }
+                current
             }
             FileAccessClaim::User { capability_id } => {
                 let grant = self
@@ -1050,7 +1154,7 @@ impl FileResourceRuntime {
                     .user_file_grants
                     .lock()
                     .await
-                    .get(&capability_id)
+                    .get(capability_id)
                     .cloned()
                     .ok_or_else(|| {
                         error("unauthorized_path", "user file capability was revoked")
@@ -1061,14 +1165,16 @@ impl FileResourceRuntime {
                         "user file capability does not match the resource",
                     ));
                 }
-                if grant.authorized.canonical_path != authorized.canonical_path {
+                let current = access.authorized.reauthorize_same_target()?;
+                if current.canonical_path != Path::new(&expected.canonical_path) {
                     return Err(error(
                         "unauthorized_path",
-                        "user file capability resolves to another file",
+                        "user file subscription resolves to another file",
                     ));
                 }
+                current
             }
-        }
+        };
         if let Some(reason) = expected.unavailable_reason.as_deref() {
             return Err(error(
                 reason,
@@ -1765,6 +1871,27 @@ fn error(code: &str, message: impl Into<String>) -> FileResourceErrorV1 {
     FileResourceErrorV1::new(code, message)
 }
 
+fn authorize_user_file_path(path: &Path) -> Result<AuthorizedPath, FileResourceErrorV1> {
+    let parent = path.parent().ok_or_else(|| {
+        error(
+            "unavailable_path",
+            "selected file does not have an authorizable parent directory",
+        )
+    })?;
+    let parent = parent.to_str().ok_or_else(|| {
+        error(
+            "unavailable_path",
+            "selected file parent cannot be represented losslessly as UTF-8",
+        )
+    })?;
+    let config = AgentConfig {
+        session_id: "native-picker".to_string(),
+        folder: parent.to_string(),
+        ..AgentConfig::default()
+    };
+    AuthorizedRootService::from_agent_config(&config)?.authorize_existing_file(path)
+}
+
 fn now_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1772,6 +1899,13 @@ fn now_epoch_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn same_subscriptions(entry: &FileResourceEntry, expected: &[String]) -> bool {
+    entry.subscribers.len() == expected.len()
+        && expected
+            .iter()
+            .all(|subscription_id| entry.subscribers.contains_key(subscription_id))
 }
 
 fn file_resource_id(canonical_path: &str) -> String {
@@ -1834,6 +1968,368 @@ mod tests {
             .close(&second.subscription_id)
             .await
             .expect("close second");
+        assert_eq!(runtime.watcher_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn removed_alias_only_revokes_its_subscription_while_direct_text_refreshes() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-current");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "revision one\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+
+        let alias = runtime
+            .open_agent_file("agent-a", &config, &alias_path, None)
+            .await
+            .expect("open through alias");
+        let direct = runtime
+            .open_agent_file("agent-a", &config, &canonical_path, None)
+            .await
+            .expect("open directly");
+        assert_eq!(alias.resource_id, direct.resource_id);
+        assert_eq!(runtime.watcher_count().await, 1);
+        assert_eq!(runtime.subscriber_count(&alias.resource_id).await, 2);
+
+        remove_directory_link(&alias_dir);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &alias.resource_id,
+                    &alias.subscription_id,
+                    alias.revision,
+                    Some(&config),
+                )
+                .await
+                .expect_err("removed alias must revoke only its subscription")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            runtime
+                .read_text(
+                    &direct.resource_id,
+                    &direct.subscription_id,
+                    direct.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("direct subscription remains readable")
+                .text,
+            "revision one\n"
+        );
+
+        let mut events = runtime.subscribe_events();
+        fs::write(&canonical_path, "revision two\n").expect("updated fixture");
+        runtime.schedule_refresh(direct.resource_id.clone());
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("direct refresh timeout")
+            .expect("direct refresh event");
+        assert_eq!(event.revision, direct.revision + 1);
+        assert_eq!(event.descriptor.unavailable_reason, None);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &direct.resource_id,
+                    &direct.subscription_id,
+                    event.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("refreshed direct read")
+                .text,
+            "revision two\n"
+        );
+        assert_eq!(
+            runtime
+                .read_text(
+                    &alias.resource_id,
+                    &alias.subscription_id,
+                    event.revision,
+                    Some(&config),
+                )
+                .await
+                .expect_err("removed alias stays revoked after shared refresh")
+                .code(),
+            "unauthorized_path"
+        );
+
+        runtime
+            .close(&alias.subscription_id)
+            .await
+            .expect("close alias subscription");
+        assert_eq!(runtime.watcher_count().await, 1);
+        assert_eq!(runtime.subscriber_count(&direct.resource_id).await, 1);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &direct.resource_id,
+                    &direct.subscription_id,
+                    event.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("direct read survives alias close")
+                .text,
+            "revision two\n"
+        );
+        runtime
+            .close(&direct.subscription_id)
+            .await
+            .expect("close direct subscription");
+        assert_eq!(runtime.watcher_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn retargeted_picker_alias_cannot_poison_direct_pdf_ticket_or_atomic_refresh() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let other_dir = temp.path().join("y-other");
+        let alias_dir = temp.path().join("a-current");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        fs::create_dir(&other_dir).expect("other directory");
+        let canonical_path = canonical_dir.join("shared.pdf");
+        let other_path = other_dir.join("shared.pdf");
+        fs::write(&canonical_path, b"%PDF-1.7 revision one").expect("fixture");
+        fs::write(&other_path, b"%PDF-1.7 unrelated target").expect("other fixture");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let alias_path = alias_dir.join("shared.pdf");
+        let runtime = test_runtime();
+
+        let alias_grant = runtime
+            .record_user_file(&alias_path)
+            .await
+            .expect("alias picker grant");
+        let alias = runtime
+            .open_user_file(&alias_grant.capability_id, &alias_path, None)
+            .await
+            .expect("open picker alias");
+        let direct_grant = runtime
+            .record_user_file(&canonical_path)
+            .await
+            .expect("direct picker grant");
+        assert_eq!(
+            alias_grant.capability_id, direct_grant.capability_id,
+            "exact grants deduplicate by canonical resource without widening a subscription"
+        );
+        let direct = runtime
+            .open_user_file(&direct_grant.capability_id, &canonical_path, None)
+            .await
+            .expect("open picker path directly");
+        let alias_after_dedup = runtime
+            .open_user_file(&direct_grant.capability_id, &alias_path, None)
+            .await
+            .expect("deduplicated grant still retains this open's alias provenance");
+        assert_eq!(alias.resource_id, direct.resource_id);
+        assert_eq!(runtime.watcher_count().await, 1);
+        assert_eq!(runtime.subscriber_count(&direct.resource_id).await, 3);
+
+        remove_directory_link(&alias_dir);
+        create_directory_link(&other_dir, &alias_dir);
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &alias.resource_id,
+                    &alias.subscription_id,
+                    alias.revision,
+                    None,
+                    "alias-before-refresh",
+                )
+                .await
+                .expect_err("retargeted alias must not mint a ticket")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &alias_after_dedup.resource_id,
+                    &alias_after_dedup.subscription_id,
+                    alias_after_dedup.revision,
+                    None,
+                    "deduplicated-alias-before-refresh",
+                )
+                .await
+                .expect_err("deduplicated capability must not replace alias provenance")
+                .code(),
+            "unauthorized_path"
+        );
+        let direct_ticket = runtime
+            .issue_ticket(
+                &direct.resource_id,
+                &direct.subscription_id,
+                direct.revision,
+                None,
+                "direct-before-refresh",
+            )
+            .await
+            .expect("direct ticket survives alias retarget");
+        assert_eq!(
+            runtime
+                .read_ticket_range(&direct_ticket.ticket_id, None)
+                .await
+                .expect("read direct ticket")
+                .bytes,
+            b"%PDF-1.7 revision one"
+        );
+
+        let replacement = canonical_dir.join("shared.replacement");
+        fs::write(&replacement, b"%PDF-1.7 revision two").expect("replacement fixture");
+        replace_path_identity(&replacement, &canonical_path);
+        let mut events = runtime.subscribe_events();
+        runtime.schedule_refresh(direct.resource_id.clone());
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("atomic refresh timeout")
+            .expect("atomic refresh event");
+        assert_eq!(event.revision, direct.revision + 1);
+        assert_eq!(event.descriptor.unavailable_reason, None);
+
+        let refreshed_ticket = runtime
+            .issue_ticket(
+                &direct.resource_id,
+                &direct.subscription_id,
+                event.revision,
+                None,
+                "direct-after-refresh",
+            )
+            .await
+            .expect("direct ticket survives atomic replacement");
+        assert_eq!(
+            runtime
+                .read_ticket_range(&refreshed_ticket.ticket_id, None)
+                .await
+                .expect("read refreshed ticket")
+                .bytes,
+            b"%PDF-1.7 revision two"
+        );
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &alias.resource_id,
+                    &alias.subscription_id,
+                    event.revision,
+                    None,
+                    "alias-after-refresh",
+                )
+                .await
+                .expect_err("retargeted alias remains revoked after direct refresh")
+                .code(),
+            "unauthorized_path"
+        );
+
+        runtime
+            .close(&alias.subscription_id)
+            .await
+            .expect("close alias subscription");
+        assert_eq!(runtime.watcher_count().await, 1);
+        runtime
+            .close(&alias_after_dedup.subscription_id)
+            .await
+            .expect("close deduplicated alias subscription");
+        assert_eq!(runtime.watcher_count().await, 1);
+        runtime
+            .close(&direct.subscription_id)
+            .await
+            .expect("close direct subscription");
+        assert_eq!(runtime.watcher_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_alias_and_direct_first_opens_retain_both_authorizations() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-current");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "concurrent\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let first_open_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        *runtime.inner.open_after_entry_miss_hook.lock().await = Some(first_open_barrier.clone());
+
+        let alias_task = {
+            let runtime = runtime.clone();
+            let config = config.clone();
+            let alias_path = alias_path.clone();
+            tokio::spawn(async move {
+                runtime
+                    .open_agent_file("agent-a", &config, &alias_path, None)
+                    .await
+            })
+        };
+        let direct_task = {
+            let runtime = runtime.clone();
+            let config = config.clone();
+            let canonical_path = canonical_path.clone();
+            tokio::spawn(async move {
+                runtime
+                    .open_agent_file("agent-a", &config, &canonical_path, None)
+                    .await
+            })
+        };
+        let (alias_result, direct_result) = timeout(Duration::from_secs(5), async {
+            tokio::join!(alias_task, direct_task)
+        })
+        .await
+        .expect("concurrent opens must not deadlock");
+        let alias = alias_result
+            .expect("alias task")
+            .expect("concurrent alias open");
+        let direct = direct_result
+            .expect("direct task")
+            .expect("concurrent direct open");
+        *runtime.inner.open_after_entry_miss_hook.lock().await = None;
+
+        assert_eq!(alias.resource_id, direct.resource_id);
+        assert_ne!(alias.subscription_id, direct.subscription_id);
+        assert_eq!(runtime.watcher_count().await, 1);
+        assert_eq!(runtime.subscriber_count(&direct.resource_id).await, 2);
+
+        remove_directory_link(&alias_dir);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &alias.resource_id,
+                    &alias.subscription_id,
+                    alias.revision,
+                    Some(&config),
+                )
+                .await
+                .expect_err("concurrent alias subscription retained its own provenance")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            runtime
+                .read_text(
+                    &direct.resource_id,
+                    &direct.subscription_id,
+                    direct.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("concurrent direct subscription retained its own provenance")
+                .text,
+            "concurrent\n"
+        );
+
+        runtime
+            .close(&alias.subscription_id)
+            .await
+            .expect("close alias subscription");
+        runtime
+            .close(&direct.subscription_id)
+            .await
+            .expect("close direct subscription");
         assert_eq!(runtime.watcher_count().await, 0);
     }
 
@@ -3053,6 +3549,14 @@ mod tests {
         assert_eq!(runtime.ticket_count().await, 0);
         assert_eq!(runtime.user_grant_count().await, 0);
         assert!(runtime.inner.renderer_leases.lock().await.is_empty());
+    }
+
+    fn create_directory_link(target: &Path, link: &Path) {
+        wardian_core::library::create_directory_link(target, link).expect("directory link");
+    }
+
+    fn remove_directory_link(link: &Path) {
+        wardian_core::library::remove_existing_deployment(link).expect("remove directory link");
     }
 
     #[cfg(unix)]
