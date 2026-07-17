@@ -1,0 +1,99 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  FileResourceEventV1,
+  FileResourceSnapshotV1,
+  FileResourceTextV1,
+  FileResourceTicketV1,
+  OpenFileResourceRequestV1,
+} from "../../types";
+
+export const FILE_RESOURCE_REVISION_EVENT = "file-resource://revision";
+
+/** Typed Tauri adapter for one set of locally shared file subscriptions. */
+export class FileResourceClient {
+  readonly #subscriptionByResource = new Map<
+    string,
+    { subscription_id: string; open_sequence: number }
+  >();
+  readonly #resourceBySubscription = new Map<string, string>();
+  readonly #closeBySubscription = new Map<string, Promise<void>>();
+  #openSequence = 0;
+
+  async open(request: OpenFileResourceRequestV1): Promise<FileResourceSnapshotV1> {
+    const open_sequence = ++this.#openSequence;
+    const snapshot = await invoke<FileResourceSnapshotV1>("open_file_resource", { request });
+    const active = this.#subscriptionByResource.get(snapshot.resource_id);
+    if (!active || open_sequence > active.open_sequence) {
+      this.#subscriptionByResource.set(snapshot.resource_id, {
+        subscription_id: snapshot.subscription_id,
+        open_sequence,
+      });
+    }
+    this.#resourceBySubscription.set(snapshot.subscription_id, snapshot.resource_id);
+    return snapshot;
+  }
+
+  readText(resource_id: string, revision: number): Promise<FileResourceTextV1> {
+    return invoke<FileResourceTextV1>("read_file_resource_text", {
+      request: {
+        resource_id,
+        subscription_id: this.#subscription(resource_id),
+        revision,
+      },
+    });
+  }
+
+  issueTicket(
+    resource_id: string,
+    revision: number,
+    purpose: string,
+  ): Promise<FileResourceTicketV1> {
+    return invoke<FileResourceTicketV1>("issue_file_resource_ticket", {
+      request: {
+        resource_id,
+        subscription_id: this.#subscription(resource_id),
+        revision,
+        renderer_lease_id: purpose,
+      },
+    });
+  }
+
+  listenForRevisions(
+    callback: (event: FileResourceEventV1) => void,
+  ): Promise<UnlistenFn> {
+    return listen<FileResourceEventV1>(FILE_RESOURCE_REVISION_EVENT, (event) => {
+      callback(event.payload);
+    });
+  }
+
+  close(subscription_id: string): Promise<void> {
+    const existing = this.#closeBySubscription.get(subscription_id);
+    if (existing) return existing;
+
+    const closing = invoke<void>("close_file_resource", {
+      request: { subscription_id },
+    }).then(() => {
+      const resource_id = this.#resourceBySubscription.get(subscription_id);
+      if (
+        resource_id
+        && this.#subscriptionByResource.get(resource_id)?.subscription_id === subscription_id
+      ) {
+        this.#subscriptionByResource.delete(resource_id);
+      }
+      this.#resourceBySubscription.delete(subscription_id);
+    });
+    this.#closeBySubscription.set(subscription_id, closing);
+    return closing;
+  }
+
+  #subscription(resource_id: string) {
+    const subscription = this.#subscriptionByResource.get(resource_id);
+    if (!subscription) {
+      throw new Error(`File resource is not open: ${resource_id}`);
+    }
+    return subscription.subscription_id;
+  }
+}
+
+export const fileResourceClient = new FileResourceClient();
