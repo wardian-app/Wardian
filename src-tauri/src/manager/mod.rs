@@ -28,7 +28,8 @@ pub use opencode::{
 };
 pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
 pub(crate) use session_identity::{
-    clear_credential_resume_session, validate_session_values_for_launch,
+    apply_provider_identity, clear_credential_resume_session, validate_config_for_launch,
+    validate_session_values_for_launch, ProviderIdentityOutcome,
 };
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
