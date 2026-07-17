@@ -9,6 +9,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
+import { formatExplorerPathForDisplay } from "../../utils/displayPath";
 
 type FilesModeBarProps = {
   resource_key: string;
@@ -22,10 +23,35 @@ function resourcePath(resourceKey: string) {
   return resourceKey.slice(resourceKey.indexOf(":") + 1).replace(/\\/g, "/");
 }
 
-function breadcrumbParts(path: string) {
-  const drive = /^[A-Za-z]:\//.exec(path)?.[0].slice(0, 2);
-  const rest = drive ? path.slice(3) : path.replace(/^\/+/, "");
-  return [...(drive ? [drive] : path.startsWith("/") ? ["/"] : []), ...rest.split("/").filter(Boolean)];
+type BreadcrumbPart = { separator: string; label: string };
+
+function breadcrumbParts(path: string): BreadcrumbPart[] {
+  const separator = path.includes("\\") ? "\\" : "/";
+  const drive = /^[A-Za-z]:[\\/]/.exec(path)?.[0].slice(0, 2);
+  const unc = path.startsWith("\\\\") || path.startsWith("//");
+  const rooted = !unc && path.startsWith("/");
+  const rest = drive ? path.slice(3) : unc ? path.slice(2) : rooted ? path.slice(1) : path;
+  const segments = rest.split(/[\\/]+/).filter(Boolean);
+
+  if (drive) {
+    return [
+      { separator: "", label: drive },
+      ...segments.map((label) => ({ separator, label })),
+    ];
+  }
+  if (unc) {
+    return [
+      { separator: "", label: separator.repeat(2) },
+      ...segments.map((label, index) => ({ separator: index === 0 ? "" : separator, label })),
+    ];
+  }
+  if (rooted) {
+    return [
+      { separator: "", label: "/" },
+      ...segments.map((label, index) => ({ separator: index === 0 ? "" : "/", label })),
+    ];
+  }
+  return segments.map((label, index) => ({ separator: index === 0 ? "" : separator, label }));
 }
 
 export function FilesModeBar({
@@ -42,8 +68,9 @@ export function FilesModeBar({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const initialMenuItemRef = useRef(0);
-  const path = descriptor?.canonical_path ?? resourcePath(resource_key);
-  const parts = useMemo(() => breadcrumbParts(path), [path]);
+  const actionPath = descriptor?.canonical_path ?? resourcePath(resource_key);
+  const displayPath = formatExplorerPathForDisplay(actionPath);
+  const parts = useMemo(() => breadcrumbParts(displayPath), [displayPath]);
   const changesReasonId = `${unavailableReasonId}-changes`;
   const draftReasonId = `${unavailableReasonId}-draft`;
   const changesReason = "Changes is not available in this foundation.";
@@ -93,7 +120,7 @@ export function FilesModeBar({
   const runAction = (action: (path: string) => Promise<void> | void) => {
     closeMenu(true);
     try {
-      void Promise.resolve(action(path)).catch(() => undefined);
+      void Promise.resolve(action(actionPath)).catch(() => undefined);
     } catch {
       // The owning Files surface reports action failures when applicable.
     }
@@ -101,11 +128,10 @@ export function FilesModeBar({
 
   return (
     <header className="files-mode-bar" data-restored-mode={state.mode}>
-      <nav className="files-breadcrumb" aria-label="File location" title={path}>
+      <nav className="files-breadcrumb" aria-label="File location" title={displayPath}>
         {parts.map((part, index) => (
-          <span className="files-breadcrumb-part" key={`${part}-${index}`}>
-            {index > 0 ? <span aria-hidden="true">/</span> : null}
-            <span>{part}</span>
+          <span className="files-breadcrumb-part" key={`${part.separator}${part.label}-${index}`}>
+            {part.separator}{part.label}
           </span>
         ))}
       </nav>

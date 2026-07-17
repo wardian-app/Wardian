@@ -33,6 +33,7 @@ const descriptor: FileContentDescriptorV1 = {
 };
 
 function modeBar(overrides: {
+  descriptor?: FileContentDescriptorV1;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
 } = {}) {
@@ -40,7 +41,7 @@ function modeBar(overrides: {
     <FilesModeBar
       resource_key="file:C:/work/report.pdf"
       state={state}
-      descriptor={descriptor}
+      descriptor={overrides.descriptor ?? descriptor}
       on_open_with={overrides.on_open_with ?? vi.fn()}
       on_reveal={overrides.on_reveal ?? vi.fn()}
     />
@@ -126,5 +127,30 @@ describe("FilesModeBar actions menu", () => {
     expect(trigger).toHaveFocus();
     expect(onOpenWith).toHaveBeenCalledWith("C:/work/report.pdf");
     await Promise.resolve();
+  });
+
+  it("hides extended path prefixes while preserving canonical action paths", async () => {
+    const user = userEvent.setup();
+    const canonicalPath = "\\\\?\\C:\\Work\\Docs\\Report.pdf";
+    const onOpenWith = vi.fn();
+    const onReveal = vi.fn();
+    render(modeBar({
+      descriptor: { ...descriptor, canonical_path: canonicalPath },
+      on_open_with: onOpenWith,
+      on_reveal: onReveal,
+    }));
+
+    const breadcrumb = screen.getByRole("navigation", { name: "File location" });
+    expect(breadcrumb).toHaveAttribute("title", "C:\\Work\\Docs\\Report.pdf");
+    expect(breadcrumb).toHaveTextContent("C:\\Work\\Docs\\Report.pdf");
+    expect(breadcrumb).not.toHaveTextContent("\\\\?\\");
+
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Open With" }));
+    expect(onOpenWith).toHaveBeenCalledWith(canonicalPath);
+
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reveal" }));
+    expect(onReveal).toHaveBeenCalledWith(canonicalPath);
   });
 });
