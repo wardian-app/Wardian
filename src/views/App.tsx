@@ -75,7 +75,7 @@ import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurfac
 import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
 import { FilesSurface } from "../features/files/FilesSurface";
 import { fileResourceClient } from "../features/files/fileResourceClient";
-import { createFileSurfaceState, fileResourceKey } from "../features/files/fileResourceKey";
+import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
 import type { FilesSurfaceStateV1 } from "../types";
 
 declare global {
@@ -1132,11 +1132,7 @@ function AppBody() {
             });
           }}
           on_open_file={(path) => {
-            workbenchNavigation.open({
-              surface_type: "files",
-              resource_key: fileResourceKey(path),
-              state: createFileSurfaceState(false),
-            });
+            openPermanentFileSurface(workbenchNavigation, path);
           }}
         />
       );

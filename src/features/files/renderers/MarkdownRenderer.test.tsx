@@ -65,7 +65,12 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByText("Unsafe").closest("a")).toBeNull();
     fireEvent.click(local);
     expect(onOpenFile).toHaveBeenCalledWith("C:/work/other.md");
-    fireEvent.click(screen.getByRole("link", { name: "Web" }));
+    const web = screen.getByRole("link", { name: "Web" });
+    const auxiliary = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+    fireEvent(web, auxiliary);
+    expect(auxiliary.defaultPrevented).toBe(false);
+    expect(mockOpenUrl).not.toHaveBeenCalled();
+    fireEvent.click(web);
     await waitFor(() => expect(mockOpenUrl).toHaveBeenCalledWith("https://example.test/docs"));
   });
 
@@ -174,6 +179,44 @@ describe("MarkdownRenderer", () => {
     expect(mockOpenUrl).not.toHaveBeenCalled();
   });
 
+  it("keeps local targets non-navigable while routing primary and auxiliary activation", async () => {
+    const onOpenFile = vi.fn();
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1, resource_id: snapshot().resource_id, revision: 1,
+      text: "[Sibling](../other.md) [Local file](file:///C:/work/report.md)",
+    }) } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client, onOpenFile)} />);
+
+    const sibling = await screen.findByRole("link", { name: "Sibling" });
+    const fileUrl = screen.getByRole("link", { name: "Local file" });
+    expect(sibling).not.toHaveAttribute("href");
+    expect(fileUrl).not.toHaveAttribute("href");
+    expect(sibling).toHaveAttribute("tabindex", "0");
+
+    const auxiliary = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+    fireEvent(sibling, auxiliary);
+    expect(auxiliary.defaultPrevented).toBe(true);
+    expect(onOpenFile).toHaveBeenCalledWith("C:/work/other.md");
+
+    const enter = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" });
+    const space = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: " " });
+    fireEvent(sibling, enter);
+    fireEvent(fileUrl, space);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(space.defaultPrevented).toBe(true);
+    expect(onOpenFile).toHaveBeenNthCalledWith(2, "C:/work/other.md");
+    expect(onOpenFile).toHaveBeenNthCalledWith(3, "C:/work/report.md");
+
+    fireEvent.click(fileUrl);
+    expect(onOpenFile).toHaveBeenCalledWith("C:/work/report.md");
+
+    const context = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    fireEvent(fileUrl, context);
+    expect(context.defaultPrevented).toBe(true);
+    expect(onOpenFile).toHaveBeenCalledTimes(4);
+    expect(mockOpenUrl).not.toHaveBeenCalled();
+  });
+
   it("keeps fragment-only links in-pane for primary, middle, and context semantics", async () => {
     mockOpenUrl.mockClear();
     const openWindow = vi.spyOn(window, "open").mockImplementation(() => null);
@@ -182,10 +225,17 @@ describe("MarkdownRenderer", () => {
       text: "# Heading\n\n[Jump](#heading)",
     }) } as unknown as FileResourceClient;
     render(<MarkdownRenderer {...props(client)} />);
+    const heading = await screen.findByRole("heading", { name: "Heading" });
+    heading.scrollIntoView = vi.fn();
     const link = await screen.findByRole("link", { name: "Jump" });
+    expect(link).not.toHaveAttribute("href");
     expect(link).not.toHaveAttribute("target", "_blank");
-    fireEvent(link, new MouseEvent("auxclick", { bubbles: true, button: 1 }));
-    fireEvent.contextMenu(link);
+    const auxiliary = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+    const context = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    fireEvent(link, auxiliary);
+    fireEvent(link, context);
+    expect(auxiliary.defaultPrevented).toBe(true);
+    expect(context.defaultPrevented).toBe(true);
     expect(mockOpenUrl).not.toHaveBeenCalled();
     expect(openWindow).not.toHaveBeenCalled();
   });

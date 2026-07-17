@@ -417,6 +417,25 @@ describe('ExplorerPanel', () => {
     expect(invoke).not.toHaveBeenCalledWith('read_file_preview', expect.anything());
   });
 
+  it('reports when Open to Side is rejected because the current pane is too small', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const navigation = makeNavigation();
+    vi.mocked(navigation.open_to_side).mockReturnValue(null);
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    const tree = await screen.findByTestId('mock-file-row');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open to Side' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Open to Side failed: Error: The current pane is too small to open a file to the side.',
+    );
+  });
+
   it('opens a clicked file externally when Explorer file click action is External app', async () => {
     useSettingsStore.setState({
       explorerFileClickAction: 'external',

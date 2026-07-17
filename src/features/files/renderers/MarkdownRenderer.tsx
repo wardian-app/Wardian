@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -110,9 +111,7 @@ function SafeLink({
   if (!safe) return <span>{children}</span>;
   const local = href ? isLocalTarget(href) : false;
   const fragment = href?.startsWith("#") ?? false;
-  const activate = (event: MouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const openTrustedTarget = () => {
     if (href?.startsWith("#")) {
       onOpenFragment(href.slice(1));
     } else if (local && href) {
@@ -126,11 +125,34 @@ function SafeLink({
       void openUrl(safe).catch(() => window.open(safe, "_blank", "noopener,noreferrer"));
     }
   };
+  const activate = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openTrustedTarget();
+  };
+  const activateFromKeyboard = (event: KeyboardEvent<HTMLAnchorElement>) => {
+    if ((!local && !fragment) || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openTrustedTarget();
+  };
   return (
     <a
-      href={safe}
+      href={local || fragment ? undefined : safe}
+      role={local || fragment ? "link" : undefined}
+      tabIndex={local || fragment ? 0 : undefined}
       onClick={activate}
-      onAuxClick={(event) => { if (fragment) event.preventDefault(); }}
+      onKeyDown={activateFromKeyboard}
+      onAuxClick={(event) => {
+        if (!local && !fragment) return;
+        if (event.button === 1) activate(event);
+        else event.preventDefault();
+      }}
+      onContextMenu={(event) => {
+        if (!local && !fragment) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
       rel="noreferrer"
       target={local || fragment ? undefined : "_blank"}
     >

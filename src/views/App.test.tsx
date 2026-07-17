@@ -580,6 +580,88 @@ describe("Workbench persistence boot integration", () => {
       .toBeNull();
   });
 
+  it("pins an existing transient Files preview when a Markdown link opens it", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    const fileState = (transientPreview: boolean) => ({
+      resource_kind: "file" as const,
+      mode: "preview" as const,
+      transient_preview: transientPreview,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    });
+    const sourcePath = "C:/work/docs/readme.md";
+    const targetPath = "C:/work/linked.md";
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("linked-preview", {
+              surface_type: "files",
+              resource_key: `file:${targetPath}`,
+              state: fileState(true),
+            }),
+            makeSurface("markdown-source", {
+              surface_type: "files",
+              resource_key: `file:${sourcePath}`,
+              state: fileState(false),
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "files-link-durable-zero",
+        });
+      }
+      if (command === "open_file_resource") {
+        const path = (args as { request?: { path?: string } } | undefined)?.request?.path ?? sourcePath;
+        const markdown = path === sourcePath;
+        return Promise.resolve({
+          resource_id: `file:${path}`,
+          subscription_id: `subscription:${path}`,
+          revision: 1,
+          descriptor: {
+            schema: 1,
+            canonical_path: path,
+            display_name: path.split("/").pop(),
+            extension: markdown ? "md" : "txt",
+            mime_type: markdown ? "text/markdown" : "text/plain",
+            encoding: "utf-8",
+            renderer_kind: markdown ? "markdown" : "text",
+            size_bytes: 32,
+            line_count: 1,
+            content_hash: `sha256:${path}`,
+            modified_at_ms: 1,
+            capabilities: { preview: true, changes: false, draft: false, stream: false },
+            unavailable_reason: null,
+          },
+        });
+      }
+      if (command === "read_file_resource_text") {
+        return Promise.resolve({
+          schema: 1,
+          resource_id: `file:${sourcePath}`,
+          revision: 1,
+          text: "[Open linked preview](../linked.md)",
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Open linked preview" }));
+    await waitFor(() => {
+      const saves = mockInvoke.mock.calls.filter(([command]) => command === "save_workbench_state");
+      const latest = saves[saves.length - 1]?.[1] as {
+        document?: ReturnType<typeof makeSingleGroupDocument>;
+      } | undefined;
+      expect(latest?.document?.surfaces["linked-preview"]?.state)
+        .toMatchObject({ transient_preview: false });
+    });
+  });
+
   it("boots the canonical workbench and migrates legacy layout state", async () => {
     setupDefaultMocks([], defaultClasses);
     localStorage.setItem("wardian-layout", "legacy-layout-bytes");

@@ -9,6 +9,7 @@ import { AgentConfig, GitStatusResult } from '../../types';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { normalizeExplorerPathForCompare } from './pathUtils';
 import { createFileSurfaceState, fileResourceKey } from '../files/fileResourceKey';
+import { openPermanentFileSurface } from '../files/fileSurfaceNavigation';
 import type { WorkbenchNavigationService } from '../workbench/navigationService';
 import { useAppShellWorkbenchNavigation } from '../../layout/AppShell';
 
@@ -270,13 +271,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
 
   const openPermanent = (path: string) => {
     runNavigationAction('File open', (currentNavigation) => {
-      const surfaceId = currentNavigation.open(fileSurfaceRequest(path, false)) as unknown;
-      if (surfaceId && typeof (surfaceId as PromiseLike<string>).then === 'function') {
-        return Promise.resolve(surfaceId as PromiseLike<string>).then((resolvedSurfaceId) => (
-          currentNavigation.pin_transient(resolvedSurfaceId)
-        ));
-      }
-      return currentNavigation.pin_transient(surfaceId as string);
+      openPermanentFileSurface(currentNavigation, path);
     });
   };
 
@@ -287,9 +282,16 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
 
   const handleOpenToSide = () => {
     if (activeNode && !activeNode.is_dir) {
-      runNavigationAction('Open to side', (currentNavigation) => (
-        currentNavigation.open_to_side(fileSurfaceRequest(activeNode.path, false), 'horizontal')
-      ));
+      runNavigationAction('Open to Side', (currentNavigation) => {
+        const surfaceId = currentNavigation.open_to_side(
+          fileSurfaceRequest(activeNode.path, false),
+          'horizontal',
+        );
+        if (surfaceId === null) {
+          throw new Error('The current pane is too small to open a file to the side.');
+        }
+        return surfaceId;
+      });
     }
     setMenuPos(null);
   };
