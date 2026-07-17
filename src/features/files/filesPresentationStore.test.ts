@@ -91,6 +91,22 @@ describe("Files presentation store", () => {
     expect(filesPresentationIcon("missing", undefined)).toBe("files");
   });
 
+  it("preserves POSIX backslash basenames and opaque artifact fallback identities", () => {
+    expect(filesPresentationTitle("missing", "file:/tmp/a\\b.md")).toBe("a\\b.md");
+    expect(filesPresentationTitle("missing", "artifact:opaque\\artifact-id"))
+      .toBe("opaque\\artifact-id");
+
+    const store = useFilesPresentationStore.getState();
+    const first = filesSurface("artifact-a", "artifact:opaque\\artifact-id");
+    const second = filesSurface("artifact-b", "artifact:opaque\\artifact-id");
+    store.syncPresentations([second, first]);
+
+    expect(filesPresentationTitle("artifact-a", first.resource_key))
+      .toBe("opaque\\artifact-id (1)");
+    expect(filesPresentationTitle("artifact-b", second.resource_key))
+      .toBe("opaque\\artifact-id (2)");
+  });
+
   it("retains lightweight metadata for hidden open surfaces and prunes closed surfaces", () => {
     const store = useFilesPresentationStore.getState();
     const filesA = filesSurface("files-a", "file:/workspace/a.pdf");

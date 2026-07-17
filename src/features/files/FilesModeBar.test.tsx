@@ -33,15 +33,16 @@ const descriptor: FileContentDescriptorV1 = {
 };
 
 function modeBar(overrides: {
-  descriptor?: FileContentDescriptorV1;
+  resource_key?: string;
+  descriptor?: FileContentDescriptorV1 | null;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
 } = {}) {
   return (
     <FilesModeBar
-      resource_key="file:C:/work/report.pdf"
+      resource_key={overrides.resource_key ?? "file:C:/work/report.pdf"}
       state={state}
-      descriptor={overrides.descriptor ?? descriptor}
+      descriptor={overrides.descriptor === undefined ? descriptor : overrides.descriptor}
       preview_presentation="rendered"
       source_available={false}
       on_preview_presentation_change={vi.fn()}
@@ -157,5 +158,52 @@ describe("FilesModeBar actions menu", () => {
     await user.click(screen.getByRole("button", { name: "File actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Reveal" }));
     expect(onReveal).toHaveBeenCalledWith(canonicalPath);
+  });
+
+  it("preserves a POSIX literal backslash in descriptor-free breadcrumbs and actions", async () => {
+    const user = userEvent.setup();
+    const onOpenWith = vi.fn();
+    const onReveal = vi.fn();
+    const view = render(modeBar({
+      resource_key: "file:/tmp/a\\b.md",
+      descriptor: null,
+      on_open_with: onOpenWith,
+      on_reveal: onReveal,
+    }));
+
+    const breadcrumb = screen.getByRole("navigation", { name: "File location" });
+    expect(breadcrumb).toHaveAttribute("title", "/tmp/a\\b.md");
+    expect(Array.from(view.container.querySelectorAll(".files-breadcrumb-part"))
+      .map((part) => part.textContent)).toEqual(["/", "tmp", "/a\\b.md"]);
+
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Open With" }));
+    expect(onOpenWith).toHaveBeenCalledWith("/tmp/a\\b.md");
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reveal" }));
+    expect(onReveal).toHaveBeenCalledWith("/tmp/a\\b.md");
+  });
+
+  it("uses normalized Windows identity for descriptor-free breadcrumbs and actions", async () => {
+    const user = userEvent.setup();
+    const onOpenWith = vi.fn();
+    const onReveal = vi.fn();
+    render(modeBar({
+      resource_key: "file:C:\\Work\\Docs\\Report.pdf",
+      descriptor: null,
+      on_open_with: onOpenWith,
+      on_reveal: onReveal,
+    }));
+
+    const breadcrumb = screen.getByRole("navigation", { name: "File location" });
+    expect(breadcrumb).toHaveAttribute("title", "C:/Work/Docs/Report.pdf");
+    expect(breadcrumb).toHaveTextContent("C:/Work/Docs/Report.pdf");
+
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Open With" }));
+    expect(onOpenWith).toHaveBeenCalledWith("C:/Work/Docs/Report.pdf");
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reveal" }));
+    expect(onReveal).toHaveBeenCalledWith("C:/Work/Docs/Report.pdf");
   });
 });

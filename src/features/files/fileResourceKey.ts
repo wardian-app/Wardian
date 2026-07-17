@@ -7,7 +7,8 @@ export type DecodedFileResourceKey =
   | { resource_kind: "file"; path: string; resource_key: FileResourceKey }
   | { resource_kind: "artifact"; artifact_id: string; resource_key: FileResourceKey };
 
-function isWindowsAbsolutePath(path: string) {
+/** Identifies path syntax whose backslashes are Windows separators, independent of host OS. */
+export function isWindowsAbsoluteFilePath(path: string) {
   return WINDOWS_DRIVE_ABSOLUTE_PATH.test(path)
     || WINDOWS_UNC_ABSOLUTE_PATH.test(path)
     || path.startsWith("\\\\?\\")
@@ -20,7 +21,7 @@ function isWindowsAbsolutePath(path: string) {
  * their separators so drive, UNC, and extended-length spellings converge.
  */
 export function filePathIdentity(path: string) {
-  return isWindowsAbsolutePath(path) ? path.replace(/\\/g, "/") : path;
+  return isWindowsAbsoluteFilePath(path) ? path.replace(/\\/g, "/") : path;
 }
 
 export function fileResourceKey(path: string): FileResourceKey {

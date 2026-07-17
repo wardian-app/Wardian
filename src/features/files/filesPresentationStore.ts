@@ -8,6 +8,12 @@ import type {
   WorkbenchSurfaceV1,
 } from "../../types";
 import type { DirtySurfacePrompt } from "../workbench/surfaces/dirtySurfaceGuards";
+import {
+  decodeFileResourceKey,
+  filePathIdentity,
+  isWindowsAbsoluteFilePath,
+  type DecodedFileResourceKey,
+} from "./fileResourceKey";
 
 export type FilesPresentationEntry = {
   resource_key: string;
@@ -66,12 +72,13 @@ const ICON_BY_RENDERER: Readonly<Record<FileRendererKind, string>> = {
   unsupported: "files-unsupported",
 };
 
-function resourceValue(resourceKey: string | undefined): string | undefined {
-  if (!resourceKey?.startsWith("file:") && !resourceKey?.startsWith("artifact:")) {
+function decodedResource(resourceKey: string | undefined): DecodedFileResourceKey | undefined {
+  if (resourceKey === undefined) return undefined;
+  try {
+    return decodeFileResourceKey(resourceKey);
+  } catch {
     return undefined;
   }
-  const value = resourceKey.slice(resourceKey.indexOf(":") + 1).replace(/\\/g, "/");
-  return value.length > 0 ? value : undefined;
 }
 
 type PresentationPath = {
@@ -81,11 +88,12 @@ type PresentationPath = {
 };
 
 function normalizedPresentationPath(value: string | undefined): PresentationPath | undefined {
-  const normalized = value?.trim().replace(/\\/g, "/").replace(/\/+$/g, "");
+  const trimmed = value?.trim();
+  const normalized = trimmed ? filePathIdentity(trimmed).replace(/\/+$/g, "") : undefined;
   if (!normalized) return undefined;
   const display = normalized.split("/").filter(Boolean);
   if (display.length === 0) return undefined;
-  const windowsPath = /^[a-z]:\//i.test(normalized) || normalized.startsWith("//");
+  const windowsPath = isWindowsAbsoluteFilePath(normalized);
   const comparison = windowsPath ? display.map((segment) => segment.toLowerCase()) : display;
   return { display, comparison, identity: comparison.join("/") };
 }
@@ -93,7 +101,16 @@ function normalizedPresentationPath(value: string | undefined): PresentationPath
 function entryPath(entry: FilesPresentationEntry): PresentationPath | undefined {
   const descriptorPath = normalizedPresentationPath(entry.descriptor?.canonical_path);
   if (descriptorPath) return descriptorPath;
-  return normalizedPresentationPath(resourceValue(entry.resource_key));
+  const decoded = decodedResource(entry.resource_key);
+  if (decoded?.resource_kind === "file") return normalizedPresentationPath(decoded.path);
+  if (decoded?.resource_kind === "artifact") {
+    return {
+      display: [decoded.artifact_id],
+      comparison: [decoded.artifact_id],
+      identity: decoded.resource_key,
+    };
+  }
+  return undefined;
 }
 
 function entryBaseName(entry: FilesPresentationEntry): string {
@@ -147,10 +164,11 @@ function distinguishingTitle(surfaceId: string, entry: FilesPresentationEntry): 
 }
 
 function basename(resourceKey: string | undefined): string | undefined {
-  const value = resourceValue(resourceKey)?.replace(/\/+$/, "");
-  if (!value) return undefined;
-  const name = value.slice(value.lastIndexOf("/") + 1);
-  return name || undefined;
+  const decoded = decodedResource(resourceKey);
+  if (decoded?.resource_kind === "artifact") return decoded.artifact_id;
+  if (decoded?.resource_kind !== "file") return undefined;
+  const display = normalizedPresentationPath(decoded.path)?.display;
+  return display?.[display.length - 1];
 }
 
 function fallbackIcon(resourceKey: string | undefined): string {

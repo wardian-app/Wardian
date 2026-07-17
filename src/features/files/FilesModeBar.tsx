@@ -11,6 +11,7 @@ import {
 import { BookOpen, Pencil } from "lucide-react";
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
+import { decodeFileResourceKey, isWindowsAbsoluteFilePath } from "./fileResourceKey";
 import type { FilePreviewPresentation } from "./rendererRegistry";
 
 type FilesModeBarProps = {
@@ -24,19 +25,16 @@ type FilesModeBarProps = {
   on_reveal: (path: string) => Promise<void> | void;
 };
 
-function resourcePath(resourceKey: string) {
-  return resourceKey.slice(resourceKey.indexOf(":") + 1).replace(/\\/g, "/");
-}
-
 type BreadcrumbPart = { separator: string; label: string };
 
 function breadcrumbParts(path: string): BreadcrumbPart[] {
-  const separator = path.includes("\\") ? "\\" : "/";
-  const drive = /^[A-Za-z]:[\\/]/.exec(path)?.[0].slice(0, 2);
-  const unc = path.startsWith("\\\\") || path.startsWith("//");
+  const windowsPath = isWindowsAbsoluteFilePath(path);
+  const separator = windowsPath && path.includes("\\") ? "\\" : "/";
+  const drive = windowsPath ? /^[A-Za-z]:[\\/]/.exec(path)?.[0].slice(0, 2) : undefined;
+  const unc = windowsPath && (path.startsWith("\\\\") || path.startsWith("//"));
   const rooted = !unc && path.startsWith("/");
   const rest = drive ? path.slice(3) : unc ? path.slice(2) : rooted ? path.slice(1) : path;
-  const segments = rest.split(/[\\/]+/).filter(Boolean);
+  const segments = rest.split(windowsPath ? /[\\/]+/ : /\/+/).filter(Boolean);
 
   if (drive) {
     return [
@@ -76,9 +74,15 @@ export function FilesModeBar({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const initialMenuItemRef = useRef(0);
-  const actionPath = descriptor?.canonical_path ?? resourcePath(resource_key);
-  const displayPath = formatExplorerPathForDisplay(actionPath);
-  const parts = useMemo(() => breadcrumbParts(displayPath), [displayPath]);
+  const decodedResource = useMemo(() => decodeFileResourceKey(resource_key), [resource_key]);
+  const opaqueFallback = descriptor === null && decodedResource.resource_kind === "artifact";
+  const actionPath = descriptor?.canonical_path ?? (decodedResource.resource_kind === "file"
+    ? decodedResource.path
+    : decodedResource.artifact_id);
+  const displayPath = opaqueFallback ? actionPath : formatExplorerPathForDisplay(actionPath);
+  const parts = useMemo(() => opaqueFallback
+    ? [{ separator: "", label: displayPath }]
+    : breadcrumbParts(displayPath), [displayPath, opaqueFallback]);
   const changesReasonId = `${unavailableReasonId}-changes`;
   const draftReasonId = `${unavailableReasonId}-draft`;
   const changesReason = "Changes is not available in this foundation.";
