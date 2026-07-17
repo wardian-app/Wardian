@@ -80,11 +80,11 @@ describe("FileResourceClient", () => {
       agent_id: "agent-1",
       user_file_capability_id: null,
     })).resolves.toEqual(snapshot);
-    await expect(client.readText(snapshot.resource_id, snapshot.revision)).resolves.toEqual(text);
+    await expect(client.readText(snapshot)).resolves.toEqual(text);
     await expect(
-      client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-1"),
+      client.issueTicket(snapshot, "preview-pane-1"),
     ).resolves.toEqual(ticket);
-    await client.closeRendererLease(snapshot.resource_id, "preview-pane-1");
+    await client.closeRendererLease(snapshot, "preview-pane-1");
     await client.close(snapshot.subscription_id);
 
     expect(mockInvoke.mock.calls).toEqual([
@@ -152,7 +152,7 @@ describe("FileResourceClient", () => {
       .toHaveLength(1);
   });
 
-  it("keeps the newest open subscription when responses resolve out of order", async () => {
+  it("keeps each owner bound to its own subscription when opens resolve out of order", async () => {
     let resolveFirst: ((value: FileResourceSnapshotV1) => void) | undefined;
     let resolveSecond: ((value: FileResourceSnapshotV1) => void) | undefined;
     const firstResponse = new Promise<FileResourceSnapshotV1>((resolve) => {
@@ -164,7 +164,7 @@ describe("FileResourceClient", () => {
     mockInvoke
       .mockImplementationOnce(() => firstResponse)
       .mockImplementationOnce(() => secondResponse)
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         schema: 1,
         resource_id: snapshot.resource_id,
         revision: 5,
@@ -182,28 +182,38 @@ describe("FileResourceClient", () => {
       user_file_capability_id: null,
     });
 
-    resolveSecond?.({ ...snapshot, subscription_id: "subscription-2", revision: 5 });
-    await second;
+    const secondSnapshot = { ...snapshot, subscription_id: "subscription-2", revision: 5 };
+    resolveSecond?.(secondSnapshot);
+    await expect(second).resolves.toEqual(secondSnapshot);
     resolveFirst?.(snapshot);
-    await first;
-    await client.readText(snapshot.resource_id, 5);
+    await expect(first).resolves.toEqual(snapshot);
+    await client.readText(secondSnapshot);
+    await client.readText(snapshot);
 
-    expect(mockInvoke).toHaveBeenLastCalledWith("read_file_resource_text", {
-      request: {
-        resource_id: snapshot.resource_id,
-        subscription_id: "subscription-2",
-        revision: 5,
-      },
-    });
+    expect(mockInvoke.mock.calls.slice(-2)).toEqual([
+      ["read_file_resource_text", {
+        request: {
+          resource_id: snapshot.resource_id,
+          subscription_id: secondSnapshot.subscription_id,
+          revision: secondSnapshot.revision,
+        },
+      }],
+      ["read_file_resource_text", {
+        request: {
+          resource_id: snapshot.resource_id,
+          subscription_id: snapshot.subscription_id,
+          revision: snapshot.revision,
+        },
+      }],
+    ]);
   });
 
-  it("falls back to an older live subscription when a newer authorization closes", async () => {
+  it("keeps simultaneous controllers isolated when either subscription closes", async () => {
     const older = { ...snapshot, subscription_id: "subscription-older" };
     const newer = { ...snapshot, subscription_id: "subscription-newer" };
     mockInvoke
       .mockResolvedValueOnce(older)
       .mockResolvedValueOnce(newer)
-      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({
         schema: 1,
         resource_id: snapshot.resource_id,
@@ -219,6 +229,13 @@ describe("FileResourceClient", () => {
         renderer_lease_id: "preview-pane-older",
         expires_at_ms: 1_700_000_060_000,
       } satisfies FileResourceTicketV1)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        schema: 1,
+        resource_id: snapshot.resource_id,
+        revision: snapshot.revision,
+        text: "older remains authorized",
+      } satisfies FileResourceTextV1)
       .mockResolvedValueOnce(undefined);
 
     const client = new FileResourceClient();
@@ -233,18 +250,19 @@ describe("FileResourceClient", () => {
       user_file_capability_id: null,
     });
 
+    await client.readText(older);
+    await client.issueTicket(older, "preview-pane-older");
     await client.close(newer.subscription_id);
-    await client.readText(snapshot.resource_id, snapshot.revision);
-    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-older");
+    await client.readText(older);
 
-    expect(mockInvoke).toHaveBeenNthCalledWith(4, "read_file_resource_text", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(3, "read_file_resource_text", {
       request: {
         resource_id: snapshot.resource_id,
         subscription_id: older.subscription_id,
         revision: snapshot.revision,
       },
     });
-    expect(mockInvoke).toHaveBeenNthCalledWith(5, "issue_file_resource_ticket", {
+    expect(mockInvoke).toHaveBeenNthCalledWith(4, "issue_file_resource_ticket", {
       request: {
         resource_id: snapshot.resource_id,
         subscription_id: older.subscription_id,
@@ -253,9 +271,14 @@ describe("FileResourceClient", () => {
       },
     });
 
+    expect(mockInvoke).toHaveBeenNthCalledWith(6, "read_file_resource_text", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: older.subscription_id,
+        revision: snapshot.revision,
+      },
+    });
     await client.close(older.subscription_id);
-    expect(() => client.readText(snapshot.resource_id, snapshot.revision))
-      .toThrow(`File resource is not open: ${snapshot.resource_id}`);
   });
 
   it("closes a renderer lease with the subscription that successfully issued it", async () => {
@@ -284,19 +307,19 @@ describe("FileResourceClient", () => {
       agent_id: "agent-issuing",
       user_file_capability_id: null,
     });
-    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned");
+    await client.issueTicket(issuing, "preview-pane-owned");
     await client.open({
       path: descriptor.canonical_path,
       agent_id: "agent-newer",
       user_file_capability_id: null,
     });
     await expect(
-      client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned"),
+      client.issueTicket(newer, "preview-pane-owned"),
     ).rejects.toThrow("lease reissue denied");
 
-    await expect(client.closeRendererLease(snapshot.resource_id, "preview-pane-owned"))
+    await expect(client.closeRendererLease(issuing, "preview-pane-owned"))
       .rejects.toThrow("transient lease close failure");
-    await expect(client.closeRendererLease(snapshot.resource_id, "preview-pane-owned"))
+    await expect(client.closeRendererLease(issuing, "preview-pane-owned"))
       .resolves.toBeUndefined();
 
     const leaseCloses = mockInvoke.mock.calls.filter(
@@ -320,7 +343,7 @@ describe("FileResourceClient", () => {
     ]);
   });
 
-  it("forgets renderer lease ownership only after its subscription closes successfully", async () => {
+  it("never retargets renderer cleanup after its owning subscription closes", async () => {
     const issuing = { ...snapshot, subscription_id: "subscription-issuing" };
     const newer = { ...snapshot, subscription_id: "subscription-newer" };
     mockInvoke
@@ -345,7 +368,7 @@ describe("FileResourceClient", () => {
       agent_id: "agent-issuing",
       user_file_capability_id: null,
     });
-    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-owned");
+    await client.issueTicket(issuing, "preview-pane-owned");
     await client.open({
       path: descriptor.canonical_path,
       agent_id: "agent-newer",
@@ -354,7 +377,7 @@ describe("FileResourceClient", () => {
 
     await expect(client.close(issuing.subscription_id))
       .rejects.toThrow("transient resource close failure");
-    await client.closeRendererLease(snapshot.resource_id, "preview-pane-owned");
+    await client.closeRendererLease(issuing, "preview-pane-owned");
     expect(mockInvoke).toHaveBeenLastCalledWith("close_file_renderer_lease", {
       request: {
         resource_id: snapshot.resource_id,
@@ -364,11 +387,11 @@ describe("FileResourceClient", () => {
     });
 
     await client.close(issuing.subscription_id);
-    await client.closeRendererLease(snapshot.resource_id, "preview-pane-owned");
+    await client.closeRendererLease(issuing, "preview-pane-owned");
     expect(mockInvoke).toHaveBeenLastCalledWith("close_file_renderer_lease", {
       request: {
         resource_id: snapshot.resource_id,
-        subscription_id: newer.subscription_id,
+        subscription_id: issuing.subscription_id,
         renderer_lease_id: "preview-pane-owned",
       },
     });
@@ -394,7 +417,7 @@ describe("FileResourceClient", () => {
 
     await expect(client.close(snapshot.subscription_id))
       .rejects.toThrow("transient close failure");
-    await client.readText(snapshot.resource_id, snapshot.revision);
+    await client.readText(snapshot);
     expect(mockInvoke).toHaveBeenCalledWith("read_file_resource_text", {
       request: {
         resource_id: snapshot.resource_id,

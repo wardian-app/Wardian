@@ -549,6 +549,22 @@ describe("workbench model", () => {
     });
   });
 
+  it("discards a provisional-identity surface without adding close history", () => {
+    const provisional = makeSurface("surface-provisional", { surface_type: "files" });
+    const retained = makeSurface("surface-retained", { surface_type: "files" });
+    const initial = makeSingleGroupDocument([retained, provisional]);
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "discard_surface",
+      surface_id: provisional.surface_id,
+      provisional_identity: true,
+    }));
+
+    expect(document.groups["group-1"].surface_ids).toEqual([retained.surface_id]);
+    expect(document.surfaces[provisional.surface_id]).toBeUndefined();
+    expect(document.recently_closed).toEqual([]);
+  });
+
   it("collapses an active group closed through its final surface and reopens in the sibling subtree", () => {
     let document = makeSingleGroupDocument([makeSurface("surface-1")]);
     document = acceptedDocument(applyWorkbenchCommand(document, {

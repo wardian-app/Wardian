@@ -103,6 +103,15 @@ Files also uses `focus_resource`. Its canonical resource key is either
 `artifact:<artifact-id>`. These identities never collapse into each other even
 when an artifact is backed by the same file.
 
+An Explorer or restored path is provisional until `open_file_resource` returns
+its backend-owned `resource_id`. The visible Files surface then applies
+`canonicalize_resource` as one Workbench transaction. A normal alias open
+focuses and removes itself in favor of an existing canonical presentation,
+even when that presentation is in another pane. Only `open_to_side` carries
+ephemeral explicit-duplicate provenance through this first rekey; its two
+presentations converge to the same canonical key and remain in separate panes.
+The frontend never resolves symlinks, junctions, or filesystem authority.
+
 ### Render policies
 
 - `keep_alive` retains the logical component while its tab is hidden. Expensive
@@ -181,7 +190,9 @@ The Rust lifecycle is:
    nothing.
 3. Text reads are bound to the subscription and current revision. Image/PDF
    streams require a short-lived ticket bound to the subscription, WebView,
-   renderer lease, and revision.
+   renderer lease, and revision. Renderer calls carry the exact owning
+   snapshot's `subscription_id`; the client never selects a newer subscription
+   merely because another pane opened the same resource.
 4. `close_file_renderer_lease` revokes that renderer's tickets without closing
    another pane's subscription. `close_file_resource` releases one
    subscription; the watcher disappears only after the last subscriber closes.
@@ -197,6 +208,9 @@ Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
 5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for
 images, and 256 MiB for PDFs. HTML and SVG resolve to the unsupported renderer
 until the zero-Tauri-capability, networkless active artifact host is available.
+PDF search is debounced and stops after 128 pages or two seconds, whichever
+comes first. Partial results state exactly how many pages were searched; the
+PDF renderer still mounts no more than three page slots.
 
 ## Persistence and Migration
 

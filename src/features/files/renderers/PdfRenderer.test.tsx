@@ -167,15 +167,15 @@ describe("PdfRenderer", () => {
     const firstTicket = new Promise<object>((resolve) => { resolveFirst = resolve; });
     const issuedLeases: string[] = [];
     const client = {
-      issueTicket: vi.fn().mockImplementation((_resource, revision, lease) => {
+      issueTicket: vi.fn().mockImplementation((owner: FileResourceSnapshotV1, lease: string) => {
         issuedLeases.push(lease);
-        if (revision === 3) return firstTicket;
+        if (owner.revision === 3) return firstTicket;
         return Promise.resolve({
           schema: 1,
           ticket_id: "ticket-current",
           url: "wardian-resource://localhost/ticket-current",
           resource_id: snapshot().resource_id,
-          revision,
+          revision: owner.revision,
           renderer_lease_id: lease,
           expires_at_ms: Date.now() + 60_000,
         });
@@ -196,7 +196,11 @@ describe("PdfRenderer", () => {
       expires_at_ms: Date.now() + 60_000,
     });
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledWith(
-      snapshot().resource_id,
+      expect.objectContaining({
+        resource_id: snapshot().resource_id,
+        subscription_id: snapshot().subscription_id,
+        revision: 3,
+      }),
       issuedLeases[0],
     ));
     expect(getDocument).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -269,6 +273,40 @@ describe("PdfRenderer", () => {
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
   });
 
+  it("bounds search work and reports partial results for million-page documents", async () => {
+    const getTextContent = vi.fn().mockResolvedValue({ items: [{ str: "needle" }] });
+    const getPage = vi.fn().mockImplementation(async () => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
+      getTextContent,
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+    }));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 1_000_000, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+
+    await screen.findByText("Page 1");
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search PDF" }), {
+      target: { value: "needle" },
+    });
+    expect(await screen.findByText(
+      "128 matches in 128 of 1000000 pages (search limited)",
+      {},
+      { timeout: 2_000 },
+    )).toBeInTheDocument();
+    expect(getTextContent).toHaveBeenCalledTimes(128);
+    expect(screen.getAllByRole("figure")).toHaveLength(2);
+  });
+
   it("caps malicious page geometry, zoom, and device pixel ratio before canvas allocation", async () => {
     vi.stubGlobal("devicePixelRatio", 16);
     const pageRender = vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() });
@@ -309,12 +347,11 @@ describe("PdfRenderer", () => {
       destroy,
     });
     const issueTicket = vi.fn().mockImplementation(async (
-      _resource: string,
-      revision: number,
+      owner: FileResourceSnapshotV1,
       lease: string,
     ) => ({
         schema: 1, ticket_id: lease, url: `wardian-resource://localhost/${lease}`,
-        resource_id: snapshot().resource_id, revision, renderer_lease_id: lease,
+        resource_id: owner.resource_id, revision: owner.revision, renderer_lease_id: lease,
         expires_at_ms: Date.now() + 60_000,
       }));
     const client = {
@@ -348,6 +385,6 @@ describe("PdfRenderer", () => {
     pageResolvers.splice(0).forEach((resolve) => resolve());
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(searchGetPage.mock.calls.length).toBeLessThan(10);
-    expect(new Set(issueTicket.mock.calls.map((call) => call[2])).size).toBe(2);
+    expect(new Set(issueTicket.mock.calls.map((call) => call[1])).size).toBe(2);
   });
 });

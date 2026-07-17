@@ -17,7 +17,7 @@ export type WorkbenchCommand =
   | { type: "open_surface"; surface: WorkbenchSurfaceV1; group_id?: string; index?: number }
   | { type: "focus_surface"; surface_id: string }
   | { type: "close_surface"; surface_id: string }
-  | { type: "discard_surface"; surface_id: string }
+  | { type: "discard_surface"; surface_id: string; provisional_identity?: boolean }
   | { type: "replace_surface"; surface: WorkbenchSurfaceV1 }
   | { type: "reopen_closed_surface" }
   | { type: "reopen_closed_in_placeholder"; surface_id: string }
@@ -960,7 +960,11 @@ export function applyWorkbenchCommand(
 
     case "discard_surface": {
       const surface = document.surfaces[command.surface_id];
-      if (surface && surface.surface_type !== "new-tab") {
+      if (
+        surface
+        && surface.surface_type !== "new-tab"
+        && command.provisional_identity !== true
+      ) {
         return commandRejected(
           document,
           "only New Tab surfaces can be discarded",

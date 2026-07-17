@@ -810,6 +810,167 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["left-preview"]).toEqual(transient);
   });
 
+  it("collapses a normal alias open across groups into the backend-canonical surface", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const canonical = makeSurface("canonical", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const initial = makeSingleGroupDocument([], "left");
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "left" },
+      second: { kind: "group", group_id: "right" },
+    };
+    initial.groups.right = {
+      group_id: "right",
+      surface_ids: [canonical.surface_id],
+      active_surface_id: canonical.surface_id,
+    };
+    initial.surfaces[canonical.surface_id] = canonical;
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["raw-alias"]),
+    });
+
+    expect(navigation.open({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    })).toBe("raw-alias");
+    await expect(navigation.canonicalize_resource("raw-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    })).resolves.toBe("allow");
+
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
+    expect(store.getState().document.active_group_id).toBe("right");
+    expect(store.getState().document.groups.right.active_surface_id).toBe("canonical");
+  });
+
+  it("preserves an explicit Open to Side duplicate through canonical rekeying", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const canonical = makeSurface("canonical", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([canonical]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+    });
+
+    expect(navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    })).toBe("side-alias");
+    await expect(navigation.canonicalize_resource("side-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    })).resolves.toBe("allow");
+
+    expect(Object.values(store.getState().document.surfaces).map(
+      (surface) => surface.resource_key,
+    )).toEqual(["file:C:/real/report.md", "file:C:/real/report.md"]);
+    expect(Object.keys(store.getState().document.groups)).toHaveLength(2);
+    expect(store.getState().document.groups["side-group"].surface_ids).toEqual(["side-alias"]);
+  });
+
+  it("consumes Open to Side provenance when the first backend key is already canonical", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const canonical = makeSurface("canonical", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([canonical]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-copy"]),
+    });
+    navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+
+    await navigation.canonicalize_resource("side-copy", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    await navigation.rebind_resource("side-copy", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    await navigation.canonicalize_resource("side-copy", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
+    expect(store.getState().document.active_group_id).toBe("group-1");
+  });
+
+  it("drops Open to Side provenance when its provisional surface closes", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const canonical = makeSurface("canonical", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([canonical]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([
+        "side-group",
+        "side-node",
+        "reused-surface-id",
+        "reused-surface-id",
+      ]),
+    });
+    navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    await navigation.close("reused-surface-id");
+
+    navigation.open({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    await navigation.canonicalize_resource("reused-surface-id", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
+  });
+
   it("does not reuse a transient Files surface from another group", () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const otherGroupTransient = makeSurface("right-preview", {

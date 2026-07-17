@@ -134,7 +134,7 @@ export default function MonacoTextRenderer({ snapshot, client, lifecycle }: File
     setError(null);
 
     void Promise.all([
-      client.readText(snapshot.resource_id, snapshot.revision),
+      client.readText(snapshot),
       loadMonaco(),
     ]).then(([resource, monaco]) => {
       if (cancelled) return;

@@ -41,7 +41,7 @@ function snapshot(
   descriptorValue: FileContentDescriptorV1 = descriptor(),
 ): FileResourceSnapshotV1 {
   return {
-    resource_id: "resource-1",
+    resource_id: "file:C:/work/docs/report.pdf",
     subscription_id: "subscription-1",
     revision: 1,
     descriptor: descriptorValue,
@@ -163,6 +163,37 @@ describe("FilesSurface", () => {
       agent_id: null,
       user_file_capability_id: null,
     }, expect.any(FileResourceClient));
+  });
+
+  it("reports backend canonical identity for a restored alias without rewriting it locally", async () => {
+    const onCanonicalResource = vi.fn().mockResolvedValue(undefined);
+    render(<FilesSurface {...props({
+      resource_key: "file:C:/work/link/report.pdf",
+      on_canonical_resource: onCanonicalResource,
+    })} />);
+
+    await waitFor(() => expect(onCanonicalResource).toHaveBeenCalledWith(
+      "file:C:/work/docs/report.pdf",
+    ));
+    expect(useFileResourceMock).toHaveBeenCalledWith({
+      path: "C:/work/link/report.pdf",
+      agent_id: null,
+      user_file_capability_id: null,
+    }, expect.any(FileResourceClient));
+  });
+
+  it("acknowledges an already-canonical snapshot once so duplicate provenance is released", async () => {
+    const onCanonicalResource = vi.fn().mockResolvedValue(undefined);
+    const view = render(<FilesSurface {...props({
+      on_canonical_resource: onCanonicalResource,
+    })} />);
+    await waitFor(() => expect(onCanonicalResource).toHaveBeenCalledOnce());
+    expect(onCanonicalResource).toHaveBeenCalledWith("file:C:/work/docs/report.pdf");
+
+    view.rerender(<FilesSurface {...props({
+      on_canonical_resource: onCanonicalResource,
+    })} />);
+    expect(onCanonicalResource).toHaveBeenCalledOnce();
   });
 
   it("keeps breadcrumb identity visible while metadata and actions live in overflow", () => {

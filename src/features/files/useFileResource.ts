@@ -51,6 +51,7 @@ class FileResourceController {
   #loadGeneration = 0;
   #listenerSetup: Promise<void> | null = null;
   #unlisten: (() => void) | null = null;
+  #preSnapshotRevisions = new Map<string, FileResourceEventV1>();
 
   constructor(
     client: FileResourceClient,
@@ -131,7 +132,16 @@ class FileResourceController {
         return;
       }
       const previousSubscription = this.#state.snapshot?.subscription_id;
-      this.#publish({ status: "ready", snapshot, error: null });
+      const observed = this.#preSnapshotRevisions.get(snapshot.resource_id);
+      this.#preSnapshotRevisions.clear();
+      const reconciledSnapshot = observed && observed.revision > snapshot.revision
+        ? {
+            ...snapshot,
+            revision: observed.revision,
+            descriptor: observed.descriptor,
+          }
+        : snapshot;
+      this.#publish({ status: "ready", snapshot: reconciledSnapshot, error: null });
       if (previousSubscription && previousSubscription !== snapshot.subscription_id) {
         await this.#client.close(previousSubscription).catch(() => undefined);
       }
@@ -144,9 +154,19 @@ class FileResourceController {
 
   #applyRevision(event: FileResourceEventV1) {
     const snapshot = this.#state.snapshot;
+    if (!snapshot) {
+      const previous = this.#preSnapshotRevisions.get(event.resource_id);
+      if (!previous || event.revision > previous.revision) {
+        this.#preSnapshotRevisions.set(event.resource_id, event);
+        if (this.#preSnapshotRevisions.size > 64) {
+          const oldest = this.#preSnapshotRevisions.keys().next().value;
+          if (oldest !== undefined) this.#preSnapshotRevisions.delete(oldest);
+        }
+      }
+      return;
+    }
     if (
       this.#disposed
-      || !snapshot
       || event.resource_id !== snapshot.resource_id
       || event.revision <= snapshot.revision
     ) {

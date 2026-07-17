@@ -176,7 +176,7 @@ export default function MarkdownRenderer({
     let cancelled = false;
     setText(null);
     setError(null);
-    void client.readText(snapshot.resource_id, snapshot.revision).then((resource) => {
+    void client.readText(snapshot).then((resource) => {
       if (!cancelled && resource.revision === snapshot.revision) setText(resource.text);
     }).catch((cause) => {
       if (!cancelled) setError(errorMessage(cause));

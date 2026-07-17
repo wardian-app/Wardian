@@ -51,8 +51,9 @@ The Files IPC contract uses snake-case DTOs nested under `request`:
 For complete request and response JSON, see
 [Tauri Command Reference](./tauri-command-reference.md#files-resources-commandsfilesrs).
 Do not persist picker capability IDs, subscriptions, revisions, tickets, or
-leases in Workbench state. Restoration sends the canonical path with both
-authorization IDs set to `null`; the backend resolves current authority again.
+leases in Workbench state. Restoration sends its saved path with both
+authorization IDs set to `null`; the backend resolves current authority again
+and the Workbench converges the tab to the returned canonical `resource_id`.
 
 ## 🔔 Events (Backend to Frontend)
 
@@ -146,6 +147,13 @@ IDs and revisions not newer than their snapshot, then reopen through
 `open_file_resource`; they do not read a new revision through an old
 subscription snapshot. A stale `read_file_resource_text` or stream ticket
 request fails with `stale_revision`.
+
+Listener readiness alone does not close the response-publication race. While
+the initial open is pending, the controller coalesces the highest event per
+resource. Before publishing the returned snapshot, it combines that snapshot's
+owning subscription with any higher observed revision and descriptor. This
+prevents a stable event delivered between backend response formation and React
+snapshot publication from being discarded.
 
 The backend owns one watcher per canonical file, shared by every subscription.
 Closing a renderer lease revokes only its stream tickets. Closing the last file

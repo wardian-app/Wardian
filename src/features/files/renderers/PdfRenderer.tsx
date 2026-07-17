@@ -8,6 +8,8 @@ const PDF_MAX_SIZE_BYTES = 256 * 1024 * 1024;
 const PDF_RANGE_CHUNK_BYTES = 65_536;
 const PDF_RENDER_WINDOW = 1;
 const PDF_SEARCH_DEBOUNCE_MS = 250;
+const PDF_SEARCH_PAGE_BUDGET = 128;
+const PDF_SEARCH_TIME_BUDGET_MS = 2_000;
 const PDF_MAX_CSS_DIMENSION = 4_096;
 const PDF_MAX_CSS_PIXELS = 16_000_000;
 const PDF_MAX_CANVAS_DIMENSION = 8_192;
@@ -18,6 +20,13 @@ const PDF_PAGE_GAP = 16;
 const PDF_MAX_VIRTUAL_HEIGHT = 16_000_000;
 let pdfLeaseSequence = 0;
 
+type PdfSearchResult = {
+  matches: number;
+  searched_pages: number;
+  total_pages: number;
+  partial: boolean;
+};
+
 function nextLeaseId(resourceId: string, revision: number) {
   pdfLeaseSequence += 1;
   return `pdf:${resourceId}@${revision}:${pdfLeaseSequence}`;
@@ -27,9 +36,13 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function releaseLease(client: FileRendererProps["client"], resourceId: string, leaseId: string) {
+function releaseLease(
+  client: FileRendererProps["client"],
+  snapshot: FileRendererProps["snapshot"],
+  leaseId: string,
+) {
   try {
-    void client.closeRendererLease(resourceId, leaseId).catch(() => undefined);
+    void client.closeRendererLease(snapshot, leaseId).catch(() => undefined);
   } catch {
     // Subscription teardown is the final capability revocation boundary.
   }
@@ -171,7 +184,8 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const [retryToken, setRetryToken] = useState(0);
   const [scale, setScale] = useState(1);
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<number | null>(null);
+  const [searchResult, setSearchResult] = useState<PdfSearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
   const [centerPage, setCenterPage] = useState(1);
   const [estimatedPageHeight, setEstimatedPageHeight] = useState(PDF_ESTIMATED_PAGE_HEIGHT);
   const descriptor = snapshot.descriptor;
@@ -199,7 +213,7 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     const release = () => {
       if (!issued || released) return;
       released = true;
-      releaseLease(client, snapshot.resource_id, leaseId);
+      releaseLease(client, snapshot, leaseId);
     };
     const disposeAttempt = () => {
       if (!disposed) {
@@ -212,13 +226,14 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     disposeAttemptRef.current = disposeAttempt;
     setDocument(null);
     setError(null);
-    setMatches(null);
+    setSearchResult(null);
+    setSearching(false);
     setCenterPage(1);
     setEstimatedPageHeight(PDF_ESTIMATED_PAGE_HEIGHT);
 
     void (async () => {
       try {
-        const ticket = await client.issueTicket(snapshot.resource_id, snapshot.revision, leaseId);
+        const ticket = await client.issueTicket(snapshot, leaseId);
         issued = true;
         if (cancelled || ticket.revision !== snapshot.revision) {
           disposeAttempt();
@@ -260,21 +275,34 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   useEffect(() => {
     const normalizedQuery = query.trim();
     if (!document || !normalizedQuery) {
-      setMatches(normalizedQuery ? 0 : null);
+      setSearchResult(normalizedQuery && document ? {
+        matches: 0,
+        searched_pages: 0,
+        total_pages: document.numPages,
+        partial: document.numPages > 0,
+      } : null);
+      setSearching(false);
       return;
     }
     let cancelled = false;
+    setSearchResult(null);
+    setSearching(true);
     const timer = globalThis.setTimeout(() => {
       void (async () => {
         try {
           const needle = normalizedQuery.toLocaleLowerCase();
           let count = 0;
-          for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+          let searchedPages = 0;
+          const startedAt = performance.now();
+          const pageLimit = Math.min(document.numPages, PDF_SEARCH_PAGE_BUDGET);
+          for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
             if (cancelled) return;
+            if (performance.now() - startedAt >= PDF_SEARCH_TIME_BUDGET_MS) break;
             const page = await document.getPage(pageNumber);
             if (cancelled) return;
             const content = await page.getTextContent();
             if (cancelled) return;
+            searchedPages += 1;
             const text = content.items
               .map((item) => "str" in item ? item.str : "")
               .join(" ")
@@ -285,9 +313,20 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
               from += Math.max(1, needle.length);
             }
           }
-          if (!cancelled) setMatches(count);
+          if (!cancelled) {
+            setSearchResult({
+              matches: count,
+              searched_pages: searchedPages,
+              total_pages: document.numPages,
+              partial: searchedPages < document.numPages,
+            });
+            setSearching(false);
+          }
         } catch (cause) {
-          if (!cancelled) failPdf(cause);
+          if (!cancelled) {
+            setSearching(false);
+            failPdf(cause);
+          }
         }
       })();
     }, PDF_SEARCH_DEBOUNCE_MS);
@@ -345,7 +384,15 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
           <span className="files-visually-hidden">Search PDF</span>
           <input aria-label="Search PDF" type="search" value={query} onChange={(event) => setQuery(event.target.value)} />
         </label>
-        {matches !== null ? <output aria-live="polite">{matches} {matches === 1 ? "match" : "matches"}</output> : null}
+        {searching ? <output aria-live="polite">Searching…</output> : null}
+        {!searching && searchResult ? (
+          <output aria-live="polite">
+            {searchResult.matches} {searchResult.matches === 1 ? "match" : "matches"}
+            {searchResult.partial
+              ? ` in ${searchResult.searched_pages} of ${searchResult.total_pages} pages (search limited)`
+              : ""}
+          </output>
+        ) : null}
         <button type="button" aria-label="Zoom out" onClick={() => setScale((value) => Math.max(0.5, value - 0.25))}>−</button>
         <output aria-label="PDF zoom">{Math.round(scale * 100)}%</output>
         <button type="button" aria-label="Zoom in" onClick={() => setScale((value) => Math.min(4, value + 0.25))}>+</button>

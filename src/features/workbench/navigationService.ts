@@ -37,6 +37,8 @@ export interface WorkbenchNavigationService {
     direction?: "horizontal" | "vertical",
   ): string | null;
   focus(surface_id: string): void;
+  /** Converges a provisional resource key after the backend returns canonical identity. */
+  canonicalize_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   rebind_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   reset_surface(surface_id: string): Promise<CloseDecision>;
   close(surface_id: string): Promise<CloseDecision>;
@@ -67,6 +69,7 @@ export function createWorkbenchNavigationService(
 ): WorkbenchNavigationService {
   const { registry, store } = options;
   const createId = options.create_id ?? defaultCreateId;
+  const explicitDuplicateSurfaceIds = new Set<string>();
 
   const apply = (commands: readonly WorkbenchCommand[]): void => {
     const result = store.getState().apply_commands(commands);
@@ -325,10 +328,77 @@ export function createWorkbenchNavigationService(
         },
         { type: "open_surface", surface, group_id: groupId },
       ]);
+      explicitDuplicateSurfaceIds.add(surfaceId);
       return surfaceId;
     },
 
     focus: (surfaceId) => apply([{ type: "focus_surface", surface_id: surfaceId }]),
+
+    canonicalize_resource: async (surfaceId, request) => {
+      registry.require(request.surface_type);
+      const snapshotState = store.getState();
+      const snapshot = snapshotState.document;
+      const source = snapshot.surfaces[surfaceId];
+      if (!source) throw new Error(`surface ${surfaceId} does not exist`);
+      const replacement = createSurface(request, surfaceId);
+      if (replacement.resource_key === source.resource_key) {
+        explicitDuplicateSurfaceIds.delete(surfaceId);
+        return "allow";
+      }
+
+      const candidates = orderedSurfaces(snapshotState).filter(
+        (candidate) => candidate.surface_id !== surfaceId,
+      );
+      const existingId = registry.resolve_existing(
+        { ...request, duplicate: false },
+        candidates,
+      );
+      const preserveExplicitDuplicate = explicitDuplicateSurfaceIds.has(surfaceId);
+      let commands: WorkbenchCommand[];
+      let guardedSurfaceIds = [surfaceId];
+
+      if (existingId && !preserveExplicitDuplicate) {
+        const existing = snapshot.surfaces[existingId];
+        if (!existing) throw new Error(`surface ${existingId} does not exist`);
+        if (transientStatus(source) === false && transientStatus(existing) === true) {
+          guardedSurfaceIds = [surfaceId, existingId];
+          commands = [
+            {
+              type: "discard_surface",
+              surface_id: surfaceId,
+              provisional_identity: true,
+            },
+            { type: "replace_surface", surface: createSurface(request, existingId) },
+            { type: "focus_surface", surface_id: existingId },
+          ];
+        } else {
+          commands = [
+            {
+              type: "discard_surface",
+              surface_id: surfaceId,
+              provisional_identity: true,
+            },
+            { type: "focus_surface", surface_id: existingId },
+          ];
+        }
+      } else {
+        commands = [{ type: "replace_surface", surface: replacement }];
+      }
+
+      if (
+        await guardSurfaces(
+          snapshot,
+          snapshotState.transaction_version,
+          guardedSurfaceIds,
+        ) === "cancel"
+      ) return "cancel";
+      const decision = closeResult(store.getState().compare_and_apply_commands(
+        snapshotState.transaction_version,
+        commands,
+      ));
+      if (decision === "allow") explicitDuplicateSurfaceIds.delete(surfaceId);
+      return decision;
+    },
 
     rebind_resource: async (surfaceId, request) => {
       registry.require(request.surface_type);
@@ -379,10 +449,12 @@ export function createWorkbenchNavigationService(
       if (
         await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) === "cancel"
       ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
+      const decision = closeResult(store.getState().compare_and_apply_commands(
         snapshotState.transaction_version,
         [{ type: "close_surface", surface_id: surfaceId }],
       ));
+      if (decision === "allow") explicitDuplicateSurfaceIds.delete(surfaceId);
+      return decision;
     },
 
     close_group: async (groupId) => {
@@ -394,10 +466,16 @@ export function createWorkbenchNavigationService(
         await guardSurfaces(snapshot, snapshotState.transaction_version, group.surface_ids)
           === "cancel"
       ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
+      const decision = closeResult(store.getState().compare_and_apply_commands(
         snapshotState.transaction_version,
         [{ type: "close_group", group_id: groupId }],
       ));
+      if (decision === "allow") {
+        for (const surfaceId of group.surface_ids) {
+          explicitDuplicateSurfaceIds.delete(surfaceId);
+        }
+      }
+      return decision;
     },
 
     reset_workbench: async () => {
@@ -413,13 +491,18 @@ export function createWorkbenchNavigationService(
         if (store.getState().transaction_version !== snapshotState.transaction_version) {
           return "cancel";
         }
-        return await options.reset_document(snapshotState.transaction_version) ? "allow" : "cancel";
+        const decision = await options.reset_document(snapshotState.transaction_version)
+          ? "allow"
+          : "cancel";
+        if (decision === "allow") explicitDuplicateSurfaceIds.clear();
+        return decision;
       }
       const result = store.getState().compare_and_reset_document(
         snapshotState.transaction_version,
       );
       if (!result.accepted && result.stale) return "cancel";
       if (!result.accepted) throw commandFailure(result.errors);
+      explicitDuplicateSurfaceIds.clear();
       return "allow";
     },
   };

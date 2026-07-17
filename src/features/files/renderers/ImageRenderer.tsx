@@ -21,9 +21,13 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function releaseLease(client: FileRendererProps["client"], resourceId: string, leaseId: string) {
+function releaseLease(
+  client: FileRendererProps["client"],
+  snapshot: FileRendererProps["snapshot"],
+  leaseId: string,
+) {
   try {
-    void client.closeRendererLease(resourceId, leaseId).catch(() => undefined);
+    void client.closeRendererLease(snapshot, leaseId).catch(() => undefined);
   } catch {
     // Closing the shared resource already revokes every renderer lease.
   }
@@ -58,7 +62,7 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     const release = () => {
       if (!issued || released) return;
       released = true;
-      releaseLease(client, snapshot.resource_id, leaseId);
+      releaseLease(client, snapshot, leaseId);
     };
     const disposeAttempt = () => {
       if (!disposed) disposed = true;
@@ -68,7 +72,7 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     setUrl(null);
     setError(null);
     setNaturalSize(null);
-    void client.issueTicket(snapshot.resource_id, snapshot.revision, leaseId).then((ticket) => {
+    void client.issueTicket(snapshot, leaseId).then((ticket) => {
       issued = true;
       if (cancelled) {
         disposeAttempt();

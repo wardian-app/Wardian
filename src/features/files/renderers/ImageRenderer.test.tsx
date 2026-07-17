@@ -42,12 +42,12 @@ function props(client: FileResourceClient, nextSnapshot = snapshot()) {
 describe("ImageRenderer", () => {
   it("uses a revision ticket URL directly and releases its renderer lease", async () => {
     const client = {
-      issueTicket: vi.fn().mockImplementation(async (_resource, revision, lease) => ({
+      issueTicket: vi.fn().mockImplementation(async (owner: FileResourceSnapshotV1, lease: string) => ({
         schema: 1,
-        ticket_id: `ticket-${revision}`,
-        url: `wardian-resource://localhost/ticket-${revision}`,
-        resource_id: snapshot().resource_id,
-        revision,
+        ticket_id: `ticket-${owner.revision}`,
+        url: `wardian-resource://localhost/ticket-${owner.revision}`,
+        resource_id: owner.resource_id,
+        revision: owner.revision,
         renderer_lease_id: lease,
         expires_at_ms: Date.now() + 60_000,
       })),
@@ -57,7 +57,7 @@ describe("ImageRenderer", () => {
 
     const image = await screen.findByRole("img", { name: "figure.png" });
     expect(image).toHaveAttribute("src", "wardian-resource://localhost/ticket-1");
-    expect(client.issueTicket).toHaveBeenCalledWith(snapshot().resource_id, 1, expect.any(String));
+    expect(client.issueTicket).toHaveBeenCalledWith(snapshot(), expect.any(String));
     Object.defineProperty(image, "naturalWidth", { value: 800 });
     Object.defineProperty(image, "naturalHeight", { value: 600 });
     fireEvent.load(image);
@@ -142,11 +142,11 @@ describe("ImageRenderer", () => {
   it("releases decode failures immediately and retries with a fresh lease", async () => {
     const issuedLeases: string[] = [];
     const client = {
-      issueTicket: vi.fn().mockImplementation(async (_resource, revision, lease) => {
+      issueTicket: vi.fn().mockImplementation(async (owner: FileResourceSnapshotV1, lease: string) => {
         issuedLeases.push(lease);
         return {
           schema: 1, ticket_id: lease, url: `wardian-resource://localhost/${lease}`,
-          resource_id: snapshot().resource_id, revision, renderer_lease_id: lease,
+          resource_id: owner.resource_id, revision: owner.revision, renderer_lease_id: lease,
           expires_at_ms: Date.now() + 60_000,
         };
       }),
@@ -157,7 +157,7 @@ describe("ImageRenderer", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Image preview unavailable");
     expect(screen.queryByRole("img", { name: "figure.png" })).toBeNull();
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledWith(
-      snapshot().resource_id,
+      snapshot(),
       issuedLeases[0],
     ));
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));

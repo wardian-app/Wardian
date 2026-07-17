@@ -83,6 +83,40 @@ beforeEach(() => {
 });
 
 describe("useFileResource", () => {
+  it("reconciles the highest revision observed before the open snapshot is published", async () => {
+    const revisedDescriptor = {
+      ...descriptor,
+      content_hash: "hash-2",
+      modified_at_ms: descriptor.modified_at_ms + 1,
+    };
+    mockInvoke.mockImplementation((command) => {
+      if (command === "open_file_resource") {
+        emitRevision({
+          schema: 1,
+          resource_id: snapshot.resource_id,
+          revision: 2,
+          descriptor: revisedDescriptor,
+        });
+        return Promise.resolve(snapshot);
+      }
+      return Promise.resolve(undefined);
+    });
+    const client = new FileResourceClient();
+    const resource = renderHook(() => useFileResource(request, client));
+
+    await waitFor(() => expect(resource.result.current.status).toBe("ready"));
+    expect(resource.result.current.snapshot).toEqual({
+      ...snapshot,
+      revision: 2,
+      descriptor: revisedDescriptor,
+    });
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
+      .toHaveLength(1);
+
+    resource.unmount();
+    await waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+  });
+
   it("shares one controller, applies only matching newer revisions, and releases last", async () => {
     const client = new FileResourceClient();
     const first = renderHook(() => useFileResource(request, client));
@@ -270,6 +304,15 @@ describe("useFileResource", () => {
     await waitFor(() => expect(older.result.current.status).toBe("ready"));
     const newer = renderHook(() => useFileResource(newerRequest, client));
     await waitFor(() => expect(newer.result.current.status).toBe("ready"));
+    const olderSnapshot = older.result.current.snapshot!;
+    const newerSnapshot = newer.result.current.snapshot!;
+
+    await client.readText(olderSnapshot);
+    await client.issueTicket(olderSnapshot, "preview-pane-older");
+    await client.closeRendererLease(olderSnapshot, "preview-pane-older");
+    await client.readText(newerSnapshot);
+    await client.issueTicket(newerSnapshot, "preview-pane-newer");
+    await client.closeRendererLease(newerSnapshot, "preview-pane-newer");
 
     newer.unmount();
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
@@ -277,8 +320,7 @@ describe("useFileResource", () => {
     }));
     expect(older.result.current.snapshot?.subscription_id).toBe("subscription-1");
 
-    await client.readText(snapshot.resource_id, snapshot.revision);
-    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-older");
+    await client.readText(olderSnapshot);
     expect(mockInvoke).toHaveBeenCalledWith("read_file_resource_text", {
       request: {
         resource_id: snapshot.resource_id,
@@ -299,7 +341,5 @@ describe("useFileResource", () => {
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
       request: { subscription_id: "subscription-1" },
     }));
-    expect(() => client.readText(snapshot.resource_id, snapshot.revision))
-      .toThrow(`File resource is not open: ${snapshot.resource_id}`);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { FilesSurfaceStateV1 } from "../../types";
@@ -21,6 +21,7 @@ export type FilesSurfaceProps = {
   lifecycle: { visible: boolean };
   client?: FileResourceClient;
   registry?: RendererRegistry;
+  on_canonical_resource?: (resource_key: string) => Promise<void> | void;
   on_open_file?: (path: string) => Promise<void> | void;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
@@ -50,6 +51,7 @@ type ActiveFilesSurfaceProps = Required<Pick<
   FilesSurfaceProps,
   "surface_id" | "resource_key" | "state" | "lifecycle" | "client" | "registry"
 >> & {
+  on_canonical_resource: (resource_key: string) => Promise<void> | void;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -57,11 +59,22 @@ type ActiveFilesSurfaceProps = Required<Pick<
 };
 
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
+  const notifiedCanonicalSnapshot = useRef<string | null>(null);
   const resource = useFileResource({
     path: pathFromResourceKey(props.resource_key),
     agent_id: null,
     user_file_capability_id: null,
   }, props.client);
+
+  useEffect(() => {
+    const canonicalResourceKey = resource.snapshot?.resource_id;
+    const subscriptionId = resource.snapshot?.subscription_id;
+    if (!canonicalResourceKey || !subscriptionId) return;
+    const notificationKey = `${subscriptionId}\0${canonicalResourceKey}`;
+    if (notifiedCanonicalSnapshot.current === notificationKey) return;
+    notifiedCanonicalSnapshot.current = notificationKey;
+    void props.on_canonical_resource(canonicalResourceKey);
+  }, [props.on_canonical_resource, resource.snapshot?.resource_id, resource.snapshot?.subscription_id]);
 
   useEffect(() => {
     useFilesPresentationStore.getState().setPresentation(props.surface_id, {
@@ -126,12 +139,21 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
 export function FilesSurface({
   client = fileResourceClient,
   registry = defaultRendererRegistry,
+  on_canonical_resource = () => undefined,
   on_open_file = () => undefined,
   on_open_with = openWithConfiguredEditor,
   on_reveal = revealPath,
   ...props
 }: FilesSurfaceProps) {
   const [actionError, setActionError] = useState<string | null>(null);
+  const guardedCanonicalResource = useCallback(async (resourceKey: string) => {
+    try {
+      await on_canonical_resource(resourceKey);
+      setActionError(null);
+    } catch (error) {
+      setActionError(`File identity update failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [on_canonical_resource]);
   const guardedOpenWith = useCallback(async (path: string) => {
     try {
       await on_open_with(path);
@@ -173,6 +195,7 @@ export function FilesSurface({
       {...props}
       client={client}
       registry={registry}
+      on_canonical_resource={guardedCanonicalResource}
       on_open_file={on_open_file}
       on_open_with={guardedOpenWith}
       on_reveal={guardedReveal}

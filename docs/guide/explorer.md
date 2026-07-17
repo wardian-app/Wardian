@@ -88,7 +88,8 @@ When the selected root is a Git repository, the Explorer uses status colors and 
   and PDFs. Complete text models are limited to 16 MiB and 200,000 lines;
   images to 64 MiB and 64 million decoded pixels; PDFs to 256 MiB. Oversized or
   unsupported content shows metadata and **Open With** instead of allocating an
-  unsafe renderer.
+  unsafe renderer. PDF search is bounded to 128 pages or two seconds per query;
+  partial results show how much of the document was searched.
 - Active HTML and SVG are deliberately unavailable in this foundation. They
   will not render live until the capability-free, networkless artifact host and
   artifact review lifecycle ship.
