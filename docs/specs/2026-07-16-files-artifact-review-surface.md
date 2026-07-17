@@ -103,9 +103,10 @@ type FilesSurfaceStateV1 = {
 };
 ```
 
-`file:` helpers slash-normalize paths. `artifact:` helpers accept a non-empty,
-backend-owned stable ID and prefix it verbatim; artifact IDs are not paths and
-must never be slash-normalized or case-folded.
+`file:` helpers slash-normalize only syntactic Windows absolute drive, UNC, and
+extended-length paths. POSIX paths preserve literal backslashes. `artifact:`
+helpers accept a non-empty, backend-owned stable ID and prefix it verbatim;
+artifact IDs are not paths and must never be slash-normalized or case-folded.
 
 Only bounded presentation state is serialized in the Workbench document.
 Contents, drafts, comments, versions, capabilities, and watcher state live in

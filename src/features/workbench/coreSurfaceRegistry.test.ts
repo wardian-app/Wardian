@@ -68,11 +68,27 @@ describe("core workbench surface registry", () => {
       resource_key: "file:",
       state,
     })).toThrow(/file:.*artifact:/i);
-    expect(() => registry.resource_key({
+    expect(registry.resource_key({
       surface_type: "files",
       resource_key: "file:C:\\work\\notes.md",
       state,
-    })).toThrow(/file:.*artifact:/i);
+    })).toBe("file:C:/work/notes.md");
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:/tmp/a\\b.md",
+      state,
+    })).toBe("file:/tmp/a\\b.md");
+    const artifactState = { ...state, resource_kind: "artifact" } as const;
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: "artifact:opaque\\artifact-id",
+      state: artifactState,
+    })).toBe("artifact:opaque\\artifact-id");
+    expect(registry.resolve_surface(makeSurface("opaque-artifact", {
+      surface_type: "files",
+      resource_key: "artifact:opaque\\artifact-id",
+      state: artifactState,
+    })).restore_result).toEqual({ ok: true, state: artifactState });
 
     expect(files.restore_state(state, 1)).toEqual({ ok: true, state });
     expect(files.restore_state({ ...state, extra: true }, 1)).toEqual({
@@ -94,11 +110,6 @@ describe("core workbench surface registry", () => {
         surface_type: "files",
         resource_key: "https://example.test/report.md",
         state,
-      }),
-      makeSurface("unnormalized", {
-        surface_type: "files",
-        resource_key: "artifact:C:\\work\\report.md",
-        state: { ...state, resource_kind: "artifact" },
       }),
       makeSurface("kind-mismatch", {
         surface_type: "files",

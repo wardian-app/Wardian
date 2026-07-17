@@ -336,6 +336,16 @@ describe("FilesSurface", () => {
     }, expect.any(FileResourceClient));
   });
 
+  it("preserves literal backslashes when decoding a POSIX file resource key", () => {
+    render(<FilesSurface {...props({ resource_key: "file:/tmp/a\\b.md" })} />);
+
+    expect(useFileResourceMock).toHaveBeenCalledWith({
+      path: "/tmp/a\\b.md",
+      agent_id: null,
+      user_file_capability_id: null,
+    }, expect.any(FileResourceClient));
+  });
+
   it("reports backend canonical identity for a restored alias without rewriting it locally", async () => {
     const onCanonicalResource = vi.fn().mockResolvedValue(undefined);
     render(<FilesSurface {...props({

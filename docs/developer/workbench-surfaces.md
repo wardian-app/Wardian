@@ -99,9 +99,12 @@ Normal Agent Session opens use `focus_resource`. The agent runtime is shared;
 duplicate surfaces are independent presentations of it.
 
 Files also uses `focus_resource`. Its canonical resource key is either
-`file:<slash-normalized-canonical-path>` or, in the future artifact slice,
-`artifact:<artifact-id>`. These identities never collapse into each other even
-when an artifact is backed by the same file.
+`file:<canonical-path>` or, in the future artifact slice,
+`artifact:<artifact-id>`. Syntactic Windows absolute drive, UNC, and
+extended-length paths normalize separators for identity; POSIX paths preserve
+literal backslashes. Opaque artifact IDs remain verbatim. File and artifact
+identities never collapse into each other even when an artifact is backed by
+the same file.
 
 An Explorer or restored path is provisional until `open_file_resource` returns
 its backend-owned `resource_id`. The visible Files surface then applies
@@ -255,8 +258,10 @@ Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
 images, and 256 MiB for PDFs. HTML and SVG resolve to the unsupported renderer
 until the zero-Tauri-capability, networkless active artifact host is available.
 PDF search is debounced and stops after 128 pages or two seconds, whichever
-comes first. Partial results state exactly how many pages were searched; the
-PDF renderer still mounts no more than three page slots.
+comes first. Partial results state exactly how many pages were searched. The
+PDF renderer mounts a dynamic bounded window whose radius adapts to the
+viewport from one to 12 pages on either side of the center page, for an exact
+maximum of 25 mounted page slots.
 
 A byte- or decoded-pixel-limit violation is a stable metadata revision, not an
 open failure. Its descriptor keeps the canonical name, type, byte size, and

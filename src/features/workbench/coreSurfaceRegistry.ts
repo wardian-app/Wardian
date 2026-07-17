@@ -19,6 +19,7 @@ import {
   filesPresentationTitle,
   useFilesPresentationStore,
 } from "../files/filesPresentationStore";
+import { decodeFileResourceKey } from "../files/fileResourceKey";
 import { createSurfaceRegistry, type WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import {
   CORE_VIEW_SURFACE_DEFINITIONS,
@@ -175,20 +176,8 @@ function restoreFilesSurfaceState(value: unknown, version: number) {
 }
 
 function filesResourceKey(request: OpenSurfaceRequest): FileResourceKey {
-  const resourceKey = request.resource_key;
-  const fileKey = resourceKey?.startsWith("file:") === true;
-  const artifactKey = resourceKey?.startsWith("artifact:") === true;
-  const identity = resourceKey?.slice(resourceKey.indexOf(":") + 1);
-  if (
-    !resourceKey
-    || (!fileKey && !artifactKey)
-    || !identity
-    || identity.trim().length === 0
-    || resourceKey.includes("\\")
-  ) {
-    throw new Error("Files requires a file: or artifact: resource_key");
-  }
-  const expectedKind = fileKey ? "file" : "artifact";
+  const decoded = decodeFileResourceKey(request.resource_key ?? "");
+  const expectedKind = decoded.resource_kind;
   if (request.state !== undefined) {
     const restored = restoreFilesSurfaceState(request.state, 1);
     if (!restored.ok) throw new Error(restored.error);
@@ -198,7 +187,7 @@ function filesResourceKey(request: OpenSurfaceRequest): FileResourceKey {
   } else if (expectedKind === "artifact") {
     throw new Error("Files artifact: resources require artifact state");
   }
-  return resourceKey as FileResourceKey;
+  return decoded.resource_key;
 }
 
 function restoreAgentsOverviewState(value: unknown, version: number) {

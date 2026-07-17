@@ -406,6 +406,64 @@ describe("useFileResource", () => {
     });
   });
 
+  it("keeps distinct POSIX paths with literal backslashes in separate controllers", async () => {
+    mockInvoke.mockImplementation((command, args) => {
+      if (command !== "open_file_resource") return Promise.resolve(undefined);
+      const openRequest = (args as { request: typeof request }).request;
+      return Promise.resolve({
+        ...snapshot,
+        resource_id: `file:${openRequest.path}`,
+        subscription_id: `subscription-${openRequest.path}`,
+        descriptor: { ...descriptor, canonical_path: openRequest.path },
+      });
+    });
+    const client = new FileResourceClient();
+    const literalBackslash = renderHook(() => useFileResource({
+      ...request,
+      path: "/tmp/a\\b.md",
+    }, client));
+    const nestedPath = renderHook(() => useFileResource({
+      ...request,
+      path: "/tmp/a/b.md",
+    }, client));
+
+    await waitFor(() => {
+      expect(literalBackslash.result.current.status).toBe("ready");
+      expect(nestedPath.result.current.status).toBe("ready");
+    });
+    expect(mockListen).toHaveBeenCalledTimes(2);
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
+      .toHaveLength(2);
+    expect(literalBackslash.result.current.snapshot?.descriptor.canonical_path)
+      .toBe("/tmp/a\\b.md");
+    expect(nestedPath.result.current.snapshot?.descriptor.canonical_path)
+      .toBe("/tmp/a/b.md");
+
+    literalBackslash.unmount();
+    nestedPath.unmount();
+  });
+
+  it("shares one controller for equivalent Windows absolute path spellings", async () => {
+    const client = new FileResourceClient();
+    const backslashPath = renderHook(() => useFileResource({
+      ...request,
+      path: "C:\\work\\report.md",
+    }, client));
+    await waitFor(() => expect(backslashPath.result.current.status).toBe("ready"));
+    const slashPath = renderHook(() => useFileResource({
+      ...request,
+      path: "C:/work/report.md",
+    }, client));
+    await waitFor(() => expect(slashPath.result.current.status).toBe("ready"));
+
+    expect(mockListen).toHaveBeenCalledTimes(1);
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "open_file_resource"))
+      .toHaveLength(1);
+
+    backslashPath.unmount();
+    slashPath.unmount();
+  });
+
   it("contains load errors and retries without replacing the shared listener", async () => {
     mockInvoke.mockRejectedValueOnce(new Error("resource unavailable"));
     const client = new FileResourceClient();

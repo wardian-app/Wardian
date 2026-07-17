@@ -5,6 +5,7 @@ import type { CloseDecision, FilesSurfaceStateV1 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FilePreview } from "./FilePreview";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
+import { decodeFileResourceKey } from "./fileResourceKey";
 import { FilesModeBar } from "./FilesModeBar";
 import { useFilesPresentationStore } from "./filesPresentationStore";
 import {
@@ -31,7 +32,8 @@ export type FilesSurfaceProps = {
 };
 
 function pathFromResourceKey(resourceKey: string) {
-  return resourceKey.slice(resourceKey.indexOf(":") + 1).replace(/\\/g, "/");
+  const decoded = decodeFileResourceKey(resourceKey);
+  return decoded.resource_kind === "file" ? decoded.path : decoded.artifact_id;
 }
 
 async function openWithConfiguredEditor(path: string) {

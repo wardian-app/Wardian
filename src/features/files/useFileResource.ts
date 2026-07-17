@@ -5,6 +5,7 @@ import type {
   OpenFileResourceRequestV1,
 } from "../../types";
 import { FileResourceClient, fileResourceClient } from "./fileResourceClient";
+import { filePathIdentity } from "./fileResourceKey";
 
 export type FileResourceStatus = "loading" | "ready" | "error";
 
@@ -28,7 +29,7 @@ const PRE_SNAPSHOT_RECONCILIATION_ERROR =
 
 function requestIdentity(request: OpenFileResourceRequestV1) {
   return JSON.stringify([
-    request.path.replace(/\\/g, "/"),
+    filePathIdentity(request.path),
     request.agent_id,
     request.user_file_capability_id,
   ]);

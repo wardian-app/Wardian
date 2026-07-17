@@ -106,4 +106,3 @@ Unit and browser coverage must prove:
   continue receiving the original canonical path.
 - The control remains reachable in narrow panes and does not displace the
   Preview, Changes, or Draft tabs.
-
