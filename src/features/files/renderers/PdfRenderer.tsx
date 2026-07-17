@@ -78,8 +78,9 @@ function virtualWindowPageTop(
 
 function pageAtScroll(scrollTop: number, clientHeight: number, pageCount: number, totalHeight: number) {
   if (pageCount <= 1) return 1;
-  const center = Math.max(0, Math.min(totalHeight, scrollTop + clientHeight / 2));
-  const fraction = totalHeight > 0 ? center / totalHeight : 0;
+  const maximumScroll = Math.max(1, totalHeight - clientHeight);
+  const clampedScroll = Math.max(0, Math.min(maximumScroll, scrollTop));
+  const fraction = clampedScroll / maximumScroll;
   return Math.max(1, Math.min(pageCount, Math.round(fraction * (pageCount - 1)) + 1));
 }
 

@@ -235,17 +235,37 @@ describe("PdfRenderer", () => {
     const viewport = document.querySelector<HTMLElement>(".files-pdf-viewport")!;
     Object.defineProperty(viewport, "clientHeight", { value: 800, configurable: true });
     Object.defineProperty(viewport, "scrollHeight", { value: 16_000_000, configurable: true });
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(screen.getByText("Page 1")).toBeInTheDocument());
+    expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+
+    let callsBeforeWindow = getPage.mock.calls.length;
     viewport.scrollTop = 8_000_000;
     fireEvent.scroll(viewport);
     await waitFor(() => expect(getPage).toHaveBeenCalledWith(expect.any(Number)));
     const visiblePages = screen.getAllByText(/^Page /).map((node) => Number(node.textContent?.replace("Page ", "")));
     expect(visiblePages.some((page) => page > 400_000 && page < 600_000)).toBe(true);
     expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+    expect(getPage.mock.calls.length - callsBeforeWindow).toBeLessThanOrEqual(3);
     const pageTops = screen.getAllByRole("figure")
       .map((figure) => Number((figure as HTMLElement).style.top.replace("px", "")))
       .sort((left, right) => left - right);
     expect(pageTops[1]! - pageTops[0]!).toBeGreaterThan(500);
-    expect(getPage.mock.calls.length).toBeLessThanOrEqual(6);
+
+    callsBeforeWindow = getPage.mock.calls.length;
+    viewport.scrollTop = 16_000_000 - 800;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(screen.getByText("Page 1000000")).toBeInTheDocument());
+    expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+    expect(getPage.mock.calls.length - callsBeforeWindow).toBeLessThanOrEqual(3);
+
+    callsBeforeWindow = getPage.mock.calls.length;
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(screen.getByText("Page 1")).toBeInTheDocument());
+    expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+    expect(getPage.mock.calls.length - callsBeforeWindow).toBeLessThanOrEqual(3);
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
   });
 
