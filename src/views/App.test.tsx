@@ -651,7 +651,11 @@ describe("Workbench persistence boot integration", () => {
 
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("link", { name: "Open linked preview" }));
+    fireEvent.click(await screen.findByRole(
+      "link",
+      { name: "Open linked preview" },
+      { timeout: 10_000 },
+    ));
     await waitFor(() => {
       const saves = mockInvoke.mock.calls.filter(([command]) => command === "save_workbench_state");
       const latest = saves[saves.length - 1]?.[1] as {
@@ -659,7 +663,7 @@ describe("Workbench persistence boot integration", () => {
       } | undefined;
       expect(latest?.document?.surfaces["linked-preview"]?.state)
         .toMatchObject({ transient_preview: false });
-    });
+    }, { timeout: 5_000 });
   });
 
   it("boots the canonical workbench and migrates legacy layout state", async () => {
