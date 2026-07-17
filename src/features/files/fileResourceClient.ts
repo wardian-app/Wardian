@@ -74,11 +74,10 @@ export class FileResourceClient {
     let closing: Promise<void>;
     closing = invoke<void>("close_file_resource", {
       request: { subscription_id },
-    }).catch((error) => {
+    }).finally(() => {
       if (this.#closeBySubscription.get(subscription_id) === closing) {
         this.#closeBySubscription.delete(subscription_id);
       }
-      throw error;
     });
     this.#closeBySubscription.set(subscription_id, closing);
     return closing;

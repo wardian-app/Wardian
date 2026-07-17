@@ -123,11 +123,14 @@ describe("FileResourceClient", () => {
     ]);
   });
 
-  it("closes a subscription idempotently, including concurrent callers", async () => {
+  it("deduplicates concurrent subscription closes without retaining settled tombstones", async () => {
     let resolveClose: (() => void) | undefined;
+    let closeCalls = 0;
     mockInvoke.mockImplementation((command) => {
       if (command === "open_file_resource") return Promise.resolve(snapshot);
       if (command === "close_file_resource") {
+        closeCalls += 1;
+        if (closeCalls > 1) return Promise.resolve(undefined);
         return new Promise<void>((resolve) => {
           resolveClose = resolve;
         });
@@ -149,7 +152,58 @@ describe("FileResourceClient", () => {
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
     await client.close(snapshot.subscription_id);
     expect(mockInvoke.mock.calls.filter(([command]) => command === "close_file_resource"))
-      .toHaveLength(1);
+      .toHaveLength(2);
+  });
+
+  it("evicts every successful close after it settles", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const client = new FileResourceClient();
+    const subscriptionIds = Array.from(
+      { length: 100 },
+      (_, index) => `subscription-${index}`,
+    );
+
+    await Promise.all(subscriptionIds.map((subscriptionId) => client.close(subscriptionId)));
+    await Promise.all(subscriptionIds.map((subscriptionId) => client.close(subscriptionId)));
+
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "close_file_resource"))
+      .toHaveLength(subscriptionIds.length * 2);
+  });
+
+  it("does not let cleanup from an older close evict a newer in-flight close", async () => {
+    let settleFirst: (() => void) | undefined;
+    let replayFirstCleanup: (() => void) | undefined;
+    let resolveSecond: (() => void) | undefined;
+    mockInvoke
+      .mockImplementationOnce(() => ({
+        finally: (cleanup: () => void) => {
+          replayFirstCleanup = cleanup;
+          return new Promise<void>((resolve) => {
+            settleFirst = () => {
+              cleanup();
+              resolve();
+            };
+          });
+        },
+      }) as Promise<void>)
+      .mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveSecond = resolve;
+      }));
+    const client = new FileResourceClient();
+
+    const first = client.close(snapshot.subscription_id);
+    settleFirst?.();
+    await first;
+
+    const second = client.close(snapshot.subscription_id);
+    replayFirstCleanup?.();
+    const duplicate = client.close(snapshot.subscription_id);
+    expect(second).toBe(duplicate);
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "close_file_resource"))
+      .toHaveLength(2);
+
+    resolveSecond?.();
+    await expect(Promise.all([second, duplicate])).resolves.toEqual([undefined, undefined]);
   });
 
   it("keeps each owner bound to its own subscription when opens resolve out of order", async () => {
@@ -397,7 +451,7 @@ describe("FileResourceClient", () => {
     });
   });
 
-  it("retries a rejected close while keeping successful close idempotence", async () => {
+  it("retries a rejected close after evicting the failed operation", async () => {
     mockInvoke
       .mockResolvedValueOnce(snapshot)
       .mockRejectedValueOnce(new Error("transient close failure"))
@@ -407,6 +461,7 @@ describe("FileResourceClient", () => {
         revision: snapshot.revision,
         text: "still active after rejected close",
       } satisfies FileResourceTextV1)
+      .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
     const client = new FileResourceClient();
     await client.open({
@@ -429,6 +484,6 @@ describe("FileResourceClient", () => {
     await expect(client.close(snapshot.subscription_id)).resolves.toBeUndefined();
 
     expect(mockInvoke.mock.calls.filter(([command]) => command === "close_file_resource"))
-      .toHaveLength(2);
+      .toHaveLength(3);
   });
 });
