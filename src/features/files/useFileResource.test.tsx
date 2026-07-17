@@ -263,7 +263,7 @@ describe("useFileResource", () => {
     const newerRequest = {
       ...request,
       agent_id: "agent-newer",
-      user_file_capability_id: "capability-newer",
+      user_file_capability_id: null,
     };
 
     const older = renderHook(() => useFileResource(olderRequest, client));

@@ -222,7 +222,7 @@ describe("FileResourceClient", () => {
     await client.open({
       path: descriptor.canonical_path,
       agent_id: "agent-newer",
-      user_file_capability_id: "capability-newer",
+      user_file_capability_id: null,
     });
 
     await client.close(newer.subscription_id);
