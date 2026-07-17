@@ -2,7 +2,7 @@ use super::FileResourceErrorV1;
 use crate::models::AgentConfig;
 use std::fs;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -131,6 +131,65 @@ pub struct AuthorizedPath {
 }
 
 impl AuthorizedPath {
+    /// Reopens the originally requested pathname after an editor-style atomic
+    /// replacement while preserving the authorization boundary that approved
+    /// it.
+    ///
+    /// A replacement is accepted only when the original pathname still
+    /// canonicalizes to the exact same target under the exact same canonical
+    /// root. A symlink or junction retarget, including one that remains inside
+    /// the root, is rejected rather than silently changing the resource's
+    /// identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` when the pathname no longer resolves to the
+    /// previously approved canonical target or escapes its root, and
+    /// `unavailable_path` when the replacement cannot be opened as a file.
+    pub fn reauthorize_same_target(&self) -> Result<Self, FileResourceErrorV1> {
+        let canonical_path = fs::canonicalize(&self.requested_path)
+            .map(normalize_drive_letter)
+            .map_err(|_| unauthorized(&self.requested_path))?;
+        if canonical_path != self.verified_canonical_path
+            || !component_contains(&self.verified_root, &canonical_path)
+        {
+            return Err(unauthorized(&self.requested_path));
+        }
+
+        let file =
+            File::open(&canonical_path).map_err(|error| unavailable("replacement file", error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| unavailable("replacement file", error))?;
+        if !metadata.is_file() {
+            return Err(FileResourceErrorV1::new(
+                "unavailable_path",
+                format!(
+                    "replacement path is not a file: {}",
+                    self.requested_path.display()
+                ),
+            ));
+        }
+        let identity = FileIdentity::from_file(&file)
+            .map_err(|error| unavailable("replacement file identity", error))?;
+        verify_binding(
+            &self.requested_path,
+            &self.verified_canonical_path,
+            &self.verified_root,
+            identity,
+        )?;
+
+        Ok(Self {
+            canonical_path: self.canonical_path.clone(),
+            root: self.root.clone(),
+            requested_path: self.requested_path.clone(),
+            verified_canonical_path: self.verified_canonical_path.clone(),
+            verified_root: self.verified_root.clone(),
+            identity,
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+
     /// Reads validated UTF-8 text from the retained authorized file handle for
     /// one exact verified revision.
     ///
@@ -188,6 +247,33 @@ impl AuthorizedPath {
         self.read_verified_bytes(revision, None, 0, false).map(drop)
     }
 
+    /// Streams one exact verified revision into a caller-owned destination.
+    ///
+    /// This performs the same retained-handle identity, size, and SHA-256
+    /// verification as the bounded read methods, but never materializes the
+    /// complete file in memory. It is intended for immutable renderer-ticket
+    /// snapshots that serve repeated ranges without rehashing the source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same authorization, revision, and size errors as
+    /// [`Self::verify_revision`], or `runtime_unavailable` if the destination
+    /// cannot accept the complete verified revision.
+    pub fn copy_verified_revision_to(
+        &self,
+        revision: &FileRevisionToken,
+        destination: &mut impl Write,
+    ) -> Result<u64, FileResourceErrorV1> {
+        self.scan_verified_revision(revision, |_, bytes| {
+            destination.write_all(bytes).map_err(|error| {
+                FileResourceErrorV1::new(
+                    "runtime_unavailable",
+                    format!("cannot write immutable file snapshot: {error}"),
+                )
+            })
+        })
+    }
+
     fn read_verified_bytes(
         &self,
         revision: &FileRevisionToken,
@@ -195,22 +281,7 @@ impl AuthorizedPath {
         maximum_length_bytes: u64,
         capture_bytes: bool,
     ) -> Result<Vec<u8>, FileResourceErrorV1> {
-        if revision.identity != self.identity
-            || revision.canonical_path != self.verified_canonical_path
-        {
-            return Err(FileResourceErrorV1::new(
-                "unauthorized_path",
-                "file revision token belongs to another authorized file",
-            ));
-        }
         let expected_size_bytes = revision.size_bytes;
-        let maximum_size_bytes = revision.maximum_size_bytes;
-        if expected_size_bytes > maximum_size_bytes {
-            return Err(FileResourceErrorV1::new(
-                "file_too_large",
-                "file revision exceeds the allowed read size",
-            ));
-        }
 
         let selected_range = if !capture_bytes {
             None
@@ -250,6 +321,45 @@ impl AuthorizedPath {
                 "selected byte range cannot fit in process memory",
             )
         })?;
+        let mut selected = Vec::with_capacity(selected_capacity);
+
+        self.scan_verified_revision(revision, |offset, bytes| {
+            if let Some((start, end)) = selected_range {
+                let read_u64 = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let next_offset = offset.saturating_add(read_u64);
+                let chunk_end = next_offset.saturating_sub(1);
+                if offset <= end && chunk_end >= start {
+                    let copy_start = start.saturating_sub(offset) as usize;
+                    let copy_end = (end.min(chunk_end) - offset + 1) as usize;
+                    selected.extend_from_slice(&bytes[copy_start..copy_end]);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(selected)
+    }
+
+    fn scan_verified_revision(
+        &self,
+        revision: &FileRevisionToken,
+        mut consume: impl FnMut(u64, &[u8]) -> Result<(), FileResourceErrorV1>,
+    ) -> Result<u64, FileResourceErrorV1> {
+        if revision.identity != self.identity
+            || revision.canonical_path != self.verified_canonical_path
+        {
+            return Err(FileResourceErrorV1::new(
+                "unauthorized_path",
+                "file revision token belongs to another authorized file",
+            ));
+        }
+        let expected_size_bytes = revision.size_bytes;
+        let maximum_size_bytes = revision.maximum_size_bytes;
+        if expected_size_bytes > maximum_size_bytes {
+            return Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "file revision exceeds the allowed read size",
+            ));
+        }
 
         let mut file = self.lock_verified_file()?;
         let metadata = file.metadata().map_err(|error| {
@@ -278,7 +388,6 @@ impl AuthorizedPath {
             )
         })?;
         let mut hasher = Sha256::new();
-        let mut selected = Vec::with_capacity(selected_capacity);
         let mut buffer = [0_u8; 64 * 1024];
         let mut offset = 0_u64;
         loop {
@@ -300,15 +409,7 @@ impl AuthorizedPath {
                 ));
             }
             hasher.update(&buffer[..read]);
-
-            if let Some((start, end)) = selected_range {
-                let chunk_end = next_offset.saturating_sub(1);
-                if offset <= end && chunk_end >= start {
-                    let copy_start = start.saturating_sub(offset) as usize;
-                    let copy_end = (end.min(chunk_end) - offset + 1) as usize;
-                    selected.extend_from_slice(&buffer[copy_start..copy_end]);
-                }
-            }
+            consume(offset, &buffer[..read])?;
             offset = next_offset;
         }
 
@@ -326,7 +427,7 @@ impl AuthorizedPath {
                 "file content no longer matches the expected revision",
             ));
         }
-        Ok(selected)
+        Ok(offset)
     }
 
     pub(super) fn verified_canonical_path(&self) -> &Path {
@@ -861,13 +962,150 @@ mod tests {
         );
     }
 
+    #[test]
+    fn same_path_atomic_replacement_can_be_reauthorized_without_changing_target() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, b"revision one").expect("fixture");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+
+        let replacement = workspace.join("payload.replacement");
+        fs::write(&replacement, b"revision two").expect("replacement fixture");
+        replace_path_identity(&replacement, &path);
+
+        let replacement = authorized
+            .reauthorize_same_target()
+            .expect("same target replacement must be authorized");
+        let snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &replacement,
+            &super::super::FileResourceLimits::default(),
+        )
+        .expect("replacement snapshot");
+        assert_eq!(
+            replacement
+                .read_verified_text(snapshot.revision_token(), 12)
+                .expect("replacement text"),
+            "revision two"
+        );
+    }
+
+    #[test]
+    fn replacement_reauthorization_rejects_link_retarget_and_escape() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        let approved = workspace.join("approved");
+        let other_inside = workspace.join("other-inside");
+        let outside = temp.path().join("outside");
+        for directory in [&workspace, &approved, &other_inside, &outside] {
+            fs::create_dir_all(directory).expect("fixture directory");
+            fs::write(
+                directory.join("payload.txt"),
+                directory.to_string_lossy().as_bytes(),
+            )
+            .expect("fixture file");
+        }
+        let link = workspace.join("current");
+        create_directory_link(&approved, &link);
+        let requested = link.join("payload.txt");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&requested)
+            .expect("authorized linked file");
+
+        remove_directory_link(&link);
+        create_directory_link(&other_inside, &link);
+        assert_eq!(
+            authorized
+                .reauthorize_same_target()
+                .expect_err("same-root link retarget must not change resource identity")
+                .code(),
+            "unauthorized_path"
+        );
+
+        remove_directory_link(&link);
+        create_directory_link(&outside, &link);
+        assert_eq!(
+            authorized
+                .reauthorize_same_target()
+                .expect_err("link escape must remain denied")
+                .code(),
+            "unauthorized_path"
+        );
+    }
+
+    #[test]
+    fn verified_revision_can_be_streamed_once_into_an_immutable_destination() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.pdf");
+        fs::write(&path, b"%PDF-1.7 immutable bytes").expect("fixture");
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &authorized,
+            &super::super::FileResourceLimits::default(),
+        )
+        .expect("verified snapshot");
+        let mut copied = Vec::new();
+
+        assert_eq!(
+            authorized
+                .copy_verified_revision_to(snapshot.revision_token(), &mut copied)
+                .expect("stream verified revision"),
+            copied.len() as u64
+        );
+        assert_eq!(copied, b"%PDF-1.7 immutable bytes");
+    }
+
     #[cfg(unix)]
     fn create_directory_link(target: &Path, link: &Path) {
         std::os::unix::fs::symlink(target, link).expect("directory symlink");
     }
 
+    #[cfg(unix)]
+    fn replace_path_identity(replacement: &Path, target: &Path) {
+        fs::rename(replacement, target).expect("atomic replacement");
+    }
+
+    #[cfg(unix)]
+    fn remove_directory_link(link: &Path) {
+        fs::remove_file(link).expect("remove directory symlink");
+    }
+
     #[cfg(windows)]
     fn create_directory_link(target: &Path, link: &Path) {
         junction::create(target, link).expect("directory junction");
+    }
+
+    #[cfg(windows)]
+    fn replace_path_identity(replacement: &Path, target: &Path) {
+        // Common Windows editor saves move the prior identity aside before
+        // moving the staged file into the stable pathname. This reproduces the
+        // same retained-handle identity transition without relying on
+        // `MoveFileExW(REPLACE_EXISTING)`, which rejects an open destination.
+        let prior = target.with_extension("prior");
+        fs::rename(target, &prior).expect("move prior identity aside");
+        fs::rename(replacement, target).expect("move replacement into target");
+        fs::remove_file(prior).expect("remove prior identity");
+    }
+
+    #[cfg(windows)]
+    fn remove_directory_link(link: &Path) {
+        junction::delete(link).expect("delete directory junction");
+        fs::remove_dir(link).expect("remove directory junction");
     }
 }

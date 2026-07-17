@@ -865,12 +865,14 @@ mod tests {
         assert_eq!(wrong_webview.status(), StatusCode::FORBIDDEN);
 
         fs::write(&path, b"%PDF-1.7 modified payload").expect("mutate revision");
-        let stale = Request::builder()
+        let issued_revision = Request::builder()
             .method(tauri::http::Method::GET)
             .uri(&uri)
             .body(Vec::new())
-            .expect("stale request");
-        let stale = file_resource_protocol_response(&runtime, "main", stale).await;
-        assert_eq!(stale.status(), StatusCode::CONFLICT);
+            .expect("issued revision request");
+        let issued_revision =
+            file_resource_protocol_response(&runtime, "main", issued_revision).await;
+        assert_eq!(issued_revision.status(), StatusCode::OK);
+        assert_eq!(issued_revision.body(), b"%PDF-1.7 protocol payload");
     }
 }

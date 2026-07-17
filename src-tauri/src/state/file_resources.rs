@@ -2,10 +2,12 @@
 
 use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter as _;
 use tokio::sync::{broadcast, Mutex};
@@ -19,6 +21,8 @@ use wardian_core::models::AgentConfig;
 pub const FILE_RESOURCE_REVISION_EVENT: &str = "file-resource://revision";
 const DEFAULT_STABILITY_DELAY: Duration = Duration::from_millis(150);
 const DEFAULT_TICKET_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_USER_FILE_GRANTS: usize = 128;
+const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +95,9 @@ struct FileResourceRuntimeInner {
     limits: FileResourceLimits,
     stability_delay: Duration,
     ticket_ttl: Duration,
+    max_user_file_grants: usize,
+    ticket_snapshot_usage: Arc<AtomicU64>,
+    max_ticket_snapshot_bytes: u64,
     events: broadcast::Sender<FileResourceEventV1>,
     app_handle: RwLock<Option<tauri::AppHandle>>,
     #[cfg(test)]
@@ -125,6 +132,8 @@ enum FileAccessClaim {
 struct UserFileGrant {
     canonical_path: String,
     authorized: AuthorizedPath,
+    last_used_at: Instant,
+    in_flight_uses: usize,
 }
 
 #[derive(Clone)]
@@ -134,11 +143,83 @@ struct FileReadTicket {
     renderer_lease: RendererLeaseKey,
     subscription_id: String,
     resource_id: String,
-    authorized: AuthorizedPath,
-    revision_token: FileRevisionToken,
+    snapshot: Arc<ImmutableTicketSnapshot>,
     size_bytes: u64,
     mime_type: String,
     expires_at: Instant,
+}
+
+struct ImmutableTicketSnapshot {
+    file: StdMutex<File>,
+    size_bytes: u64,
+    usage: Arc<AtomicU64>,
+}
+
+impl ImmutableTicketSnapshot {
+    fn read_range(&self, start: u64, end: u64) -> Result<Vec<u8>, FileResourceErrorV1> {
+        if start > end || end >= self.size_bytes {
+            return Err(error(
+                "range_not_satisfiable",
+                "byte range is outside the immutable ticket snapshot",
+            ));
+        }
+        let length = end - start + 1;
+        let length: usize = length.try_into().map_err(|_| {
+            error(
+                "file_too_large",
+                "selected byte range cannot fit in process memory",
+            )
+        })?;
+        let mut bytes = vec![0_u8; length];
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| error("runtime_unavailable", "ticket snapshot is unavailable"))?;
+        file.seek(SeekFrom::Start(start)).map_err(|cause| {
+            error(
+                "runtime_unavailable",
+                format!("cannot seek immutable ticket snapshot: {cause}"),
+            )
+        })?;
+        file.read_exact(&mut bytes).map_err(|cause| {
+            error(
+                "runtime_unavailable",
+                format!("cannot read immutable ticket snapshot: {cause}"),
+            )
+        })?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for ImmutableTicketSnapshot {
+    fn drop(&mut self) {
+        self.usage.fetch_sub(self.size_bytes, Ordering::AcqRel);
+    }
+}
+
+struct TicketSnapshotReservation {
+    usage: Arc<AtomicU64>,
+    size_bytes: u64,
+    committed: bool,
+}
+
+impl TicketSnapshotReservation {
+    fn commit(mut self, file: File) -> Arc<ImmutableTicketSnapshot> {
+        self.committed = true;
+        Arc::new(ImmutableTicketSnapshot {
+            file: StdMutex::new(file),
+            size_bytes: self.size_bytes,
+            usage: self.usage.clone(),
+        })
+    }
+}
+
+impl Drop for TicketSnapshotReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.usage.fetch_sub(self.size_bytes, Ordering::AcqRel);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -168,9 +249,40 @@ impl FileResourceRuntime {
                 limits: FileResourceLimits::default(),
                 stability_delay,
                 ticket_ttl,
+                max_user_file_grants: DEFAULT_MAX_USER_FILE_GRANTS,
+                ticket_snapshot_usage: Arc::new(AtomicU64::new(0)),
+                max_ticket_snapshot_bytes: MAX_TICKET_SNAPSHOT_BYTES,
                 events,
                 app_handle: RwLock::new(None),
                 #[cfg(test)]
+                issue_ticket_after_validation_hook: Mutex::new(None),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_limits(
+        stability_delay: Duration,
+        ticket_ttl: Duration,
+        max_user_file_grants: usize,
+        max_ticket_snapshot_bytes: u64,
+    ) -> Self {
+        let (events, _) = broadcast::channel(64);
+        Self {
+            inner: Arc::new(FileResourceRuntimeInner {
+                entries: Mutex::new(HashMap::new()),
+                subscription_resources: Mutex::new(HashMap::new()),
+                user_file_grants: Mutex::new(HashMap::new()),
+                read_tickets: Mutex::new(HashMap::new()),
+                renderer_leases: Mutex::new(HashMap::new()),
+                limits: FileResourceLimits::default(),
+                stability_delay,
+                ticket_ttl,
+                max_user_file_grants,
+                ticket_snapshot_usage: Arc::new(AtomicU64::new(0)),
+                max_ticket_snapshot_bytes,
+                events,
+                app_handle: RwLock::new(None),
                 issue_ticket_after_validation_hook: Mutex::new(None),
             }),
         }
@@ -240,14 +352,9 @@ impl FileResourceRuntime {
             .authorize_existing_file(selected_path)?;
         let snapshot = verified_snapshot(authorized.clone(), self.inner.limits.clone()).await?;
         let canonical_path = snapshot.descriptor().canonical_path.clone();
-        let capability_id = Uuid::new_v4().to_string();
-        self.inner.user_file_grants.lock().await.insert(
-            capability_id.clone(),
-            UserFileGrant {
-                canonical_path: canonical_path.clone(),
-                authorized,
-            },
-        );
+        let capability_id = self
+            .upsert_user_file_grant(canonical_path.clone(), authorized)
+            .await?;
         Ok(UserFileGrantV1 {
             schema: 1,
             capability_id,
@@ -264,14 +371,6 @@ impl FileResourceRuntime {
         if let Some(app_handle) = app_handle {
             self.attach_app_handle(app_handle);
         }
-        let grant = self
-            .inner
-            .user_file_grants
-            .lock()
-            .await
-            .get(capability_id)
-            .cloned()
-            .ok_or_else(|| error("unauthorized_path", "user file capability is unavailable"))?;
         let requested = std::fs::canonicalize(path).map_err(|cause| {
             error(
                 "unavailable_path",
@@ -284,19 +383,124 @@ impl FileResourceRuntime {
                 "selected file cannot be represented losslessly as UTF-8",
             )
         })?;
-        if requested != grant.canonical_path {
-            return Err(error(
-                "unauthorized_path",
-                "user file capability grants only the selected canonical file",
-            ));
+        let authorized = {
+            let mut grants = self.inner.user_file_grants.lock().await;
+            let grant = grants
+                .get_mut(capability_id)
+                .ok_or_else(|| error("unauthorized_path", "user file capability is unavailable"))?;
+            if requested != grant.canonical_path {
+                return Err(error(
+                    "unauthorized_path",
+                    "user file capability grants only the selected canonical file",
+                ));
+            }
+            grant.in_flight_uses = grant.in_flight_uses.saturating_add(1);
+            grant.authorized.clone()
+        };
+        let authorized = match authorized.reauthorize_same_target() {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                self.finish_user_grant_open(capability_id, None).await;
+                return Err(error);
+            }
+        };
+        {
+            let mut grants = self.inner.user_file_grants.lock().await;
+            let current = grants
+                .get_mut(capability_id)
+                .ok_or_else(|| error("unauthorized_path", "user file capability was revoked"))?;
+            if current.canonical_path != requested {
+                return Err(error(
+                    "unauthorized_path",
+                    "user file capability changed while it was being opened",
+                ));
+            }
+            current.authorized = authorized.clone();
+            current.last_used_at = Instant::now();
         }
-        self.open_authorized(
-            grant.authorized,
-            FileAccessClaim::User {
-                capability_id: capability_id.to_string(),
+        let result = self
+            .open_authorized(
+                authorized.clone(),
+                FileAccessClaim::User {
+                    capability_id: capability_id.to_string(),
+                },
+            )
+            .await;
+        self.finish_user_grant_open(capability_id, result.as_ref().ok().map(|_| authorized))
+            .await;
+        result
+    }
+
+    async fn finish_user_grant_open(
+        &self,
+        capability_id: &str,
+        authorized: Option<AuthorizedPath>,
+    ) {
+        let mut grants = self.inner.user_file_grants.lock().await;
+        if let Some(grant) = grants.get_mut(capability_id) {
+            grant.in_flight_uses = grant.in_flight_uses.saturating_sub(1);
+            if let Some(authorized) = authorized {
+                grant.authorized = authorized;
+                grant.last_used_at = Instant::now();
+            }
+        }
+    }
+
+    async fn upsert_user_file_grant(
+        &self,
+        canonical_path: String,
+        authorized: AuthorizedPath,
+    ) -> Result<String, FileResourceErrorV1> {
+        let active_capabilities = {
+            let entries = self.inner.entries.lock().await;
+            entries
+                .values()
+                .flat_map(|entry| entry.subscribers.values())
+                .filter_map(|claim| match claim {
+                    FileAccessClaim::User { capability_id } => Some(capability_id.clone()),
+                    FileAccessClaim::Agent { .. } => None,
+                })
+                .collect::<HashSet<_>>()
+        };
+        let now = Instant::now();
+        let mut grants = self.inner.user_file_grants.lock().await;
+        if let Some((capability_id, existing)) = grants
+            .iter_mut()
+            .find(|(_, grant)| grant.canonical_path == canonical_path)
+        {
+            existing.authorized = authorized;
+            existing.last_used_at = now;
+            return Ok(capability_id.clone());
+        }
+
+        if grants.len() >= self.inner.max_user_file_grants {
+            let evict = grants
+                .iter()
+                .filter(|(capability_id, grant)| {
+                    grant.in_flight_uses == 0 && !active_capabilities.contains(*capability_id)
+                })
+                .min_by_key(|(_, grant)| grant.last_used_at)
+                .map(|(capability_id, _)| capability_id.clone());
+            let Some(evict) = evict else {
+                return Err(error(
+                    "grant_limit_reached",
+                    "all exact-file grants are active; close a file before selecting another",
+                ));
+            };
+            grants.remove(&evict);
+        }
+
+        let capability_id = Uuid::new_v4().to_string();
+        grants.insert(
+            capability_id.clone(),
+            UserFileGrant {
+                canonical_path,
+                authorized,
+                last_used_at: now,
+                in_flight_uses: 0,
             },
-        )
-        .await
+        );
+        Ok(capability_id)
     }
 
     /// Reopens an exact file selected through the native picker without
@@ -520,11 +724,122 @@ impl FileResourceRuntime {
             }
             entry.authorized.clone()
         };
-        let Ok(snapshot) = verified_snapshot(authorized.clone(), self.inner.limits.clone()).await
-        else {
-            return;
-        };
+        let (authorized, snapshot) =
+            match verified_snapshot(authorized.clone(), self.inner.limits.clone()).await {
+                Ok(snapshot) => (authorized, snapshot),
+                Err(initial_error)
+                    if matches!(
+                        initial_error.code(),
+                        "unauthorized_path" | "unavailable_path"
+                    ) =>
+                {
+                    let replacement = match authorized.reauthorize_same_target() {
+                        Ok(replacement) => {
+                            match verified_snapshot(replacement.clone(), self.inner.limits.clone())
+                                .await
+                            {
+                                Ok(snapshot) => Some((replacement, snapshot)),
+                                Err(error) => {
+                                    self.publish_refresh_failure(
+                                        resource_id,
+                                        incarnation_id,
+                                        generation,
+                                        &error,
+                                    )
+                                    .await;
+                                    None
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.publish_refresh_failure(
+                                resource_id,
+                                incarnation_id,
+                                generation,
+                                &error,
+                            )
+                            .await;
+                            None
+                        }
+                    };
+                    let Some(replacement) = replacement else {
+                        return;
+                    };
+                    replacement
+                }
+                Err(error) => {
+                    if error.code() != "unstable_file" {
+                        self.publish_refresh_failure(
+                            resource_id,
+                            incarnation_id,
+                            generation,
+                            &error,
+                        )
+                        .await;
+                    }
+                    return;
+                }
+            };
         let (descriptor, revision_token) = snapshot.into_parts();
+        let (event, user_capability_ids) = {
+            let mut entries = self.inner.entries.lock().await;
+            let Some(entry) = entries.get_mut(resource_id) else {
+                return;
+            };
+            if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
+                return;
+            }
+            entry.authorized = authorized.clone();
+            entry.revision_token = revision_token;
+            let recovered = entry.descriptor.unavailable_reason.is_some();
+            let content_changed = entry.descriptor.content_hash != descriptor.content_hash;
+            let user_capability_ids = entry
+                .subscribers
+                .values()
+                .filter_map(|claim| match claim {
+                    FileAccessClaim::User { capability_id } => Some(capability_id.clone()),
+                    FileAccessClaim::Agent { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            if !content_changed && !recovered {
+                entry.descriptor = descriptor;
+                (None, user_capability_ids)
+            } else {
+                entry.revision = entry.revision.saturating_add(1);
+                entry.descriptor = descriptor.clone();
+                (
+                    Some(FileResourceEventV1 {
+                        schema: 1,
+                        resource_id: resource_id.to_string(),
+                        revision: entry.revision,
+                        descriptor,
+                    }),
+                    user_capability_ids,
+                )
+            }
+        };
+        if !user_capability_ids.is_empty() {
+            let now = Instant::now();
+            let mut grants = self.inner.user_file_grants.lock().await;
+            for capability_id in user_capability_ids {
+                if let Some(grant) = grants.get_mut(&capability_id) {
+                    grant.authorized = authorized.clone();
+                    grant.last_used_at = now;
+                }
+            }
+        }
+        if let Some(event) = event {
+            self.emit(event);
+        }
+    }
+
+    async fn publish_refresh_failure(
+        &self,
+        resource_id: &str,
+        incarnation_id: Uuid,
+        generation: u64,
+        failure: &FileResourceErrorV1,
+    ) {
         let event = {
             let mut entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get_mut(resource_id) else {
@@ -533,12 +848,15 @@ impl FileResourceRuntime {
             if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
                 return;
             }
-            entry.authorized = authorized;
-            entry.revision_token = revision_token;
-            if entry.descriptor.content_hash == descriptor.content_hash {
-                entry.descriptor = descriptor;
+            if entry.descriptor.unavailable_reason.as_deref() == Some(failure.code()) {
                 return;
             }
+            let mut descriptor = entry.descriptor.clone();
+            descriptor.capabilities.preview = false;
+            descriptor.capabilities.changes = false;
+            descriptor.capabilities.draft = false;
+            descriptor.capabilities.stream = false;
+            descriptor.unavailable_reason = Some(failure.code().to_string());
             entry.revision = entry.revision.saturating_add(1);
             entry.descriptor = descriptor.clone();
             FileResourceEventV1 {
@@ -831,6 +1149,9 @@ impl FileResourceRuntime {
             }
         };
         self.remove_expired_tickets().await;
+        let snapshot = self
+            .create_ticket_snapshot(authorized, revision_token, descriptor.size_bytes)
+            .await?;
         let ticket_id = Uuid::new_v4().to_string();
         let issuance_id = Uuid::new_v4();
         let expires_at = Instant::now() + self.inner.ticket_ttl;
@@ -877,8 +1198,7 @@ impl FileResourceRuntime {
             renderer_lease,
             subscription_id: subscription_id.to_string(),
             resource_id: resource_id.to_string(),
-            authorized,
-            revision_token,
+            snapshot,
             size_bytes: descriptor.size_bytes,
             mime_type: descriptor.mime_type,
             expires_at,
@@ -901,6 +1221,71 @@ impl FileResourceRuntime {
             renderer_lease_id: renderer_lease_id.to_string(),
             expires_at_ms,
         })
+    }
+
+    async fn create_ticket_snapshot(
+        &self,
+        authorized: AuthorizedPath,
+        revision_token: FileRevisionToken,
+        size_bytes: u64,
+    ) -> Result<Arc<ImmutableTicketSnapshot>, FileResourceErrorV1> {
+        let reservation = self.reserve_ticket_snapshot(size_bytes)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut file = tempfile::tempfile().map_err(|cause| {
+                error(
+                    "runtime_unavailable",
+                    format!("cannot create immutable ticket snapshot: {cause}"),
+                )
+            })?;
+            let copied = authorized.copy_verified_revision_to(&revision_token, &mut file)?;
+            if copied != size_bytes {
+                return Err(error(
+                    "stale_revision",
+                    "immutable ticket snapshot length does not match its descriptor",
+                ));
+            }
+            file.seek(SeekFrom::Start(0)).map_err(|cause| {
+                error(
+                    "runtime_unavailable",
+                    format!("cannot rewind immutable ticket snapshot: {cause}"),
+                )
+            })?;
+            Ok(reservation.commit(file))
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    fn reserve_ticket_snapshot(
+        &self,
+        size_bytes: u64,
+    ) -> Result<TicketSnapshotReservation, FileResourceErrorV1> {
+        let usage = &self.inner.ticket_snapshot_usage;
+        let mut current = usage.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(size_bytes) else {
+                return Err(error(
+                    "ticket_capacity_exceeded",
+                    "renderer ticket snapshot budget is exhausted",
+                ));
+            };
+            if next > self.inner.max_ticket_snapshot_bytes {
+                return Err(error(
+                    "ticket_capacity_exceeded",
+                    "renderer ticket snapshot budget is exhausted",
+                ));
+            }
+            match usage.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    return Ok(TicketSnapshotReservation {
+                        usage: usage.clone(),
+                        size_bytes,
+                        committed: false,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Releases one renderer-scoped stream capability without closing the
@@ -997,14 +1382,11 @@ impl FileResourceRuntime {
         let ticket = self.validated_ticket(ticket_id, webview_label).await?;
         let range = parse_byte_range(range_header, ticket.size_bytes)?;
         let partial = range_header.is_some();
-        let revision_token = ticket.revision_token.clone();
-        let authorized = ticket.authorized.clone();
-        let maximum_length_bytes = ticket.size_bytes;
-        let bytes = tauri::async_runtime::spawn_blocking(move || {
-            authorized.read_verified_range(&revision_token, range.0..=range.1, maximum_length_bytes)
-        })
-        .await
-        .map_err(join_error)??;
+        let snapshot = ticket.snapshot.clone();
+        let bytes =
+            tauri::async_runtime::spawn_blocking(move || snapshot.read_range(range.0, range.1))
+                .await
+                .map_err(join_error)??;
         self.ensure_ticket_lease_active(&ticket).await?;
         Ok(FileResourceRangeRead {
             bytes,
@@ -1025,11 +1407,6 @@ impl FileResourceRuntime {
         let ticket = self.validated_ticket(ticket_id, webview_label).await?;
         let range = parse_byte_range(range_header, ticket.size_bytes)?;
         let partial = range_header.is_some();
-        let revision_token = ticket.revision_token.clone();
-        let authorized = ticket.authorized.clone();
-        tauri::async_runtime::spawn_blocking(move || authorized.verify_revision(&revision_token))
-            .await
-            .map_err(join_error)??;
         self.ensure_ticket_lease_active(&ticket).await?;
         Ok(FileResourceRangeRead {
             bytes: Vec::new(),
@@ -1185,6 +1562,11 @@ impl FileResourceRuntime {
     #[must_use]
     pub async fn user_grant_count(&self) -> usize {
         self.inner.user_file_grants.lock().await.len()
+    }
+
+    #[cfg(test)]
+    fn ticket_snapshot_bytes_in_use(&self) -> u64 {
+        self.inner.ticket_snapshot_usage.load(Ordering::Acquire)
     }
 }
 
@@ -1413,6 +1795,105 @@ mod tests {
         assert_eq!(event.revision, 2);
         sleep(Duration::from_millis(250)).await;
         assert!(events.try_recv().is_err(), "raw notify burst leaked");
+    }
+
+    #[tokio::test]
+    async fn same_path_identity_replacement_advances_once_and_refreshes_picker_grant() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("atomic.txt");
+        fs::write(&path, "revision one\n").expect("fixture");
+        let runtime = test_runtime();
+        let grant = runtime.record_user_file(&path).await.expect("picker grant");
+        let subscription = runtime
+            .open_user_file(&grant.capability_id, &path, None)
+            .await
+            .expect("open picker file");
+        let mut events = runtime.subscribe_events();
+
+        let replacement = temp.path().join("atomic.replacement");
+        fs::write(&replacement, "revision two\n").expect("replacement fixture");
+        replace_path_identity(&replacement, &path);
+        runtime.schedule_refresh(subscription.resource_id.clone());
+
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("replacement event timeout")
+            .expect("replacement event");
+        assert_eq!(event.revision, subscription.revision + 1);
+        assert_eq!(event.descriptor.unavailable_reason, None);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    event.revision,
+                    None,
+                )
+                .await
+                .expect("replacement read")
+                .text,
+            "revision two\n"
+        );
+        sleep(Duration::from_millis(300)).await;
+        assert!(events.try_recv().is_err(), "replacement emitted twice");
+
+        let refreshed_grant = runtime
+            .inner
+            .user_file_grants
+            .lock()
+            .await
+            .get(&grant.capability_id)
+            .expect("live grant")
+            .authorized
+            .clone();
+        verified_snapshot(refreshed_grant, runtime.inner.limits.clone())
+            .await
+            .expect("grant retains the replacement identity");
+    }
+
+    #[tokio::test]
+    async fn persistent_refresh_failure_is_typed_once_and_recovers() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("unavailable.txt");
+        let moved = temp.path().join("unavailable.moved");
+        fs::write(&path, "stable\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let subscription = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let mut events = runtime.subscribe_events();
+
+        fs::rename(&path, &moved).expect("move file away");
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        let unavailable = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("unavailable event timeout")
+            .expect("unavailable event");
+        assert_eq!(unavailable.revision, 2);
+        assert_eq!(
+            unavailable.descriptor.unavailable_reason.as_deref(),
+            Some("unauthorized_path")
+        );
+        assert!(!unavailable.descriptor.capabilities.preview);
+
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "identical failure state repeated"
+        );
+
+        fs::rename(&moved, &path).expect("restore original identity");
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        let recovered = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("recovery event timeout")
+            .expect("recovery event");
+        assert_eq!(recovered.revision, 3);
+        assert_eq!(recovered.descriptor.unavailable_reason, None);
+        assert!(recovered.descriptor.capabilities.preview);
     }
 
     #[tokio::test]
@@ -1672,7 +2153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ticket_rejects_stale_content_and_is_revoked_with_its_subscription() {
+    async fn ticket_serves_its_immutable_revision_after_source_changes_and_is_revoked_on_close() {
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join("lease.pdf");
         fs::write(&path, b"%PDF-1.7 lease payload").expect("fixture");
@@ -1697,14 +2178,28 @@ mod tests {
         fs::write(&path, b"%PDF-1.7 other payload").expect("mutate");
         assert_eq!(
             runtime
-                .read_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=0-3"), Some("main"))
+                .read_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=9-13"), Some("main"))
                 .await
-                .expect_err("stale ticket must fail")
-                .code(),
-            "stale_revision"
+                .expect("ticket retains the issued revision")
+                .bytes,
+            b"lease"
+        );
+        assert!(runtime
+            .verify_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=9-13"), Some("main"),)
+            .await
+            .expect("HEAD validates immutable snapshot")
+            .bytes
+            .is_empty());
+        fs::remove_file(&path).expect("remove source after issuance");
+        assert_eq!(
+            runtime
+                .read_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=9-13"), Some("main"))
+                .await
+                .expect("range never rereads the removed source")
+                .bytes,
+            b"lease"
         );
 
-        fs::write(&path, b"%PDF-1.7 lease payload").expect("restore");
         runtime
             .close(&subscription.subscription_id)
             .await
@@ -1717,6 +2212,159 @@ mod tests {
                 .code(),
             "invalid_ticket"
         );
+    }
+
+    #[tokio::test]
+    async fn ticket_snapshot_disk_budget_is_bounded_and_released_with_the_lease() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let first_path = temp.path().join("first.pdf");
+        let second_path = temp.path().join("second.pdf");
+        let first_bytes = b"%PDF-1.7 first payload";
+        let second_bytes = b"%PDF-1.7 second payload";
+        fs::write(&first_path, first_bytes).expect("first fixture");
+        fs::write(&second_path, second_bytes).expect("second fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = FileResourceRuntime::with_test_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+            8,
+            second_bytes.len() as u64,
+        );
+        let first = runtime
+            .open_agent_file("agent-a", &config, &first_path, None)
+            .await
+            .expect("first open");
+        let second = runtime
+            .open_agent_file("agent-a", &config, &second_path, None)
+            .await
+            .expect("second open");
+        runtime
+            .issue_ticket(
+                &first.resource_id,
+                &first.subscription_id,
+                first.revision,
+                Some(&config),
+                "first-lease",
+            )
+            .await
+            .expect("first ticket");
+        assert_eq!(
+            runtime.ticket_snapshot_bytes_in_use(),
+            first_bytes.len() as u64
+        );
+
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &second.resource_id,
+                    &second.subscription_id,
+                    second.revision,
+                    Some(&config),
+                    "second-lease",
+                )
+                .await
+                .expect_err("snapshot budget must reject another file")
+                .code(),
+            "ticket_capacity_exceeded"
+        );
+        runtime
+            .close_renderer_lease(
+                &first.resource_id,
+                &first.subscription_id,
+                "first-lease",
+                None,
+            )
+            .await
+            .expect("release first lease");
+        assert_eq!(runtime.ticket_snapshot_bytes_in_use(), 0);
+        runtime
+            .issue_ticket(
+                &second.resource_id,
+                &second.subscription_id,
+                second.revision,
+                Some(&config),
+                "second-lease",
+            )
+            .await
+            .expect("released budget admits another snapshot");
+    }
+
+    #[tokio::test]
+    async fn picker_grants_are_exact_path_deduplicated_and_lru_bounded() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let first_path = temp.path().join("first.txt");
+        let second_path = temp.path().join("second.txt");
+        let third_path = temp.path().join("third.txt");
+        for path in [&first_path, &second_path, &third_path] {
+            fs::write(path, path.to_string_lossy().as_bytes()).expect("fixture");
+        }
+        let runtime = FileResourceRuntime::with_test_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+            2,
+            MAX_TICKET_SNAPSHOT_BYTES,
+        );
+        let first = runtime
+            .record_user_file(&first_path)
+            .await
+            .expect("first grant");
+        let duplicate = runtime
+            .record_user_file(&first_path)
+            .await
+            .expect("duplicate grant");
+        assert_eq!(duplicate.capability_id, first.capability_id);
+        assert_eq!(runtime.user_grant_count().await, 1);
+
+        let second = runtime
+            .record_user_file(&second_path)
+            .await
+            .expect("second grant");
+        let active_first = runtime
+            .open_user_file(&first.capability_id, &first_path, None)
+            .await
+            .expect("activate first grant");
+        let third = runtime
+            .record_user_file(&third_path)
+            .await
+            .expect("third grant evicts inactive LRU");
+        assert_eq!(runtime.user_grant_count().await, 2);
+        assert!(
+            runtime
+                .open_user_file(&second.capability_id, &second_path, None)
+                .await
+                .is_err(),
+            "evicted grant must be revoked"
+        );
+        let active_third = runtime
+            .open_user_file(&third.capability_id, &third_path, None)
+            .await
+            .expect("new grant remains available");
+        runtime
+            .snapshot(&active_first.resource_id)
+            .await
+            .expect("active grant is never evicted");
+        assert_eq!(
+            runtime
+                .record_user_file(&second_path)
+                .await
+                .expect_err("all-active grant set must reject growth")
+                .code(),
+            "grant_limit_reached"
+        );
+
+        runtime
+            .close(&active_first.subscription_id)
+            .await
+            .expect("close first grant");
+        runtime
+            .record_user_file(&second_path)
+            .await
+            .expect("closed LRU slot can be reused");
+        assert_eq!(runtime.user_grant_count().await, 2);
+        runtime
+            .snapshot(&active_third.resource_id)
+            .await
+            .expect("remaining active grant is retained");
     }
 
     #[tokio::test]
@@ -1761,6 +2409,7 @@ mod tests {
             .expect("idempotent release");
 
         assert_eq!(runtime.ticket_count().await, 0);
+        assert_eq!(runtime.ticket_snapshot_bytes_in_use(), 0);
         assert!(runtime.inner.renderer_leases.lock().await.is_empty());
         assert_eq!(runtime.watcher_count().await, 1);
         assert_eq!(
@@ -1960,5 +2609,18 @@ mod tests {
         assert_eq!(runtime.ticket_count().await, 0);
         assert_eq!(runtime.user_grant_count().await, 0);
         assert!(runtime.inner.renderer_leases.lock().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn replace_path_identity(replacement: &Path, target: &Path) {
+        fs::rename(replacement, target).expect("atomic replacement");
+    }
+
+    #[cfg(windows)]
+    fn replace_path_identity(replacement: &Path, target: &Path) {
+        let prior = target.with_extension("prior");
+        fs::rename(target, &prior).expect("move prior identity aside");
+        fs::rename(replacement, target).expect("move replacement into target");
+        fs::remove_file(prior).expect("remove prior identity");
     }
 }
