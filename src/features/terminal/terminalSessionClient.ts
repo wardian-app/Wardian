@@ -79,6 +79,7 @@ export class TerminalSessionClient {
   readonly sessionId: string;
   readonly #consumerId: string;
   readonly #presentations = new Map<string, PresentationBinding>();
+  readonly #closingPresentations = new Set<string>();
   #brokerState: TerminalBrokerState | null = null;
   #replacementOwnerCandidate: string | null = null;
   #lastOwnerPresentationId: string | null = null;
@@ -94,6 +95,7 @@ export class TerminalSessionClient {
   #drainQueued = false;
   #destroyed = false;
   #operation = Promise.resolve();
+  #inputOperation = Promise.resolve();
 
   constructor(sessionId: string) {
     if (!sessionId) {
@@ -226,32 +228,41 @@ export class TerminalSessionClient {
   }
 
   async unregisterPresentation(presentationId: string) {
-    return this.#serialize(async () => {
-      const binding = this.#presentations.get(presentationId);
-      this.#presentations.delete(presentationId);
-      try {
-        if (binding) {
-          try {
-            const state = await invoke<TerminalBrokerState>("unregister_terminal_presentation", {
-              request: {
-                session_id: this.sessionId,
-                presentation_id: presentationId,
-                runtime_generation: this.#brokerState?.runtime_generation ?? 0,
-              },
-            });
-            this.#setBrokerState(state);
-          } catch (error) {
-            if (!String(error).includes("SessionNotFound")) {
-              throw error;
+    if (this.#closingPresentations.has(presentationId)) {
+      return;
+    }
+    this.#closingPresentations.add(presentationId);
+    try {
+      return await this.#serialize(async () => {
+        await this.#inputOperation;
+        const binding = this.#presentations.get(presentationId);
+        this.#presentations.delete(presentationId);
+        try {
+          if (binding) {
+            try {
+              const state = await invoke<TerminalBrokerState>("unregister_terminal_presentation", {
+                request: {
+                  session_id: this.sessionId,
+                  presentation_id: presentationId,
+                  runtime_generation: this.#brokerState?.runtime_generation ?? 0,
+                },
+              });
+              this.#setBrokerState(state);
+            } catch (error) {
+              if (!String(error).includes("SessionNotFound")) {
+                throw error;
+              }
             }
           }
+        } finally {
+          if (this.#presentations.size === 0) {
+            await this.destroy();
+          }
         }
-      } finally {
-        if (this.#presentations.size === 0) {
-          await this.destroy();
-        }
-      }
-    });
+      });
+    } finally {
+      this.#closingPresentations.delete(presentationId);
+    }
   }
 
   /**
@@ -322,33 +333,39 @@ export class TerminalSessionClient {
   }
 
   async sendText(presentationId: string, input: string) {
-    const state = this.#requiredBrokerState();
-    const decision = await invoke<TerminalLeaseDecision>(
-      "send_terminal_presentation_input",
-      {
-        request: {
-          ...terminalLease(this.sessionId, presentationId, state),
-          input,
+    this.#assertPresentationAcceptsInput(presentationId);
+    return this.#serializeInput(async () => {
+      const state = this.#requiredBrokerState();
+      const decision = await invoke<TerminalLeaseDecision>(
+        "send_terminal_presentation_input",
+        {
+          request: {
+            ...terminalLease(this.sessionId, presentationId, state),
+            input,
+          },
         },
-      },
-    );
-    this.#notifyDecision(decision);
-    return decision;
+      );
+      this.#notifyDecision(decision);
+      return decision;
+    });
   }
 
   async sendBinary(presentationId: string, input: readonly number[]) {
-    const state = this.#requiredBrokerState();
-    const decision = await invoke<TerminalLeaseDecision>(
-      "send_terminal_presentation_binary",
-      {
-        request: {
-          ...terminalLease(this.sessionId, presentationId, state),
-          input: Array.from(input),
+    this.#assertPresentationAcceptsInput(presentationId);
+    return this.#serializeInput(async () => {
+      const state = this.#requiredBrokerState();
+      const decision = await invoke<TerminalLeaseDecision>(
+        "send_terminal_presentation_binary",
+        {
+          request: {
+            ...terminalLease(this.sessionId, presentationId, state),
+            input: Array.from(input),
+          },
         },
-      },
-    );
-    this.#notifyDecision(decision);
-    return decision;
+      );
+      this.#notifyDecision(decision);
+      return decision;
+    });
   }
 
   async resize(
@@ -864,6 +881,15 @@ export class TerminalSessionClient {
     return binding;
   }
 
+  #assertPresentationAcceptsInput(presentationId: string) {
+    if (this.#closingPresentations.has(presentationId)) {
+      throw new Error(`Terminal presentation is closing: ${presentationId}`);
+    }
+    if (this.#destroyed || !this.#presentations.has(presentationId)) {
+      throw new Error(`Terminal presentation not registered: ${presentationId}`);
+    }
+  }
+
   #currentLocalOwnerPresentationId() {
     const ownerPresentationId = this.#brokerState?.owner_presentation_id ?? null;
     return ownerPresentationId !== null && this.#presentations.has(ownerPresentationId)
@@ -881,6 +907,15 @@ export class TerminalSessionClient {
   #serialize<T>(operation: () => Promise<T>) {
     const result = this.#operation.then(operation, operation);
     this.#operation = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  #serializeInput<T>(operation: () => Promise<T>) {
+    const result = this.#inputOperation.then(operation, operation);
+    this.#inputOperation = result.then(
       () => undefined,
       () => undefined,
     );

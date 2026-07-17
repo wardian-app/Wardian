@@ -166,6 +166,34 @@ is 0.75 and cannot be configured below 0.5. A phone, narrow split, or remote
 viewport therefore never degrades the desktop PTY by imposing
 smallest-client-wins geometry.
 
+### Alternate-screen application ownership
+
+The broker owns PTY transport, presentation leases, canonical geometry,
+snapshots, and ordered output. A terminal application still owns the protocol
+state it negotiates inside that transport. When an application such as OpenCode
+enters the alternate buffer and enables xterm mouse tracking, xterm forwards
+click, drag, hover, and wheel reports to the application instead of treating
+them as Wardian or xterm scrollback gestures. Remote touch input adapts vertical
+travel into the same wheel protocol only while that alternate-screen mouse mode
+is active.
+
+Snapshots and replay preserve alternate-buffer, mouse-mode, and synchronized-
+output controls. Synchronized-output boundaries are renderer instructions, not
+broker events: xterm holds intermediate row refreshes until the application
+closes the frame. Normal-buffer presentations may use rendered-row geometry to
+fill a host, while alternate buffers use xterm's measured cell grid so
+application-owned layout is not inferred from stale row DOM.
+
+Text and binary input share a dedicated FIFO in the desktop session client.
+This preserves the byte order emitted by xterm when rapid keyboard and mouse
+events would otherwise create concurrent Tauri IPC requests. The input FIFO is
+separate from snapshot, event-drain, and geometry serialization so a renderer
+refresh cannot delay interactive input or create a resize backlog. The final
+presentation drains that FIFO before unregistering and releasing the session
+client, and marks itself closing before that drain begins. Already accepted
+input completes in order, while late renderer callbacks cannot append work to a
+client being released or be overtaken by a replacement presentation.
+
 ## Desktop and Remote Consistency
 
 `TerminalSessionClient` owns one ordered desktop subscription per session and

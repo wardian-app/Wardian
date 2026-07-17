@@ -44,7 +44,7 @@ describe("terminal capability broker", () => {
       "\u001b[?2004;2$y",
       "\u001b[?2027;0$y",
       "\u001b[?2031;0$y",
-      "\u001b[?2026;0$y",
+      "\u001b[?2026;2$y",
       "\u001b[4;600;900t",
       "\u001b[I",
     ]);
@@ -190,6 +190,13 @@ describe("terminal capability broker", () => {
     expect(filterProviderTerminalInput("opencode", mouseMotion, { binary: true })).toBe("");
     expect(filterProviderTerminalInput("opencode", wheelPacket, { binary: true })).toBe(wheelPacket);
     expect(filterProviderTerminalInput("codex", mouseMotion, { binary: true })).toBe(mouseMotion);
+  });
+
+  it("preserves complete OpenCode SGR mouse reports and legacy drag packets", () => {
+    const sgrDrag = "\u001b[<32;12;8M";
+    const legacyDrag = "\u001b[M" + String.fromCharCode(64, 44, 40);
+
+    expect(filterProviderTerminalInput("opencode", sgrDrag + legacyDrag)).toBe(sgrDrag + legacyDrag);
   });
 
   it("strips ConPTY-echoed color/light-dark replies from Codex output even when fragmented across chunks", () => {
@@ -352,11 +359,11 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput("\u001b[?2031hready\u001b[?2031l", "opencode")).toBe("ready");
   });
 
-  it("strips OpenCode mouse-tracking toggles before xterm sees them", () => {
+  it("preserves OpenCode mouse-tracking toggles for xterm", () => {
     const data =
       "\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h\u001b[?1016hready\u001b[?1016l\u001b[?1006l\u001b[?1003l";
 
-    expect(normalizeOpenCodeOutput(data, "opencode")).toBe("ready");
+    expect(normalizeOpenCodeOutput(data, "opencode")).toBe(data);
     expect(normalizeOpenCodeOutput(data, "codex")).toBe(data);
   });
 
@@ -371,10 +378,10 @@ describe("terminal capability broker", () => {
     ]);
   });
 
-  it("strips synchronized output toggles and decrqm queries from rendered output", () => {
+  it("preserves synchronized output toggles while stripping brokered decrqm queries", () => {
     expect(
       normalizeOpenCodeOutput("\u001b[?2026hhello\u001b[?1016$ptest\u001b[?2026l", "opencode"),
-    ).toBe("hellotest");
+    ).toBe("\u001b[?2026hhellotest\u001b[?2026l");
   });
 
   it("preserves standard clear-screen sequences for non-opencode providers", () => {
@@ -437,8 +444,6 @@ describe("terminal capability broker", () => {
 
   it("renders OpenCode home-redraw frames natively without fabricating scrollback", () => {
     const ESC = String.fromCharCode(27);
-    const stripSyncToggles = (value: string) =>
-      value.split(`${ESC}[?2026h`).join("").split(`${ESC}[?2026l`).join("");
     const firstFrame =
       `${ESC}[?2026h${ESC}[H` +
       `${ESC}[3;3H| "Introduce yourself"` +
@@ -453,10 +458,10 @@ describe("terminal capability broker", () => {
 
     // OpenTUI (opencode's renderer) is a home-anchored in-place repainter, so
     // the second frame must NOT inject a 999;1H synthetic-scrollback row for the
-    // lines the repaint stopped painting. Only the synchronized-update toggles
-    // are stripped; the frame is otherwise passed through verbatim.
-    expect(normalizeOpenCodeOutput(firstFrame, "opencode")).toBe(stripSyncToggles(firstFrame));
-    expect(normalizeOpenCodeOutput(secondFrame, "opencode")).toBe(stripSyncToggles(secondFrame));
+    // lines the repaint stopped painting. Synchronized-update boundaries remain
+    // intact so xterm presents each OpenTUI frame atomically.
+    expect(normalizeOpenCodeOutput(firstFrame, "opencode")).toBe(firstFrame);
+    expect(normalizeOpenCodeOutput(secondFrame, "opencode")).toBe(secondFrame);
   });
 
   it("renders Codex home-redraw frames natively without fabricating scrollback", () => {
