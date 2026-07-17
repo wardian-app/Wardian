@@ -65,7 +65,7 @@ async fn open_file_resource_for_app(
         request.user_file_capability_id.as_deref(),
     ) {
         (Some(agent_id), None) => {
-            let config = current_agent_config(&state, agent_id).await?;
+            let config = current_agent_config(state, agent_id).await?;
             state
                 .file_resources
                 .open_agent_file(agent_id, &config, Path::new(&request.path), app)
