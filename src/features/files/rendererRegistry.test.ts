@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { FileContentDescriptorV1 } from "../../types";
 import {
+  defaultRendererRegistry,
   RendererRegistry,
   type FileRendererDefinition,
 } from "./rendererRegistry";
@@ -23,6 +24,7 @@ function renderer(
       annotations: "general",
     },
     render: EmptyRenderer,
+    create_renderer: () => EmptyRenderer,
   };
 }
 
@@ -73,6 +75,31 @@ describe("RendererRegistry", () => {
     expect(registry.resolve(descriptor({
       renderer_kind: "unsupported",
       mime_type: "application/octet-stream",
+    })).renderer_id).toBe("unsupported");
+  });
+
+  it("uses validated MIME fallback in the real production registry", () => {
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "application/pdf",
+    })).renderer_id).toBe("pdf");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    })).renderer_id).toBe("text");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "application/octet-stream",
+    })).renderer_id).toBe("unsupported");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "pdf",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    })).renderer_id).toBe("pdf");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "pdf",
+      unavailable_reason: "file_too_large",
     })).renderer_id).toBe("unsupported");
   });
 

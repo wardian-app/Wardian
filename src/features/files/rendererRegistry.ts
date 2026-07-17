@@ -21,6 +21,8 @@ export type FileRendererDefinition = {
     annotations: "line_range" | "spatial" | "general";
   };
   render: LazyExoticComponent<ComponentType<FileRendererProps>>;
+  /** Creates a new lazy wrapper so a rejected module load can be retried. */
+  create_renderer: () => LazyExoticComponent<ComponentType<FileRendererProps>>;
 };
 
 const MIME_RENDERER_IDS = Object.freeze({
@@ -61,6 +63,9 @@ export class RendererRegistry {
       if (this.#definitionsById.has(definition.renderer_id)) {
         throw new Error(`duplicate renderer_id: ${definition.renderer_id}`);
       }
+      if (typeof definition.create_renderer !== "function") {
+        throw new Error(`renderer ${definition.renderer_id} requires a create_renderer factory`);
+      }
       this.#definitionsById.set(definition.renderer_id, Object.freeze({
         ...definition,
         capabilities: Object.freeze({ ...definition.capabilities }),
@@ -96,7 +101,9 @@ export class RendererRegistry {
   }
 }
 
-const pendingRenderer = lazy(() => import("./UnsupportedRenderer"));
+function createPendingRenderer() {
+  return lazy(() => import("./UnsupportedRenderer"));
+}
 
 function pendingDefinition(
   renderer_id: string,
@@ -104,9 +111,13 @@ function pendingDefinition(
 ): FileRendererDefinition {
   return {
     renderer_id,
-    matches: (descriptor) => descriptor.renderer_kind === renderer_id,
+    matches: (descriptor) => (
+      descriptor.renderer_kind === renderer_id
+      || rendererIdForValidatedMime(descriptor) === renderer_id
+    ),
     capabilities,
-    render: pendingRenderer,
+    render: createPendingRenderer(),
+    create_renderer: createPendingRenderer,
   };
 }
 

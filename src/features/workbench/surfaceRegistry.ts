@@ -40,6 +40,8 @@ export interface WorkbenchSurfaceRegistry {
     candidates: readonly WorkbenchSurfaceV1[],
   ): string | undefined;
   presentation(surface: WorkbenchSurfaceV1): SurfacePresentationMetadata;
+  subscribe_presentation(listener: () => void): () => void;
+  presentation_version(): number;
   can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision>;
 }
 
@@ -124,6 +126,10 @@ function validateDefinition(definition: SurfaceDefinition): void {
     definition.presentation_icon !== undefined
     && typeof definition.presentation_icon !== "function"
   ) throw new Error("presentation_icon must be a function");
+  if (
+    definition.presentation_subscribe !== undefined
+    && typeof definition.presentation_subscribe !== "function"
+  ) throw new Error("presentation_subscribe must be a function");
   if (typeof definition.title !== "function") throw new Error("title must be a function");
   if (!Array.isArray(definition.commands) || definition.commands.some(
     (command) => typeof command.command_id !== "string" || typeof command.title !== "string",
@@ -228,6 +234,18 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
   private readonly rawDefinitionsByType = new Map<string, SurfaceDefinition>();
   private readonly publicDefinitionsByType = new Map<string, SurfaceDefinition>();
   private readonly registrationOrder: SurfaceDefinition[] = [];
+  private readonly presentationListeners = new Set<() => void>();
+  private readonly presentationSources = new Set<(listener: () => void) => () => void>();
+  private readonly presentationSourceUnsubscribers = new Map<
+    (listener: () => void) => () => void,
+    () => void
+  >();
+  private presentationVersion = 0;
+
+  private readonly invalidatePresentation = () => {
+    this.presentationVersion += 1;
+    for (const listener of this.presentationListeners) listener();
+  };
 
   register<TState extends SurfaceState>(definition: SurfaceDefinition<TState>): void {
     validateDefinition(definition as SurfaceDefinition);
@@ -239,6 +257,12 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     const publicDefinition = this.safeDefinition(rawDefinition);
     this.publicDefinitionsByType.set(rawDefinition.type, publicDefinition);
     this.registrationOrder.push(publicDefinition);
+    if (rawDefinition.presentation_subscribe) {
+      this.presentationSources.add(rawDefinition.presentation_subscribe);
+      if (this.presentationListeners.size > 0) {
+        this.attachPresentationSource(rawDefinition.presentation_subscribe);
+      }
+    }
   }
 
   list(): readonly SurfaceDefinition[] {
@@ -413,6 +437,27 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     }) as SurfacePresentationMetadata;
   }
 
+  subscribe_presentation(listener: () => void): () => void {
+    this.presentationListeners.add(listener);
+    if (this.presentationListeners.size === 1) {
+      for (const source of this.presentationSources) this.attachPresentationSource(source);
+    }
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.presentationListeners.delete(listener);
+      if (this.presentationListeners.size === 0) {
+        for (const unsubscribe of this.presentationSourceUnsubscribers.values()) unsubscribe();
+        this.presentationSourceUnsubscribers.clear();
+      }
+    };
+  }
+
+  presentation_version(): number {
+    return this.presentationVersion;
+  }
+
   async can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision> {
     const definition = this.rawDefinitionsByType.get(surface.surface_type);
     if (!definition) return "allow";
@@ -430,6 +475,12 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     const definition = this.rawDefinitionsByType.get(type);
     if (!definition) throw new Error(`surface type ${type} is not registered`);
     return definition;
+  }
+
+  private attachPresentationSource(source: (listener: () => void) => () => void): void {
+    if (this.presentationSourceUnsubscribers.has(source)) return;
+    const unsubscribe = source(this.invalidatePresentation);
+    this.presentationSourceUnsubscribers.set(source, unsubscribe);
   }
 
   private restoreKnown(

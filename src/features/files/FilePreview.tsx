@@ -1,6 +1,7 @@
 import {
   Component,
   Suspense,
+  useMemo,
   useState,
   type ErrorInfo,
   type ReactNode,
@@ -76,7 +77,10 @@ export function FilePreview({
 }: FilePreviewProps) {
   const [resetToken, setResetToken] = useState(0);
   const definition = registry.resolve(snapshot.descriptor);
-  const Renderer = definition.render;
+  const Renderer = useMemo(
+    () => definition.create_renderer(),
+    [definition, resetToken],
+  );
   const path = snapshot.descriptor.canonical_path;
   return (
     <RendererErrorBoundary

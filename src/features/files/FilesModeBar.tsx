@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
 
 type FilesModeBarProps = {
@@ -27,10 +27,13 @@ export function FilesModeBar({
   on_reveal,
 }: FilesModeBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const unavailableReasonId = useId();
   const path = descriptor?.canonical_path ?? resourcePath(resource_key);
   const parts = useMemo(() => breadcrumbParts(path), [path]);
-  const changesReasonId = `files-changes-unavailable-${resource_key.replace(/[^a-zA-Z0-9]/g, "-")}`;
-  const draftReasonId = `files-draft-unavailable-${resource_key.replace(/[^a-zA-Z0-9]/g, "-")}`;
+  const changesReasonId = `${unavailableReasonId}-changes`;
+  const draftReasonId = `${unavailableReasonId}-draft`;
+  const changesReason = "Changes is not available in this foundation.";
+  const draftReason = "Draft is not available in this foundation.";
 
   return (
     <header className="files-mode-bar" data-restored-mode={state.mode}>
@@ -50,7 +53,7 @@ export function FilesModeBar({
           aria-selected="false"
           aria-disabled="true"
           aria-describedby={changesReasonId}
-          disabled
+          title={changesReason}
         >Changes</button>
         <button
           type="button"
@@ -58,13 +61,13 @@ export function FilesModeBar({
           aria-selected="false"
           aria-disabled="true"
           aria-describedby={draftReasonId}
-          disabled
+          title={draftReason}
         >Draft</button>
         <span id={changesReasonId} className="files-visually-hidden">
-          Changes is not available in this foundation.
+          {changesReason}
         </span>
         <span id={draftReasonId} className="files-visually-hidden">
-          Draft is not available in this foundation.
+          {draftReason}
         </span>
       </div>
       <div className="files-overflow">

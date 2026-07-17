@@ -87,6 +87,58 @@ describe("WorkbenchHost", () => {
     expect(tab.querySelector('[data-surface-icon="graph"]')).toHaveClass("lucide-network");
   });
 
+  it("reacts to generic presentation invalidation and releases its subscription", async () => {
+    let title = "Before descriptor";
+    let icon = "graph";
+    const listeners = new Set<() => void>();
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    registry.register({
+      type: "reactive-extension",
+      icon: "dashboard",
+      title: () => title,
+      presentation_icon: () => icon,
+      presentation_subscribe: (listener) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      render_policy: "recreate_from_state",
+      open_policy: "singleton",
+      runtime_policy: "view_only",
+      close_policy: "close_view",
+      state_schema_version: 1,
+      max_state_bytes: 1024,
+      default_state: () => ({}),
+      serialize_state: (state) => state,
+      restore_state: (_value, version) => version === 1
+        ? { ok: true, state: {} }
+        : { ok: false, error: "unsupported version" },
+      commands: [],
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("reactive-1", { surface_type: "reactive-extension", state: {} }),
+      ]),
+    });
+
+    const view = render(
+      <WorkbenchHost store={store} registry={registry} navigation={makeNavigation()} />,
+    );
+    const before = await screen.findByRole("tab", { name: "Before descriptor" });
+    expect(before.querySelector('[data-surface-icon="graph"]')).toBeInTheDocument();
+    expect(listeners).toHaveLength(1);
+
+    act(() => {
+      title = "After descriptor";
+      icon = "queue";
+      for (const listener of listeners) listener();
+    });
+    const after = await screen.findByRole("tab", { name: "After descriptor" });
+    expect(after.querySelector('[data-surface-icon="queue"]')).toBeInTheDocument();
+
+    view.unmount();
+    expect(listeners).toHaveLength(0);
+  });
+
   it("opens an inline New Tab by default and replaces it in place after selection", async () => {
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([

@@ -116,6 +116,19 @@ export function WorkbenchHost({
   const rootRef = suppliedRootRef ?? ownedRootRef;
   const ownedRegistry = useMemo(createCoreWorkbenchSurfaceRegistry, []);
   const registry = suppliedRegistry ?? ownedRegistry;
+  const subscribePresentation = useCallback(
+    (listener: () => void) => registry.subscribe_presentation(listener),
+    [registry],
+  );
+  const getPresentationVersion = useCallback(
+    () => registry.presentation_version(),
+    [registry],
+  );
+  const presentationVersion = useSyncExternalStore(
+    subscribePresentation,
+    getPresentationVersion,
+    getPresentationVersion,
+  );
   const ownedNavigation = useMemo(
     () => createWorkbenchNavigationService({
       registry,
@@ -220,11 +233,11 @@ export function WorkbenchHost({
   }, [registry]);
   const defaultTitleSurface = useCallback<WorkbenchSurfaceTitle>(
     (surface) => registry.presentation(surface).title,
-    [registry],
+    [presentationVersion, registry],
   );
   const surfaceIcon = useCallback<WorkbenchSurfaceIcon>(
     (surface) => registry.presentation(surface).icon,
-    [registry],
+    [presentationVersion, registry],
   );
   const rendererPolicy = useCallback<WorkbenchPanelRendererPolicy>((surface) => (
       registry.get(surface.surface_type)?.render_policy === "recreate_from_state"
@@ -261,7 +274,10 @@ export function WorkbenchHost({
     state.document,
     store,
   ]);
-  const titleSurface = surface_title ?? defaultTitleSurface;
+  const titleSurface = useCallback<WorkbenchSurfaceTitle>(
+    (surface) => (surface_title ?? defaultTitleSurface)(surface),
+    [defaultTitleSurface, presentationVersion, surface_title],
+  );
 
   return (
     <div

@@ -584,6 +584,8 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly icon: SurfaceIcon;
     /** Optional surface-aware tab icon. The static icon remains launcher/fallback metadata. */
     readonly presentation_icon?: (surface: WorkbenchSurfaceV1) => SurfaceIcon;
+    /** Optional runtime source that invalidates tab presentation metadata. */
+    readonly presentation_subscribe?: (listener: () => void) => () => void;
     readonly render_policy: SurfaceRenderPolicy;
     readonly open_policy: SurfaceOpenPolicy;
     readonly runtime_policy: SurfaceRuntimePolicy;

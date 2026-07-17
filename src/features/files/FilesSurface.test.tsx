@@ -70,6 +70,7 @@ function definition(
       annotations: "general",
     },
     render: renderComponent,
+    create_renderer: () => renderComponent,
   };
 }
 
@@ -134,8 +135,34 @@ describe("FilesSurface", () => {
     expect(screen.getByRole("tab", { name: "Changes" })).toHaveAccessibleDescription(
       /not available in this foundation/i,
     );
+    expect(screen.getByRole("tab", { name: "Changes" })).not.toBeDisabled();
+    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute(
+      "title",
+      expect.stringMatching(/not available/i),
+    );
+    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute(
+      "aria-describedby",
+      expect.not.stringContaining("file-C--work-docs-report-pdf"),
+    );
+    screen.getByRole("tab", { name: "Changes" }).focus();
+    expect(screen.getByRole("tab", { name: "Changes" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.getByTestId("files-content-region")).toHaveClass("files-content-region");
     expect(await screen.findByTestId("preview-renderer")).toHaveTextContent("report.pdf");
+  });
+
+  it("requests trusted backend restore without persisting authorization identifiers", () => {
+    render(<FilesSurface {...props()} />);
+
+    expect(useFileResourceMock).toHaveBeenCalledWith({
+      path: "C:/work/docs/report.pdf",
+      agent_id: null,
+      user_file_capability_id: null,
+    }, expect.any(FileResourceClient));
   });
 
   it("keeps breadcrumb identity visible while metadata and actions live in overflow", () => {
@@ -208,22 +235,31 @@ describe("FilesSurface", () => {
     expect(screen.getByRole("button", { name: "Reveal" })).toBeInTheDocument();
   });
 
-  it("contains a thrown lazy renderer and can reset only that renderer", async () => {
-    const BrokenRenderer = lazy(async () => ({
-      default: () => {
-        throw new Error("PDF worker crashed");
-      },
-    }));
+  it("retries a rejected lazy renderer with a fresh loader attempt", async () => {
+    let attempt = 0;
+    const retryingDefinition: FileRendererDefinition = {
+      ...definition("pdf"),
+      create_renderer: () => lazy(async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("PDF worker failed to load");
+        return { default: () => <div data-testid="recovered-renderer">Recovered</div> };
+      }),
+    };
+    const retryRegistry = new RendererRegistry([
+      retryingDefinition,
+      definition("unsupported", UnsupportedPreview),
+    ]);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    render(<FilesSurface {...props({ registry: registry(BrokenRenderer) })} />);
+    render(<FilesSurface {...props({ registry: retryRegistry })} />);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/renderer could not display report.pdf/i);
-    expect(alert).toHaveTextContent("PDF worker crashed");
+    expect(alert).toHaveTextContent("PDF worker failed to load");
     expect(within(alert).getByRole("button", { name: "Reset Renderer" })).toBeInTheDocument();
     expect(within(alert).getByRole("button", { name: "Open With" })).toBeInTheDocument();
     fireEvent.click(within(alert).getByRole("button", { name: "Reset Renderer" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("PDF worker crashed");
+    expect(await screen.findByTestId("recovered-renderer")).toHaveTextContent("Recovered");
+    expect(attempt).toBe(2);
     consoleError.mockRestore();
   });
 });

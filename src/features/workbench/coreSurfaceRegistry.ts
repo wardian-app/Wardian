@@ -17,6 +17,7 @@ import {
   filesPresentationBadges,
   filesPresentationIcon,
   filesPresentationTitle,
+  useFilesPresentationStore,
 } from "../files/filesPresentationStore";
 import { createSurfaceRegistry, type WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import {
@@ -64,6 +65,7 @@ type DefinitionOptions = {
   default_state?: () => unknown;
   presentation_title?: (surface: WorkbenchSurfaceV1) => string;
   presentation_icon?: (surface: WorkbenchSurfaceV1) => string;
+  presentation_subscribe?: (listener: () => void) => () => void;
   resource_key?: (request: OpenSurfaceRequest) => string | undefined;
   can_close?: SurfaceDefinition["can_close"];
   commands?: SurfaceDefinition["commands"];
@@ -83,6 +85,9 @@ function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
     )),
     icon: options.type,
     ...(options.presentation_icon ? { presentation_icon: options.presentation_icon } : {}),
+    ...(options.presentation_subscribe
+      ? { presentation_subscribe: options.presentation_subscribe }
+      : {}),
     render_policy: options.render_policy,
     open_policy: options.open_policy,
     runtime_policy: options.runtime_policy ?? "view_only",
@@ -315,6 +320,7 @@ function coreSurfaceDefinitions(
         surface.surface_id,
         surface.resource_key,
       ),
+      presentation_subscribe: (listener) => useFilesPresentationStore.subscribe(listener),
       badges: (surface) => filesPresentationBadges(
         surface.surface_id,
         surface.resource_key,
