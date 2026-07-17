@@ -474,6 +474,7 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const onPdfScroll = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport || !document) return;
+    pendingAnchorPageRef.current = null;
     setViewportHeight(viewport.clientHeight);
     const nextCenterPage = pageAtScroll(
       viewport.scrollTop,

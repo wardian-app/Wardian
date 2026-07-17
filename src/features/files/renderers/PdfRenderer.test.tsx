@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
@@ -447,6 +447,52 @@ describe("PdfRenderer", () => {
       .style.height.replace("px", ""));
     expect(zoomedOutHeight).toBeLessThan(zoomedHeight);
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
+  });
+
+  it("lets a later user scroll supersede a pending measurement anchor", async () => {
+    let resolveFirstPage: ((page: object) => void) | undefined;
+    const getPage = vi.fn().mockImplementation((pageNumber: number) => (
+      pageNumber === 1
+        ? new Promise((resolvePage) => { resolveFirstPage = resolvePage; })
+        : new Promise(() => undefined)
+    ));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "http://wardian-resource.localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+
+    await screen.findByText("Page 1");
+    await waitFor(() => expect(resolveFirstPage).toBeDefined());
+    const viewport = screen.getByRole("region", { name: "PDF document viewport" });
+    Object.defineProperty(viewport, "clientHeight", { value: 500, configurable: true });
+    const measuredPage = {
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+    };
+
+    await act(async () => {
+      resolveFirstPage?.(measuredPage);
+      await Promise.resolve();
+      viewport.scrollTop = 39_000;
+      fireEvent.scroll(viewport);
+    });
+
+    await waitFor(() => {
+      const pages = screen.getAllByRole("figure")
+        .map((figure) => Number(figure.getAttribute("data-page-number")));
+      expect(Math.max(...pages)).toBeGreaterThan(20);
+    });
+    expect(viewport.scrollTop).toBe(39_000);
   });
 
   it("uses per-page measurements to place short, tall, and short pages without overlap", async () => {

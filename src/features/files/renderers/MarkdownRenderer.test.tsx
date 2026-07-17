@@ -165,6 +165,32 @@ describe("MarkdownRenderer", () => {
     expect(resolveLocalMarkdownTarget("C:/work/readme.md", "other.md#part")).toBe("C:/work/other.md");
   });
 
+  it("preserves literal backslashes in POSIX source filenames and directories", () => {
+    expect(resolveLocalMarkdownTarget("/work/docs/read\\me.md", "other.md"))
+      .toBe("/work/docs/other.md");
+    expect(resolveLocalMarkdownTarget("/work/dir\\name/readme.md", "other.md"))
+      .toBe("/work/dir\\name/other.md");
+  });
+
+  it("preserves a literal backslash in a POSIX relative target", () => {
+    expect(resolveLocalMarkdownTarget("/work/docs/readme.md", "draft\\notes.md"))
+      .toBe("/work/docs/draft\\notes.md");
+  });
+
+  it("treats backslashes as separators for a Windows relative target", () => {
+    expect(resolveLocalMarkdownTarget("C:\\work\\docs\\readme.md", "..\\other\\report.md"))
+      .toBe("C:/work/other/report.md");
+    expect(resolveLocalMarkdownTarget("/work/docs/readme.md", "D:\\other\\report.md"))
+      .toBe("D:/other/report.md");
+    expect(resolveLocalMarkdownTarget("/work/docs/readme.md", "\\\\server\\share\\report.md"))
+      .toBe("//server/share/report.md");
+  });
+
+  it("preserves an encoded POSIX backslash in a file URL target", () => {
+    expect(resolveLocalMarkdownTarget("/work/docs/readme.md", "file:///tmp/a%5Cb.md"))
+      .toBe("/tmp/a\\b.md");
+  });
+
   it("routes file URL UNC authorities through the authorized local-file callback", async () => {
     mockOpenUrl.mockClear();
     const onOpenFile = vi.fn();

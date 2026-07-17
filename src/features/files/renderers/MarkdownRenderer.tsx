@@ -14,6 +14,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { markdownUrlTransform, safeMarkdownUrl } from "../../grid/markdown/markdownSafety";
+import { filePathIdentity, isWindowsAbsoluteFilePath } from "../fileResourceKey";
 import type { FileRendererProps } from "../rendererRegistry";
 
 const MARKDOWN_MAX_SIZE_BYTES = 16 * 1024 * 1024;
@@ -63,17 +64,17 @@ function pathRootSegmentCount(path: string) {
 export function resolveLocalMarkdownTarget(sourcePath: string, rawTarget: string) {
   if (rawTarget.startsWith("file:")) {
     const url = new URL(rawTarget);
-    const decoded = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
-    const normalized = decoded.replace(/\\/g, "/");
-    return url.hostname && url.hostname.toLowerCase() !== "localhost"
-      ? `//${url.hostname}${normalized.startsWith("/") ? normalized : `/${normalized}`}`
-      : normalized;
+    const decoded = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:[\\/])/, "$1");
+    const localPath = url.hostname && url.hostname.toLowerCase() !== "localhost"
+      ? `//${url.hostname}${decoded.startsWith("/") ? decoded : `/${decoded}`}`
+      : decoded;
+    return filePathIdentity(localPath);
   }
-  const normalizedSource = sourcePath.replace(/\\/g, "/");
-  const normalizedTarget = rawTarget.replace(/\\/g, "/").split(/[?#]/, 1)[0] ?? "";
-  if (/^[A-Za-z]:\//.test(normalizedTarget)) {
-    return normalizedTarget;
-  }
+  const windowsSource = isWindowsAbsoluteFilePath(sourcePath);
+  const normalizedSource = filePathIdentity(sourcePath);
+  const targetPath = rawTarget.split(/[?#]/, 1)[0] ?? "";
+  if (isWindowsAbsoluteFilePath(targetPath)) return filePathIdentity(targetPath);
+  const normalizedTarget = windowsSource ? targetPath.replace(/\\/g, "/") : targetPath;
   if (normalizedTarget.startsWith("/")) {
     const windowsRoot = windowsPathRoot(normalizedSource);
     return windowsRoot ? `${windowsRoot}${normalizedTarget}` : normalizedTarget;
