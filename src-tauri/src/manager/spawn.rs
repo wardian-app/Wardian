@@ -17,6 +17,7 @@ use super::codex::{
     codex_provider_session_is_excluded, codex_session_file_path, latest_codex_session_index_entry,
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
+use super::session_identity::{apply_provider_identity, ProviderIdentityOutcome};
 use super::{
     apply_agent_event, apply_agent_event_with_policy, apply_agent_status_event,
     apply_agent_status_event_with_policy, apply_terminal_identity_env, debug_preview_bytes,
@@ -215,6 +216,28 @@ pub(super) fn capture_init_timestamp(
             *current = Some(timestamp.clone());
         }
     }
+}
+
+pub(super) fn handle_provider_init_event(
+    provider: &str,
+    event: &AgentEvent,
+    config: &std::sync::Arc<std::sync::Mutex<AgentConfig>>,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<ProviderIdentityOutcome, String> {
+    let AgentEvent::Init { session_id, .. } = event else {
+        return Err(format!(
+            "{provider} identity validation requires an initialization event"
+        ));
+    };
+
+    let outcome = {
+        let mut config = config
+            .lock()
+            .map_err(|_| format!("{provider} session configuration is unavailable"))?;
+        apply_provider_identity(provider, &mut config, session_id)?
+    };
+    capture_init_timestamp(event, init_timestamp);
+    Ok(outcome)
 }
 
 fn codex_status_log_session(
@@ -635,6 +658,7 @@ pub async fn spawn_agent(
     let terminal_theme_for_pty = app_state.terminal_theme();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
+    let pty_config = config_lock.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -731,7 +755,26 @@ pub async fn spawn_agent(
                     // Use a simple line-based approach for stream-json events
                     for line in text.lines() {
                         if let Some(event) = pty_provider.parse_output(line) {
-                            capture_init_timestamp(&event, &init_timestamp_clone);
+                            if matches!(&event, AgentEvent::Init { .. }) {
+                                if let Err(error) = handle_provider_init_event(
+                                    &provider_name_for_pty,
+                                    &event,
+                                    &pty_config,
+                                    &init_timestamp_clone,
+                                ) {
+                                    log_debug(&format!(
+                                        "[WARDIAN] Rejected {} initialization identity: {}",
+                                        provider_name_for_pty, error
+                                    ));
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Error",
+                                    );
+                                    return;
+                                }
+                            }
                             if provider_name_for_pty == "claude" {
                                 apply_agent_status_event_with_policy(
                                     &pty_app,
@@ -847,7 +890,26 @@ pub async fn spawn_agent(
                                         }
                                     }
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
-                                        capture_init_timestamp(&event, &init_timestamp_clone);
+                                        if matches!(&event, AgentEvent::Init { .. }) {
+                                            if let Err(error) = handle_provider_init_event(
+                                                &provider_name_for_pty,
+                                                &event,
+                                                &pty_config,
+                                                &init_timestamp_clone,
+                                            ) {
+                                                log_debug(&format!(
+                                                    "[WARDIAN] Rejected {} initialization identity: {}",
+                                                    provider_name_for_pty, error
+                                                ));
+                                                set_agent_status(
+                                                    &pty_app,
+                                                    &sid_for_pty,
+                                                    &current_status_clone,
+                                                    "Error",
+                                                );
+                                                return;
+                                            }
+                                        }
 
                                         let status_policy = if provider_name_for_pty == "claude"
                                             || provider_name_for_pty == "codex"
