@@ -190,6 +190,9 @@ function canonicalSurface(
     surface_id: surface.surface_id,
     surface_type: surface.surface_type,
     ...(surface.resource_key === undefined ? {} : { resource_key: surface.resource_key }),
+    ...(surface.presentation_provenance === undefined
+      ? {}
+      : { presentation_provenance: { ...surface.presentation_provenance } }),
     state_schema_version: surface.state_schema_version,
     state: canonicalizeState(surface.state, maxStateBytes),
   });

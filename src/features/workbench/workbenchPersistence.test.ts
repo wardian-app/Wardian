@@ -49,6 +49,56 @@ describe("createWorkbenchInvokeAdapter", () => {
     expect(result.durable_token).toBe("opaque-token-from-rust");
   });
 
+  it("round-trips optional surface presentation provenance verbatim", async () => {
+    const document = makeSingleGroupDocument([
+      makeSurface("partner", { resource_key: "file:/alias/report.md" }),
+      makeSurface("side", {
+        resource_key: "file:/alias/report.md",
+        presentation_provenance: {
+          kind: "explicit_duplicate",
+          duplicate_surface_id: "side",
+          partner_surface_id: "partner",
+          provisional_resource_key: "file:/alias/report.md",
+        },
+      }),
+    ]);
+    const invoke = vi.fn()
+      .mockResolvedValueOnce({
+        source: "primary",
+        document: JSON.parse(JSON.stringify(document)),
+        notice: null,
+        durable_revision: 0,
+        durable_token: "opaque-zero",
+      })
+      .mockResolvedValueOnce({
+        outcome: "saved",
+        durable_revision: 1,
+        durable_token: "opaque-one",
+        request_id: "request-1",
+      });
+    const adapter = createWorkbenchInvokeAdapter(invoke);
+
+    const loaded = await adapter.load();
+    expect(loaded.document?.surfaces.side.presentation_provenance).toEqual(
+      document.surfaces.side.presentation_provenance,
+    );
+    await adapter.save({
+      document: { ...loaded.document!, revision: 1 },
+      expected_revision: 0,
+      expected_token: "opaque-zero",
+      request_id: "request-1",
+    });
+    expect(invoke).toHaveBeenLastCalledWith("save_workbench_state", expect.objectContaining({
+      document: expect.objectContaining({
+        surfaces: expect.objectContaining({
+          side: expect.objectContaining({
+            presentation_provenance: document.surfaces.side.presentation_provenance,
+          }),
+        }),
+      }),
+    }));
+  });
+
   it("passes exact snake_case save/reset payloads and reads boot safe mode separately", async () => {
     const invoke = vi.fn()
       .mockResolvedValueOnce({ safe_mode: true })

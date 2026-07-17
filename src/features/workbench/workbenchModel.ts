@@ -227,7 +227,7 @@ function validateSurface(
   if (!hasExactKeys(
     value,
     ["surface_id", "surface_type", "state_schema_version", "state"],
-    ["resource_key"],
+    ["resource_key", "presentation_provenance"],
   )) {
     addError(errors, path, "must contain only V1 surface fields");
   }
@@ -243,6 +243,58 @@ function validateSurface(
     typeof value.resource_key !== "string"
   ) {
     addError(errors, `${path}.resource_key`, "must be a string when present");
+  }
+  if (hasOwn(value, "presentation_provenance")) {
+    const provenancePath = `${path}.presentation_provenance`;
+    const provenance = value.presentation_provenance;
+    if (validatePlainRecordContainer(provenance, provenancePath, errors)) {
+      if (!hasExactKeys(provenance, [
+        "kind",
+        "duplicate_surface_id",
+        "partner_surface_id",
+        "provisional_resource_key",
+      ])) {
+        addError(errors, provenancePath, "must contain exactly the V1 provenance fields");
+      }
+      if (provenance.kind !== "explicit_duplicate") {
+        addError(errors, `${provenancePath}.kind`, "must equal explicit_duplicate");
+      }
+      if (provenance.duplicate_surface_id !== surfaceId) {
+        addError(
+          errors,
+          `${provenancePath}.duplicate_surface_id`,
+          "must match the owning surface_id",
+        );
+      }
+      if (
+        provenance.partner_surface_id !== null
+        && (typeof provenance.partner_surface_id !== "string"
+          || provenance.partner_surface_id.length === 0)
+      ) {
+        addError(
+          errors,
+          `${provenancePath}.partner_surface_id`,
+          "must be a non-empty string or null",
+        );
+      }
+      if (provenance.partner_surface_id === surfaceId) {
+        addError(
+          errors,
+          `${provenancePath}.partner_surface_id`,
+          "must not reference the duplicate surface itself",
+        );
+      }
+      if (
+        typeof provenance.provisional_resource_key !== "string"
+        || provenance.provisional_resource_key.length === 0
+      ) {
+        addError(
+          errors,
+          `${provenancePath}.provisional_resource_key`,
+          "must be a non-empty string",
+        );
+      }
+    }
   }
   if (!Number.isSafeInteger(value.state_schema_version) || (value.state_schema_version as number) < 0) {
     addError(errors, `${path}.state_schema_version`, "must be a non-negative safe integer");

@@ -936,6 +936,116 @@ describe("workbench navigation service", () => {
   );
 
   it.each([
+    ["explicit first", ["side-alias", "ordinary-alias"]],
+    ["partner first", ["ordinary-alias", "side-alias"]],
+  ] as const)(
+    "restores persisted Open to Side intent and canonicalizes %s without collapsing the pair",
+    async (_ordering, surfaceOrder) => {
+      const registry = createCoreWorkbenchSurfaceRegistry();
+      const ordinaryAlias = makeSurface("ordinary-alias", {
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      });
+      const preRestartStore = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([ordinaryAlias]),
+      });
+      const preRestartNavigation = createWorkbenchNavigationService({
+        registry,
+        store: preRestartStore,
+        create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+      });
+      preRestartNavigation.open_to_side({
+        surface_type: "files",
+        resource_key: "file:C:/link/report.md",
+        state: filesState(false),
+      });
+
+      const restoredDocument = JSON.parse(
+        JSON.stringify(preRestartStore.getState().document),
+      ) as WorkbenchDocumentV1;
+      expect(restoredDocument.surfaces["side-alias"].presentation_provenance).toEqual({
+        kind: "explicit_duplicate",
+        duplicate_surface_id: "side-alias",
+        partner_surface_id: "ordinary-alias",
+        provisional_resource_key: "file:C:/link/report.md",
+      });
+      const restoredStore = createWorkbenchStore({ initial_document: restoredDocument });
+      const restoredNavigation = createWorkbenchNavigationService({
+        registry,
+        store: restoredStore,
+        create_id: deterministicIds(["unrelated-alias"]),
+      });
+      const canonicalRequest = {
+        surface_type: "files" as const,
+        resource_key: "file:C:/real/report.md",
+        state: filesState(false),
+      };
+
+      await restoredNavigation.canonicalize_resource(surfaceOrder[0], canonicalRequest);
+      expect(restoredStore.getState().document.surfaces["side-alias"]
+        .presentation_provenance).toBeDefined();
+      await restoredNavigation.canonicalize_resource(surfaceOrder[1], canonicalRequest);
+
+      expect(Object.keys(restoredStore.getState().document.surfaces).sort())
+        .toEqual(["ordinary-alias", "side-alias"]);
+      expect(restoredStore.getState().document.surfaces["side-alias"]
+        .presentation_provenance).toBeUndefined();
+
+      expect(restoredNavigation.open({
+        surface_type: "files",
+        resource_key: "file:C:/unrelated/report.md",
+        state: filesState(false),
+      })).toBe("unrelated-alias");
+      await restoredNavigation.canonicalize_resource("unrelated-alias", canonicalRequest);
+      expect(Object.keys(restoredStore.getState().document.surfaces).sort())
+        .toEqual(["ordinary-alias", "side-alias"]);
+    },
+  );
+
+  it("keeps an already-canonical intentional duplicate after restore while consuming its intent", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const canonical = makeSurface("canonical", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const preRestartStore = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([canonical]),
+    });
+    const preRestartNavigation = createWorkbenchNavigationService({
+      registry,
+      store: preRestartStore,
+      create_id: deterministicIds(["side-group", "side-node", "side-copy"]),
+    });
+    preRestartNavigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    });
+    const restoredStore = createWorkbenchStore({
+      initial_document: JSON.parse(
+        JSON.stringify(preRestartStore.getState().document),
+      ) as WorkbenchDocumentV1,
+    });
+    const restoredNavigation = createWorkbenchNavigationService({
+      registry,
+      store: restoredStore,
+    });
+
+    await expect(restoredNavigation.canonicalize_resource("side-copy", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    })).resolves.toBe("allow");
+
+    expect(Object.keys(restoredStore.getState().document.surfaces).sort())
+      .toEqual(["canonical", "side-copy"]);
+    expect(restoredStore.getState().document.surfaces["side-copy"]
+      .presentation_provenance).toBeUndefined();
+  });
+
+  it.each([
     ["side then same-side then partner", ["side-alias", "side-alias", "ordinary-alias"]],
     ["normal then same-normal then side", ["ordinary-alias", "ordinary-alias", "side-alias"]],
   ] as const)(

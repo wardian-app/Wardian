@@ -108,13 +108,19 @@ its backend-owned `resource_id`. The visible Files surface then applies
 `canonicalize_resource` as one Workbench transaction. A normal alias open
 focuses and removes itself in favor of an existing canonical presentation,
 even when that presentation is in another pane. Only `open_to_side` carries
-ephemeral explicit-duplicate provenance through the rekey of both it and its
-matching source presentation; the pair converges to the same canonical key and
-remains in separate panes regardless of which response publishes first.
+strictly validated `presentation_provenance` through the rekey of both it and
+its matching source presentation. This generic Workbench record is persisted
+with the surface, so restoring the app between either backend response does not
+collapse an intentional duplicate. The pair converges to the same canonical
+key and remains in separate panes regardless of which response publishes first.
 Repeated same-key acknowledgements do not consume this provenance while the
 matching presentation still has its provisional key.
-An accepted explicit resource rebind detaches either endpoint from the pair;
-cancelled or stale rebinds leave the original provenance intact.
+Once both endpoints settle, the record is removed atomically without removing
+the duplicate. An accepted explicit resource rebind, close, group close, reset,
+or missing endpoint detaches the affected pair; cancelled or stale operations
+leave the original provenance intact. Legacy documents without the optional
+field remain valid, while unknown record keys and cross-surface owner IDs are
+rejected.
 The frontend never resolves symlinks, junctions, or filesystem authority.
 Canonicalization re-resolves the current Workbench document after a stale
 compare-and-swap. A close guard cancellation remains a user veto, while a

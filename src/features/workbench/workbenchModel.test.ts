@@ -275,6 +275,36 @@ describe("workbench model", () => {
     if (result.valid) expect(result.document).toBe(document);
   });
 
+  it("strictly validates optional persisted presentation provenance", () => {
+    const duplicate = makeSurface("side", {
+      resource_key: "file:/alias/report.md",
+      presentation_provenance: {
+        kind: "explicit_duplicate",
+        duplicate_surface_id: "side",
+        partner_surface_id: "partner",
+        provisional_resource_key: "file:/alias/report.md",
+      },
+    });
+    const partner = makeSurface("partner", { resource_key: "file:/alias/report.md" });
+    expect(validateWorkbenchDocument(makeSingleGroupDocument([partner, duplicate])).valid)
+      .toBe(true);
+
+    const unknownField = structuredClone(duplicate) as WorkbenchSurfaceV1 & {
+      presentation_provenance: Record<string, unknown>;
+    };
+    unknownField.presentation_provenance.extra = true;
+    expect(validateWorkbenchDocument(makeSingleGroupDocument([partner, unknownField])).valid)
+      .toBe(false);
+
+    const mismatchedOwner = structuredClone(duplicate);
+    mismatchedOwner.presentation_provenance!.duplicate_surface_id = "other";
+    expect(validateWorkbenchDocument(makeSingleGroupDocument([partner, mismatchedOwner])).valid)
+      .toBe(false);
+
+    const legacy = makeSingleGroupDocument([makeSurface("legacy")]);
+    expect(validateWorkbenchDocument(legacy).valid).toBe(true);
+  });
+
   it("rejects duplicate tree/group and tab/surface references", () => {
     const duplicateGroup = makeSingleGroupDocument();
     duplicateGroup.root = {

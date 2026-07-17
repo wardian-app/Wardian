@@ -478,10 +478,18 @@ export type WorkbenchGroupV1 = {
     active_surface_id: string | null;
 };
 
+export type WorkbenchPresentationProvenanceV1 = {
+    kind: "explicit_duplicate";
+    duplicate_surface_id: string;
+    partner_surface_id: string | null;
+    provisional_resource_key: string;
+};
+
 export type WorkbenchSurfaceV1 = {
     surface_id: string;
     surface_type: string;
     resource_key?: string;
+    presentation_provenance?: WorkbenchPresentationProvenanceV1;
     state_schema_version: number;
     state: unknown;
 };
