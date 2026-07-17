@@ -666,7 +666,7 @@ fn detected_image_pixels(probe: &[u8]) -> Option<u64> {
 fn bounded_probe_is_text(probe: &[u8]) -> bool {
     let mut analyzer = Utf8TextAnalyzer::default();
     analyzer.push(probe);
-    analyzer.finish().0
+    analyzer.finish_prefix()
 }
 
 fn content_scan_ceiling(probe: &[u8], limits: &FileResourceLimits) -> u64 {
@@ -767,6 +767,18 @@ impl Utf8TextAnalyzer {
         }
         let is_utf8_text = self.is_valid && self.looks_like_text;
         (is_utf8_text, is_utf8_text.then_some(self.line_count))
+    }
+
+    fn finish_prefix(mut self) -> bool {
+        if !self.initialized {
+            self.is_valid = true;
+            self.looks_like_text = true;
+        }
+        // `push` retains bytes only when `Utf8Error::error_len` is `None`,
+        // which means the final scalar is valid so far but incomplete. A
+        // bounded leading probe may end there without making the prefix
+        // binary. Invalid completed sequences already set `is_valid = false`.
+        self.is_valid && self.looks_like_text
     }
 }
 
@@ -1396,6 +1408,77 @@ mod tests {
         let mut binary_control = Utf8TextAnalyzer::default();
         binary_control.push("before\u{0085}after".as_bytes());
         assert_eq!(binary_control.finish(), (false, None));
+    }
+
+    #[test]
+    fn bounded_text_probe_accepts_only_incomplete_trailing_utf8_scalars() {
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: MINIMUM_DETECTION_BYTES,
+            monaco_max_line_count: u64::MAX,
+            diff_max_size_bytes_per_side: MINIMUM_DETECTION_BYTES,
+            diff_max_line_count: u64::MAX,
+            image_max_size_bytes: u64::MAX,
+            image_max_pixels: u64::MAX,
+            pdf_max_size_bytes: u64::MAX,
+        };
+        let valid_splits: &[(&str, &[u8], FileRendererKind)] = &[
+            ("split-two.txt", &[0xc2, 0xa2], FileRendererKind::Text),
+            (
+                "split-three.md",
+                &[0xe2, 0x82, 0xac],
+                FileRendererKind::Markdown,
+            ),
+            (
+                "split-four.markdown",
+                &[0xf0, 0x9f, 0xa6, 0x80],
+                FileRendererKind::Markdown,
+            ),
+        ];
+
+        for (name, scalar, renderer_kind) in valid_splits {
+            let mut bytes = vec![b'a'; MINIMUM_DETECTION_BYTES as usize - 1];
+            bytes.extend_from_slice(scalar);
+            bytes.push(b'\n');
+            let descriptor = describe_with_limits(name, &bytes, &limits);
+
+            assert_eq!(&descriptor.renderer_kind, renderer_kind, "{name}");
+            assert_eq!(
+                descriptor.unavailable_reason.as_deref(),
+                Some("monaco_size_limit_exceeded"),
+                "{name}"
+            );
+            assert!(
+                descriptor.content_hash.starts_with("bounded-sha256:"),
+                "{name}"
+            );
+        }
+
+        let invalid_sequences: &[(&str, &[u8])] = &[
+            ("invalid-two.md", &[0xc2, b'a']),
+            ("invalid-three.md", &[0xe2, 0x28, 0xa1]),
+            ("invalid-four.md", &[0xf0, 0x28, 0x8c, 0xbc]),
+        ];
+        for (name, invalid) in invalid_sequences {
+            let mut bytes = vec![b'a'; 8];
+            bytes.extend_from_slice(invalid);
+            bytes.resize(MINIMUM_DETECTION_BYTES as usize + 1, b'a');
+            let descriptor = describe_with_limits(name, &bytes, &limits);
+
+            assert_eq!(
+                descriptor.renderer_kind,
+                FileRendererKind::Unsupported,
+                "{name}"
+            );
+            assert_eq!(
+                descriptor.unavailable_reason.as_deref(),
+                Some("unsupported_content"),
+                "{name}"
+            );
+            assert!(
+                descriptor.content_hash.starts_with("bounded-sha256:"),
+                "{name}"
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -156,11 +156,12 @@ Response:
 `sha256:` value is the exact digest of content scanned completely within its
 renderer limits. A `bounded-sha256:` value is deliberately not a full-content
 hash: it fingerprints the retained file identity, stable size/write metadata,
-and a bounded leading detection probe. Wardian emits the bounded form only for
-metadata-only descriptors whose capabilities are disabled by a byte or decoded
-image-pixel limit. This lets watcher refreshes compare stable oversized
-revisions without reading the entire oversized file or mislabeling a partial
-digest as a content SHA.
+and a bounded leading detection probe. Wardian emits the bounded form for every
+metadata-only scan that crosses its detected renderer ceiling. That includes
+supported text/image/PDF resources disabled by byte or decoded image-pixel
+limits and oversized unsupported/binary fallbacks that cross the text scan
+ceiling. This lets watcher refreshes compare stable oversized revisions without
+reading the entire file or mislabeling a partial digest as a content SHA.
 
 Files above the 16 MiB Monaco limit, 64 MiB encoded/64-million-pixel image
 limits, or 256 MiB PDF limit still return a successful metadata snapshot. Their
