@@ -89,7 +89,7 @@ export function FilesModeBar({
   const draftReason = "Draft is not available in this foundation.";
   const sourceActive = preview_presentation === "source";
   const sourceLabel = sourceActive ? "View rendered" : "View source";
-  const SourceIcon = sourceActive ? BookOpen : Pencil;
+  const SourceIcon = sourceActive ? Pencil : BookOpen;
   const closeMenu = useCallback((restoreTrigger = false) => {
     setMenuOpen(false);
     if (restoreTrigger) triggerRef.current?.focus();

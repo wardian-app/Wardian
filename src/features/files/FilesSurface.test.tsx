@@ -190,11 +190,13 @@ describe("FilesSurface", () => {
     const viewSource = screen.getByRole("button", { name: "View source" });
     expect(viewSource).toHaveAttribute("aria-pressed", "false");
     expect(viewSource).toHaveAttribute("title", "View source");
+    expect(viewSource.querySelector("svg")).toHaveClass("lucide-book-open");
     fireEvent.click(viewSource);
     expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View rendered" }))
       .toHaveAttribute("aria-pressed", "true");
     const viewRendered = screen.getByRole("button", { name: "View rendered" });
+    expect(viewRendered.querySelector("svg")).toHaveClass("lucide-pencil");
     viewRendered.focus();
     expect(viewRendered).toHaveFocus();
     await user.keyboard("{Enter}");

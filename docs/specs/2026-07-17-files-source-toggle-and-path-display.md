@@ -31,10 +31,12 @@ The Files header places one compact icon control beside the existing file
 actions when the selected renderer supports both rendered and source
 presentations.
 
-- Rendered Markdown shows a pencil/edit icon with the accessible label and
+- Rendered Markdown shows a reading/preview icon with the accessible label and
   tooltip **View source**.
-- Markdown source shows a reading/preview icon with the accessible label and
+- Markdown source shows a pencil/edit icon with the accessible label and
   tooltip **View rendered**.
+- The glyph reflects the active presentation, while the accessible label and
+  tooltip describe the action the control will perform.
 - The control exposes its current state through standard pressed-state
   semantics and remains keyboard operable.
 - Plain text and source-code files remain source-only and do not show a

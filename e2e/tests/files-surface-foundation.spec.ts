@@ -193,11 +193,14 @@ test("switches Markdown source without reopening the resource and preserves it p
   expect(JSON.stringify(alphaTextReads)).not.toContain("mock-file:");
 
   const viewSource = page.getByRole("button", { name: "View source" });
+  await expect(viewSource.locator("svg.lucide-book-open")).toBeVisible();
   await expect(viewSource).toHaveAttribute("aria-pressed", "false");
   await viewSource.click();
   await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
   await expect(page.getByRole("button", { name: "View rendered" }))
     .toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "View rendered" })
+    .locator("svg.lucide-pencil")).toBeVisible();
   expect((await ipc.calls("open_file_resource")).length).toBe(openCount);
 
   await betaRow.dblclick();
