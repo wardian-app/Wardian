@@ -7,12 +7,13 @@ import MonacoTextRenderer from "./MonacoTextRenderer";
 
 const createModel = vi.fn();
 const createEditor = vi.fn();
+const setTheme = vi.fn();
 const getModel = vi.fn();
 const uriFrom = vi.fn((parts: { path: string }) => ({ path: parts.path }));
 
 vi.mock("monaco-editor", () => ({
   Uri: { from: uriFrom },
-  editor: { create: createEditor, createModel, getModel },
+  editor: { create: createEditor, createModel, getModel, setTheme },
 }));
 
 vi.mock("monaco-editor/esm/vs/editor/editor.worker.js?worker", () => ({
@@ -141,5 +142,33 @@ describe("MonacoTextRenderer", () => {
     unavailable.descriptor.unavailable_reason = "monaco_size_limit_exceeded";
     render(<MonacoTextRenderer {...props(client)} snapshot={unavailable} />);
     expect(client.readText).not.toHaveBeenCalled();
+  });
+
+  it("accepts the registry's validated text MIME fallback", async () => {
+    const fallback = snapshot();
+    fallback.descriptor.renderer_kind = "unsupported";
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1, resource_id: fallback.resource_id, revision: fallback.revision, text: "fallback",
+    }) } as unknown as FileResourceClient;
+    render(<MonacoTextRenderer {...props(client)} snapshot={fallback} />);
+    await waitFor(() => expect(client.readText).toHaveBeenCalledOnce());
+  });
+
+  it("follows live Wardian data-theme changes without recreating the editor", async () => {
+    document.documentElement.setAttribute("data-theme", "dark");
+    const client = {
+      readText: vi.fn().mockResolvedValue({
+        schema: 1, resource_id: snapshot().resource_id, revision: 4, text: "hello",
+      }),
+    } as unknown as FileResourceClient;
+    const view = render(<MonacoTextRenderer {...props(client)} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    expect(createEditor).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
+      theme: "vs-dark",
+    }));
+    document.documentElement.setAttribute("data-theme", "light");
+    await waitFor(() => expect(setTheme).toHaveBeenCalledWith("vs"));
+    expect(createEditor).toHaveBeenCalledOnce();
+    view.unmount();
   });
 });

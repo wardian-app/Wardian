@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
 import type { FileResourceClient } from "../fileResourceClient";
-import MarkdownRenderer from "./MarkdownRenderer";
+import MarkdownRenderer, { resolveLocalMarkdownTarget } from "./MarkdownRenderer";
 
 const mockOpenUrl = vi.mocked(openUrl);
 
@@ -102,5 +102,45 @@ describe("MarkdownRenderer", () => {
     unavailable.descriptor.unavailable_reason = "monaco_line_limit_exceeded";
     render(<MarkdownRenderer {...props(client)} snapshot={unavailable} />);
     expect(client.readText).not.toHaveBeenCalled();
+  });
+
+  it("accepts the registry's validated Markdown MIME fallback", async () => {
+    const fallback = snapshot();
+    fallback.descriptor.renderer_kind = "unsupported";
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1, resource_id: fallback.resource_id, revision: 1, text: "Fallback",
+    }) } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client)} snapshot={fallback} />);
+    expect(await screen.findByText("Fallback")).toBeInTheDocument();
+  });
+
+  it("preserves Windows roots and keeps document fragments inside the preview", async () => {
+    const onOpenFile = vi.fn();
+    const client = {
+      readText: vi.fn().mockResolvedValue({
+        schema: 1,
+        resource_id: snapshot().resource_id,
+        revision: 1,
+        text: "# Heading\n\n[Root](/docs/a.md) [Bare](other.md) [Jump](#heading)",
+      }),
+    } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client, onOpenFile)} />);
+    const heading = await screen.findByRole("heading", { name: "Heading" });
+    heading.scrollIntoView = vi.fn();
+    fireEvent.click(screen.getByRole("link", { name: "Root" }));
+    fireEvent.click(screen.getByRole("link", { name: "Bare" }));
+    fireEvent.click(screen.getByRole("link", { name: "Jump" }));
+    expect(onOpenFile).toHaveBeenNthCalledWith(1, "C:/docs/a.md");
+    expect(onOpenFile).toHaveBeenNthCalledWith(2, "C:/work/docs/other.md");
+    expect(onOpenFile).toHaveBeenCalledTimes(2);
+    expect(heading).toHaveAttribute("id", "heading");
+    expect(heading.scrollIntoView).toHaveBeenCalled();
+    expect(mockOpenUrl).not.toHaveBeenCalledWith("#heading");
+  });
+
+  it("keeps POSIX root-relative targets rooted and rejects unsafe schemes", () => {
+    expect(resolveLocalMarkdownTarget("/work/readme.md", "/docs/a.md")).toBe("/docs/a.md");
+    expect(resolveLocalMarkdownTarget("C:/work/readme.md", "/docs/a.md")).toBe("C:/docs/a.md");
+    expect(resolveLocalMarkdownTarget("C:/work/readme.md", "other.md#part")).toBe("C:/work/other.md");
   });
 });

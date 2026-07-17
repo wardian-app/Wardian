@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import {
+  createElement,
+  isValidElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -14,7 +23,7 @@ function errorMessage(error: unknown) {
 }
 
 function canRenderMarkdown(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
-  return descriptor.renderer_kind === "markdown"
+  return (descriptor.renderer_kind === "markdown" || descriptor.mime_type.trim().toLowerCase() === "text/markdown")
     && descriptor.encoding === "utf-8"
     && descriptor.capabilities.preview
     && descriptor.unavailable_reason === null
@@ -39,8 +48,12 @@ export function resolveLocalMarkdownTarget(sourcePath: string, rawTarget: string
     return decoded.replace(/\\/g, "/");
   }
   const normalizedTarget = rawTarget.replace(/\\/g, "/").split(/[?#]/, 1)[0] ?? "";
-  if (/^[A-Za-z]:\//.test(normalizedTarget) || normalizedTarget.startsWith("/")) {
+  if (/^[A-Za-z]:\//.test(normalizedTarget)) {
     return normalizedTarget;
+  }
+  if (normalizedTarget.startsWith("/")) {
+    const windowsRoot = sourcePath.replace(/\\/g, "/").match(/^([A-Za-z]:)\//)?.[1];
+    return windowsRoot ? `${windowsRoot}${normalizedTarget}` : normalizedTarget;
   }
   const sourceParts = sourcePath.replace(/\\/g, "/").split("/");
   sourceParts.pop();
@@ -60,12 +73,14 @@ function SafeLink({
   children,
   sourcePath,
   onOpenFile,
+  onOpenFragment,
   onError,
 }: {
   href?: string;
   children: ReactNode;
   sourcePath: string;
   onOpenFile: (path: string) => Promise<void> | void;
+  onOpenFragment: (fragment: string) => void;
   onError: (message: string) => void;
 }) {
   const safe = safeMarkdownUrl(href);
@@ -74,7 +89,9 @@ function SafeLink({
   const activate = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    if (local && href) {
+    if (href?.startsWith("#")) {
+      onOpenFragment(href.slice(1));
+    } else if (local && href) {
       try {
         void Promise.resolve(onOpenFile(resolveLocalMarkdownTarget(sourcePath, href)))
           .catch((cause) => onError(errorMessage(cause)));
@@ -97,12 +114,34 @@ function SafeLink({
   );
 }
 
+function headingText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(headingText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return headingText(node.props.children);
+  return "";
+}
+
+function headingSlug(node: ReactNode) {
+  return headingText(node)
+    .normalize("NFKD")
+    .toLocaleLowerCase()
+    .trim()
+    .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
+    .replace(/[\s-]+/g, "-")
+    .replace(/^-|-$/g, "") || "section";
+}
+
+function filesMarkdownUrlTransform(rawUrl: string) {
+  return rawUrl.startsWith("#") ? rawUrl : markdownUrlTransform(rawUrl);
+}
+
 export default function MarkdownRenderer({
   snapshot,
   client,
   lifecycle,
   on_open_file,
 }: FileRendererProps) {
+  const articleRef = useRef<HTMLElement>(null);
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
@@ -143,15 +182,38 @@ export default function MarkdownRenderer({
     );
   }
   if (text === null) return <div className="files-resource-state" role="status">Loading Markdown…</div>;
+  const headingCounts = new Map<string, number>();
+  const renderHeading = (tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6", children: ReactNode) => {
+    const base = headingSlug(children);
+    const count = (headingCounts.get(base) ?? 0) + 1;
+    headingCounts.set(base, count);
+    const id = count === 1 ? base : `${base}-${count}`;
+    return createElement(tag, { id, tabIndex: -1 }, children);
+  };
+  const openFragment = (fragment: string) => {
+    let id: string;
+    try { id = decodeURIComponent(fragment); } catch { id = fragment; }
+    const candidate = document.getElementById(id);
+    const heading = candidate && articleRef.current?.contains(candidate) ? candidate : null;
+    heading?.scrollIntoView({ block: "start" });
+    heading?.focus({ preventScroll: true });
+  };
   return (
-    <article className="files-markdown-renderer">
+    <article ref={articleRef} className="files-markdown-renderer">
       <Markdown
         components={{
+          h1: ({ children }) => renderHeading("h1", children),
+          h2: ({ children }) => renderHeading("h2", children),
+          h3: ({ children }) => renderHeading("h3", children),
+          h4: ({ children }) => renderHeading("h4", children),
+          h5: ({ children }) => renderHeading("h5", children),
+          h6: ({ children }) => renderHeading("h6", children),
           a: ({ href, children }) => (
             <SafeLink
               href={href}
               sourcePath={snapshot.descriptor.canonical_path}
               onOpenFile={on_open_file}
+              onOpenFragment={openFragment}
               onError={setError}
             >
               {children}
@@ -164,7 +226,7 @@ export default function MarkdownRenderer({
         }}
         remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         skipHtml
-        urlTransform={markdownUrlTransform}
+        urlTransform={filesMarkdownUrlTransform}
       >
         {text}
       </Markdown>

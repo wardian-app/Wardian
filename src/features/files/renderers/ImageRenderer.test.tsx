@@ -58,10 +58,13 @@ describe("ImageRenderer", () => {
     const image = await screen.findByRole("img", { name: "figure.png" });
     expect(image).toHaveAttribute("src", "wardian-resource://localhost/ticket-1");
     expect(client.issueTicket).toHaveBeenCalledWith(snapshot().resource_id, 1, expect.any(String));
+    Object.defineProperty(image, "naturalWidth", { value: 800 });
+    Object.defineProperty(image, "naturalHeight", { value: 600 });
+    fireEvent.load(image);
     fireEvent.click(screen.getByRole("button", { name: "100%" }));
-    expect(image).toHaveStyle({ transform: "scale(1)" });
+    expect(image.parentElement).toHaveStyle({ width: "800px", height: "600px" });
     fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
-    expect(image.getAttribute("style")).toContain("scale(1.25)");
+    expect(image.parentElement).toHaveStyle({ width: "1000px", height: "750px" });
 
     view.rerender(<ImageRenderer {...props(client, snapshot(2))} />);
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledTimes(1));
@@ -81,5 +84,58 @@ describe("ImageRenderer", () => {
     oversized.unmount();
     render(<ImageRenderer {...props(client)} lifecycle={{ visible: false }} />);
     expect(client.issueTicket).not.toHaveBeenCalled();
+  });
+
+  it("accepts the registry's validated image MIME fallback but never active SVG", async () => {
+    const fallback = snapshot();
+    fallback.descriptor.renderer_kind = "unsupported";
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: fallback.resource_id, revision: 1, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    const view = render(<ImageRenderer {...props(client, fallback)} />);
+    await screen.findByRole("img", { name: "figure.png" });
+    view.unmount();
+    const svg = snapshot();
+    svg.descriptor.renderer_kind = "unsupported";
+    svg.descriptor.mime_type = "image/svg+xml";
+    render(<ImageRenderer {...props(client, svg)} />);
+    expect(client.issueTicket).toHaveBeenCalledTimes(1);
+  });
+
+  it("supports keyboard panning, pointer cancellation, and reachable zoomed layout", async () => {
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 1, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<ImageRenderer {...props(client)} />);
+    const image = await screen.findByRole("img", { name: "figure.png" });
+    Object.defineProperty(image, "naturalWidth", { value: 1600 });
+    Object.defineProperty(image, "naturalHeight", { value: 900 });
+    fireEvent.load(image);
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    const viewport = screen.getByRole("region", { name: "Image pan viewport" });
+    expect(viewport).toHaveAttribute("tabindex", "0");
+    Object.defineProperty(viewport, "scrollLeft", { value: 0, writable: true });
+    Object.defineProperty(viewport, "scrollTop", { value: 0, writable: true });
+    fireEvent.keyDown(viewport, { key: "ArrowRight" });
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    expect(viewport.scrollLeft).toBeGreaterThan(0);
+    expect(viewport.scrollTop).toBeGreaterThan(0);
+    const layout = image.parentElement;
+    expect(layout).toHaveStyle({ width: "1600px", height: "900px" });
+    fireEvent.pointerDown(viewport, { pointerId: 1, clientX: 20, clientY: 20 });
+    fireEvent.pointerCancel(viewport, { pointerId: 1 });
+    const left = viewport.scrollLeft;
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 0, clientY: 0 });
+    expect(viewport.scrollLeft).toBe(left);
   });
 });

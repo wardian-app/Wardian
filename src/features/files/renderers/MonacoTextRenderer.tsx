@@ -96,7 +96,11 @@ function errorMessage(error: unknown) {
 
 function canRenderText(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
   const mime = descriptor.mime_type.trim().toLowerCase();
-  return descriptor.renderer_kind === "text"
+  const validatedTextMime = mime.startsWith("text/")
+    || mime === "application/json"
+    || mime === "application/xml"
+    || mime === "application/javascript";
+  return (descriptor.renderer_kind === "text" || validatedTextMime)
     && mime !== "text/html"
     && mime !== "image/svg+xml"
     && descriptor.encoding === "utf-8"
@@ -105,6 +109,10 @@ function canRenderText(descriptor: FileRendererProps["snapshot"]["descriptor"]) 
     && descriptor.size_bytes <= MONACO_MAX_SIZE_BYTES
     && descriptor.line_count !== null
     && descriptor.line_count <= MONACO_MAX_LINE_COUNT;
+}
+
+function monacoTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "vs";
 }
 
 export default function MonacoTextRenderer({ snapshot, client, lifecycle }: FileRendererProps) {
@@ -121,6 +129,7 @@ export default function MonacoTextRenderer({ snapshot, client, lifecycle }: File
     let editor: Monaco.editor.IStandaloneCodeEditor | null = null;
     let model: Monaco.editor.ITextModel | null = null;
     let observer: ResizeObserver | null = null;
+    let themeObserver: MutationObserver | null = null;
     const modelKey = `${snapshot.resource_id}@${snapshot.revision}`;
     setError(null);
 
@@ -140,7 +149,13 @@ export default function MonacoTextRenderer({ snapshot, client, lifecycle }: File
         readOnly: true,
         renderValidationDecorations: "off",
         scrollBeyondLastLine: false,
+        theme: monacoTheme(),
         wordWrap: "off",
+      });
+      themeObserver = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
       });
       let previousWidth = -1;
       let previousHeight = -1;
@@ -163,6 +178,7 @@ export default function MonacoTextRenderer({ snapshot, client, lifecycle }: File
     return () => {
       cancelled = true;
       observer?.disconnect();
+      themeObserver?.disconnect();
       editor?.dispose();
       if (model) releaseModel(modelKey, model);
     };

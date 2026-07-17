@@ -120,6 +120,48 @@ describe("PdfRenderer", () => {
     expect(getDocument).not.toHaveBeenCalled();
   });
 
+  it("accepts the registry's validated PDF MIME fallback", async () => {
+    const fallback = snapshot();
+    fallback.descriptor.renderer_kind = "unsupported";
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: fallback.resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} snapshot={fallback} />);
+    expect(await screen.findByText("Page 1")).toBeInTheDocument();
+  });
+
+  it("destroys a loaded document and releases its lease on page failure", async () => {
+    const destroyDocument = vi.fn().mockResolvedValue(undefined);
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({
+        numPages: 1,
+        destroy: destroyDocument,
+        getPage: vi.fn().mockResolvedValue({
+          getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 100 * scale }),
+          render: vi.fn().mockImplementation(() => { throw new Error("render failed"); }),
+        }),
+      }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("render failed");
+    await waitFor(() => expect(destroyDocument).toHaveBeenCalledOnce());
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledOnce());
+  });
+
   it("releases a delayed ticket from a stale revision without loading it", async () => {
     let resolveFirst: ((value: object) => void) | undefined;
     const firstTicket = new Promise<object>((resolve) => { resolveFirst = resolve; });
@@ -160,5 +202,136 @@ describe("PdfRenderer", () => {
     expect(getDocument).not.toHaveBeenCalledWith(expect.objectContaining({
       url: "wardian-resource://localhost/ticket-stale",
     }));
+  });
+
+  it("renders only a bounded visible page window and cancels pages leaving it", async () => {
+    let intersectionCallback: IntersectionObserverCallback | undefined;
+    vi.stubGlobal("IntersectionObserver", class TestIntersectionObserver {
+      constructor(callback: IntersectionObserverCallback) { intersectionCallback = callback; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() { return []; }
+      root = null;
+      rootMargin = "0px";
+      thresholds = [0];
+    });
+    const getPage = vi.fn().mockImplementation(async (pageNumber: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [{ str: `page ${pageNumber}` }] }),
+      render: vi.fn().mockImplementation(() => {
+        const task = { promise: new Promise<void>(() => undefined), cancel: vi.fn() };
+        renderTasks.push(task);
+        return task;
+      }),
+    }));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+
+    await screen.findByText("Page 100");
+    await waitFor(() => expect(getPage.mock.calls.length).toBeLessThanOrEqual(3));
+    const page50 = screen.getByText("Page 50").closest("figure")!;
+    intersectionCallback?.([{
+      target: page50,
+      isIntersecting: true,
+      intersectionRatio: 1,
+    } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
+    await waitFor(() => expect(getPage).toHaveBeenCalledWith(50));
+    expect(getPage.mock.calls.length).toBeLessThanOrEqual(6);
+    expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("caps malicious page geometry, zoom, and device pixel ratio before canvas allocation", async () => {
+    vi.stubGlobal("devicePixelRatio", 16);
+    const pageRender = vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() });
+    const getPage = vi.fn().mockResolvedValue({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 1_000_000 * scale, height: 800_000 * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      render: pageRender,
+    });
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 1, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "wardian-resource://localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+    const canvas = await screen.findByLabelText("PDF page 1") as HTMLCanvasElement;
+    await waitFor(() => expect(pageRender).toHaveBeenCalled());
+    expect(canvas.width).toBeLessThanOrEqual(8192);
+    expect(canvas.height).toBeLessThanOrEqual(8192);
+    expect(canvas.width * canvas.height).toBeLessThanOrEqual(32_000_000);
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    await waitFor(() => expect(pageRender).toHaveBeenCalledTimes(2));
+    expect(canvas.width * canvas.height).toBeLessThanOrEqual(32_000_000);
+    vi.unstubAllGlobals();
+  });
+
+  it("debounces search, stops stale generations between pages, and releases failed attempts", async () => {
+    let rejectLoad: ((cause: Error) => void) | undefined;
+    const destroy = vi.fn().mockResolvedValue(undefined);
+    getDocument.mockReturnValueOnce({
+      promise: new Promise((_resolve, reject) => { rejectLoad = reject; }),
+      destroy,
+    });
+    const issueTicket = vi.fn().mockImplementation(async (
+      _resource: string,
+      revision: number,
+      lease: string,
+    ) => ({
+        schema: 1, ticket_id: lease, url: `wardian-resource://localhost/${lease}`,
+        resource_id: snapshot().resource_id, revision, renderer_lease_id: lease,
+        expires_at_ms: Date.now() + 60_000,
+      }));
+    const client = {
+      issueTicket,
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+    await waitFor(() => expect(getDocument).toHaveBeenCalledOnce());
+    rejectLoad?.(new Error("bad pdf"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("bad pdf");
+    await waitFor(() => expect(destroy).toHaveBeenCalled());
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledOnce());
+
+    const pageResolvers: Array<() => void> = [];
+    const searchGetPage = vi.fn().mockImplementation(async (pageNumber: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 100 * scale }),
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+      getTextContent: () => new Promise((resolve) => pageResolvers.push(() => resolve({ items: [{ str: `page ${pageNumber}` }] }))),
+    }));
+    getDocument.mockReturnValueOnce({
+      promise: Promise.resolve({ numPages: 20, destroy: vi.fn(), getPage: searchGetPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Page 20");
+    const search = screen.getByRole("searchbox", { name: "Search PDF" });
+    fireEvent.change(search, { target: { value: "first" } });
+    await waitFor(() => expect(searchGetPage.mock.calls.length).toBeGreaterThan(2), { timeout: 1000 });
+    expect(searchGetPage.mock.calls.length).toBeLessThanOrEqual(4);
+    fireEvent.change(search, { target: { value: "second" } });
+    pageResolvers.splice(0).forEach((resolve) => resolve());
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(searchGetPage.mock.calls.length).toBeLessThan(10);
+    expect(new Set(issueTicket.mock.calls.map((call) => call[2])).size).toBe(2);
   });
 });

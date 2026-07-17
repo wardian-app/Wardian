@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 
 import type { FileRendererProps } from "../rendererRegistry";
 
@@ -30,9 +37,12 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
   const [fit, setFit] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [retryToken, setRetryToken] = useState(0);
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const descriptor = snapshot.descriptor;
-  const allowed = descriptor.renderer_kind === "image"
+  const mime = descriptor.mime_type.trim().toLowerCase();
+  const allowed = (descriptor.renderer_kind === "image" || mime.startsWith("image/"))
+    && mime !== "image/svg+xml"
     && descriptor.capabilities.preview
     && descriptor.capabilities.stream
     && descriptor.unavailable_reason === null
@@ -73,7 +83,7 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    viewport.setPointerCapture(event.pointerId);
+    viewport.setPointerCapture?.(event.pointerId);
     dragRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -87,6 +97,24 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     if (!viewport || !drag) return;
     viewport.scrollLeft = drag.left - (event.clientX - drag.x);
     viewport.scrollTop = drag.top - (event.clientY - drag.y);
+  };
+  const endPointer = (event: PointerEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    dragRef.current = null;
+    if (viewport?.hasPointerCapture?.(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+  };
+  const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const step = event.shiftKey ? 160 : 48;
+    if (event.key === "ArrowLeft") viewport.scrollLeft -= step;
+    else if (event.key === "ArrowRight") viewport.scrollLeft += step;
+    else if (event.key === "ArrowUp") viewport.scrollTop -= step;
+    else if (event.key === "ArrowDown") viewport.scrollTop += step;
+    else if (event.key === "PageUp") viewport.scrollTop -= Math.max(step, viewport.clientHeight * 0.8);
+    else if (event.key === "PageDown") viewport.scrollTop += Math.max(step, viewport.clientHeight * 0.8);
+    else return;
+    event.preventDefault();
   };
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
 
@@ -121,18 +149,35 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
       <div
         ref={viewportRef}
         className="files-image-viewport"
+        role="region"
+        aria-label="Image pan viewport"
+        tabIndex={0}
+        onKeyDown={keyDown}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
-        onPointerUp={() => { dragRef.current = null; }}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        onLostPointerCapture={() => { dragRef.current = null; }}
       >
         {url ? (
-          <img
-            alt={descriptor.display_name}
-            className={fit ? "files-image-preview is-fit" : "files-image-preview"}
-            draggable={false}
-            src={url}
-            style={fit ? undefined : { transform: `scale(${zoom})` }}
-          />
+          <div
+            className={fit ? "files-image-layout is-fit" : "files-image-layout"}
+            style={!fit && naturalSize ? {
+              width: `${Math.round(naturalSize.width * zoom)}px`,
+              height: `${Math.round(naturalSize.height * zoom)}px`,
+            } : undefined}
+          >
+            <img
+              alt={descriptor.display_name}
+              className={fit ? "files-image-preview is-fit" : "files-image-preview"}
+              draggable={false}
+              src={url}
+              onLoad={(event) => setNaturalSize({
+                width: event.currentTarget.naturalWidth,
+                height: event.currentTarget.naturalHeight,
+              })}
+            />
+          </div>
         ) : <div className="files-resource-state" role="status">Loading image…</div>}
       </div>
     </section>
