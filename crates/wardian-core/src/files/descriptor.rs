@@ -1,4 +1,4 @@
-use super::authorized_roots::{FileIdentity, FileRevisionToken};
+use super::authorized_roots::{FileIdentity, FileRevisionFingerprint, FileRevisionToken};
 use super::AuthorizedPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,13 +27,18 @@ pub struct FileContentDescriptorV1 {
     pub mime_type: String,
     /// Validated text encoding, or `None` for non-text content.
     pub encoding: Option<String>,
-    /// Backend-confirmed renderer family.
+    /// Backend-confirmed renderer family. Metadata-only oversized text uses a
+    /// validated leading probe; its complete encoding remains unset.
     pub renderer_kind: FileRendererKind,
-    /// Exact byte count of the content that was hashed.
+    /// Stable byte count from the same retained-handle metadata scan. Exact
+    /// hashes cover all of these bytes; bounded fingerprints include the count
+    /// without claiming to hash all content bytes.
     pub size_bytes: u64,
     /// Validated UTF-8 line count, or `None` for non-text content.
     pub line_count: Option<u64>,
-    /// SHA-256 content identity prefixed with `sha256:`.
+    /// Revision identity. `sha256:` is an exact full-content digest;
+    /// `bounded-sha256:` is an explicitly non-content fingerprint used only
+    /// for metadata-only revisions whose renderer limit prevents a full scan.
     pub content_hash: String,
     /// Last modification time as Unix epoch milliseconds.
     pub modified_at_ms: u64,
@@ -52,9 +57,9 @@ impl FileContentDescriptorV1 {
     ///
     /// Returns `unauthorized_path` if the original path no longer resolves to
     /// the authorized handle, `unstable_file` if no stable revision can be
-    /// scanned after retrying, `file_too_large` if the detected renderer's
-    /// centralized byte ceiling is exceeded, or `unavailable_path` for other
-    /// file access and metadata failures.
+    /// scanned after retrying, or `unavailable_path` for other file access and
+    /// metadata failures. Renderer-limit violations return a stable descriptor
+    /// with disabled capabilities and a typed `unavailable_reason`.
     pub fn from_authorized_path(
         authorized: &AuthorizedPath,
         limits: &FileResourceLimits,
@@ -92,8 +97,9 @@ impl VerifiedFileSnapshot {
     ///
     /// Returns `unauthorized_path` if the original path no longer resolves to
     /// the authorized handle, `unstable_file` if every bounded scan observes a
-    /// change, `file_too_large` for a renderer-limit violation, or
-    /// `unavailable_path` for other file access failures.
+    /// change, or `unavailable_path` for other file access failures.
+    /// Renderer-limit violations return a stable metadata-only snapshot with a
+    /// bounded revision fingerprint and no readable revision capability.
     pub fn from_authorized_path(
         authorized: &AuthorizedPath,
         limits: &FileResourceLimits,
@@ -155,6 +161,8 @@ impl VerifiedFileSnapshot {
             let scan = scan_reader_limited(
                 &mut BufReader::new(&mut *file),
                 SIGNATURE_PROBE_SIZE,
+                canonical_path,
+                before,
                 limits,
                 |bytes_read| after_read(attempt, bytes_read),
             )?;
@@ -293,10 +301,11 @@ fn descriptor_from_scan(
         FileRendererKind::Pdf => limits.pdf_max_size_bytes,
         FileRendererKind::Unsupported => 0,
     };
+    let content_hash = scan.fingerprint.descriptor_value().to_string();
     let revision_token = FileRevisionToken::new(
         identity,
         canonical_path.into(),
-        scan.content_hash.clone(),
+        scan.fingerprint,
         scan.size_bytes,
         maximum_size_bytes,
     );
@@ -312,7 +321,7 @@ fn descriptor_from_scan(
             renderer_kind: detected.renderer_kind,
             size_bytes: scan.size_bytes,
             line_count: detected.line_count,
-            content_hash: scan.content_hash,
+            content_hash,
             modified_at_ms,
             capabilities,
             unavailable_reason,
@@ -456,21 +465,7 @@ fn detect_content(
     is_utf8_text: bool,
     line_count: Option<u64>,
 ) -> DetectedContent {
-    let signature = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some(("image/png", FileRendererKind::Image))
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some(("image/jpeg", FileRendererKind::Image))
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some(("image/gif", FileRendererKind::Image))
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some(("image/webp", FileRendererKind::Image))
-    } else if bytes.starts_with(b"%PDF-") {
-        Some(("application/pdf", FileRendererKind::Pdf))
-    } else {
-        None
-    };
-
-    if let Some((mime_type, renderer_kind)) = signature {
+    if let Some((mime_type, renderer_kind)) = detected_signature(bytes) {
         return DetectedContent {
             mime_type,
             renderer_kind,
@@ -501,7 +496,7 @@ fn detect_content(
 struct ScannedFile {
     probe: Vec<u8>,
     size_bytes: u64,
-    content_hash: String,
+    fingerprint: FileRevisionFingerprint,
     is_utf8_text: bool,
     line_count: Option<u64>,
 }
@@ -544,7 +539,7 @@ fn scan_reader_with_hook(
     Ok(ScannedFile {
         probe,
         size_bytes,
-        content_hash: format!("sha256:{digest:x}"),
+        fingerprint: FileRevisionFingerprint::ExactSha256(format!("sha256:{digest:x}")),
         is_utf8_text,
         line_count,
     })
@@ -553,6 +548,8 @@ fn scan_reader_with_hook(
 fn scan_reader_limited(
     reader: &mut impl Read,
     probe_limit: usize,
+    canonical_path: &str,
+    revision: FileRevision,
     limits: &FileResourceLimits,
     mut after_read: impl FnMut(u64),
 ) -> Result<ScannedFile, FileResourceErrorV1> {
@@ -595,24 +592,81 @@ fn scan_reader_limited(
         if scan_ceiling.is_none() && size_bytes >= MINIMUM_DETECTION_BYTES {
             scan_ceiling = Some(content_scan_ceiling(&probe, limits));
         }
-        if scan_ceiling.is_some_and(|ceiling| size_bytes > ceiling) {
-            return Err(oversized_scan(scan_ceiling.unwrap_or_default()));
+        if let Some(ceiling) = scan_ceiling {
+            let image_pixels = detected_image_pixels(&probe);
+            let metadata_only = revision.size_bytes > ceiling
+                || image_pixels.is_some_and(|pixels| pixels > limits.image_max_pixels);
+            if metadata_only {
+                return Ok(bounded_scan(probe, canonical_path, revision));
+            }
+            if size_bytes > ceiling {
+                return Err(oversized_scan(ceiling));
+            }
         }
     }
 
-    let ceiling = scan_ceiling.unwrap_or_else(|| content_scan_ceiling(&probe, limits));
-    if size_bytes > ceiling {
-        return Err(oversized_scan(ceiling));
-    }
     let (is_utf8_text, line_count) = utf8.finish();
     let digest = hasher.finalize();
     Ok(ScannedFile {
         probe,
         size_bytes,
-        content_hash: format!("sha256:{digest:x}"),
+        fingerprint: FileRevisionFingerprint::ExactSha256(format!("sha256:{digest:x}")),
         is_utf8_text,
         line_count,
     })
+}
+
+fn bounded_scan(probe: Vec<u8>, canonical_path: &str, revision: FileRevision) -> ScannedFile {
+    let is_utf8_text = detected_signature(&probe).is_none() && bounded_probe_is_text(&probe);
+    let mut hasher = Sha256::new();
+    hasher.update(b"wardian-bounded-file-revision-v1\0");
+    hasher.update(canonical_path.as_bytes());
+    let (volume, file) = revision.identity.fingerprint_components();
+    hasher.update(volume.to_le_bytes());
+    hasher.update(file.to_le_bytes());
+    hasher.update(revision.size_bytes.to_le_bytes());
+    hasher.update(revision.modified_at_ms.to_le_bytes());
+    hasher.update(revision.write_marker.to_le_bytes());
+    hasher.update(revision.change_marker.to_le_bytes());
+    hasher.update(&probe);
+    let fingerprint =
+        FileRevisionFingerprint::BoundedSha256(format!("bounded-sha256:{:x}", hasher.finalize()));
+    ScannedFile {
+        probe,
+        size_bytes: revision.size_bytes,
+        fingerprint,
+        is_utf8_text,
+        line_count: None,
+    }
+}
+
+fn detected_signature(probe: &[u8]) -> Option<(&'static str, FileRendererKind)> {
+    if probe.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", FileRendererKind::Image))
+    } else if probe.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(("image/jpeg", FileRendererKind::Image))
+    } else if probe.starts_with(b"GIF87a") || probe.starts_with(b"GIF89a") {
+        Some(("image/gif", FileRendererKind::Image))
+    } else if probe.len() >= 12 && probe.starts_with(b"RIFF") && &probe[8..12] == b"WEBP" {
+        Some(("image/webp", FileRendererKind::Image))
+    } else if probe.starts_with(b"%PDF-") {
+        Some(("application/pdf", FileRendererKind::Pdf))
+    } else {
+        None
+    }
+}
+
+fn detected_image_pixels(probe: &[u8]) -> Option<u64> {
+    let (mime_type, renderer_kind) = detected_signature(probe)?;
+    (renderer_kind == FileRendererKind::Image)
+        .then(|| image_pixels(probe, mime_type))
+        .flatten()
+}
+
+fn bounded_probe_is_text(probe: &[u8]) -> bool {
+    let mut analyzer = Utf8TextAnalyzer::default();
+    analyzer.push(probe);
+    analyzer.finish().0
 }
 
 fn content_scan_ceiling(probe: &[u8], limits: &FileResourceLimits) -> u64 {
@@ -760,7 +814,9 @@ fn capabilities_for(
         FileRendererKind::Image => {
             let preview =
                 image_pixels.is_some_and(|pixels| limits.allows_image(size_bytes, pixels));
-            let unavailable_reason = if image_pixels.is_none() {
+            let unavailable_reason = if size_bytes > limits.image_max_size_bytes {
+                Some("image_limit_exceeded".to_string())
+            } else if image_pixels.is_none() {
                 Some("image_dimensions_unavailable".to_string())
             } else if !preview {
                 Some("image_limit_exceeded".to_string())
@@ -908,6 +964,32 @@ mod tests {
 
     fn describe(name: &str, bytes: &[u8]) -> FileContentDescriptorV1 {
         snapshot(name, bytes).into_parts().0
+    }
+
+    fn describe_with_limits(
+        name: &str,
+        bytes: &[u8],
+        limits: &FileResourceLimits,
+    ) -> FileContentDescriptorV1 {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join(name);
+        fs::write(&path, bytes).expect("fixture file");
+        let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+            folder: temp.path().to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        })
+        .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized fixture");
+        FileContentDescriptorV1::from_authorized_path(&authorized, limits)
+            .expect("metadata descriptor")
+    }
+
+    fn padded_fixture(prefix: &[u8], size_bytes: u64) -> Vec<u8> {
+        let mut bytes = prefix.to_vec();
+        bytes.resize(size_bytes.try_into().expect("test fixture size"), b'a');
+        bytes
     }
 
     #[test]
@@ -1139,28 +1221,13 @@ mod tests {
         assert_eq!(scan.line_count, Some(100_001));
         assert!(scan.is_utf8_text);
         assert_eq!(
-            scan.content_hash,
+            scan.fingerprint.descriptor_value(),
             format!("sha256:{:x}", Sha256::digest(&bytes))
         );
     }
 
     #[test]
-    fn descriptor_scan_stops_at_the_detected_renderer_byte_ceiling() {
-        use std::io::{Cursor, Read};
-
-        struct GuardedReader {
-            inner: Cursor<Vec<u8>>,
-            total_read: u64,
-        }
-
-        impl Read for GuardedReader {
-            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-                let bytes_read = self.inner.read(buffer)?;
-                self.total_read += bytes_read as u64;
-                Ok(bytes_read)
-            }
-        }
-
+    fn oversized_descriptor_scan_reads_only_a_bounded_detection_probe() {
         let limits = FileResourceLimits {
             monaco_max_size_bytes: 128,
             monaco_max_line_count: u64::MAX,
@@ -1170,43 +1237,149 @@ mod tests {
             image_max_pixels: u64::MAX,
             pdf_max_size_bytes: 512,
         };
-        let cases: &[(&str, &[u8], u64)] = &[
-            ("text", b"plain text", limits.monaco_max_size_bytes),
-            ("image", b"\x89PNG\r\n\x1a\n", limits.image_max_size_bytes),
-            ("pdf", b"%PDF-1.7\n", limits.pdf_max_size_bytes),
+        let cases: &[(&str, &[u8])] = &[
+            ("text.txt", b"plain text"),
+            ("image.png", b"\x89PNG\r\n\x1a\n"),
+            ("document.pdf", b"%PDF-1.7\n"),
         ];
 
-        for (kind, signature, ceiling) in cases {
+        for (name, signature) in cases {
+            let temp = tempfile::tempdir().expect("temp root");
+            let path = temp.path().join(name);
             let mut bytes = signature.to_vec();
             bytes.resize(4_096, b'a');
-            let mut reader = GuardedReader {
-                inner: Cursor::new(bytes),
-                total_read: 0,
-            };
+            fs::write(&path, bytes).expect("fixture");
+            let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+                folder: temp.path().to_string_lossy().into_owned(),
+                ..AgentConfig::default()
+            })
+            .expect("valid root");
+            let authorized = service
+                .authorize_existing_file(&path)
+                .expect("authorized fixture");
+            let mut maximum_read = 0;
 
-            let error = scan_reader_limited(&mut reader, SIGNATURE_PROBE_SIZE, &limits, |_| {})
-                .expect_err("content beyond its renderer ceiling must stop");
+            let descriptor = FileContentDescriptorV1::from_authorized_path_with_hook(
+                &authorized,
+                &limits,
+                |_, bytes_read| maximum_read = maximum_read.max(bytes_read),
+            )
+            .expect("oversized metadata descriptor");
 
-            assert_eq!(error.code(), "file_too_large", "{kind}");
             assert!(
-                reader.total_read <= ceiling + 1,
-                "{kind} read {} bytes past a {ceiling} byte ceiling",
-                reader.total_read,
+                descriptor.content_hash.starts_with("bounded-sha256:"),
+                "{name}"
             );
+            assert_eq!(maximum_read, MINIMUM_DETECTION_BYTES, "{name}");
         }
+    }
 
-        let tiny_limits = FileResourceLimits {
-            monaco_max_size_bytes: 8,
-            ..limits
+    #[test]
+    fn renderer_byte_boundaries_use_exact_hashes_then_bounded_metadata_fingerprints() {
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: 64,
+            monaco_max_line_count: u64::MAX,
+            diff_max_size_bytes_per_side: 64,
+            diff_max_line_count: u64::MAX,
+            image_max_size_bytes: 96,
+            image_max_pixels: u64::MAX,
+            pdf_max_size_bytes: 128,
         };
-        let mut reader = GuardedReader {
-            inner: Cursor::new(vec![b'a'; 4_096]),
-            total_read: 0,
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01";
+        let cases = [
+            (
+                "text",
+                "boundary.txt",
+                vec![b'a'; limits.monaco_max_size_bytes as usize],
+                "over.txt",
+                vec![b'a'; limits.monaco_max_size_bytes as usize + 1],
+                "monaco_size_limit_exceeded",
+            ),
+            (
+                "image",
+                "boundary.png",
+                padded_fixture(png, limits.image_max_size_bytes),
+                "over.png",
+                padded_fixture(png, limits.image_max_size_bytes + 1),
+                "image_limit_exceeded",
+            ),
+            (
+                "pdf",
+                "boundary.pdf",
+                padded_fixture(b"%PDF-1.7\n", limits.pdf_max_size_bytes),
+                "over.pdf",
+                padded_fixture(b"%PDF-1.7\n", limits.pdf_max_size_bytes + 1),
+                "pdf_size_limit_exceeded",
+            ),
+        ];
+
+        for (kind, boundary_name, boundary, over_name, over, reason) in cases {
+            let exact = describe_with_limits(boundary_name, &boundary, &limits);
+            assert_eq!(exact.size_bytes, boundary.len() as u64, "{kind} boundary");
+            assert!(exact.content_hash.starts_with("sha256:"), "{kind} boundary");
+
+            let oversized = describe_with_limits(over_name, &over, &limits);
+            assert_eq!(oversized.size_bytes, over.len() as u64, "{kind} oversized");
+            assert!(
+                oversized.content_hash.starts_with("bounded-sha256:"),
+                "{kind} oversized fingerprint: {}",
+                oversized.content_hash
+            );
+            assert_eq!(
+                oversized.unavailable_reason.as_deref(),
+                Some(reason),
+                "{kind}"
+            );
+            assert!(!oversized.capabilities.preview, "{kind}");
+            assert!(!oversized.capabilities.changes, "{kind}");
+            assert!(!oversized.capabilities.draft, "{kind}");
+            assert!(!oversized.capabilities.stream, "{kind}");
+        }
+    }
+
+    #[test]
+    fn bounded_metadata_revision_token_cannot_authorize_content_reads() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("oversized.txt");
+        fs::write(&path, vec![b'a'; 65]).expect("fixture");
+        let service = AuthorizedRootService::from_agent_config(&AgentConfig {
+            folder: temp.path().to_string_lossy().into_owned(),
+            ..AgentConfig::default()
+        })
+        .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized fixture");
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: 64,
+            monaco_max_line_count: u64::MAX,
+            diff_max_size_bytes_per_side: 64,
+            diff_max_line_count: u64::MAX,
+            image_max_size_bytes: 96,
+            image_max_pixels: u64::MAX,
+            pdf_max_size_bytes: 128,
         };
-        let error = scan_reader_limited(&mut reader, SIGNATURE_PROBE_SIZE, &tiny_limits, |_| {})
-            .expect_err("detection allowance must remain bounded");
-        assert_eq!(error.code(), "file_too_large");
-        assert_eq!(reader.total_read, MINIMUM_DETECTION_BYTES);
+        let snapshot = VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+            .expect("metadata snapshot");
+        assert!(snapshot
+            .descriptor()
+            .content_hash
+            .starts_with("bounded-sha256:"));
+
+        assert_eq!(
+            authorized
+                .read_verified_text(snapshot.revision_token(), u64::MAX)
+                .expect_err("bounded token must not read content")
+                .code(),
+            "file_too_large"
+        );
+        assert_eq!(
+            authorized
+                .copy_verified_revision_to(snapshot.revision_token(), &mut Vec::new())
+                .expect_err("bounded token must not stream content")
+                .code(),
+            "file_too_large"
+        );
     }
 
     #[test]
@@ -1287,19 +1460,45 @@ mod tests {
             bytes
         }
 
+        fn padded(mut bytes: Vec<u8>) -> Vec<u8> {
+            bytes.resize(MINIMUM_DETECTION_BYTES as usize, b'a');
+            bytes
+        }
+
         let fixtures = [
-            ("png", png_header(8_000, 8_000), png_header(8_001, 8_000)),
-            ("gif", gif_header(8_000, 8_000), gif_header(8_001, 8_000)),
-            ("jpeg", jpeg_header(8_000, 8_000), jpeg_header(8_001, 8_000)),
-            ("webp", webp_header(8_000, 8_000), webp_header(8_001, 8_000)),
+            (
+                "png",
+                padded(png_header(8_000, 8_000)),
+                padded(png_header(8_001, 8_000)),
+            ),
+            (
+                "gif",
+                padded(gif_header(8_000, 8_000)),
+                padded(gif_header(8_001, 8_000)),
+            ),
+            (
+                "jpeg",
+                padded(jpeg_header(8_000, 8_000)),
+                padded(jpeg_header(8_001, 8_000)),
+            ),
+            (
+                "webp",
+                padded(webp_header(8_000, 8_000)),
+                padded(webp_header(8_001, 8_000)),
+            ),
         ];
 
         for (extension, at_limit_bytes, over_limit_bytes) in fixtures {
             let at_limit = describe(&format!("at-limit.{extension}"), &at_limit_bytes);
             assert!(at_limit.capabilities.preview, "{extension} at limit");
+            assert!(at_limit.content_hash.starts_with("sha256:"), "{extension}");
 
             let over_limit = describe(&format!("over-limit.{extension}"), &over_limit_bytes);
             assert!(!over_limit.capabilities.preview, "{extension} over limit");
+            assert!(
+                over_limit.content_hash.starts_with("bounded-sha256:"),
+                "{extension}"
+            );
             assert_eq!(
                 over_limit.unavailable_reason.as_deref(),
                 Some("image_limit_exceeded"),

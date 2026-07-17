@@ -62,6 +62,13 @@ stream. If a file is temporarily unreadable or keeps changing during a scan,
 its tab shows one local unavailable state and automatically recovers when the
 source stabilizes.
 
+The same metadata state applies when text exceeds 16 MiB or 200,000 lines, an
+image exceeds 64 MiB encoded or 64 million decoded pixels, or a PDF exceeds
+256 MiB. Wardian does not read the oversized content into a renderer merely to
+identify it. The tab can still show its name, type, size, modification time,
+typed limit reason, **Open With**, and Reveal actions. If the file later moves
+back within its limit, the existing tab refreshes into the normal preview.
+
 Files is intentionally absent from the New Surface launcher in this slice.
 Open files from Explorer; the launcher will become available only when the
 artifact review and isolated active-content contracts are complete. A restored

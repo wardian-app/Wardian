@@ -152,6 +152,24 @@ Response:
 }
 ```
 
+`content_hash` is a revision-identity field with an algorithm prefix. A
+`sha256:` value is the exact digest of content scanned completely within its
+renderer limits. A `bounded-sha256:` value is deliberately not a full-content
+hash: it fingerprints the retained file identity, stable size/write metadata,
+and a bounded leading detection probe. Wardian emits the bounded form only for
+metadata-only descriptors whose capabilities are disabled by a byte or decoded
+image-pixel limit. This lets watcher refreshes compare stable oversized
+revisions without reading the entire oversized file or mislabeling a partial
+digest as a content SHA.
+
+Files above the 16 MiB Monaco limit, 64 MiB encoded/64-million-pixel image
+limits, or 256 MiB PDF limit still return a successful metadata snapshot. Their
+capabilities are all false and `unavailable_reason` is respectively
+`monaco_size_limit_exceeded`, `image_limit_exceeded`, or
+`pdf_size_limit_exceeded`. Text reads and stream-ticket issuance reject that
+revision with the same typed reason; the bounded revision token never grants
+content access.
+
 ### `read_file_resource_text`
 
 Reads complete validated UTF-8 text only when the subscription and revision are
@@ -286,7 +304,9 @@ Files commands:
 
 Stable codes include `invalid_request`, `unauthorized_path`,
 `unavailable_path`, `unstable_file`, `resource_not_found`, `stale_revision`,
-`unsupported_content`, `file_too_large`, `grant_limit_reached`,
+`unsupported_content`, `file_too_large`, `monaco_size_limit_exceeded`,
+`monaco_line_limit_exceeded`, `image_dimensions_unavailable`,
+`image_limit_exceeded`, `pdf_size_limit_exceeded`, `grant_limit_reached`,
 `ticket_capacity_exceeded`, `invalid_ticket`, `unauthorized_ticket`,
 `expired_ticket`, `invalid_range`, and `range_not_satisfiable`.
 `grant_limit_reached` means all 128 exact picker grants are currently active;

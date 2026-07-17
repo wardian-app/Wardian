@@ -352,6 +352,15 @@ impl AuthorizedPath {
                 "file revision token belongs to another authorized file",
             ));
         }
+        let expected_hash = match &revision.fingerprint {
+            FileRevisionFingerprint::ExactSha256(hash) => hash,
+            FileRevisionFingerprint::BoundedSha256(_) => {
+                return Err(FileResourceErrorV1::new(
+                    "file_too_large",
+                    "bounded metadata revisions cannot authorize content reads",
+                ));
+            }
+        };
         let expected_size_bytes = revision.size_bytes;
         let maximum_size_bytes = revision.maximum_size_bytes;
         if expected_size_bytes > maximum_size_bytes {
@@ -421,7 +430,7 @@ impl AuthorizedPath {
             ));
         }
         let actual_hash = format!("sha256:{:x}", hasher.finalize());
-        if actual_hash != revision.content_hash {
+        if actual_hash != expected_hash.as_str() {
             return Err(FileResourceErrorV1::new(
                 "stale_revision",
                 "file content no longer matches the expected revision",
@@ -476,29 +485,49 @@ pub(super) struct FileIdentity {
     file: u64,
 }
 
+impl FileIdentity {
+    pub(super) fn fingerprint_components(self) -> (u64, u64) {
+        (self.volume, self.file)
+    }
+}
+
 /// Opaque capability proving that a descriptor was scanned from one retained
 /// authorized file handle at one bounded content revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRevisionToken {
     identity: FileIdentity,
     canonical_path: PathBuf,
-    content_hash: String,
+    fingerprint: FileRevisionFingerprint,
     size_bytes: u64,
     maximum_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FileRevisionFingerprint {
+    ExactSha256(String),
+    BoundedSha256(String),
+}
+
+impl FileRevisionFingerprint {
+    pub(super) fn descriptor_value(&self) -> &str {
+        match self {
+            Self::ExactSha256(value) | Self::BoundedSha256(value) => value,
+        }
+    }
 }
 
 impl FileRevisionToken {
     pub(super) fn new(
         identity: FileIdentity,
         canonical_path: PathBuf,
-        content_hash: String,
+        fingerprint: FileRevisionFingerprint,
         size_bytes: u64,
         maximum_size_bytes: u64,
     ) -> Self {
         Self {
             identity,
             canonical_path,
-            content_hash,
+            fingerprint,
             size_bytes,
             maximum_size_bytes,
         }

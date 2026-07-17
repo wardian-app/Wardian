@@ -807,7 +807,8 @@ impl FileResourceRuntime {
             }
             entry.authorized = authorized.clone();
             entry.revision_token = revision_token;
-            let recovered = entry.descriptor.unavailable_reason.is_some();
+            let availability_changed =
+                entry.descriptor.unavailable_reason != descriptor.unavailable_reason;
             let content_changed = entry.descriptor.content_hash != descriptor.content_hash;
             let user_capability_ids = entry
                 .subscribers
@@ -817,7 +818,7 @@ impl FileResourceRuntime {
                     FileAccessClaim::Agent { .. } => None,
                 })
                 .collect::<Vec<_>>();
-            if !content_changed && !recovered {
+            if !content_changed && !availability_changed {
                 entry.descriptor = descriptor;
                 (None, user_capability_ids)
             } else {
@@ -2277,6 +2278,137 @@ mod tests {
             .await
             .expect_err("revoked root must fail");
         assert_eq!(revoked.code(), "unauthorized_path");
+    }
+
+    #[tokio::test]
+    async fn oversized_resources_open_as_metadata_and_reject_reads_until_recovery() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: 64,
+            monaco_max_line_count: u64::MAX,
+            diff_max_size_bytes_per_side: 64,
+            diff_max_line_count: u64::MAX,
+            image_max_size_bytes: 96,
+            image_max_pixels: u64::MAX,
+            pdf_max_size_bytes: 128,
+        };
+        let mut runtime = test_runtime();
+        Arc::get_mut(&mut runtime.inner)
+            .expect("unshared test runtime")
+            .limits = limits.clone();
+        let config = agent_config("agent-a", temp.path());
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01";
+        let mut image = png.to_vec();
+        image.resize(limits.image_max_size_bytes as usize + 1, b'a');
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        pdf.resize(limits.pdf_max_size_bytes as usize + 1, b'a');
+        let fixtures = [
+            (
+                "oversized.txt",
+                vec![b'a'; limits.monaco_max_size_bytes as usize + 1],
+                "monaco_size_limit_exceeded",
+            ),
+            ("oversized.png", image, "image_limit_exceeded"),
+            ("oversized.pdf", pdf, "pdf_size_limit_exceeded"),
+        ];
+
+        for (name, bytes, reason) in fixtures {
+            let path = temp.path().join(name);
+            fs::write(&path, bytes).expect("oversized fixture");
+            let snapshot = runtime
+                .open_agent_file("agent-a", &config, &path, None)
+                .await
+                .expect("oversized resource opens as metadata");
+
+            assert_eq!(snapshot.revision, 1, "{name}");
+            assert_eq!(
+                snapshot.descriptor.unavailable_reason.as_deref(),
+                Some(reason),
+                "{name}"
+            );
+            assert!(
+                snapshot
+                    .descriptor
+                    .content_hash
+                    .starts_with("bounded-sha256:"),
+                "{name}"
+            );
+            assert!(!snapshot.descriptor.capabilities.preview, "{name}");
+            assert!(!snapshot.descriptor.capabilities.changes, "{name}");
+            assert!(!snapshot.descriptor.capabilities.draft, "{name}");
+            assert!(!snapshot.descriptor.capabilities.stream, "{name}");
+            assert_eq!(
+                runtime
+                    .read_text(
+                        &snapshot.resource_id,
+                        &snapshot.subscription_id,
+                        snapshot.revision,
+                        Some(&config),
+                    )
+                    .await
+                    .expect_err("metadata-only revision must reject text reads")
+                    .code(),
+                reason,
+                "{name}"
+            );
+            assert_eq!(
+                runtime
+                    .issue_ticket(
+                        &snapshot.resource_id,
+                        &snapshot.subscription_id,
+                        snapshot.revision,
+                        Some(&config),
+                        &format!("oversized-{name}"),
+                    )
+                    .await
+                    .expect_err("metadata-only revision must reject tickets")
+                    .code(),
+                reason,
+                "{name}"
+            );
+        }
+
+        let text_path = temp.path().join("oversized.txt");
+        let text_resource = file_resource_id(
+            std::fs::canonicalize(&text_path)
+                .expect("canonical oversized text")
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let mut events = runtime.subscribe_events();
+        runtime.schedule_refresh(text_resource.clone());
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "unchanged bounded fingerprint emitted"
+        );
+
+        fs::write(
+            &text_path,
+            vec![b'b'; limits.monaco_max_size_bytes as usize + 1],
+        )
+        .expect("same-size oversized rewrite");
+        runtime.schedule_refresh(text_resource.clone());
+        let changed = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("oversized revision timeout")
+            .expect("oversized revision event");
+        assert_eq!(changed.revision, 2);
+        assert_eq!(
+            changed.descriptor.unavailable_reason.as_deref(),
+            Some("monaco_size_limit_exceeded")
+        );
+
+        fs::write(&text_path, b"recovered\n").expect("recover within renderer limit");
+        runtime.schedule_refresh(text_resource);
+        let recovered = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("recovery timeout")
+            .expect("recovery event");
+        assert_eq!(recovered.revision, 3);
+        assert_eq!(recovered.descriptor.unavailable_reason, None);
+        assert!(recovered.descriptor.content_hash.starts_with("sha256:"));
+        assert!(recovered.descriptor.capabilities.preview);
     }
 
     #[tokio::test]

@@ -229,6 +229,17 @@ PDF search is debounced and stops after 128 pages or two seconds, whichever
 comes first. Partial results state exactly how many pages were searched; the
 PDF renderer still mounts no more than three page slots.
 
+A byte- or decoded-pixel-limit violation is a stable metadata revision, not an
+open failure. Its descriptor keeps the canonical name, type, byte size, and
+modified time but disables preview, changes, draft, and stream capabilities.
+Exact readable scans use `sha256:<full-content-digest>` as their revision
+identity. Metadata-only scans use `bounded-sha256:<revision-fingerprint>`,
+derived from retained file identity, stable write metadata, and a bounded
+leading probe. The bounded form is never presented as a full-content hash and
+its opaque token cannot authorize reads or tickets. Watcher refresh compares
+the bounded identity, suppresses unchanged oversized scans, and advances when
+the oversized revision changes or recovers within its renderer limit.
+
 ## Persistence and Migration
 
 Rust is the durable authority for:
