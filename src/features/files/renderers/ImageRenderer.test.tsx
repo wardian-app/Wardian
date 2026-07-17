@@ -138,4 +138,31 @@ describe("ImageRenderer", () => {
     fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 0, clientY: 0 });
     expect(viewport.scrollLeft).toBe(left);
   });
+
+  it("releases decode failures immediately and retries with a fresh lease", async () => {
+    const issuedLeases: string[] = [];
+    const client = {
+      issueTicket: vi.fn().mockImplementation(async (_resource, revision, lease) => {
+        issuedLeases.push(lease);
+        return {
+          schema: 1, ticket_id: lease, url: `wardian-resource://localhost/${lease}`,
+          resource_id: snapshot().resource_id, revision, renderer_lease_id: lease,
+          expires_at_ms: Date.now() + 60_000,
+        };
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<ImageRenderer {...props(client)} />);
+    fireEvent.error(await screen.findByRole("img", { name: "figure.png" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Image preview unavailable");
+    expect(screen.queryByRole("img", { name: "figure.png" })).toBeNull();
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalledWith(
+      snapshot().resource_id,
+      issuedLeases[0],
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByRole("img", { name: "figure.png" });
+    expect(issuedLeases).toHaveLength(2);
+    expect(issuedLeases[1]).not.toBe(issuedLeases[0]);
+  });
 });

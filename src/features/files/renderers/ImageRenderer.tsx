@@ -31,7 +31,7 @@ function releaseLease(client: FileRendererProps["client"], resourceId: string, l
 
 export default function ImageRenderer({ snapshot, client, lifecycle }: FileRendererProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const leaseIdRef = useRef(nextLeaseId(snapshot.resource_id, snapshot.revision));
+  const disposeAttemptRef = useRef<() => void>(() => undefined);
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fit, setFit] = useState(true);
@@ -49,24 +49,33 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     && descriptor.size_bytes <= IMAGE_MAX_SIZE_BYTES;
 
   useEffect(() => {
-    leaseIdRef.current = nextLeaseId(snapshot.resource_id, snapshot.revision);
-  }, [snapshot.resource_id, snapshot.revision]);
-
-  useEffect(() => {
     if (!lifecycle.visible || !allowed) return;
-    const leaseId = leaseIdRef.current;
+    const leaseId = nextLeaseId(snapshot.resource_id, snapshot.revision);
     let cancelled = false;
     let issued = false;
+    let released = false;
+    let disposed = false;
+    const release = () => {
+      if (!issued || released) return;
+      released = true;
+      releaseLease(client, snapshot.resource_id, leaseId);
+    };
+    const disposeAttempt = () => {
+      if (!disposed) disposed = true;
+      release();
+    };
+    disposeAttemptRef.current = disposeAttempt;
     setUrl(null);
     setError(null);
+    setNaturalSize(null);
     void client.issueTicket(snapshot.resource_id, snapshot.revision, leaseId).then((ticket) => {
       issued = true;
       if (cancelled) {
-        releaseLease(client, snapshot.resource_id, leaseId);
+        disposeAttempt();
         return undefined;
       }
       if (ticket.revision !== snapshot.revision) {
-        releaseLease(client, snapshot.resource_id, leaseId);
+        disposeAttempt();
         return undefined;
       }
       setUrl(ticket.url);
@@ -76,7 +85,10 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     });
     return () => {
       cancelled = true;
-      if (issued) releaseLease(client, snapshot.resource_id, leaseId);
+      disposeAttempt();
+      if (disposeAttemptRef.current === disposeAttempt) {
+        disposeAttemptRef.current = () => undefined;
+      }
     };
   }, [allowed, client, lifecycle.visible, retryToken, snapshot.resource_id, snapshot.revision]);
 
@@ -117,6 +129,11 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
     event.preventDefault();
   };
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const failImage = useCallback(() => {
+    disposeAttemptRef.current();
+    setUrl(null);
+    setError("The image could not be decoded.");
+  }, []);
 
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">Image preview suspended.</div>;
@@ -176,6 +193,7 @@ export default function ImageRenderer({ snapshot, client, lifecycle }: FileRende
                 width: event.currentTarget.naturalWidth,
                 height: event.currentTarget.naturalHeight,
               })}
+              onError={failImage}
             />
           </div>
         ) : <div className="files-resource-state" role="status">Loading image…</div>}

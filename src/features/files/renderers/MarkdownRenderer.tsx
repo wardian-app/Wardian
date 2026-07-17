@@ -41,26 +41,46 @@ function isLocalTarget(raw: string) {
     || (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) && !raw.startsWith("#"));
 }
 
+function windowsPathRoot(path: string): string | null {
+  const verbatimUnc = path.match(/^\/\/\?\/UNC\/([^/]+)\/([^/]+)(?:\/|$)/i);
+  if (verbatimUnc) return `//?/UNC/${verbatimUnc[1]}/${verbatimUnc[2]}`;
+  const verbatimDrive = path.match(/^\/\/\?\/([A-Za-z]:)(?:\/|$)/);
+  if (verbatimDrive) return `//?/${verbatimDrive[1]}`;
+  const unc = path.match(/^\/\/([^/?][^/]*)\/([^/]+)(?:\/|$)/);
+  if (unc) return `//${unc[1]}/${unc[2]}`;
+  return path.match(/^([A-Za-z]:)(?:\/|$)/)?.[1] ?? null;
+}
+
+function pathRootSegmentCount(path: string) {
+  if (/^\/\/\?\/UNC\/[^/]+\/[^/]+(?:\/|$)/i.test(path)) return 6;
+  if (/^\/\/\?\/[A-Za-z]:(?:\/|$)/.test(path)) return 4;
+  if (/^\/\/[^/?][^/]*\/[^/]+(?:\/|$)/.test(path)) return 4;
+  if (/^[A-Za-z]:(?:\/|$)/.test(path) || path.startsWith("/")) return 1;
+  return 0;
+}
+
 export function resolveLocalMarkdownTarget(sourcePath: string, rawTarget: string) {
   if (rawTarget.startsWith("file:")) {
     const url = new URL(rawTarget);
     const decoded = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
     return decoded.replace(/\\/g, "/");
   }
+  const normalizedSource = sourcePath.replace(/\\/g, "/");
   const normalizedTarget = rawTarget.replace(/\\/g, "/").split(/[?#]/, 1)[0] ?? "";
   if (/^[A-Za-z]:\//.test(normalizedTarget)) {
     return normalizedTarget;
   }
   if (normalizedTarget.startsWith("/")) {
-    const windowsRoot = sourcePath.replace(/\\/g, "/").match(/^([A-Za-z]:)\//)?.[1];
+    const windowsRoot = windowsPathRoot(normalizedSource);
     return windowsRoot ? `${windowsRoot}${normalizedTarget}` : normalizedTarget;
   }
-  const sourceParts = sourcePath.replace(/\\/g, "/").split("/");
+  const sourceParts = normalizedSource.split("/");
+  const rootSegmentCount = pathRootSegmentCount(normalizedSource);
   sourceParts.pop();
   for (const part of normalizedTarget.split("/")) {
     if (!part || part === ".") continue;
     if (part === "..") {
-      if (sourceParts.length > 1) sourceParts.pop();
+      if (sourceParts.length > rootSegmentCount) sourceParts.pop();
     } else {
       sourceParts.push(part);
     }
@@ -86,6 +106,7 @@ function SafeLink({
   const safe = safeMarkdownUrl(href);
   if (!safe) return <span>{children}</span>;
   const local = href ? isLocalTarget(href) : false;
+  const fragment = href?.startsWith("#") ?? false;
   const activate = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -106,8 +127,9 @@ function SafeLink({
     <a
       href={safe}
       onClick={activate}
+      onAuxClick={(event) => { if (fragment) event.preventDefault(); }}
       rel="noreferrer"
-      target={local ? undefined : "_blank"}
+      target={local || fragment ? undefined : "_blank"}
     >
       {children}
     </a>

@@ -348,24 +348,23 @@
 }
 
 .files-pdf-viewport {
-  display: grid;
-  justify-items: center;
-  gap: 16px;
-  padding: 16px;
+  position: relative;
 }
 
 .files-pdf-page {
+  position: absolute;
+  left: 50%;
   min-width: 320px;
   min-height: 480px;
   max-width: 100%;
   margin: 0;
   box-shadow: var(--shadow-wardian-accent);
+  transform: translateX(-50%);
 }
 
-.files-pdf-page-placeholder {
-  width: min(640px, 70vw);
-  height: min(900px, 75vh);
-  background: var(--color-wardian-bg);
+.files-pdf-virtual-spacer {
+  position: relative;
+  min-width: 100%;
 }
 
 .files-pdf-page figcaption {

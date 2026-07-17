@@ -13,6 +13,9 @@ const PDF_MAX_CSS_PIXELS = 16_000_000;
 const PDF_MAX_CANVAS_DIMENSION = 8_192;
 const PDF_MAX_CANVAS_PIXELS = 32_000_000;
 const PDF_MAX_DPR = 2;
+const PDF_ESTIMATED_PAGE_HEIGHT = 960;
+const PDF_PAGE_GAP = 16;
+const PDF_MAX_VIRTUAL_HEIGHT = 16_000_000;
 let pdfLeaseSequence = 0;
 
 function nextLeaseId(resourceId: string, revision: number) {
@@ -51,6 +54,35 @@ function renderWindow(center: number, pageCount: number) {
   return pages;
 }
 
+function virtualHeight(pageCount: number, pageHeight: number) {
+  const requested = pageCount * (pageHeight + PDF_PAGE_GAP);
+  return Math.max(pageHeight, Math.min(PDF_MAX_VIRTUAL_HEIGHT, requested));
+}
+
+function virtualPageTop(pageNumber: number, pageCount: number, totalHeight: number, pageHeight: number) {
+  if (pageCount <= 1) return 0;
+  return ((pageNumber - 1) / (pageCount - 1)) * Math.max(0, totalHeight - pageHeight);
+}
+
+function virtualWindowPageTop(
+  pageNumber: number,
+  centerPage: number,
+  pageCount: number,
+  totalHeight: number,
+  pageHeight: number,
+) {
+  const anchor = virtualPageTop(centerPage, pageCount, totalHeight, pageHeight);
+  const requested = anchor + (pageNumber - centerPage) * (pageHeight + PDF_PAGE_GAP);
+  return Math.max(0, Math.min(totalHeight - pageHeight, requested));
+}
+
+function pageAtScroll(scrollTop: number, clientHeight: number, pageCount: number, totalHeight: number) {
+  if (pageCount <= 1) return 1;
+  const center = Math.max(0, Math.min(totalHeight, scrollTop + clientHeight / 2));
+  const fraction = totalHeight > 0 ? center / totalHeight : 0;
+  return Math.max(1, Math.min(pageCount, Math.round(fraction * (pageCount - 1)) + 1));
+}
+
 function boundedPageGeometry(page: PDFPageProxy, requestedScale: number) {
   const base = page.getViewport({ scale: 1 });
   if (
@@ -75,18 +107,18 @@ function boundedPageGeometry(page: PDFPageProxy, requestedScale: number) {
   return { viewport, cssWidth, cssHeight, outputScale };
 }
 
-function PdfPage({ document, pageNumber, scale, active, onFatalError }: {
+function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, top }: {
   document: PDFDocumentProxy;
   pageNumber: number;
   scale: number;
-  active: boolean;
   onFatalError: (cause: unknown) => void;
+  onMeasuredHeight: (height: number) => void;
+  top: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!active) return;
     let cancelled = false;
     let renderTask: RenderTask | null = null;
     setError(null);
@@ -100,6 +132,7 @@ function PdfPage({ document, pageNumber, scale, active, onFatalError }: {
       canvas.height = Math.max(1, Math.floor(geometry.cssHeight * geometry.outputScale));
       canvas.style.width = `${geometry.cssWidth}px`;
       canvas.style.height = `${geometry.cssHeight}px`;
+      onMeasuredHeight(geometry.cssHeight + 32);
       renderTask = page.render({
         canvas,
         canvasContext: context,
@@ -119,16 +152,12 @@ function PdfPage({ document, pageNumber, scale, active, onFatalError }: {
       cancelled = true;
       renderTask?.cancel();
     };
-  }, [active, document, onFatalError, pageNumber, scale]);
+  }, [document, onFatalError, onMeasuredHeight, pageNumber, scale]);
 
   return (
-    <figure className="files-pdf-page" data-page-number={pageNumber}>
+    <figure className="files-pdf-page" data-page-number={pageNumber} style={{ top: `${Math.round(top)}px` }}>
       <figcaption>Page {pageNumber}</figcaption>
-      {error
-        ? <div role="alert">{error}</div>
-        : active
-          ? <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />
-          : <div className="files-pdf-page-placeholder" aria-hidden="true" />}
+      {error ? <div role="alert">{error}</div> : <canvas ref={canvasRef} aria-label={`PDF page ${pageNumber}`} />}
     </figure>
   );
 }
@@ -142,7 +171,8 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const [scale, setScale] = useState(1);
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<number | null>(null);
-  const [activePages, setActivePages] = useState<ReadonlySet<number>>(() => new Set([1, 2]));
+  const [centerPage, setCenterPage] = useState(1);
+  const [estimatedPageHeight, setEstimatedPageHeight] = useState(PDF_ESTIMATED_PAGE_HEIGHT);
   const descriptor = snapshot.descriptor;
   const mime = descriptor.mime_type.trim().toLowerCase();
   const allowed = (descriptor.renderer_kind === "pdf" || mime === "application/pdf")
@@ -182,7 +212,8 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     setDocument(null);
     setError(null);
     setMatches(null);
-    setActivePages(new Set([1, 2]));
+    setCenterPage(1);
+    setEstimatedPageHeight(PDF_ESTIMATED_PAGE_HEIGHT);
 
     void (async () => {
       try {
@@ -226,21 +257,6 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   }, [allowed, client, lifecycle.visible, retryToken, snapshot.resource_id, snapshot.revision]);
 
   useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!document || !viewport || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver((entries) => {
-      const firstVisible = entries
-        .filter((entry) => entry.isIntersecting)
-        .map((entry) => Number((entry.target as HTMLElement).dataset.pageNumber))
-        .filter(Number.isFinite)
-        .sort((left, right) => left - right)[0];
-      if (firstVisible) setActivePages(renderWindow(firstVisible, document.numPages));
-    }, { root: viewport, rootMargin: "75% 0px", threshold: 0.01 });
-    viewport.querySelectorAll<HTMLElement>("[data-page-number]").forEach((page) => observer.observe(page));
-    return () => observer.disconnect();
-  }, [document]);
-
-  useEffect(() => {
     const normalizedQuery = query.trim();
     if (!document || !normalizedQuery) {
       setMatches(normalizedQuery ? 0 : null);
@@ -281,10 +297,31 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   }, [document, failPdf, query]);
 
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const totalVirtualHeight = document
+    ? virtualHeight(document.numPages, estimatedPageHeight)
+    : estimatedPageHeight;
   const pages = useMemo(
-    () => document ? Array.from({ length: document.numPages }, (_, index) => index + 1) : [],
-    [document],
+    () => document
+      ? [...renderWindow(centerPage, document.numPages)].sort((left, right) => left - right)
+      : [],
+    [centerPage, document],
   );
+  const onPdfScroll = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !document) return;
+    const centerPage = pageAtScroll(
+      viewport.scrollTop,
+      viewport.clientHeight,
+      document.numPages,
+      totalVirtualHeight,
+    );
+    setCenterPage(centerPage);
+  }, [document, totalVirtualHeight]);
+  const onMeasuredHeight = useCallback((height: number) => {
+    if (!Number.isFinite(height) || height <= 0) return;
+    const measured = Math.max(200, Math.min(PDF_MAX_CSS_DIMENSION + 32, Math.round(height)));
+    setEstimatedPageHeight((current) => Math.max(current, measured));
+  }, []);
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">PDF preview suspended.</div>;
   }
@@ -312,18 +349,29 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
         <output aria-label="PDF zoom">{Math.round(scale * 100)}%</output>
         <button type="button" aria-label="Zoom in" onClick={() => setScale((value) => Math.min(4, value + 0.25))}>+</button>
       </div>
-      <div ref={viewportRef} className="files-pdf-viewport">
+      <div ref={viewportRef} className="files-pdf-viewport" onScroll={onPdfScroll}>
         {document
-          ? pages.map((pageNumber) => (
-            <PdfPage
-              key={pageNumber}
-              document={document}
-              pageNumber={pageNumber}
-              scale={scale}
-              active={activePages.has(pageNumber)}
-              onFatalError={failPdf}
-            />
-          ))
+          ? (
+            <div className="files-pdf-virtual-spacer" style={{ height: `${Math.round(totalVirtualHeight)}px` }}>
+              {pages.map((pageNumber) => (
+                <PdfPage
+                  key={pageNumber}
+                  document={document}
+                  pageNumber={pageNumber}
+                  scale={scale}
+                  onFatalError={failPdf}
+                  onMeasuredHeight={onMeasuredHeight}
+                  top={virtualWindowPageTop(
+                    pageNumber,
+                    centerPage,
+                    document.numPages,
+                    totalVirtualHeight,
+                    estimatedPageHeight,
+                  )}
+                />
+              ))}
+            </div>
+          )
           : <div className="files-resource-state" role="status">Loading PDF…</div>}
       </div>
     </section>

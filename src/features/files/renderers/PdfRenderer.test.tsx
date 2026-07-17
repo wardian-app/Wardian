@@ -204,18 +204,7 @@ describe("PdfRenderer", () => {
     }));
   });
 
-  it("renders only a bounded visible page window and cancels pages leaving it", async () => {
-    let intersectionCallback: IntersectionObserverCallback | undefined;
-    vi.stubGlobal("IntersectionObserver", class TestIntersectionObserver {
-      constructor(callback: IntersectionObserverCallback) { intersectionCallback = callback; }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-      takeRecords() { return []; }
-      root = null;
-      rootMargin = "0px";
-      thresholds = [0];
-    });
+  it("mounts a fixed page window for huge documents and changes it on scroll", async () => {
     const getPage = vi.fn().mockImplementation(async (pageNumber: number) => ({
       getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
       getTextContent: vi.fn().mockResolvedValue({ items: [{ str: `page ${pageNumber}` }] }),
@@ -226,7 +215,7 @@ describe("PdfRenderer", () => {
       }),
     }));
     getDocument.mockReturnValue({
-      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      promise: Promise.resolve({ numPages: 1_000_000, destroy: vi.fn(), getPage }),
       destroy: vi.fn().mockResolvedValue(undefined),
     });
     const client = {
@@ -239,18 +228,25 @@ describe("PdfRenderer", () => {
     } as unknown as FileResourceClient;
     render(<PdfRenderer {...props(client)} />);
 
-    await screen.findByText("Page 100");
+    await screen.findByText("Page 1");
+    expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+    expect(document.querySelectorAll("[data-page-number]").length).toBeLessThanOrEqual(3);
     await waitFor(() => expect(getPage.mock.calls.length).toBeLessThanOrEqual(3));
-    const page50 = screen.getByText("Page 50").closest("figure")!;
-    intersectionCallback?.([{
-      target: page50,
-      isIntersecting: true,
-      intersectionRatio: 1,
-    } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
-    await waitFor(() => expect(getPage).toHaveBeenCalledWith(50));
+    const viewport = document.querySelector<HTMLElement>(".files-pdf-viewport")!;
+    Object.defineProperty(viewport, "clientHeight", { value: 800, configurable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 16_000_000, configurable: true });
+    viewport.scrollTop = 8_000_000;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(getPage).toHaveBeenCalledWith(expect.any(Number)));
+    const visiblePages = screen.getAllByText(/^Page /).map((node) => Number(node.textContent?.replace("Page ", "")));
+    expect(visiblePages.some((page) => page > 400_000 && page < 600_000)).toBe(true);
+    expect(screen.getAllByRole("figure").length).toBeLessThanOrEqual(3);
+    const pageTops = screen.getAllByRole("figure")
+      .map((figure) => Number((figure as HTMLElement).style.top.replace("px", "")))
+      .sort((left, right) => left - right);
+    expect(pageTops[1]! - pageTops[0]!).toBeGreaterThan(500);
     expect(getPage.mock.calls.length).toBeLessThanOrEqual(6);
     expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
-    vi.unstubAllGlobals();
   });
 
   it("caps malicious page geometry, zoom, and device pixel ratio before canvas allocation", async () => {
@@ -323,7 +319,7 @@ describe("PdfRenderer", () => {
       destroy: vi.fn().mockResolvedValue(undefined),
     });
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findByText("Page 20");
+    await screen.findByText("Page 1");
     const search = screen.getByRole("searchbox", { name: "Search PDF" });
     fireEvent.change(search, { target: { value: "first" } });
     await waitFor(() => expect(searchGetPage.mock.calls.length).toBeGreaterThan(2), { timeout: 1000 });

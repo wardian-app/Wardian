@@ -141,6 +141,26 @@ describe("MarkdownRenderer", () => {
   it("keeps POSIX root-relative targets rooted and rejects unsafe schemes", () => {
     expect(resolveLocalMarkdownTarget("/work/readme.md", "/docs/a.md")).toBe("/docs/a.md");
     expect(resolveLocalMarkdownTarget("C:/work/readme.md", "/docs/a.md")).toBe("C:/docs/a.md");
+    expect(resolveLocalMarkdownTarget("//?/C:/work/readme.md", "/docs/a.md")).toBe("//?/C:/docs/a.md");
+    expect(resolveLocalMarkdownTarget("//server/share/work/readme.md", "/docs/a.md")).toBe("//server/share/docs/a.md");
+    expect(resolveLocalMarkdownTarget("//?/UNC/server/share/work/readme.md", "/docs/a.md"))
+      .toBe("//?/UNC/server/share/docs/a.md");
     expect(resolveLocalMarkdownTarget("C:/work/readme.md", "other.md#part")).toBe("C:/work/other.md");
+  });
+
+  it("keeps fragment-only links in-pane for primary, middle, and context semantics", async () => {
+    mockOpenUrl.mockClear();
+    const openWindow = vi.spyOn(window, "open").mockImplementation(() => null);
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1, resource_id: snapshot().resource_id, revision: 1,
+      text: "# Heading\n\n[Jump](#heading)",
+    }) } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client)} />);
+    const link = await screen.findByRole("link", { name: "Jump" });
+    expect(link).not.toHaveAttribute("target", "_blank");
+    fireEvent(link, new MouseEvent("auxclick", { bubbles: true, button: 1 }));
+    fireEvent.contextMenu(link);
+    expect(mockOpenUrl).not.toHaveBeenCalled();
+    expect(openWindow).not.toHaveBeenCalled();
   });
 });
