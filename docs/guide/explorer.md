@@ -69,6 +69,20 @@ file tab. The second pane has already reloaded its stable backend revision.
 
 ![Explorer opening Markdown files as transient and permanent Workbench tabs across two panes](../assets/screenshots/explorer/files-tabs.png)
 
+## Preview Controls
+
+Image and PDF previews keep their controls inside the pane. The PDF toolbar
+wraps at narrow split widths, and its search field shrinks without clipping the
+zoom controls. Zooming keeps the visible page anchored while the virtual page
+window is recalculated, including when the pane is resized. Focus the labeled
+PDF document viewport to use the browser's native arrow and page scrolling.
+
+The **File actions** menu supports pointer use as well as `Arrow Up`,
+`Arrow Down`, `Home`, and `End`. `Escape` closes the menu and returns focus to
+its trigger. Markdown links to authorized local files stay inside Wardian's
+Files routing, including UNC `file://server/share/...` links; the backend still
+performs the final root/capability check before opening the target.
+
 Agent terminals and the bottom user terminal also make recognized file paths and
 URLs clickable, including links that wrap across terminal rows. File paths use
 the same type-sensitive behavior as **Open in External App**; URLs open as URLs.

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
+import { fileResourceUrlConversion } from "../../src/features/files/resourceTicketUrl.mjs";
+
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
@@ -113,20 +115,14 @@ async function expectFileError(driver, command, args, code) {
 }
 
 async function fetchResource(driver, url, { method = "GET", range = null } = {}) {
-  return driver.executeAsyncScript((resourceUrl, resourceMethod, resourceRange, done) => {
-    let fetchUrl = resourceUrl;
-    try {
-      const parsed = new URL(resourceUrl);
-      if (parsed.protocol === "wardian-resource:") {
-        fetchUrl = window.__TAURI_INTERNALS__.convertFileSrc(
-          decodeURIComponent(parsed.pathname).replace(/^\/+/, ""),
-          "wardian-resource",
-        );
-      }
-    } catch (error) {
-      done({ ok: false, error: `resource URL conversion failed: ${String(error)}` });
-      return;
-    }
+  const conversion = fileResourceUrlConversion(url);
+  return driver.executeAsyncScript((resourceUrl, resourceConversion, resourceMethod, resourceRange, done) => {
+    const fetchUrl = resourceConversion
+      ? window.__TAURI_INTERNALS__.convertFileSrc(
+          resourceConversion.path,
+          resourceConversion.protocol,
+        )
+      : resourceUrl;
     const headers = resourceRange ? { Range: resourceRange } : undefined;
     fetch(fetchUrl, { method: resourceMethod, headers }).then(async (response) => {
       const bytes = new Uint8Array(await response.arrayBuffer());
@@ -140,7 +136,7 @@ async function fetchResource(driver, url, { method = "GET", range = null } = {})
           : "",
       });
     }, (error) => done({ ok: false, fetch_url: fetchUrl, error: String(error) }));
-  }, url, method, range);
+  }, url, conversion, method, range);
 }
 
 function tryCreateEscapeLink(t, fixtures) {
@@ -333,6 +329,7 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
 
   const full = await fetchResource(driver, ticket.url);
   assert.equal(full.ok, true, JSON.stringify(full));
+  assert.notEqual(full.fetch_url, ticket.url, "production ticket conversion path was bypassed");
   assert.deepEqual(
     { status: full.status, body_base64: full.body_base64 },
     { status: 200, body_base64: fixtures.pdfBytes.toString("base64") },

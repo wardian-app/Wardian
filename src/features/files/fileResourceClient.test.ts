@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   FileContentDescriptorV1,
   FileResourceSnapshotV1,
@@ -9,6 +9,7 @@ import type {
 import { FileResourceClient } from "./fileResourceClient";
 
 vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: vi.fn((path: string, protocol: string) => `http://${protocol}.localhost/${path}`),
   invoke: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const mockInvoke = vi.mocked(invoke);
+const mockConvertFileSrc = vi.mocked(convertFileSrc);
 
 const descriptor: FileContentDescriptorV1 = {
   schema: 1,
@@ -48,6 +50,7 @@ const snapshot: FileResourceSnapshotV1 = {
 
 beforeEach(() => {
   mockInvoke.mockReset();
+  mockConvertFileSrc.mockClear();
 });
 
 describe("FileResourceClient", () => {
@@ -83,7 +86,12 @@ describe("FileResourceClient", () => {
     await expect(client.readText(snapshot)).resolves.toEqual(text);
     await expect(
       client.issueTicket(snapshot, "preview-pane-1"),
-    ).resolves.toEqual(ticket);
+    ).resolves.toEqual({
+      ...ticket,
+      url: "http://wardian-resource.localhost/ticket-1",
+    });
+    expect(mockConvertFileSrc).toHaveBeenCalledOnce();
+    expect(mockConvertFileSrc).toHaveBeenCalledWith("ticket-1", "wardian-resource");
     await client.closeRendererLease(snapshot, "preview-pane-1");
     await client.close(snapshot.subscription_id);
 

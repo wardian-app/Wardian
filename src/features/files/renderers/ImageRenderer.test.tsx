@@ -44,12 +44,12 @@ function props(client: FileResourceClient, nextSnapshot = snapshot()) {
 }
 
 describe("ImageRenderer", () => {
-  it("uses a revision ticket URL directly and releases its renderer lease", async () => {
+  it("consumes the client's converted revision ticket URL and releases its renderer lease", async () => {
     const client = {
       issueTicket: vi.fn().mockImplementation(async (owner: FileResourceSnapshotV1, lease: string) => ({
         schema: 1,
         ticket_id: `ticket-${owner.revision}`,
-        url: `wardian-resource://localhost/ticket-${owner.revision}`,
+        url: `http://wardian-resource.localhost/ticket-${owner.revision}`,
         resource_id: owner.resource_id,
         revision: owner.revision,
         renderer_lease_id: lease,
@@ -60,7 +60,7 @@ describe("ImageRenderer", () => {
     const view = render(<ImageRenderer {...props(client)} />);
 
     const image = await screen.findByRole("img", { name: "figure.png" });
-    expect(image).toHaveAttribute("src", "wardian-resource://localhost/ticket-1");
+    expect(image).toHaveAttribute("src", "http://wardian-resource.localhost/ticket-1");
     expect(client.issueTicket).toHaveBeenCalledWith(snapshot(), expect.any(String));
     Object.defineProperty(image, "naturalWidth", { value: 800 });
     Object.defineProperty(image, "naturalHeight", { value: 600 });

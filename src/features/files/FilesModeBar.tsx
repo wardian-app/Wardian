@@ -1,4 +1,13 @@
-import { useId, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+} from "react";
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
 
 type FilesModeBarProps = {
@@ -28,12 +37,62 @@ export function FilesModeBar({
 }: FilesModeBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const unavailableReasonId = useId();
+  const menuId = `${unavailableReasonId}-actions`;
+  const overflowRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const path = descriptor?.canonical_path ?? resourcePath(resource_key);
   const parts = useMemo(() => breadcrumbParts(path), [path]);
   const changesReasonId = `${unavailableReasonId}-changes`;
   const draftReasonId = `${unavailableReasonId}-draft`;
   const changesReason = "Changes is not available in this foundation.";
   const draftReason = "Draft is not available in this foundation.";
+  const closeMenu = useCallback((restoreTrigger = false) => {
+    setMenuOpen(false);
+    if (restoreTrigger) triggerRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!menuOpen) return;
+    itemRefs.current[0]?.focus();
+    const dismissOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !overflowRef.current?.contains(target)) closeMenu();
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    return () => document.removeEventListener("pointerdown", dismissOutside, true);
+  }, [closeMenu, menuOpen]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const items = itemRefs.current.filter((item): item is HTMLButtonElement => item !== null);
+    if (!items.length) return;
+    const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+    else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu(true);
+      return;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  };
+  const onOverflowBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    closeMenu();
+  };
+  const runAction = (action: (path: string) => Promise<void> | void) => {
+    closeMenu(true);
+    try {
+      void Promise.resolve(action(path)).catch(() => undefined);
+    } catch {
+      // The owning Files surface reports action failures when applicable.
+    }
+  };
 
   return (
     <header className="files-mode-bar" data-restored-mode={state.mode}>
@@ -70,27 +129,52 @@ export function FilesModeBar({
           {draftReason}
         </span>
       </div>
-      <div className="files-overflow">
+      <div ref={overflowRef} className="files-overflow" onBlur={onOverflowBlur}>
         <button
+          ref={triggerRef}
           type="button"
           className="files-overflow-trigger"
           aria-label="File actions"
           aria-haspopup="menu"
           aria-expanded={menuOpen}
+          aria-controls={menuOpen ? menuId : undefined}
           onClick={() => setMenuOpen((open) => !open)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            event.preventDefault();
+            setMenuOpen(true);
+          }}
         >•••</button>
         {menuOpen ? (
-          <div className="files-overflow-menu" role="menu" aria-label="File actions">
+          <div
+            id={menuId}
+            className="files-overflow-menu"
+            role="menu"
+            aria-label="File actions"
+            onKeyDown={onMenuKeyDown}
+          >
             {descriptor ? (
               <div className="files-overflow-metadata">
                 <span>{descriptor.mime_type}</span>
                 <span>{descriptor.size_bytes.toLocaleString()} bytes</span>
               </div>
             ) : null}
-            <button type="button" role="menuitem" onClick={() => void on_open_with(path)}>
+            <button
+              ref={(node) => { itemRefs.current[0] = node; }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => runAction(on_open_with)}
+            >
               Open With
             </button>
-            <button type="button" role="menuitem" onClick={() => void on_reveal(path)}>
+            <button
+              ref={(node) => { itemRefs.current[1] = node; }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => runAction(on_reveal)}
+            >
               Reveal
             </button>
           </div>

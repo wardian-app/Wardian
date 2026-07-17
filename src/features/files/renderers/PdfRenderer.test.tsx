@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
 import type { FileResourceClient } from "../fileResourceClient";
@@ -69,12 +71,16 @@ describe("PdfRenderer", () => {
     getDocument.mockReturnValue({ promise: Promise.resolve(document), destroy: vi.fn().mockResolvedValue(undefined) });
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("uses the bundled worker and a range-capable ticket with pages, search, and zoom", async () => {
     const client = {
       issueTicket: vi.fn().mockResolvedValue({
         schema: 1,
         ticket_id: "ticket-pdf",
-        url: "wardian-resource://localhost/ticket-pdf",
+        url: "http://wardian-resource.localhost/ticket-pdf",
         resource_id: snapshot().resource_id,
         revision: 3,
         renderer_lease_id: "pdf-lease",
@@ -91,7 +97,7 @@ describe("PdfRenderer", () => {
       disableRange: false,
       disableStream: false,
       rangeChunkSize: 65_536,
-      url: "wardian-resource://localhost/ticket-pdf",
+      url: "http://wardian-resource.localhost/ticket-pdf",
     }));
     fireEvent.change(screen.getByRole("searchbox", { name: "Search PDF" }), {
       target: { value: "Wardian" },
@@ -373,7 +379,156 @@ describe("PdfRenderer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
     await waitFor(() => expect(pageRender).toHaveBeenCalledTimes(2));
     expect(canvas.width * canvas.height).toBeLessThanOrEqual(32_000_000);
-    vi.unstubAllGlobals();
+  });
+
+  it("keeps a later-page anchor mounted while zooming to 400% and back down", async () => {
+    const getPage = vi.fn().mockImplementation(async (pageNumber: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [{ str: `page ${pageNumber}` }] }),
+      render: vi.fn().mockImplementation(() => {
+        const task = { promise: Promise.resolve(), cancel: vi.fn() };
+        renderTasks.push(task);
+        return task;
+      }),
+    }));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "http://wardian-resource.localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+
+    await screen.findByText("Page 1");
+    const viewport = screen.getByRole("region", { name: "PDF document viewport" });
+    expect(viewport).toHaveAttribute("tabindex", "0");
+    Object.defineProperty(viewport, "clientHeight", { value: 500, configurable: true });
+    viewport.scrollTop = 39_000;
+    fireEvent.scroll(viewport);
+    await waitFor(() => {
+      const pageNumbers = screen.getAllByRole("figure")
+        .map((figure) => Number(figure.getAttribute("data-page-number")));
+      expect(pageNumbers.some((page) => page >= 59 && page <= 62)).toBe(true);
+    });
+    const anchoredPage = Number(screen.getAllByRole("figure")[1]?.getAttribute("data-page-number"));
+
+    for (let step = 0; step < 12; step += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    }
+    await waitFor(() => expect(screen.getByLabelText("PDF zoom")).toHaveTextContent("400%"));
+    const zoomedHeight = Number((document.querySelector(".files-pdf-virtual-spacer") as HTMLElement)
+      .style.height.replace("px", ""));
+    await waitFor(() => {
+      const pages = screen.getAllByRole("figure")
+        .map((figure) => Number(figure.getAttribute("data-page-number")));
+      expect(pages.some((page) => Math.abs(page - anchoredPage) <= 1)).toBe(true);
+      expect(screen.getAllByLabelText(/^PDF page /)).not.toHaveLength(0);
+    });
+
+    for (let step = 0; step < 14; step += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
+    }
+    await waitFor(() => expect(screen.getByLabelText("PDF zoom")).toHaveTextContent("50%"));
+    await waitFor(() => {
+      const pages = screen.getAllByRole("figure")
+        .map((figure) => Number(figure.getAttribute("data-page-number")));
+      expect(pages.some((page) => Math.abs(page - anchoredPage) <= 1)).toBe(true);
+      expect(screen.getAllByRole("figure").every((figure) => (
+        Number.isFinite(Number((figure as HTMLElement).style.top.replace("px", "")))
+      ))).toBe(true);
+    });
+    const zoomedOutHeight = Number((document.querySelector(".files-pdf-virtual-spacer") as HTMLElement)
+      .style.height.replace("px", ""));
+    expect(zoomedOutHeight).toBeLessThan(zoomedHeight);
+    expect(renderTasks.some((task) => task.cancel.mock.calls.length > 0)).toBe(true);
+  });
+
+  it("uses only the anchor page measurement when mixed page sizes resolve out of order", async () => {
+    const pageResolvers = new Map<number, (page: object) => void>();
+    const getPage = vi.fn().mockImplementation((pageNumber: number) => new Promise((resolvePage) => {
+      pageResolvers.set(pageNumber, resolvePage);
+    }));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 100, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "http://wardian-resource.localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    render(<PdfRenderer {...props(client)} />);
+
+    await waitFor(() => expect(pageResolvers.has(1) && pageResolvers.has(2)).toBe(true));
+    const page = (height: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: height * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [] }),
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+    });
+    pageResolvers.get(2)?.(page(900));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 0));
+    expect((document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height)
+      .toBe("97600px");
+
+    pageResolvers.get(1)?.(page(600));
+    await waitFor(() => expect(
+      (document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height,
+    ).toBe("64800px"));
+  });
+
+  it("tracks pane resize and keeps toolbar controls contained at narrow widths", async () => {
+    let resize: (() => void) | undefined;
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() { /* test drives the observer explicitly */ }
+      disconnect() { disconnect(); }
+    });
+    const getPage = vi.fn().mockImplementation(async (pageNumber: number) => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 400 * scale, height: 600 * scale }),
+      getTextContent: vi.fn().mockResolvedValue({ items: [{ str: `page ${pageNumber}` }] }),
+      render: vi.fn().mockReturnValue({ promise: Promise.resolve(), cancel: vi.fn() }),
+    }));
+    getDocument.mockReturnValue({
+      promise: Promise.resolve({ numPages: 20, destroy: vi.fn(), getPage }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = {
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1, ticket_id: "ticket", url: "http://wardian-resource.localhost/ticket",
+        resource_id: snapshot().resource_id, revision: 3, renderer_lease_id: "lease",
+        expires_at_ms: Date.now() + 60_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    const view = render(<PdfRenderer {...props(client)} />);
+    await screen.findByText("Page 1");
+    const viewport = screen.getByRole("region", { name: "PDF document viewport" });
+    Object.defineProperty(viewport, "clientHeight", { value: 2_000, configurable: true });
+    resize?.();
+    await waitFor(() => expect(screen.getAllByRole("figure").length).toBeGreaterThan(2));
+    expect(viewport.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "PageDown", bubbles: true, cancelable: true,
+    }))).toBe(true);
+    expect(screen.getByRole("toolbar", { name: "PDF controls" })).toHaveClass("files-pdf-toolbar");
+    expect(screen.getByRole("searchbox", { name: "Search PDF" }).parentElement)
+      .toHaveClass("files-pdf-search");
+
+    const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
+    expect(css).toMatch(/\.files-pdf-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s);
+    expect(css).toMatch(/\.files-pdf-search\s*\{[^}]*min-width:\s*0[^}]*flex:/s);
+    expect(css).toMatch(/@container \(max-width: 440px\)[\s\S]*\.files-pdf-search\s*\{[^}]*flex-basis:\s*100%/);
+    view.unmount();
+    expect(disconnect).toHaveBeenCalledOnce();
   });
 
   it("debounces search, stops stale generations between pages, and releases failed attempts", async () => {

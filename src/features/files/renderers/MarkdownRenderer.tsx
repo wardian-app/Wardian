@@ -63,7 +63,10 @@ export function resolveLocalMarkdownTarget(sourcePath: string, rawTarget: string
   if (rawTarget.startsWith("file:")) {
     const url = new URL(rawTarget);
     const decoded = decodeURIComponent(url.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
-    return decoded.replace(/\\/g, "/");
+    const normalized = decoded.replace(/\\/g, "/");
+    return url.hostname && url.hostname.toLowerCase() !== "localhost"
+      ? `//${url.hostname}${normalized.startsWith("/") ? normalized : `/${normalized}`}`
+      : normalized;
   }
   const normalizedSource = sourcePath.replace(/\\/g, "/");
   const normalizedTarget = rawTarget.replace(/\\/g, "/").split(/[?#]/, 1)[0] ?? "";

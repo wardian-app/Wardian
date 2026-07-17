@@ -229,6 +229,13 @@ The URL accepts `GET` and `HEAD`, advertises `Accept-Ranges: bytes`, returns
 `Content-Range: bytes */<size>` for an unsatisfiable range. Responses are
 `no-store` and `nosniff`; a `HEAD` response never carries a body.
 
+The returned URL is a backend protocol identifier, not a WebView-ready asset
+URL. Frontend consumers pass it through the shared Files resource URL adapter,
+which percent-decodes the ticket path and calls Tauri `convertFileSrc` once
+with the `wardian-resource` protocol. Image and PDF renderers consume only that
+converted client result; already usable HTTP(S), blob, data, and test URLs are
+left unchanged rather than converted twice.
+
 Ticket issuance copies and verifies the requested revision into an immutable,
 backend-owned snapshot before returning the URL. Later source edits, atomic
 file replacement, or deletion do not change bytes served by that ticket. A

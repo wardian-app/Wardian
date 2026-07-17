@@ -145,7 +145,33 @@ describe("MarkdownRenderer", () => {
     expect(resolveLocalMarkdownTarget("//server/share/work/readme.md", "/docs/a.md")).toBe("//server/share/docs/a.md");
     expect(resolveLocalMarkdownTarget("//?/UNC/server/share/work/readme.md", "/docs/a.md"))
       .toBe("//?/UNC/server/share/docs/a.md");
+    expect(resolveLocalMarkdownTarget(
+      "C:/work/readme.md",
+      "file://server/share/folder%20name/report.md",
+    )).toBe("//server/share/folder name/report.md");
+    expect(resolveLocalMarkdownTarget(
+      "C:/work/readme.md",
+      "file:///C:/work/folder%20name/report.md",
+    )).toBe("C:/work/folder name/report.md");
+    expect(resolveLocalMarkdownTarget(
+      "C:/work/readme.md",
+      "file://LOCALHOST/C:/work/report.md",
+    )).toBe("C:/work/report.md");
     expect(resolveLocalMarkdownTarget("C:/work/readme.md", "other.md#part")).toBe("C:/work/other.md");
+  });
+
+  it("routes file URL UNC authorities through the authorized local-file callback", async () => {
+    mockOpenUrl.mockClear();
+    const onOpenFile = vi.fn();
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1, resource_id: snapshot().resource_id, revision: 1,
+      text: "[Shared report](file://server/share/reports/agent%20output.md)",
+    }) } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client, onOpenFile)} />);
+
+    fireEvent.click(await screen.findByRole("link", { name: "Shared report" }));
+    expect(onOpenFile).toHaveBeenCalledWith("//server/share/reports/agent output.md");
+    expect(mockOpenUrl).not.toHaveBeenCalled();
   });
 
   it("keeps fragment-only links in-pane for primary, middle, and context semantics", async () => {

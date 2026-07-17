@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 
 import type { FileRendererProps } from "../rendererRegistry";
@@ -6,7 +6,6 @@ import { configurePdfWorker } from "./pdfWorker";
 
 const PDF_MAX_SIZE_BYTES = 256 * 1024 * 1024;
 const PDF_RANGE_CHUNK_BYTES = 65_536;
-const PDF_RENDER_WINDOW = 1;
 const PDF_SEARCH_DEBOUNCE_MS = 250;
 const PDF_SEARCH_PAGE_BUDGET = 128;
 const PDF_SEARCH_TIME_BUDGET_MS = 2_000;
@@ -18,6 +17,7 @@ const PDF_MAX_DPR = 2;
 const PDF_ESTIMATED_PAGE_HEIGHT = 960;
 const PDF_PAGE_GAP = 16;
 const PDF_MAX_VIRTUAL_HEIGHT = 16_000_000;
+const PDF_MAX_RENDER_WINDOW = 12;
 let pdfLeaseSequence = 0;
 
 type PdfSearchResult = {
@@ -57,11 +57,20 @@ function ignoreCleanup(cleanup: (() => unknown) | undefined) {
   }
 }
 
-function renderWindow(center: number, pageCount: number) {
+function renderWindow(
+  center: number,
+  pageCount: number,
+  viewportHeight: number,
+  pageHeight: number,
+) {
+  const radius = Math.max(1, Math.min(
+    PDF_MAX_RENDER_WINDOW,
+    Math.ceil(Math.max(1, viewportHeight) / (2 * Math.max(1, pageHeight + PDF_PAGE_GAP))),
+  ));
   const pages = new Set<number>();
   for (
-    let page = Math.max(1, center - PDF_RENDER_WINDOW);
-    page <= Math.min(pageCount, center + PDF_RENDER_WINDOW);
+    let page = Math.max(1, center - radius);
+    page <= Math.min(pageCount, center + radius);
     page += 1
   ) pages.add(page);
   return pages;
@@ -89,12 +98,27 @@ function virtualWindowPageTop(
   return Math.max(0, Math.min(totalHeight - pageHeight, requested));
 }
 
-function pageAtScroll(scrollTop: number, clientHeight: number, pageCount: number, totalHeight: number) {
+function pageAtScroll(
+  scrollTop: number,
+  clientHeight: number,
+  pageCount: number,
+  totalHeight: number,
+) {
   if (pageCount <= 1) return 1;
   const maximumScroll = Math.max(1, totalHeight - clientHeight);
   const clampedScroll = Math.max(0, Math.min(maximumScroll, scrollTop));
   const fraction = clampedScroll / maximumScroll;
   return Math.max(1, Math.min(pageCount, Math.round(fraction * (pageCount - 1)) + 1));
+}
+
+function scrollTopForPageAnchor(
+  pageNumber: number,
+  clientHeight: number,
+  pageCount: number,
+  totalHeight: number,
+) {
+  if (pageCount <= 1) return 0;
+  return ((pageNumber - 1) / (pageCount - 1)) * Math.max(0, totalHeight - clientHeight);
 }
 
 function boundedPageGeometry(page: PDFPageProxy, requestedScale: number) {
@@ -126,7 +150,7 @@ function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, 
   pageNumber: number;
   scale: number;
   onFatalError: (cause: unknown) => void;
-  onMeasuredHeight: (height: number) => void;
+  onMeasuredHeight: (pageNumber: number, scale: number, height: number) => void;
   top: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -146,7 +170,7 @@ function PdfPage({ document, pageNumber, scale, onFatalError, onMeasuredHeight, 
       canvas.height = Math.max(1, Math.floor(geometry.cssHeight * geometry.outputScale));
       canvas.style.width = `${geometry.cssWidth}px`;
       canvas.style.height = `${geometry.cssHeight}px`;
-      onMeasuredHeight(geometry.cssHeight + 32);
+      onMeasuredHeight(pageNumber, scale, geometry.cssHeight + 32);
       renderTask = page.render({
         canvas,
         canvasContext: context,
@@ -188,6 +212,14 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const [searching, setSearching] = useState(false);
   const [centerPage, setCenterPage] = useState(1);
   const [estimatedPageHeight, setEstimatedPageHeight] = useState(PDF_ESTIMATED_PAGE_HEIGHT);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const estimatedPageHeightRef = useRef(PDF_ESTIMATED_PAGE_HEIGHT);
+  const pendingAnchorPageRef = useRef<number | null>(null);
+  const centerPageRef = useRef(1);
+  const scaleRef = useRef(1);
+  const documentRef = useRef<PDFDocumentProxy | null>(null);
+  const totalVirtualHeightRef = useRef(PDF_ESTIMATED_PAGE_HEIGHT);
+  const measuredPageHeightsRef = useRef(new Map<string, number>());
   const descriptor = snapshot.descriptor;
   const mime = descriptor.mime_type.trim().toLowerCase();
   const allowed = (descriptor.renderer_kind === "pdf" || mime === "application/pdf")
@@ -230,6 +262,9 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
     setSearching(false);
     setCenterPage(1);
     setEstimatedPageHeight(PDF_ESTIMATED_PAGE_HEIGHT);
+    estimatedPageHeightRef.current = PDF_ESTIMATED_PAGE_HEIGHT;
+    pendingAnchorPageRef.current = null;
+    measuredPageHeightsRef.current.clear();
 
     void (async () => {
       try {
@@ -348,28 +383,117 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   const totalVirtualHeight = document
     ? virtualHeight(document.numPages, estimatedPageHeight)
     : estimatedPageHeight;
+  centerPageRef.current = centerPage;
+  scaleRef.current = scale;
+  documentRef.current = document;
+  totalVirtualHeightRef.current = totalVirtualHeight;
   const pages = useMemo(
     () => document
-      ? [...renderWindow(centerPage, document.numPages)].sort((left, right) => left - right)
+      ? [...renderWindow(
+          centerPage,
+          document.numPages,
+          viewportHeight,
+          estimatedPageHeight,
+        )].sort((left, right) => left - right)
       : [],
-    [centerPage, document],
+    [centerPage, document, estimatedPageHeight, viewportHeight],
   );
   const onPdfScroll = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport || !document) return;
-    const centerPage = pageAtScroll(
+    setViewportHeight(viewport.clientHeight);
+    const nextCenterPage = pageAtScroll(
       viewport.scrollTop,
       viewport.clientHeight,
       document.numPages,
       totalVirtualHeight,
     );
-    setCenterPage(centerPage);
+    setCenterPage(nextCenterPage);
   }, [document, totalVirtualHeight]);
-  const onMeasuredHeight = useCallback((height: number) => {
+  const applyMeasuredHeight = useCallback((height: number) => {
     if (!Number.isFinite(height) || height <= 0) return;
     const measured = Math.max(200, Math.min(PDF_MAX_CSS_DIMENSION + 32, Math.round(height)));
-    setEstimatedPageHeight((current) => Math.max(current, measured));
+    if (Math.abs(measured - estimatedPageHeightRef.current) < 1) return;
+    const viewport = viewportRef.current;
+    const currentDocument = documentRef.current;
+    if (viewport && currentDocument) {
+      pendingAnchorPageRef.current = pageAtScroll(
+        viewport.scrollTop,
+        viewport.clientHeight,
+        currentDocument.numPages,
+        totalVirtualHeightRef.current,
+      );
+    }
+    estimatedPageHeightRef.current = measured;
+    setEstimatedPageHeight(measured);
   }, []);
+  const onMeasuredHeight = useCallback((pageNumber: number, measuredScale: number, height: number) => {
+    measuredPageHeightsRef.current.set(`${measuredScale}:${pageNumber}`, height);
+    if (pageNumber === centerPageRef.current && measuredScale === scaleRef.current) {
+      applyMeasuredHeight(height);
+    }
+  }, [applyMeasuredHeight]);
+  const changeScale = useCallback((delta: number) => {
+    const nextScale = Math.max(0.5, Math.min(4, scale + delta));
+    if (nextScale === scale) return;
+    const viewport = viewportRef.current;
+    if (viewport && document) {
+      pendingAnchorPageRef.current = pageAtScroll(
+        viewport.scrollTop,
+        viewport.clientHeight,
+        document.numPages,
+        totalVirtualHeight,
+      );
+    }
+    const proportionalHeight = Math.max(
+      200,
+      Math.min(
+        PDF_MAX_CSS_DIMENSION + 32,
+        Math.round(estimatedPageHeightRef.current * (nextScale / scale)),
+      ),
+    );
+    estimatedPageHeightRef.current = proportionalHeight;
+    setEstimatedPageHeight(proportionalHeight);
+    setScale(nextScale);
+  }, [document, scale, totalVirtualHeight]);
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !document) return;
+    setViewportHeight(viewport.clientHeight);
+    const anchorPage = pendingAnchorPageRef.current;
+    if (anchorPage === null) return;
+    viewport.scrollTop = scrollTopForPageAnchor(
+      anchorPage,
+      viewport.clientHeight,
+      document.numPages,
+      totalVirtualHeight,
+    );
+    setCenterPage(anchorPage);
+    pendingAnchorPageRef.current = null;
+  }, [document, estimatedPageHeight, scale, totalVirtualHeight]);
+  useLayoutEffect(() => {
+    const measured = measuredPageHeightsRef.current.get(`${scale}:${centerPage}`);
+    if (measured !== undefined) applyMeasuredHeight(measured);
+  }, [applyMeasuredHeight, centerPage, scale]);
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !document) return;
+    const updateViewport = () => {
+      const height = viewport.clientHeight;
+      setViewportHeight(height);
+      setCenterPage(pageAtScroll(
+        viewport.scrollTop,
+        height,
+        document.numPages,
+        totalVirtualHeightRef.current,
+      ));
+    };
+    updateViewport();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [document]);
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">PDF preview suspended.</div>;
   }
@@ -387,31 +511,40 @@ export default function PdfRenderer({ snapshot, client, lifecycle }: FileRendere
   }
   return (
     <section className="files-binary-renderer" aria-label="PDF preview">
-      <div className="files-renderer-toolbar" role="toolbar" aria-label="PDF controls">
-        <label>
+      <div className="files-renderer-toolbar files-pdf-toolbar" role="toolbar" aria-label="PDF controls">
+        <label className="files-pdf-search">
           <span className="files-visually-hidden">Search PDF</span>
           <input aria-label="Search PDF" type="search" value={query} onChange={(event) => setQuery(event.target.value)} />
         </label>
-        {searching ? <output aria-live="polite">Searching…</output> : null}
+        {searching ? <output className="files-pdf-search-status" aria-live="polite">Searching…</output> : null}
         {!searching && searchResult ? (
-          <output aria-live="polite">
+          <output className="files-pdf-search-status" aria-live="polite">
             {searchResult.matches} {searchResult.matches === 1 ? "match" : "matches"}
             {searchResult.partial
               ? ` in ${searchResult.searched_pages} of ${searchResult.total_pages} pages (search limited)`
               : ""}
           </output>
         ) : null}
-        <button type="button" aria-label="Zoom out" onClick={() => setScale((value) => Math.max(0.5, value - 0.25))}>−</button>
-        <output aria-label="PDF zoom">{Math.round(scale * 100)}%</output>
-        <button type="button" aria-label="Zoom in" onClick={() => setScale((value) => Math.min(4, value + 0.25))}>+</button>
+        <div className="files-pdf-zoom-controls">
+          <button type="button" aria-label="Zoom out" onClick={() => changeScale(-0.25)}>−</button>
+          <output aria-label="PDF zoom">{Math.round(scale * 100)}%</output>
+          <button type="button" aria-label="Zoom in" onClick={() => changeScale(0.25)}>+</button>
+        </div>
       </div>
-      <div ref={viewportRef} className="files-pdf-viewport" onScroll={onPdfScroll}>
+      <div
+        ref={viewportRef}
+        className="files-pdf-viewport"
+        role="region"
+        aria-label="PDF document viewport"
+        tabIndex={0}
+        onScroll={onPdfScroll}
+      >
         {document
           ? (
             <div className="files-pdf-virtual-spacer" style={{ height: `${Math.round(totalVirtualHeight)}px` }}>
               {pages.map((pageNumber) => (
                 <PdfPage
-                  key={pageNumber}
+                  key={`${pageNumber}:${scale}`}
                   document={document}
                   pageNumber={pageNumber}
                   scale={scale}

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   FileResourceEventV1,
@@ -7,6 +7,7 @@ import type {
   FileResourceTicketV1,
   OpenFileResourceRequestV1,
 } from "../../types";
+import { fileResourceUrlForWebview } from "./resourceTicketUrl.mjs";
 
 export const FILE_RESOURCE_REVISION_EVENT = "file-resource://revision";
 
@@ -43,7 +44,10 @@ export class FileResourceClient {
         renderer_lease_id: purpose,
       },
     });
-    return ticket;
+    return {
+      ...ticket,
+      url: fileResourceUrlForWebview(ticket.url, convertFileSrc),
+    };
   }
 
   async closeRendererLease(
