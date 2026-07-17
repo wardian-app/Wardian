@@ -56,21 +56,6 @@ impl AntigravityProvider {
         })
     }
 
-    pub fn latest_conversation_id(home: &Path) -> Option<String> {
-        let brain = home.join("brain");
-        let entries = std::fs::read_dir(brain).ok()?;
-        entries
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| {
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                Some((modified, name))
-            })
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, name)| name)
-    }
-
     pub fn summarize_conversation(
         home: &Path,
         conversation_id: &str,

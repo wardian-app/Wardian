@@ -16,20 +16,12 @@ pub(crate) mod telemetry;
 pub use classes::{
     get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
 };
-pub(crate) use codex::codex_session_exists_in_agent_home;
-pub use codex::latest_codex_session_index_entry;
 pub use headless::{
-    obtain_session_id, run_headless, run_headless_with_config, run_headless_with_options,
-    HeadlessRunOptions,
+    obtain_session_id, run_headless_with_options, HeadlessRunOptions,
 };
 pub(crate) use opencode::opencode_last_assistant_text;
-pub use opencode::{
-    opencode_extract_created_session_id, opencode_extract_created_session_id_for_agent,
-};
-pub(crate) use opencode::{opencode_log_dirs, opencode_log_path_in};
 pub(crate) use session_identity::{
-    apply_provider_identity, clear_credential_resume_session, validate_config_for_launch,
-    validate_session_values_for_launch, ProviderIdentityOutcome,
+    apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};

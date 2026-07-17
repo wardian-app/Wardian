@@ -253,42 +253,6 @@ fn opencode_log_timestamp_to_rfc3339(timestamp: &str) -> Option<String> {
     )
 }
 
-/// Find the newest OpenCode log file whose filesystem mtime is at or after
-/// `spawn_time`.  OpenCode creates one log file per process invocation using
-/// a timestamp-based name, so the file(s) created after the PTY was launched
-/// belong to this session.
-///
-/// OpenCode sometimes spawns a background server subprocess that writes to a
-/// SEPARATE log file roughly 1 s after the parent process starts.  The watcher
-/// calls this function on every tick while `ses_id` is still unknown so it can
-/// switch to that newer server log once it appears.
-///
-/// Returns the file with the highest mtime among all qualifying candidates so
-/// that the server log (newer) wins over the parent log (older).
-pub(crate) fn opencode_log_path_after(
-    base: &std::path::Path,
-    spawn_time: std::time::SystemTime,
-) -> Option<std::path::PathBuf> {
-    let mut candidates: Vec<_> = std::fs::read_dir(base)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
-        .filter_map(|p| {
-            let mtime = p.metadata().ok()?.modified().ok()?;
-            if mtime >= spawn_time {
-                Some((p, mtime))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Newest mtime last → next_back() returns the most recently created file.
-    candidates.sort_by_key(|(_, mtime)| *mtime);
-    candidates.into_iter().next_back().map(|(p, _)| p)
-}
-
 /// Find the OpenCode log file for a session by content-searching for the
 /// Wardian session UUID.  The UUID appears in log entries because
 /// `OPENCODE_CONFIG` points to a config file whose path embeds the UUID.
@@ -337,75 +301,6 @@ pub(crate) fn opencode_log_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     dirs
-}
-
-/// A line that records the creation of an opencode session, in either log
-/// format: pre-1.17 (`service=session ... created id=ses_x`) or 1.17+
-/// (`... run=xxxx message=created id=ses_x slug=...`).
-fn is_opencode_session_created_line(line: &str) -> bool {
-    (line.contains("service=session") && line.contains("created"))
-        || line.contains("message=created")
-}
-
-fn opencode_created_session_id_from_line(line: &str) -> Option<String> {
-    if !is_opencode_session_created_line(line) {
-        return None;
-    }
-    line.split_whitespace()
-        .find(|w| w.starts_with("id=ses_"))
-        .and_then(|w| w.strip_prefix("id="))
-        .map(|id| id.to_string())
-}
-
-/// Extract the real opencode session ID (ses_xxx) from a log file.
-/// Returns the last session-created entry found (most recent in the log).
-pub fn opencode_extract_created_session_id(log_path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(log_path).ok()?;
-    content
-        .lines()
-        .filter_map(opencode_created_session_id_from_line)
-        .next_back()
-}
-
-/// Extract the opencode session ID created by THIS agent's opencode instance.
-///
-/// opencode 1.17+ writes a single rolling `opencode.log` shared by every
-/// concurrently running instance, so the last `created id=ses_x` line in the
-/// file may belong to another agent. Each instance tags its lines with a
-/// `run=<id>` token, and the agent's Wardian session UUID appears in that
-/// instance's `message=loading path="...agents/<uuid>/..."` lines, so the
-/// run ids seen on marker lines scope the search. Falls back to the unscoped
-/// last-created entry for the pre-1.17 one-file-per-instance format.
-pub fn opencode_extract_created_session_id_for_agent(
-    log_path: &std::path::Path,
-    agent_marker: &str,
-) -> Option<String> {
-    let content = std::fs::read_to_string(log_path).ok()?;
-    let agent_runs: std::collections::HashSet<&str> = content
-        .lines()
-        .filter(|line| line.contains(agent_marker))
-        .filter_map(|line| {
-            line.split_whitespace()
-                .find(|w| w.starts_with("run="))
-                .and_then(|w| w.strip_prefix("run="))
-        })
-        .collect();
-    let scoped = content
-        .lines()
-        .filter(|line| {
-            line.split_whitespace()
-                .find(|w| w.starts_with("run="))
-                .and_then(|w| w.strip_prefix("run="))
-                .is_some_and(|run| agent_runs.contains(run))
-        })
-        .filter_map(opencode_created_session_id_from_line)
-        .next_back();
-    scoped.or_else(|| {
-        content
-            .lines()
-            .filter_map(opencode_created_session_id_from_line)
-            .next_back()
-    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -692,52 +587,6 @@ mod tests {
             .expect("read assistant text");
 
         assert_eq!(text, None);
-    }
-
-    #[test]
-    fn opencode_log_path_after_returns_newest_file_created_after_spawn() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log_dir = temp.path().join("log");
-        std::fs::create_dir_all(&log_dir).expect("create log dir");
-
-        // Pre-existing log (before spawn — must be ignored).
-        let old_file = log_dir.join("2026-04-12T100000.log");
-        std::fs::write(&old_file, "old session log").expect("write old");
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let spawn_time = std::time::SystemTime::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        // Parent log — created first after spawn.
-        let parent_log = log_dir.join("2026-04-12T100001.log");
-        std::fs::write(&parent_log, "parent process startup").expect("write parent");
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        // Server log — created ~1 s later; should win because it has higher mtime.
-        let server_log = log_dir.join("2026-04-12T100002.log");
-        std::fs::write(&server_log, "server session events").expect("write server");
-
-        let found =
-            opencode_log_path_after(&log_dir, spawn_time).expect("should find a log after spawn");
-
-        assert_eq!(
-            found, server_log,
-            "should return the newest (server) log, not the parent log"
-        );
-    }
-
-    #[test]
-    fn opencode_log_path_after_returns_none_when_no_files_after_spawn() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log_dir = temp.path().join("log");
-        std::fs::create_dir_all(&log_dir).expect("create log dir");
-
-        let file = log_dir.join("2026-04-12T100001.log");
-        std::fs::write(&file, "session started").expect("write");
-
-        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        assert!(opencode_log_path_after(&log_dir, future).is_none());
     }
 
     #[test]
@@ -1172,86 +1021,6 @@ mod tests {
                 "ses_test".to_string(),
                 "C:/Users/test/.wardian/agents/ses_test/habitat/workspace".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn extract_created_session_id_supports_pre_117_format() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log = temp.path().join("2026-04-12T100001.log");
-        std::fs::write(
-            &log,
-            concat!(
-                "INFO  2026-03-30T07:35:50 +0ms service=session id=ses_old created\n",
-                "INFO  2026-03-30T07:35:53 +0ms service=session id=ses_new created\n",
-            ),
-        )
-        .expect("write log");
-
-        assert_eq!(
-            opencode_extract_created_session_id(&log).as_deref(),
-            Some("ses_new")
-        );
-    }
-
-    #[test]
-    fn extract_created_session_id_supports_117_rolling_log_format() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log = temp.path().join("opencode.log");
-        std::fs::write(
-            &log,
-            concat!(
-                "timestamp=2026-06-12T13:47:45.348Z level=INFO run=382d6755 message=created id=ses_first slug=stellar-meadow version=1.17.4\n",
-                "timestamp=2026-06-12T13:56:30.417Z level=INFO run=2afdc4b8 message=created id=ses_second slug=quiet-canyon version=1.17.4\n",
-            ),
-        )
-        .expect("write log");
-
-        assert_eq!(
-            opencode_extract_created_session_id(&log).as_deref(),
-            Some("ses_second")
-        );
-    }
-
-    #[test]
-    fn extract_created_session_id_for_agent_scopes_by_run_id() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log = temp.path().join("opencode.log");
-        // Two concurrent instances interleave in the shared rolling log; only
-        // run=aaaa1111 loaded this agent's config (path embeds the UUID).
-        std::fs::write(
-            &log,
-            concat!(
-                "timestamp=2026-06-12T13:47:45.000Z level=INFO run=aaaa1111 message=loading path=\"C:\\\\tmp\\\\agents\\\\11111111-2222-3333-4444-555555555555\\\\habitat\\\\.opencode\\\\opencode.json\"\n",
-                "timestamp=2026-06-12T13:47:45.348Z level=INFO run=aaaa1111 message=created id=ses_mine slug=stellar-meadow version=1.17.4\n",
-                "timestamp=2026-06-12T13:56:30.417Z level=INFO run=bbbb2222 message=created id=ses_other slug=quiet-canyon version=1.17.4\n",
-            ),
-        )
-        .expect("write log");
-
-        assert_eq!(
-            opencode_extract_created_session_id_for_agent(
-                &log,
-                "11111111-2222-3333-4444-555555555555"
-            )
-            .as_deref(),
-            Some("ses_mine")
-        );
-    }
-
-    #[test]
-    fn extract_created_session_id_for_agent_falls_back_when_marker_absent() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log = temp.path().join("2026-04-12T100001.log");
-        std::fs::write(
-            &log,
-            "INFO  2026-03-30T07:35:53 +0ms service=session id=ses_legacy created\n",
-        )
-        .expect("write log");
-
-        assert_eq!(
-            opencode_extract_created_session_id_for_agent(&log, "no-such-uuid").as_deref(),
-            Some("ses_legacy")
         );
     }
 

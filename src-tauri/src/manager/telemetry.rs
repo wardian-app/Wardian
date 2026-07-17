@@ -10,13 +10,11 @@ use crate::providers::transcript::extract_transcript_message;
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
 use super::codex::{
     codex_log_lookup_session_id, codex_session_file_path, codex_status_from_log,
-    latest_codex_session_index_entry,
 };
 use super::display_log_path;
 use super::opencode::{
-    apply_opencode_log_metrics, opencode_extract_created_session_id_for_agent,
-    opencode_last_assistant_text, opencode_log_dirs, opencode_log_path_after, opencode_log_path_in,
-    opencode_session_diff_path, opencode_should_fallback_to_idle,
+    apply_opencode_log_metrics, opencode_last_assistant_text, opencode_log_dirs,
+    opencode_log_path_in, opencode_session_diff_path, opencode_should_fallback_to_idle,
 };
 use crate::providers::antigravity::AntigravityProvider;
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
@@ -847,16 +845,6 @@ fn parse_antigravity_log_metrics(content: &str) -> (usize, Option<String>, Optio
     (query_count, init_timestamp, status)
 }
 
-fn timestamp_to_system_time(timestamp: Option<&str>) -> Option<std::time::SystemTime> {
-    let timestamp = timestamp?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
-    let millis = parsed.timestamp_millis();
-    if millis < 0 {
-        return None;
-    }
-    Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64))
-}
-
 fn collect_descendant_pids(
     pid: u32,
     children_map: &HashMap<u32, Vec<u32>>,
@@ -1024,9 +1012,8 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             let opencode_session_id = snap
                 .resume_session
                 .as_deref()
-                .filter(|value| value.starts_with("ses_"))
-                .unwrap_or(&snap.session_id);
-            let gemini_session_id = snap.resume_session.as_deref().unwrap_or(&snap.session_id);
+                .filter(|value| value.starts_with("ses_"));
+            let gemini_session_id = snap.resume_session.as_deref();
             let status_before_log_work = snap.current_status.lock().unwrap().clone();
             let run_provider_log_work = should_run_provider_log_telemetry(
                 &snap.provider,
@@ -1044,14 +1031,18 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                         // since the last parse; unchanged content cannot go stale.
                         let last_parsed_mtime =
                             snap.log_last_modified.lock().ok().and_then(|last| *last);
-                        let stale_gemini_log = log_path_lock.as_ref().is_some_and(|path| {
+                        let stale_gemini_log = gemini_session_id.is_none()
+                            || log_path_lock.as_ref().is_some_and(|path| {
                             let current_mtime = std::fs::metadata(path)
                                 .and_then(|meta| meta.modified())
                                 .ok();
                             match (current_mtime, last_parsed_mtime) {
                                 (Some(current), Some(last)) if current == last => false,
                                 _ => std::fs::read_to_string(path).ok().is_none_or(|content| {
-                                    !gemini_log_matches_session(&content, gemini_session_id)
+                                    !gemini_log_matches_session(
+                                        &content,
+                                        gemini_session_id.unwrap_or_default(),
+                                    )
                                 }),
                             }
                         });
@@ -1066,49 +1057,23 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     // Provider-aware log discovery
                     if snap.provider == "opencode" {
                         let mut discovered_log = None;
-                        let log_dirs = opencode_log_dirs();
-                        for dir in &log_dirs {
-                            if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
-                                discovered_log = Some(path);
-                                break;
-                            }
-                        }
-                        if discovered_log.is_none()
-                            && snap
-                                .resume_session
-                                .as_deref()
-                                .is_none_or(|value| !value.starts_with("ses_"))
-                        {
-                            let spawn_time =
-                                snap.init_timestamp.lock().ok().and_then(|timestamp| {
-                                    timestamp_to_system_time(timestamp.as_deref())
-                                });
-                            if let Some(spawn_time) = spawn_time {
-                                for dir in &log_dirs {
-                                    if let Some(path) = opencode_log_path_after(dir, spawn_time) {
+                        if let Some(opencode_session_id) = opencode_session_id {
+                            for dir in opencode_log_dirs() {
+                                if let Some(path) = opencode_log_path_in(&dir, opencode_session_id) {
                                         discovered_log = Some(path);
                                         break;
-                                    }
                                 }
                             }
                         }
-                        *log_path_lock = discovered_log
-                            .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
+                        *log_path_lock = discovered_log.or_else(|| {
+                            opencode_session_id.map(opencode_session_diff_path)
+                        });
                     } else if snap.provider == "antigravity" {
                         let conversation_id = snap
                             .resume_session
                             .as_ref()
                             .map(|value| value.trim().to_string())
-                            .filter(|value| !value.is_empty())
-                            .or_else(|| {
-                                AntigravityProvider::antigravity_home().and_then(|home| {
-                                    AntigravityProvider::conversation_for_workspace(
-                                        &home,
-                                        std::path::Path::new(&snap.folder),
-                                    )
-                                    .or_else(|| AntigravityProvider::latest_conversation_id(&home))
-                                })
-                            });
+                            .filter(|value| !value.is_empty());
                         if let (Some(home), Some(conversation_id)) =
                             (AntigravityProvider::antigravity_home(), conversation_id)
                         {
@@ -1142,13 +1107,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     .map(|path| path.to_string_lossy().to_string());
                                 let codex_session_id =
                                     codex_log_lookup_session_id(snap.resume_session.as_deref())
-                                        .map(str::to_string)
-                                        .or_else(|| {
-                                            latest_codex_session_index_entry(&snap.session_id)
-                                                .ok()
-                                                .flatten()
-                                                .map(|(session_id, _updated_at)| session_id)
-                                        });
+                                        .map(str::to_string);
                                 if let Some(codex_session_id) = codex_session_id {
                                     if let Some(path) = codex_session_file_path(
                                         &codex_session_id,
@@ -1158,33 +1117,23 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     }
                                 }
                             }
-                            "claude" => {
-                                // Fallback for initial spawn where resume_session might not be set yet
-                                if let Some(home) = dirs::home_dir() {
-                                    let project_dir = claude_project_dir_name(&snap.folder);
-                                    let candidate = home
-                                        .join(".claude")
-                                        .join("projects")
-                                        .join(&project_dir)
-                                        .join(format!("{}.jsonl", snap.session_id));
-                                    if candidate.exists() {
-                                        *log_path_lock = Some(candidate);
-                                    }
-                                }
-                            }
+                            "claude" => {}
                             _ => {
                                 // Gemini: scan ~/.gemini/tmp for chat log files.
                                 // Bounded to recent candidates with prefix reads,
                                 // and retried only after the backoff TTL when
                                 // nothing matched.
-                                if let Some(home) = dirs::home_dir()
-                                    .filter(|_| gemini_fallback_scan_due(&snap.session_id))
-                                {
-                                    let tmp_dir = home.join(".gemini").join("tmp");
-                                    if let Some(path) =
-                                        discover_gemini_log_in_tmp(&tmp_dir, gemini_session_id)
+                                if let Some(gemini_session_id) = gemini_session_id {
+                                    if let Some(home) = dirs::home_dir()
+                                        .filter(|_| gemini_fallback_scan_due(&snap.session_id))
                                     {
-                                        *log_path_lock = Some(path);
+                                        let tmp_dir = home.join(".gemini").join("tmp");
+                                        if let Some(path) = discover_gemini_log_in_tmp(
+                                            &tmp_dir,
+                                            gemini_session_id,
+                                        ) {
+                                            *log_path_lock = Some(path);
+                                        }
                                     }
                                 }
                             }
@@ -1302,15 +1251,12 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                     "opencode" => {
                                         let mut status =
                                             snap.current_status.lock().unwrap().clone();
-                                        let effective_session_id =
-                                            opencode_extract_created_session_id_for_agent(
-                                                path,
-                                                &snap.session_id,
-                                            )
-                                            .unwrap_or_else(|| opencode_session_id.to_string());
+                                        let Some(effective_session_id) = opencode_session_id else {
+                                            continue;
+                                        };
                                         apply_opencode_log_metrics(
                                             &content,
-                                            &effective_session_id,
+                                            effective_session_id,
                                             &mut q_count,
                                             &mut i_ts,
                                             &mut status,
@@ -1327,7 +1273,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         {
                                             record_latest_opencode_assistant_text(
                                                 snap,
-                                                &effective_session_id,
+                                                effective_session_id,
                                             );
                                         }
                                         set_snapshot_status_from_log(

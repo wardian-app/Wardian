@@ -227,36 +227,6 @@ pub(crate) fn headless_provider_args(
     provider_args
 }
 
-pub async fn run_headless(
-    cwd: &std::path::Path,
-    prompt: &str,
-    session_id: &str,
-    output_format: &str,
-    provider_name: &str,
-) -> Result<serde_json::Value, String> {
-    run_headless_with_config(cwd, prompt, session_id, output_format, provider_name, None).await
-}
-
-pub async fn run_headless_with_config(
-    cwd: &std::path::Path,
-    prompt: &str,
-    session_id: &str,
-    output_format: &str,
-    provider_name: &str,
-    config_override: Option<&AgentConfig>,
-) -> Result<serde_json::Value, String> {
-    run_headless_with_options(HeadlessRunOptions {
-        cwd,
-        prompt,
-        wardian_session_id: session_id,
-        resume_session: (!session_id.trim().is_empty()).then_some(session_id),
-        output_format,
-        provider_name,
-        config_override,
-    })
-    .await
-}
-
 pub async fn run_headless_with_options(
     options: HeadlessRunOptions<'_>,
 ) -> Result<serde_json::Value, String> {

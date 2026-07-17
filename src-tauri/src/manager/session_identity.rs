@@ -182,13 +182,6 @@ pub(crate) fn apply_provider_identity(
     apply_provider_identity_with_environment(provider, config, candidate, std::env::vars_os())
 }
 
-pub(crate) fn clear_credential_resume_session(config: &mut AgentConfig) -> bool {
-    config
-        .resume_session
-        .as_deref()
-        .is_some_and(|value| value_matches_credentials(value, std::env::vars_os()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

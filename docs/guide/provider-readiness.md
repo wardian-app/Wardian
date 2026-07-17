@@ -16,9 +16,11 @@ Wardian does not install provider accounts, complete browser sign-in, create pro
 
 ## Credential and Session Identity Safety
 
-Wardian keeps its stable agent UUID separate from the provider's conversation identifier. Structured initialization events from provider CLIs are treated as telemetry and cannot replace the persisted resume identifier. Wardian obtains resumable provider identities from provider-specific trusted sources, such as a Wardian-assigned session UUID or the provider's local session files and database.
+Wardian keeps its stable agent UUID separate from the provider's conversation identifier. Claude and Gemini receive a distinct caller-owned provider ID. Codex binds the exact `thread.started.thread_id` from its current JSON bootstrap, OpenCode binds the exact `ses_...` ID returned by its current run, and Antigravity accepts only the workspace mapping proven to have changed during the current bootstrap. Structured initialization events can confirm that bound ID, but they cannot replace it.
 
-Before a provider starts, Wardian rejects session identifiers that match credential-bearing environment values such as API keys, tokens, secrets, or passwords. Restored state containing such a resume value is cleared before the normal provider-specific recovery path runs. Wardian also records launch argument counts and resume presence in debug logs instead of raw arguments or provider-supplied identifiers.
+Before a provider starts, Wardian rejects session identifiers that match credential-bearing environment values such as API keys, tokens, secrets, or passwords. It also rejects provider IDs that equal the Wardian agent UUID, have the wrong provider-specific shape, or conflict with the already-bound ID. Wardian records launch argument counts and resume presence in debug logs instead of raw arguments or provider-supplied identifiers.
+
+Wardian does not guess when an exact provider identity is missing. It does not scan for the newest session, use provider `latest` or `--continue` behavior, substitute the Wardian UUID, clear the invalid value and continue, or select a session from another workspace. Spawn, resume, restore, clone, or clear returns an error without replacing the stored identity. Start an explicitly fresh conversation or repair the stored provider identity instead.
 
 If Wardian reports that a session identifier matches a credential environment value, stop the affected agent, rotate the exposed credential if it may have been persisted by an older Wardian version, and launch the agent again. Wardian does not print the matching value in the error.
 
@@ -160,7 +162,7 @@ agy --version
 agy
 ```
 
-Complete Antigravity authentication in the terminal. Wardian checks the `agy` executable before launch, then uses Antigravity's own conversation state under `~/.gemini/antigravity-cli` for session and transcript tracking.
+Complete Antigravity authentication in the terminal. Wardian checks the `agy` executable before launch, then binds the exact workspace conversation mapping created by that launch under `~/.gemini/antigravity-cli`. An absent or unchanged mapping is an error; Wardian does not select the newest conversation directory.
 
 ## Claude Code
 
