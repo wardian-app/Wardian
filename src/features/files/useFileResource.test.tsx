@@ -245,4 +245,61 @@ describe("useFileResource", () => {
     resolveClose?.();
     returning.unmount();
   });
+
+  it("keeps an older controller usable after a newer authorization unmounts", async () => {
+    let openCount = 0;
+    mockInvoke.mockImplementation((command) => {
+      if (command === "open_file_resource") {
+        openCount += 1;
+        return Promise.resolve({
+          ...snapshot,
+          subscription_id: `subscription-${openCount}`,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const client = new FileResourceClient();
+    const olderRequest = { ...request, agent_id: "agent-older" };
+    const newerRequest = {
+      ...request,
+      agent_id: "agent-newer",
+      user_file_capability_id: "capability-newer",
+    };
+
+    const older = renderHook(() => useFileResource(olderRequest, client));
+    await waitFor(() => expect(older.result.current.status).toBe("ready"));
+    const newer = renderHook(() => useFileResource(newerRequest, client));
+    await waitFor(() => expect(newer.result.current.status).toBe("ready"));
+
+    newer.unmount();
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+      request: { subscription_id: "subscription-2" },
+    }));
+    expect(older.result.current.snapshot?.subscription_id).toBe("subscription-1");
+
+    await client.readText(snapshot.resource_id, snapshot.revision);
+    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-older");
+    expect(mockInvoke).toHaveBeenCalledWith("read_file_resource_text", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: "subscription-1",
+        revision: snapshot.revision,
+      },
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("issue_file_resource_ticket", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: "subscription-1",
+        revision: snapshot.revision,
+        renderer_lease_id: "preview-pane-older",
+      },
+    });
+
+    older.unmount();
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("close_file_resource", {
+      request: { subscription_id: "subscription-1" },
+    }));
+    expect(() => client.readText(snapshot.resource_id, snapshot.revision))
+      .toThrow(`File resource is not open: ${snapshot.resource_id}`);
+  });
 });

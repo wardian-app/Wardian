@@ -12,10 +12,7 @@ export const FILE_RESOURCE_REVISION_EVENT = "file-resource://revision";
 
 /** Typed Tauri adapter for one set of locally shared file subscriptions. */
 export class FileResourceClient {
-  readonly #subscriptionByResource = new Map<
-    string,
-    { subscription_id: string; open_sequence: number }
-  >();
+  readonly #subscriptionsByResource = new Map<string, Map<string, number>>();
   readonly #resourceBySubscription = new Map<string, string>();
   readonly #closeBySubscription = new Map<string, Promise<void>>();
   #openSequence = 0;
@@ -23,13 +20,12 @@ export class FileResourceClient {
   async open(request: OpenFileResourceRequestV1): Promise<FileResourceSnapshotV1> {
     const open_sequence = ++this.#openSequence;
     const snapshot = await invoke<FileResourceSnapshotV1>("open_file_resource", { request });
-    const active = this.#subscriptionByResource.get(snapshot.resource_id);
-    if (!active || open_sequence > active.open_sequence) {
-      this.#subscriptionByResource.set(snapshot.resource_id, {
-        subscription_id: snapshot.subscription_id,
-        open_sequence,
-      });
+    let subscriptions = this.#subscriptionsByResource.get(snapshot.resource_id);
+    if (!subscriptions) {
+      subscriptions = new Map();
+      this.#subscriptionsByResource.set(snapshot.resource_id, subscriptions);
     }
+    subscriptions.set(snapshot.subscription_id, open_sequence);
     this.#resourceBySubscription.set(snapshot.subscription_id, snapshot.resource_id);
     return snapshot;
   }
@@ -71,28 +67,46 @@ export class FileResourceClient {
     const existing = this.#closeBySubscription.get(subscription_id);
     if (existing) return existing;
 
-    const closing = invoke<void>("close_file_resource", {
+    let closing: Promise<void>;
+    closing = invoke<void>("close_file_resource", {
       request: { subscription_id },
     }).then(() => {
       const resource_id = this.#resourceBySubscription.get(subscription_id);
-      if (
-        resource_id
-        && this.#subscriptionByResource.get(resource_id)?.subscription_id === subscription_id
-      ) {
-        this.#subscriptionByResource.delete(resource_id);
+      if (resource_id) {
+        const subscriptions = this.#subscriptionsByResource.get(resource_id);
+        subscriptions?.delete(subscription_id);
+        if (subscriptions?.size === 0) {
+          this.#subscriptionsByResource.delete(resource_id);
+        }
       }
       this.#resourceBySubscription.delete(subscription_id);
+    }).catch((error) => {
+      if (this.#closeBySubscription.get(subscription_id) === closing) {
+        this.#closeBySubscription.delete(subscription_id);
+      }
+      throw error;
     });
     this.#closeBySubscription.set(subscription_id, closing);
     return closing;
   }
 
   #subscription(resource_id: string) {
-    const subscription = this.#subscriptionByResource.get(resource_id);
-    if (!subscription) {
+    const subscriptions = this.#subscriptionsByResource.get(resource_id);
+    if (!subscriptions?.size) {
       throw new Error(`File resource is not open: ${resource_id}`);
     }
-    return subscription.subscription_id;
+    let selected_id: string | undefined;
+    let selected_sequence = -1;
+    for (const [subscription_id, open_sequence] of subscriptions) {
+      if (open_sequence > selected_sequence) {
+        selected_id = subscription_id;
+        selected_sequence = open_sequence;
+      }
+    }
+    if (!selected_id) {
+      throw new Error(`File resource is not open: ${resource_id}`);
+    }
+    return selected_id;
   }
 }
 

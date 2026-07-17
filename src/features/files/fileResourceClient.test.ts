@@ -188,4 +188,100 @@ describe("FileResourceClient", () => {
       },
     });
   });
+
+  it("falls back to an older live subscription when a newer authorization closes", async () => {
+    const older = { ...snapshot, subscription_id: "subscription-older" };
+    const newer = { ...snapshot, subscription_id: "subscription-newer" };
+    mockInvoke
+      .mockResolvedValueOnce(older)
+      .mockResolvedValueOnce(newer)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        schema: 1,
+        resource_id: snapshot.resource_id,
+        revision: snapshot.revision,
+        text: "older remains authorized",
+      } satisfies FileResourceTextV1)
+      .mockResolvedValueOnce({
+        schema: 1,
+        ticket_id: "ticket-older",
+        url: "wardian-resource://localhost/ticket-older",
+        resource_id: snapshot.resource_id,
+        revision: snapshot.revision,
+        renderer_lease_id: "preview-pane-older",
+        expires_at_ms: 1_700_000_060_000,
+      } satisfies FileResourceTicketV1)
+      .mockResolvedValueOnce(undefined);
+
+    const client = new FileResourceClient();
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-older",
+      user_file_capability_id: null,
+    });
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-newer",
+      user_file_capability_id: "capability-newer",
+    });
+
+    await client.close(newer.subscription_id);
+    await client.readText(snapshot.resource_id, snapshot.revision);
+    await client.issueTicket(snapshot.resource_id, snapshot.revision, "preview-pane-older");
+
+    expect(mockInvoke).toHaveBeenNthCalledWith(4, "read_file_resource_text", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: older.subscription_id,
+        revision: snapshot.revision,
+      },
+    });
+    expect(mockInvoke).toHaveBeenNthCalledWith(5, "issue_file_resource_ticket", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: older.subscription_id,
+        revision: snapshot.revision,
+        renderer_lease_id: "preview-pane-older",
+      },
+    });
+
+    await client.close(older.subscription_id);
+    expect(() => client.readText(snapshot.resource_id, snapshot.revision))
+      .toThrow(`File resource is not open: ${snapshot.resource_id}`);
+  });
+
+  it("retries a rejected close while keeping successful close idempotence", async () => {
+    mockInvoke
+      .mockResolvedValueOnce(snapshot)
+      .mockRejectedValueOnce(new Error("transient close failure"))
+      .mockResolvedValueOnce({
+        schema: 1,
+        resource_id: snapshot.resource_id,
+        revision: snapshot.revision,
+        text: "still active after rejected close",
+      } satisfies FileResourceTextV1)
+      .mockResolvedValueOnce(undefined);
+    const client = new FileResourceClient();
+    await client.open({
+      path: descriptor.canonical_path,
+      agent_id: "agent-1",
+      user_file_capability_id: null,
+    });
+
+    await expect(client.close(snapshot.subscription_id))
+      .rejects.toThrow("transient close failure");
+    await client.readText(snapshot.resource_id, snapshot.revision);
+    expect(mockInvoke).toHaveBeenCalledWith("read_file_resource_text", {
+      request: {
+        resource_id: snapshot.resource_id,
+        subscription_id: snapshot.subscription_id,
+        revision: snapshot.revision,
+      },
+    });
+    await expect(client.close(snapshot.subscription_id)).resolves.toBeUndefined();
+    await expect(client.close(snapshot.subscription_id)).resolves.toBeUndefined();
+
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "close_file_resource"))
+      .toHaveLength(2);
+  });
 });
