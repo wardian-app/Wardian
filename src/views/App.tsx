@@ -75,7 +75,7 @@ import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurfac
 import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
 import { FilesSurface } from "../features/files/FilesSurface";
 import { fileResourceClient } from "../features/files/fileResourceClient";
-import { fileResourceKey } from "../features/files/fileResourceKey";
+import { createFileSurfaceState, fileResourceKey } from "../features/files/fileResourceKey";
 import type { FilesSurfaceStateV1 } from "../types";
 
 declare global {
@@ -1128,14 +1128,7 @@ function AppBody() {
             workbenchNavigation.open({
               surface_type: "files",
               resource_key: fileResourceKey(path),
-              state: {
-                resource_kind: "file",
-                mode: "preview",
-                transient_preview: false,
-                review_drawer_open: false,
-                selected_version_id: null,
-                optional_checkpoint_id: null,
-              } satisfies FilesSurfaceStateV1,
+              state: createFileSurfaceState(false),
             });
           }}
         />
@@ -1339,6 +1332,7 @@ function AppBody() {
     <AgentResourceContext.Provider value={agentResources}>
       <RosterProvider value={roster}>
         <AppShell
+          navigation={workbenchNavigation}
           contentBusy={workbenchResetPending}
           titlebar={<CustomTitleBar
         workbenchBusy={workbenchResetPending}

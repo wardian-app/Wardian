@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FileTree } from './FileTree';
 import { invoke } from '@tauri-apps/api/core';
@@ -11,6 +11,10 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('FileTree Component', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('renders a directory tree and handles folder expansion', async () => {
@@ -64,6 +68,99 @@ describe('FileTree Component', () => {
     
     expect(contextMenuSpy).toHaveBeenCalledTimes(1);
     expect(contextMenuSpy).toHaveBeenCalledWith(expect.anything(), mockNodes[0]);
+  });
+
+  it('delays file selection so a single click can become a transient preview', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce([
+      { name: 'notes.md', path: '/test/notes.md', is_dir: false, extension: 'md' },
+    ]);
+    const onSelect = vi.fn();
+    render(<FileTree path="/test" onSelect={onSelect} />);
+
+    const file = await screen.findByText('notes.md');
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(file, { detail: 1 });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(250));
+      expect(onSelect).toHaveBeenCalledOnce();
+      expect(onSelect).toHaveBeenCalledWith('/test/notes.md', false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels delayed selection when the same file is double-clicked open', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce([
+      { name: 'notes.md', path: '/test/notes.md', is_dir: false, extension: 'md' },
+    ]);
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(<FileTree path="/test" onSelect={onSelect} onOpen={onOpen} />);
+
+    const row = (await screen.findByText('notes.md')).closest('[role="treeitem"]');
+    expect(row).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(row as HTMLElement, { detail: 1 });
+      fireEvent.click(row as HTMLElement, { detail: 2 });
+      fireEvent.doubleClick(row as HTMLElement, { detail: 2 });
+      act(() => vi.advanceTimersByTime(250));
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(onOpen).toHaveBeenCalledOnce();
+      expect(onOpen).toHaveBeenCalledWith('/test/notes.md', false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opens a focused file with Enter and clears any pending single-click timer', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce([
+      { name: 'notes.md', path: '/test/notes.md', is_dir: false, extension: 'md' },
+    ]);
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    const { unmount } = render(
+      <FileTree path="/test" onSelect={onSelect} onOpen={onOpen} />,
+    );
+
+    const row = (await screen.findByText('notes.md')).closest('[role="treeitem"]');
+    expect(row).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(row as HTMLElement, { detail: 1 });
+      fireEvent.keyDown(row as HTMLElement, { key: 'Enter' });
+      unmount();
+      act(() => vi.advanceTimersByTime(250));
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(onOpen).toHaveBeenCalledOnce();
+      expect(onOpen).toHaveBeenCalledWith('/test/notes.md', false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps directories as accessible expand/collapse items without opening Files', async () => {
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      return (args as { path: string }).path === '/test'
+        ? [{ name: 'src', path: '/test/src', is_dir: true, extension: null }]
+        : [];
+    });
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(<FileTree path="/test" onSelect={onSelect} onOpen={onOpen} />);
+
+    const row = await screen.findByRole('treeitem', { name: 'src' });
+    expect(row).toHaveAttribute('tabindex', '0');
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.keyDown(row, { key: 'Enter' });
+
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(onSelect).toHaveBeenCalledWith('/test/src', true);
+    expect(onOpen).not.toHaveBeenCalled();
   });
 
   it('uses the expand chevron without a folder glyph for directories and keeps file type icons', async () => {

@@ -8,10 +8,14 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { AgentConfig, GitStatusResult } from '../../types';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { normalizeExplorerPathForCompare } from './pathUtils';
+import { createFileSurfaceState, fileResourceKey } from '../files/fileResourceKey';
+import type { WorkbenchNavigationService } from '../workbench/navigationService';
+import { useAppShellWorkbenchNavigation } from '../../layout/AppShell';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
+  navigation?: WorkbenchNavigationService;
 }
 
 interface ExplorerChangedEvent {
@@ -30,8 +34,10 @@ const externalEditorLabel = (editor: string) => {
   }
 };
 
-export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, agents }) => {
+export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, agents, navigation }) => {
   const confirm = useConfirm();
+  const appShellNavigation = useAppShellWorkbenchNavigation();
+  const workbenchNavigation = navigation ?? appShellNavigation;
   const externalEditor = useSettingsStore((state) => state.externalEditor);
   const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const explorerFileClickAction = useSettingsStore((state) => state.explorerFileClickAction);
@@ -57,9 +63,6 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   const [menuPos, setMenuPos] = useState<{x: number, y: number} | null>(null);
   const [activeNode, setActiveNode] = useState<FileNode | null>(null);
   
-  // Preview Modal State
-  const [previewContent, setPreviewContent] = useState<string | null>(null);
-  const [previewTitle, setPreviewTitle] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [changedPaths, setChangedPaths] = useState<string[]>([]);
   const [externalOpenError, setExternalOpenError] = useState<string | null>(null);
@@ -220,41 +223,64 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     await openExternalPath(rootPath);
   };
 
-  const openPreview = async (node: FileNode) => {
-    if (node.is_dir) return;
-    try {
-      const content = await invoke<string>('read_file_preview', { path: node.path });
-      setPreviewTitle(node.name);
-      setPreviewContent(content);
-    } catch (err) {
-      console.error("Preview failed:", err);
-      setPreviewTitle("Error reading " + node.name);
-      setPreviewContent(String(err));
+  const requireNavigation = () => {
+    if (!workbenchNavigation) {
+      throw new Error('ExplorerPanel requires AppShell Workbench navigation');
     }
+    return workbenchNavigation;
   };
 
-  const handlePreview = async () => {
-    if (activeNode) {
-      await openPreview(activeNode);
+  const fileSurfaceRequest = (path: string, transientPreview: boolean) => ({
+    surface_type: 'files' as const,
+    resource_key: fileResourceKey(path),
+    state: createFileSurfaceState(transientPreview),
+  });
+
+  const openPermanent = (path: string) => {
+    const currentNavigation = requireNavigation();
+    const surfaceId = currentNavigation.open(fileSurfaceRequest(path, false));
+    currentNavigation.pin_transient(surfaceId);
+  };
+
+  const handleOpen = () => {
+    if (activeNode && !activeNode.is_dir) openPermanent(activeNode.path);
+    setMenuPos(null);
+  };
+
+  const handleOpenToSide = () => {
+    if (activeNode && !activeNode.is_dir) {
+      requireNavigation().open_to_side(fileSurfaceRequest(activeNode.path, false), 'horizontal');
     }
     setMenuPos(null);
   };
 
-  const handleFileSelect = async (path: string, isDir: boolean) => {
-    if (isDir) return;
+  const fileNode = (path: string): FileNode => {
     const normalizedPath = path.replace(/\\/g, '/');
     const name = normalizedPath.split('/').filter(Boolean).pop() ?? path;
-    const node: FileNode = {
+    return {
       path,
       name,
       is_dir: false,
       extension: name.includes('.') ? name.split('.').pop() ?? null : null,
     };
+  };
+
+  const handleFileSelect = async (path: string, isDir: boolean) => {
+    if (isDir) return;
 
     if (explorerFileClickAction === 'external') {
-      await openExternalEditor(node);
+      await openExternalEditor(fileNode(path));
     } else {
-      await openPreview(node);
+      requireNavigation().open_transient(fileSurfaceRequest(path, true));
+    }
+  };
+
+  const handleFileOpen = async (path: string, isDir: boolean) => {
+    if (isDir) return;
+    if (explorerFileClickAction === 'external') {
+      await openExternalEditor(fileNode(path));
+    } else {
+      openPermanent(path);
     }
   };
 
@@ -330,6 +356,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
             path={rootPath}
             onContextMenu={handleContextMenu}
             onSelect={handleFileSelect}
+            onOpen={handleFileOpen}
             gitStatusMap={gitStatusMap}
             changedDirectories={changedDirectories}
             explorerRoot={rootPath}
@@ -354,8 +381,13 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
             {activeNode.name}
           </div>
           {!activeNode.is_dir && (
-            <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handlePreview}>
-              Open Preview
+            <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handleOpen}>
+              Open
+            </button>
+          )}
+          {!activeNode.is_dir && (
+            <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handleOpenToSide}>
+              Open to Side
             </button>
           )}
           <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-primary" onClick={handleOpenExternalEditor}>
@@ -371,24 +403,6 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
           <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-wardian-error group flex items-center justify-between" onClick={handleDelete}>
             Delete
           </button>
-        </div>
-      )}
-
-      {/* Preview Modal */}
-      {previewContent !== null && (
-        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-8 backdrop-blur-sm animate-in fade-in" onClick={() => setPreviewContent(null)}>
-          <div 
-            className="bg-wardian-card border border-wardian-border shadow-2xl rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col font-mono text-sm overflow-hidden animate-in zoom-in-95 duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex justify-between items-center p-4 border-b border-wardian-border shrink-0 bg-wardian-bg/50">
-              <h3 className="font-bold text-lg text-wardian-accent truncate flex-1 mr-4">{previewTitle}</h3>
-              <button onClick={() => setPreviewContent(null)} className="text-wardian-text-muted hover:text-wardian-error font-bold transition-colors w-8 h-8 flex items-center justify-center rounded-md hover:bg-wardian-error/10">✕</button>
-            </div>
-            <div className="p-0 overflow-y-auto flex-1 bg-wardian-bg/30 cursor-text">
-              <pre className="p-6 text-primary whitespace-pre-wrap break-words">{previewContent}</pre>
-            </div>
-          </div>
         </div>
       )}
     </div>

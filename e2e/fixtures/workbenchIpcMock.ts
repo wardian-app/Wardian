@@ -38,6 +38,14 @@ export type WorkbenchIpcCall = {
   args?: Record<string, unknown>;
 };
 
+export type WorkbenchFileFixture = {
+  path: string;
+  content: string;
+  mime_type?: string;
+  renderer_kind?: "text" | "markdown";
+  revision?: number;
+};
+
 export type WorkbenchDocumentOptions = {
   revision?: number;
   saved_at?: string;
@@ -125,6 +133,8 @@ export type WorkbenchIpcMockOptions = {
   reset_delay_ms?: number;
   reset_outcome?: "saved" | "revision_conflict" | "error";
   responses?: Record<string, unknown>;
+  explorer_root?: string;
+  files?: WorkbenchFileFixture[];
 };
 
 export type WorkbenchIpcMockSnapshot = {
@@ -140,6 +150,7 @@ type BrowserWorkbenchMockRuntime = {
   set_load_result: (result: WorkbenchLoadResult) => void;
   set_agents: (agents: WorkbenchAgentFixture[], emit: boolean) => void;
   emit: (event: string, payload: unknown) => void;
+  update_file: (path: string, content: string) => void;
 };
 
 export type WorkbenchIpcMockController = {
@@ -150,6 +161,7 @@ export type WorkbenchIpcMockController = {
     agents: WorkbenchAgentFixture[],
     options?: { emit?: boolean },
   ) => Promise<void>;
+  updateFile: (path: string, content: string) => Promise<void>;
 };
 
 /**
@@ -171,7 +183,7 @@ export async function installWorkbenchIpcMock(
   };
 
   await page.addInitScript(
-    ({ loadResult, agents, safeMode, resetDelayMs, resetOutcome, responses }) => {
+    ({ loadResult, agents, safeMode, resetDelayMs, resetOutcome, responses, explorerRoot, files }) => {
       type Callback = (value: unknown) => void;
       type Listener = { callback_id: number; event_id: number };
       type Runtime = BrowserWorkbenchMockRuntime;
@@ -180,6 +192,37 @@ export async function installWorkbenchIpcMock(
       let eventId = 1;
       const callbacks = new Map<number, Callback>();
       const listeners = new Map<string, Listener[]>();
+      let fileSubscriptionId = 1;
+      const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/$/, "");
+      const fileFixtures = new Map(files.map((file) => [normalizePath(file.path), {
+        ...file,
+        path: normalizePath(file.path),
+        revision: file.revision ?? 1,
+      }]));
+      const fileSubscriptions = new Map<string, string>();
+      const resourceIdFor = (path: string) => `mock-file:${normalizePath(path)}`;
+      const descriptorFor = (file: typeof files[number]) => {
+        const normalizedPath = normalizePath(file.path);
+        const displayName = normalizedPath.split("/").pop() ?? normalizedPath;
+        const extension = displayName.includes(".") ? displayName.split(".").pop() ?? null : null;
+        const lines = file.content === "" ? 0 : file.content.split(/\r?\n/).length;
+        const rendererKind = file.renderer_kind ?? (extension === "md" ? "markdown" : "text");
+        return {
+          schema: 1,
+          canonical_path: normalizedPath,
+          display_name: displayName,
+          extension,
+          mime_type: file.mime_type ?? (rendererKind === "markdown" ? "text/markdown" : "text/plain"),
+          encoding: "utf-8",
+          renderer_kind: rendererKind,
+          size_bytes: new TextEncoder().encode(file.content).byteLength,
+          line_count: lines,
+          content_hash: `mock-hash-${file.revision}`,
+          modified_at_ms: 1_752_624_000_000 + file.revision,
+          capabilities: { preview: true, changes: false, draft: false, stream: false },
+          unavailable_reason: null,
+        };
+      };
       const clone = <T,>(value: T): T => structuredClone(value);
       const loadStorageKey = "wardian-e2e-workbench-load-result";
       const agentsStorageKey = "wardian-e2e-workbench-agents";
@@ -219,6 +262,21 @@ export async function installWorkbenchIpcMock(
               event,
               id: listener.event_id,
               payload: clone(payload),
+            });
+          }
+        },
+        update_file: (path, content) => {
+          const normalizedPath = normalizePath(path);
+          const file = fileFixtures.get(normalizedPath);
+          if (!file) throw new Error(`mock file not found: ${normalizedPath}`);
+          file.content = content;
+          file.revision += 1;
+          if ([...fileSubscriptions.values()].includes(normalizedPath)) {
+            runtime.emit("file-resource://revision", {
+              schema: 1,
+              resource_id: resourceIdFor(normalizedPath),
+              revision: file.revision,
+              descriptor: descriptorFor(file),
             });
           }
         },
@@ -313,6 +371,77 @@ export async function installWorkbenchIpcMock(
           if (command === "get_workbench_boot_config") return { safe_mode: safeMode };
           if (command === "load_workbench_state") return clone(runtime.load_result);
           if (command === "list_agents") return clone(runtime.agents);
+
+          if (command === "get_explorer_root") return explorerRoot;
+          if (command === "get_directory_tree") {
+            const requestedPath = normalizePath(String(args?.path ?? ""));
+            const prefix = `${requestedPath}/`;
+            const children = new Map<string, {
+              name: string;
+              path: string;
+              is_dir: boolean;
+              extension: string | null;
+            }>();
+            for (const file of fileFixtures.values()) {
+              if (!file.path.startsWith(prefix)) continue;
+              const relative = file.path.slice(prefix.length);
+              const [name, ...remaining] = relative.split("/");
+              if (!name) continue;
+              const isDirectory = remaining.length > 0;
+              children.set(name, {
+                name,
+                path: `${requestedPath}/${name}`,
+                is_dir: isDirectory,
+                extension: isDirectory || !name.includes(".") ? null : name.split(".").pop() ?? null,
+              });
+            }
+            return [...children.values()].sort((left, right) => left.name.localeCompare(right.name));
+          }
+          if (command === "git_status") return { files: [] };
+          if (command === "explorer_watch" || command === "explorer_unwatch") return null;
+
+          if (command === "open_file_resource") {
+            const request = args?.request as { path?: string } | undefined;
+            const path = normalizePath(String(request?.path ?? ""));
+            const file = fileFixtures.get(path);
+            if (!file) throw new Error(`mock file not found: ${path}`);
+            const subscription_id = `mock-subscription-${fileSubscriptionId++}`;
+            fileSubscriptions.set(subscription_id, path);
+            return {
+              resource_id: resourceIdFor(path),
+              subscription_id,
+              revision: file.revision,
+              descriptor: descriptorFor(file),
+            };
+          }
+          if (command === "read_file_resource_text") {
+            const request = args?.request as {
+              resource_id?: string;
+              subscription_id?: string;
+              revision?: number;
+            } | undefined;
+            const subscriptionId = String(request?.subscription_id ?? "");
+            const path = fileSubscriptions.get(subscriptionId);
+            const file = path ? fileFixtures.get(path) : undefined;
+            if (!path || !file || request?.resource_id !== resourceIdFor(path)) {
+              throw new Error("mock file subscription is not active for this resource");
+            }
+            if (request.revision !== file.revision) throw new Error("stale_revision");
+            return {
+              schema: 1,
+              resource_id: resourceIdFor(path),
+              revision: file.revision,
+              text: file.content,
+            };
+          }
+          if (command === "close_file_resource") {
+            const request = args?.request as { subscription_id?: string } | undefined;
+            const subscriptionId = String(request?.subscription_id ?? "");
+            if (!fileSubscriptions.delete(subscriptionId)) {
+              throw new Error("mock file subscription is already closed");
+            }
+            return null;
+          }
 
           if (command === "save_workbench_state") {
             const request = args as unknown as WorkbenchSaveRequest;
@@ -420,6 +549,8 @@ export async function installWorkbenchIpcMock(
       resetDelayMs: options.reset_delay_ms ?? 0,
       resetOutcome: options.reset_outcome ?? "saved",
       responses: options.responses ?? {},
+      explorerRoot: options.explorer_root ?? "/workspace",
+      files: options.files ?? [],
     },
   );
 
@@ -457,6 +588,15 @@ export async function installWorkbenchIpcMock(
         runtime.set_agents(nextAgents, emit);
       },
       { nextAgents: agents, emit: setOptions.emit ?? true },
+    ),
+    updateFile: (path, content) => page.evaluate(
+      ({ targetPath, nextContent }) => {
+        const runtime = (window as unknown as {
+          __WARDIAN_WORKBENCH_IPC_MOCK__: BrowserWorkbenchMockRuntime;
+        }).__WARDIAN_WORKBENCH_IPC_MOCK__;
+        runtime.update_file(targetPath, nextContent);
+      },
+      { targetPath: path, nextContent: content },
     ),
   };
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
 import { normalizeExplorerPathForCompare } from './pathUtils';
@@ -13,6 +13,7 @@ export interface FileNode {
 export interface FileTreeProps {
   path: string;
   onSelect?: (path: string, is_dir: boolean) => void;
+  onOpen?: (path: string, is_dir: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
   depth?: number;
   gitStatusMap?: Record<string, string>;
@@ -59,6 +60,7 @@ const getFileIcon = (extension: string | null) => {
 export const FileTree: React.FC<FileTreeProps> = ({
   path,
   onSelect,
+  onOpen,
   onContextMenu,
   depth = 0,
   gitStatusMap,
@@ -71,6 +73,19 @@ export const FileTree: React.FC<FileTreeProps> = ({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pendingSelection = useRef<{
+    path: string;
+    timer: number;
+  } | null>(null);
+
+  const cancelPendingSelection = useCallback((path?: string) => {
+    const pending = pendingSelection.current;
+    if (!pending || (path !== undefined && pending.path !== path)) return;
+    window.clearTimeout(pending.timer);
+    pendingSelection.current = null;
+  }, []);
+
+  useEffect(() => () => cancelPendingSelection(), [cancelPendingSelection]);
 
   const fetchTree = useCallback(async (isMounted: () => boolean, showLoading: boolean) => {
     if (showLoading) {
@@ -113,14 +128,42 @@ export const FileTree: React.FC<FileTreeProps> = ({
     setExpanded(prev => ({ ...prev, [nodePath]: !prev[nodePath] }));
   };
 
-  const handleClick = (e: React.MouseEvent, node: FileNode) => {
+  const handleClick = (e: React.MouseEvent<HTMLDivElement>, node: FileNode) => {
     e.stopPropagation();
+    e.currentTarget.focus();
     if (node.is_dir) {
+      if (e.detail > 1) return;
       toggleFolder(node.path);
+      onSelect?.(node.path, true);
+      return;
     }
-    if (onSelect) {
-      onSelect(node.path, node.is_dir);
+    if (e.detail > 1) return;
+    cancelPendingSelection();
+    const timer = window.setTimeout(() => {
+      if (pendingSelection.current?.timer !== timer) return;
+      pendingSelection.current = null;
+      onSelect?.(node.path, false);
+    }, 200);
+    pendingSelection.current = { path: node.path, timer };
+  };
+
+  const handleOpen = (e: React.SyntheticEvent, node: FileNode) => {
+    e.stopPropagation();
+    if (node.is_dir) return;
+    cancelPendingSelection(node.path);
+    onOpen?.(node.path, false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, node: FileNode) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (node.is_dir) {
+      cancelPendingSelection();
+      toggleFolder(node.path);
+      onSelect?.(node.path, true);
+      return;
     }
+    handleOpen(e, node);
   };
 
   if (loading && depth === 0) {
@@ -132,7 +175,11 @@ export const FileTree: React.FC<FileTreeProps> = ({
   }
 
   return (
-    <div className={`flex flex-col ${depth === 0 ? 'w-full h-full' : ''}`}>
+    <div
+      className={`flex flex-col ${depth === 0 ? 'w-full h-full' : ''}`}
+      role={depth === 0 ? 'tree' : 'group'}
+      aria-label={depth === 0 ? 'Workspace files' : undefined}
+    >
       {nodes.map(node => {
         const relPath = explorerRoot ? toRelativePath(node.path, explorerRoot) : '';
         const fileStatus = gitStatusMap?.[relPath];
@@ -144,9 +191,14 @@ export const FileTree: React.FC<FileTreeProps> = ({
         return (
           <React.Fragment key={node.path}>
             <div
+              role="treeitem"
+              tabIndex={0}
+              aria-expanded={node.is_dir ? Boolean(expanded[node.path]) : undefined}
               className="flex items-center shrink-0 gap-1.5 py-[2px] pr-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-[13px] whitespace-nowrap overflow-hidden select-none group w-full"
               style={{ paddingLeft: `${(depth * 14) + 2}px` }}
               onClick={(e) => handleClick(e, node)}
+              onDoubleClick={(e) => handleOpen(e, node)}
+              onKeyDown={(e) => handleKeyDown(e, node)}
               onContextMenu={(e) => onContextMenu && onContextMenu(e, node)}
             >
               {node.is_dir ? (
@@ -182,6 +234,7 @@ export const FileTree: React.FC<FileTreeProps> = ({
                 path={node.path}
                 depth={depth + 1}
                 onSelect={onSelect}
+                onOpen={onOpen}
                 onContextMenu={onContextMenu}
                 gitStatusMap={gitStatusMap}
                 changedDirectories={changedDirectories}
