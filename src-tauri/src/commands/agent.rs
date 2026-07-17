@@ -165,11 +165,10 @@ struct DeletedAgentReferenceCleanup {
 
 impl DeletedAgentReferenceCleanup {
     fn run(home: &Path, remaining_agent_ids: &BTreeSet<String>) -> Result<Self, String> {
-        let watchlists_changed =
-            crate::commands::watchlist::retain_known_agent_references_in_home(
-                home,
-                remaining_agent_ids,
-            )?;
+        let watchlists_changed = crate::commands::watchlist::retain_known_agent_references_in_home(
+            home,
+            remaining_agent_ids,
+        )?;
 
         let mut topology = wardian_core::topology::load_topology(home);
         let before_topology = topology.clone();
@@ -874,37 +873,35 @@ fn clone_ensure_profile_destination_available(
     Ok(())
 }
 
-fn persisted_resume_session_for_provider(
-    provider_name: &str,
-    actual_resume: Option<String>,
-    session_id: &str,
-) -> Option<String> {
-    actual_resume.or_else(|| {
-        if provider_uses_manual_session_id(provider_name) && !session_id.trim().is_empty() {
-            Some(session_id.to_string())
-        } else {
-            None
-        }
-    })
+fn persisted_resume_session_for_provider(actual_resume: Option<String>) -> Option<String> {
+    actual_resume.filter(|value| !value.trim().is_empty())
 }
 
 fn provider_uses_manual_session_id(provider_name: &str) -> bool {
     matches!(provider_name, "claude" | "gemini")
 }
 
-fn provider_uses_generated_session_id(provider_name: &str) -> bool {
-    matches!(
-        provider_name,
-        "claude" | "codex" | "gemini" | "mock" | "opencode" | "antigravity"
-    )
+struct NewAgentIdentityPlan {
+    wardian_session_id: String,
+    fresh_provider_session_id: Option<String>,
+    bootstrap_provider_session: bool,
+}
+
+fn new_agent_identity_plan(provider_name: &str) -> NewAgentIdentityPlan {
+    NewAgentIdentityPlan {
+        wardian_session_id: uuid::Uuid::new_v4().to_string(),
+        fresh_provider_session_id: provider_uses_manual_session_id(provider_name)
+            .then(|| uuid::Uuid::new_v4().to_string()),
+        bootstrap_provider_session: matches!(provider_name, "codex" | "opencode" | "antigravity"),
+    }
 }
 
 fn ensure_provider_available_before_session_bootstrap(provider_name: &str) -> Result<(), String> {
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)
 }
 
-fn provider_needs_obtain_session_id_on_clear(_provider_name: &str) -> bool {
-    false
+fn provider_needs_obtain_session_id_on_clear(provider_name: &str) -> bool {
+    matches!(provider_name, "codex" | "opencode" | "antigravity")
 }
 
 fn restore_runtime_state_snapshot_after_resume(
@@ -977,40 +974,6 @@ fn capture_resume_runtime_snapshot(agent: &crate::state::ActiveAgent) -> ResumeR
         init_timestamp: agent.init_timestamp.lock().unwrap().clone(),
         query_count: agent.query_count.lock().map(|count| *count).unwrap_or(0),
         log_path: agent.log_path.lock().ok().and_then(|path| path.clone()),
-    }
-}
-
-fn capture_opencode_pause_resume_session(agent: &crate::state::ActiveAgent) {
-    let provider = {
-        let config = agent.config.lock().unwrap();
-        config.provider.clone()
-    };
-
-    if provider != "opencode" {
-        return;
-    }
-
-    let mut config = agent.config.lock().unwrap();
-    if config
-        .resume_session
-        .as_deref()
-        .map(|s| !s.starts_with("ses_"))
-        .unwrap_or(true)
-    {
-        let log_path_snap = agent.log_path.lock().ok().and_then(|guard| guard.clone());
-        let log_path_snap = log_path_snap.or_else(|| {
-            manager::opencode_log_dirs()
-                .into_iter()
-                .find_map(|dir| manager::opencode_log_path_in(&dir, &config.session_id))
-        });
-        if let Some(log_path) = log_path_snap {
-            if let Some(ses_id) = manager::opencode_extract_created_session_id_for_agent(
-                &log_path,
-                &config.session_id,
-            ) {
-                config.resume_session = Some(ses_id);
-            }
-        }
     }
 }
 
@@ -1843,13 +1806,14 @@ fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
 }
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
-    config.is_off = false;
+    let mut prepared = config.clone();
+    prepare_resume_config_in_place(&mut prepared)?;
+    *config = prepared;
+    Ok(())
+}
 
-    if manager::clear_credential_resume_session(config) {
-        manager::log_debug(
-            "[WARDIAN] Cleared a credential-valued provider resume session before launch.",
-        );
-    }
+fn prepare_resume_config_in_place(config: &mut AgentConfig) -> Result<(), String> {
+    manager::validate_config_for_launch(config)?;
 
     let settings = crate::utils::load_shell_settings().unwrap_or_default();
     let resolved_persistence = match config.session_persistence {
@@ -1860,6 +1824,7 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
 
     config.fresh_provider_session_id = None;
     if resolved_persistence == AgentSessionPersistence::Fresh {
+        config.is_off = false;
         config.resume_session = None;
         if provider_uses_manual_session_id(&config.provider) {
             config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
@@ -1867,66 +1832,24 @@ fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
         return Ok(());
     }
 
-    // For opencode, Wardian uses a UUID as session_id internally, but opencode
-    // only recognises real ses_xxx IDs.  Clear any stale UUID stored in
-    // resume_session (e.g. from a pre-fix save), then only fall back to
-    // session_id if it is already in the ses_xxx format.
-    if config.provider == "opencode" {
-        if let Some(ref rs) = config.resume_session {
-            if !rs.starts_with("ses_") {
-                config.resume_session = None;
-            }
-        }
-    } else if config.provider == "codex"
-        && config.resume_session.as_deref().is_some_and(|rs| {
-            let cleared_provider_sessions = codex_cleared_provider_sessions(config);
-            rs.trim().is_empty()
-                || rs == config.session_id
-                || !codex_provider_session_is_new(rs, &cleared_provider_sessions)
-                || !manager::codex_session_exists_in_agent_home(&config.session_id, rs)
-        })
-    {
-        config.resume_session = None;
-    }
-
-    if config.resume_session.is_none() && config.provider == "codex" {
-        if let Some((provider_session_id, _updated_at)) = manager::latest_codex_session_index_entry(
-            &config.session_id,
-        )?
-        .filter(|(provider_session_id, _updated_at)| {
-            let cleared_provider_sessions = codex_cleared_provider_sessions(config);
-            codex_provider_session_is_new(provider_session_id, &cleared_provider_sessions)
-                && manager::codex_session_exists_in_agent_home(
-                    &config.session_id,
-                    provider_session_id,
-                )
-        }) {
-            config.resume_session = Some(provider_session_id);
-            clear_codex_cleared_provider_sessions(config);
-        }
-    }
-
-    if config.resume_session.is_none() {
-        let should_fallback = match config.provider.as_str() {
-            "opencode" => config.session_id.starts_with("ses_"),
-            "codex" | "antigravity" => false,
-            _ => true,
-        };
-        if should_fallback {
-            config.resume_session = Some(config.session_id.clone());
-        }
-    }
+    let resume_session = config
+        .resume_session
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} cannot resume without an exact provider session identity",
+                config.provider
+            )
+        })?;
+    let provider = config.provider.clone();
+    manager::apply_provider_identity(&provider, config, &resume_session)?;
+    config.is_off = false;
 
     Ok(())
 }
 
 pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Result<(), String> {
-    if manager::clear_credential_resume_session(config) {
-        manager::log_debug(
-            "[WARDIAN] Cleared a credential-valued provider resume session from restored state.",
-        );
-    }
-
     if config.is_off {
         return Ok(());
     }
@@ -1936,15 +1859,8 @@ pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Res
 
 fn prepare_resume_config_for_runtime(
     config: &mut AgentConfig,
-    query_count: usize,
+    _query_count: usize,
 ) -> Result<(), String> {
-    if config.provider == "gemini" && query_count == 0 && !config.is_off {
-        config.is_off = false;
-        config.resume_session = None;
-        config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
-        return Ok(());
-    }
-
     prepare_resume_config(config)
 }
 
@@ -1957,14 +1873,6 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
         config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
     }
     Ok(())
-}
-
-fn codex_provider_session_is_new(candidate: &str, excluded: &[String]) -> bool {
-    let candidate = candidate.trim();
-    !candidate.is_empty()
-        && !excluded
-            .iter()
-            .any(|session_id| session_id.trim() == candidate)
 }
 
 async fn is_name_unique(state: &AppState, name: &str, exclude_session_id: Option<&str>) -> bool {
@@ -1982,7 +1890,7 @@ async fn is_session_id_available(state: &AppState, session_id: &str) -> bool {
 
 async fn register_new_agent(
     mut config: AgentConfig,
-    mut actual_resume: Option<String>,
+    actual_resume: Option<String>,
     state: &AppState,
     app: &AppHandle,
     clone_name_base: Option<&str>,
@@ -1996,55 +1904,9 @@ async fn register_new_agent(
     ));
     let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
-    if config.provider == "codex" && actual_resume.is_none() {
-        for _ in 0..40 {
-            let live_provider_session_id = active_agent
-                .config
-                .lock()
-                .ok()
-                .and_then(|cfg| cfg.resume_session.clone())
-                .filter(|value| {
-                    value != &session_id
-                        && codex_provider_session_is_new(
-                            value,
-                            &codex_cleared_provider_sessions(&config),
-                        )
-                });
-            let provider_session_id = if live_provider_session_id.is_some() {
-                live_provider_session_id
-            } else {
-                manager::latest_codex_session_index_entry(&session_id)?
-                    .map(|(provider_session_id, _updated_at)| provider_session_id)
-                    .filter(|value| {
-                        codex_provider_session_is_new(
-                            value,
-                            &codex_cleared_provider_sessions(&config),
-                        )
-                    })
-            };
-
-            if let Some(provider_session_id) = provider_session_id {
-                actual_resume = Some(provider_session_id.clone());
-                config.resume_session = Some(provider_session_id.clone());
-                clear_codex_cleared_provider_sessions(&mut config);
-                {
-                    let mut cfg = active_agent.config.lock().unwrap();
-                    cfg.resume_session = Some(provider_session_id.clone());
-                    clear_codex_cleared_provider_sessions(&mut cfg);
-                }
-                manager::log_debug(&format!(
-                    "[WARDIAN] Adopted discovered Codex session for Wardian session {}",
-                    session_id
-                ));
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    }
-
-    let persisted_resume =
-        persisted_resume_session_for_provider(&config.provider, actual_resume.clone(), &session_id);
+    let persisted_resume = persisted_resume_session_for_provider(actual_resume);
     config.resume_session = persisted_resume.clone();
+    config.fresh_provider_session_id = None;
 
     {
         let mut cfg = active_agent.config.lock().unwrap();
@@ -2058,6 +1920,7 @@ async fn register_new_agent(
             }
         }
         cfg.resume_session = persisted_resume;
+        cfg.fresh_provider_session_id = None;
     }
 
     let mut agents = state.agents.lock().await;
@@ -2129,47 +1992,56 @@ pub async fn spawn_agent(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
-    let mut actual_resume = resume_session.clone().filter(|s| !s.is_empty());
-
-    let mut session_id = actual_resume.clone();
-
-    if actual_resume.is_none() {
-        if provider_uses_generated_session_id(&provider_name) {
-            session_id = Some(uuid::Uuid::new_v4().to_string());
-        } else {
-            let cwd = crate::utils::fs::resolve_cwd(&folder, "");
-
-            match manager::obtain_session_id(&cwd, Some(&agent_class), config_override.as_ref())
-                .await
-            {
-                Ok(real_sid) => {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] Discovered bootstrap session identity for {}.",
-                        provider_name
-                    ));
-                    // Properly set final_resume because manager::spawn_agent requires it to launch the persistent agent with --resume
-                    session_id = Some(real_sid.clone());
-                    actual_resume = Some(real_sid);
-                }
-                Err(e) => {
-                    release_spawn_name_reservation(&state, &session_name).await;
-                    return Err(format!("Failed to initialize the provider session: {}", e));
-                }
-            }
-        }
-    }
-
-    let session_id = session_id.ok_or_else(|| "Failed to determine session ID".to_string())?;
-
+    let identity = new_agent_identity_plan(&provider_name);
+    let session_id = identity.wardian_session_id;
     let mut config = config_override.unwrap_or_default();
     config.session_id = session_id.clone();
     config.session_name = session_name.clone();
     config.agent_class = agent_class.clone();
     config.folder = folder;
-    config.resume_session = actual_resume.clone();
+    config.resume_session = None;
+    config.fresh_provider_session_id = None;
     config.is_off = is_off.unwrap_or(false);
     config.normalize_provider_config_for_provider();
     config.mark_provider_config_nested_for_save();
+    let requested_resume = resume_session.filter(|value| !value.trim().is_empty());
+    let actual_resume =
+        if let Some(resume_session) = requested_resume {
+            config.resume_session = Some(resume_session.clone());
+            if let Err(error) =
+                manager::apply_provider_identity(&provider_name, &mut config, &resume_session)
+            {
+                release_spawn_name_reservation(&state, &session_name).await;
+                return Err(error);
+            }
+            Some(resume_session)
+        } else if let Some(fresh_provider_session_id) = identity.fresh_provider_session_id {
+            config.fresh_provider_session_id = Some(fresh_provider_session_id.clone());
+            Some(fresh_provider_session_id)
+        } else if identity.bootstrap_provider_session {
+            let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+            let provider_session_id =
+                match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
+                    .await
+                {
+                    Ok(provider_session_id) => provider_session_id,
+                    Err(error) => {
+                        release_spawn_name_reservation(&state, &session_name).await;
+                        return Err(format!(
+                            "Failed to initialize the provider session: {error}"
+                        ));
+                    }
+                };
+            if let Err(error) =
+                manager::apply_provider_identity(&provider_name, &mut config, &provider_session_id)
+            {
+                release_spawn_name_reservation(&state, &session_name).await;
+                return Err(error);
+            }
+            Some(provider_session_id)
+        } else {
+            None
+        };
     let registered = register_new_agent(
         config,
         actual_resume,
@@ -2251,7 +2123,19 @@ pub async fn clone_agent(
     );
     let provider_name = config.provider.clone();
     ensure_provider_available_before_session_bootstrap(&provider_name)?;
-    let mut actual_resume = None;
+    let identity = new_agent_identity_plan(&provider_name);
+    let session_id = identity.wardian_session_id;
+    config.session_id = session_id.clone();
+    config.resume_session = None;
+    config.fresh_provider_session_id = identity.fresh_provider_session_id.clone();
+
+    if !is_session_id_available(&state, &session_id).await {
+        return Err(format!(
+            "An agent with session ID '{}' already exists.",
+            session_id
+        ));
+    }
+
     let profile_home = if should_copy_profile {
         Some(
             crate::utils::fs::get_wardian_home()
@@ -2260,103 +2144,13 @@ pub async fn clone_agent(
     } else {
         None
     };
-    let provisional_profile_session_id = (profile_home.is_some()
-        && !provider_uses_generated_session_id(&provider_name))
-    .then(|| uuid::Uuid::new_v4().to_string());
     let mut created_profile_dirs = Vec::new();
 
-    let session_id = if provider_uses_generated_session_id(&provider_name) {
-        let generated_session_id = uuid::Uuid::new_v4().to_string();
-        config.session_id = generated_session_id.clone();
-        if let Some(home) = profile_home.as_ref() {
-            clone_ensure_profile_destination_available(home, &generated_session_id, None)?;
-            created_profile_dirs.push(home.join("agents").join(&generated_session_id));
-            if let Err(error) = clone_copy_profile_plan(
-                home,
-                &source_session_id,
-                &generated_session_id,
-                match profile_selection.as_ref() {
-                    Some(selection) => CloneProfileCopyPlan::Custom(selection),
-                    None => CloneProfileCopyPlan::Profile,
-                },
-            ) {
-                clone_cleanup_created_profile_dirs(&created_profile_dirs);
-                return Err(error);
-            }
-        }
-        generated_session_id
-    } else {
-        if let (Some(home), Some(provisional_session_id)) = (
-            profile_home.as_ref(),
-            provisional_profile_session_id.as_ref(),
-        ) {
-            config.session_id = provisional_session_id.clone();
-            clone_ensure_profile_destination_available(home, provisional_session_id, None)?;
-            created_profile_dirs.push(home.join("agents").join(provisional_session_id));
-            if let Err(error) = clone_copy_profile_plan(
-                home,
-                &source_session_id,
-                provisional_session_id,
-                match profile_selection.as_ref() {
-                    Some(selection) => CloneProfileCopyPlan::Custom(selection),
-                    None => CloneProfileCopyPlan::Profile,
-                },
-            ) {
-                clone_cleanup_created_profile_dirs(&created_profile_dirs);
-                return Err(error);
-            }
-            config.system_include_directories =
-                Some(crate::utils::fs::resolve_system_include_directories(
-                    &config.agent_class,
-                    provisional_session_id,
-                ));
-        }
-        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
-        let real_sid = manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
-            .await
-            .map_err(|e| {
-                clone_cleanup_created_profile_dirs(&created_profile_dirs);
-                format!("Failed to initialize the provider session: {}", e)
-            })?;
-        manager::log_debug(&format!(
-            "[WARDIAN] Discovered bootstrap clone session identity for {}.",
-            provider_name
-        ));
-        actual_resume = Some(real_sid.clone());
-        real_sid
-    };
-
-    config.session_id = session_id.clone();
-    config.resume_session = actual_resume.clone();
-
-    if !is_session_id_available(&state, &session_id).await {
-        clone_cleanup_created_profile_dirs(&created_profile_dirs);
-        return Err(format!(
-            "An agent with session ID '{}' already exists.",
-            session_id
-        ));
-    }
-
     if let Some(home) = profile_home.as_ref() {
-        let allowed_existing_profile_session_id =
-            if provider_uses_generated_session_id(&provider_name) {
-                Some(session_id.as_str())
-            } else {
-                provisional_profile_session_id.as_deref()
-            };
-        clone_ensure_profile_destination_available(
-            home,
-            &session_id,
-            allowed_existing_profile_session_id,
-        )
-        .inspect_err(|_| clone_cleanup_created_profile_dirs(&created_profile_dirs))?;
+        clone_ensure_profile_destination_available(home, &session_id, None)
+            .inspect_err(|_| clone_cleanup_created_profile_dirs(&created_profile_dirs))?;
         let final_profile_dir = home.join("agents").join(&session_id);
-        if !created_profile_dirs
-            .iter()
-            .any(|existing| existing == &final_profile_dir)
-        {
-            created_profile_dirs.push(final_profile_dir);
-        }
+        created_profile_dirs.push(final_profile_dir);
         if let Err(error) = clone_copy_profile_plan(
             home,
             &source_session_id,
@@ -2369,16 +2163,27 @@ pub async fn clone_agent(
             clone_cleanup_created_profile_dirs(&created_profile_dirs);
             return Err(error);
         }
-        if let Some(provisional_session_id) = provisional_profile_session_id
-            .as_deref()
-            .filter(|id| *id != session_id)
-        {
-            let provisional_root = home.join("agents").join(provisional_session_id);
-            clone_remove_existing_path(&provisional_root);
-            created_profile_dirs.retain(|dir| dir != &provisional_root);
-        }
         clone_refresh_profile_system_include_directories(&mut config, &session_id, true);
     }
+
+    let actual_resume = if let Some(fresh_provider_session_id) = identity.fresh_provider_session_id
+    {
+        Some(fresh_provider_session_id)
+    } else if identity.bootstrap_provider_session {
+        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+        let provider_session_id =
+            manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
+                .await
+                .map_err(|error| {
+                    clone_cleanup_created_profile_dirs(&created_profile_dirs);
+                    format!("Failed to initialize the provider session: {error}")
+                })?;
+        manager::apply_provider_identity(&provider_name, &mut config, &provider_session_id)
+            .inspect_err(|_| clone_cleanup_created_profile_dirs(&created_profile_dirs))?;
+        Some(provider_session_id)
+    } else {
+        None
+    };
 
     let registered = register_new_agent(
         config,
@@ -2608,10 +2413,6 @@ pub async fn pause_agent(
 
     manager::terminate_active_agent_process(&mut termination);
 
-    // For opencode: capture the real ses_xxx session ID from the log so
-    // resume can pass --session ses_xxx rather than the internal UUID.
-    capture_opencode_pause_resume_session(&termination);
-
     let state_snapshot = {
         let agents = state.agents.lock().await;
         let order = state.agent_order.lock().await;
@@ -2812,6 +2613,53 @@ async fn clear_agent_session_inner(
             "[WARDIAN] conversation archive lifecycle boundary failed for {session_id}: {error}"
         ));
     }
+
+    // Establish the fresh provider identity before touching the current runtime.
+    // If exact bootstrap evidence is unavailable, clear fails with the live agent intact.
+    let original_config = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(&session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        let config = agent.config.lock().unwrap().clone();
+        config
+    };
+    let previous_codex_provider_sessions = if original_config.provider == "codex" {
+        let mut sessions = codex_cleared_provider_sessions(&original_config);
+        if let Some(provider_session_id) = original_config
+            .resume_session
+            .clone()
+            .filter(|provider_session_id| !provider_session_id.trim().is_empty())
+        {
+            if !sessions
+                .iter()
+                .any(|existing| existing == &provider_session_id)
+            {
+                sessions.push(provider_session_id);
+            }
+        }
+        sessions
+    } else {
+        Vec::new()
+    };
+    let mut config = original_config;
+    prepare_clear_config(&mut config)?;
+    if config.provider == "codex" {
+        config
+            .codex_config_mut_preserve_encoding()
+            .cleared_provider_sessions = previous_codex_provider_sessions.clone();
+        config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
+    }
+    if provider_needs_obtain_session_id_on_clear(&config.provider) {
+        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
+        let new_provider_session_id =
+            manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
+                .await
+                .map_err(|error| format!("Failed to initialize the provider session: {error}"))?;
+        let provider = config.provider.clone();
+        manager::apply_provider_identity(&provider, &mut config, &new_provider_session_id)?;
+    }
+
     let mut prepared = {
         let mut agents = state.agents.lock().await;
         let Some(agent) = agents.get_mut(&session_id) else {
@@ -2834,69 +2682,6 @@ async fn clear_agent_session_inner(
         }
     }
     manager::terminate_active_agent_process(&mut prepared.termination);
-
-    // 2. Prepare fresh config (new provider session ID for Claude, clear resume IDs)
-    let mut config = prepared.config.clone();
-    let previous_codex_provider_sessions = if config.provider == "codex" {
-        let mut sessions = codex_cleared_provider_sessions(&config);
-        if let Some(session_id) = config
-            .resume_session
-            .clone()
-            .filter(|session_id| !session_id.trim().is_empty())
-        {
-            if !sessions.iter().any(|existing| existing == &session_id) {
-                sessions.push(session_id);
-            }
-        }
-        if let Some(session_id) = manager::latest_codex_session_index_entry(&config.session_id)
-            .ok()
-            .flatten()
-            .map(|(provider_session_id, _updated_at)| provider_session_id)
-            .filter(|session_id| !session_id.trim().is_empty())
-        {
-            if !sessions.iter().any(|existing| existing == &session_id) {
-                sessions.push(session_id);
-            }
-        }
-        sessions
-    } else {
-        Vec::new()
-    };
-    prepare_clear_config(&mut config)?;
-    if config.provider == "codex" {
-        config
-            .codex_config_mut_preserve_encoding()
-            .cleared_provider_sessions = previous_codex_provider_sessions.clone();
-        config.codex_cleared_provider_sessions = previous_codex_provider_sessions;
-    }
-
-    // For providers that bootstrap via obtain_session_id (e.g. Gemini), run the same
-    // bootstrap after clear so the fresh session gets a trackable provider session ID.
-    // Without this, resume_session stays None and log/status tracking breaks.
-    if provider_needs_obtain_session_id_on_clear(&config.provider) {
-        let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
-        match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config)).await {
-            Ok(new_session_id) if !new_session_id.is_empty() => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] clear_agent_session: discovered a fresh {} session identity.",
-                    config.provider
-                ));
-                config.resume_session = Some(new_session_id);
-            }
-            Ok(_) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] clear_agent_session: obtain_session_id returned empty ID for {}",
-                    config.provider
-                ));
-            }
-            Err(e) => {
-                manager::log_debug(&format!(
-                    "[WARDIAN] clear_agent_session: failed to obtain fresh {} session ID: {}",
-                    config.provider, e
-                ));
-            }
-        }
-    }
 
     let _ = app.emit(
         "agent-terminal-cleared",
@@ -3379,14 +3164,8 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(
-        session_id,
-        state,
-        app,
-        archive_snapshot,
-        lifecycle_guard,
-    )
-    .await
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
+        .await
 }
 
 async fn clear_agent_after_worktree_mutation(
@@ -3490,14 +3269,8 @@ pub async fn assign_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(
-        session_id,
-        state,
-        app,
-        archive_snapshot,
-        lifecycle_guard,
-    )
-    .await
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
+        .await
 }
 
 #[tauri::command]
@@ -3570,14 +3343,8 @@ pub async fn disable_agent_worktree(
         }
     }
 
-    clear_agent_after_worktree_mutation(
-        session_id,
-        state,
-        app,
-        archive_snapshot,
-        lifecycle_guard,
-    )
-    .await
+    clear_agent_after_worktree_mutation(session_id, state, app, archive_snapshot, lifecycle_guard)
+        .await
 }
 
 #[tauri::command]
@@ -3598,22 +3365,20 @@ pub async fn reorder_agents(
 mod tests {
     use super::{
         acquire_agent_lifecycle_guard, agent_status_update_payload, apply_agent_update_fields,
-        archive_agent_lifecycle_boundary,
-        archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
-        build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
-        build_agent_clone_preview, capture_opencode_pause_resume_session,
+        archive_agent_lifecycle_boundary, archive_agent_lifecycle_boundary_from_snapshot,
+        assign_worktree_config, build_agent_cli_command_for_session_id_with_shells,
+        build_agent_cli_command_with_shells, build_agent_clone_preview,
         capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
         clone_collect_eligible_file_tree, clone_copy_agent_profile_files, clone_copy_profile_plan,
         clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
         clone_sanitize_config, clone_unique_name, clone_validate_selected_agent_skills,
-        clone_validate_selected_profile_files, codex_provider_session_is_new,
-        collect_agent_worktrees, collect_agent_worktrees_with_discovered,
-        configured_new_agent_order_placement, conversation_boundary_for_clear_reason,
-        detach_agent_for_kill, disable_worktree_config, discover_git_worktrees_for_configs,
-        discover_git_worktrees_for_sources_with, enable_worktree_config,
-        ensure_existing_worktree_is_git_registered,
+        clone_validate_selected_profile_files, collect_agent_worktrees,
+        collect_agent_worktrees_with_discovered, configured_new_agent_order_placement,
+        conversation_boundary_for_clear_reason, detach_agent_for_kill, disable_worktree_config,
+        discover_git_worktrees_for_configs, discover_git_worktrees_for_sources_with,
+        enable_worktree_config, ensure_existing_worktree_is_git_registered,
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         flatten_clone_file_paths, generated_agent_name, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
@@ -3624,11 +3389,11 @@ mod tests {
         prepare_agent_for_clear, prepare_clear_config, prepare_restored_config_for_spawn,
         prepare_resume_config, prepare_resume_config_for_runtime,
         promote_fresh_provider_session_after_resume, provider_needs_obtain_session_id_on_clear,
-        provider_uses_generated_session_id, reserve_spawn_session_name,
-        resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_requested_spawn_session_name, restore_runtime_state_snapshot_after_resume,
-        strip_claude_embedded_stream_flags, restore_agent_config_in_state,
-        take_agent_runtime_for_termination, terminal_cleared_payload, update_agent_fields_in_state,
+        reserve_spawn_session_name, resolve_agent_worktree_branch_name,
+        resolve_agent_worktree_path, resolve_requested_spawn_session_name,
+        restore_agent_config_in_state, restore_runtime_state_snapshot_after_resume,
+        strip_claude_embedded_stream_flags, take_agent_runtime_for_termination,
+        terminal_cleared_payload, update_agent_fields_in_state,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
@@ -5227,13 +4992,9 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(error.contains("agent worktree"));
 
         let current_workspace = config.folder.clone();
-        let no_op_error = apply_agent_update_fields(
-            &mut config,
-            None,
-            Some(&current_workspace),
-            &[],
-        )
-        .expect_err("managed worktree no-op must still use worktree commands");
+        let no_op_error =
+            apply_agent_update_fields(&mut config, None, Some(&current_workspace), &[])
+                .expect_err("managed worktree no-op must still use worktree commands");
         assert!(no_op_error.contains("agent worktree"));
     }
 
@@ -5321,13 +5082,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .iter()
             .any(|path| path.replace('\\', "/").ends_with("/classes/Reviewer")));
 
-        let rollback_snapshot = restore_agent_config_in_state(
-            &state,
-            "agent-1",
-            outcome.previous_config.clone(),
-        )
-        .await
-        .expect("restore previous config");
+        let rollback_snapshot =
+            restore_agent_config_in_state(&state, "agent-1", outcome.previous_config.clone())
+                .await
+                .expect("restore previous config");
         assert_eq!(rollback_snapshot[0].agent_class, "Coder");
         assert_eq!(
             rollback_snapshot[0].folder,
@@ -6271,37 +6029,56 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn opencode_uses_generated_wardian_id_until_visible_pty_reports_provider_session() {
-        assert!(provider_uses_generated_session_id("opencode"));
+    fn opencode_uses_a_distinct_wardian_id_and_exact_bootstrap() {
+        let identity = super::new_agent_identity_plan("opencode");
+        assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
+        assert!(identity.bootstrap_provider_session);
+        assert!(identity.fresh_provider_session_id.is_none());
     }
 
     #[test]
-    fn claude_keeps_generated_session_ids() {
-        assert!(provider_uses_generated_session_id("claude"));
-        assert!(provider_uses_generated_session_id("codex"));
+    fn claude_uses_distinct_wardian_and_provider_ids() {
+        let identity = super::new_agent_identity_plan("claude");
+        assert_ne!(
+            Some(identity.wardian_session_id.as_str()),
+            identity.fresh_provider_session_id.as_deref()
+        );
+        assert!(!identity.bootstrap_provider_session);
     }
 
     #[test]
-    fn mock_uses_generated_session_id() {
-        assert!(provider_uses_generated_session_id("mock"));
+    fn mock_uses_only_a_wardian_session_id() {
+        let identity = super::new_agent_identity_plan("mock");
+        assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
+        assert!(identity.fresh_provider_session_id.is_none());
+        assert!(!identity.bootstrap_provider_session);
     }
 
     #[test]
-    fn gemini_uses_generated_wardian_id_until_visible_pty_reports_provider_session() {
-        assert!(provider_uses_generated_session_id("gemini"));
+    fn gemini_uses_distinct_wardian_and_provider_ids() {
+        let identity = super::new_agent_identity_plan("gemini");
+        assert_ne!(
+            Some(identity.wardian_session_id.as_str()),
+            identity.fresh_provider_session_id.as_deref()
+        );
+        assert!(!identity.bootstrap_provider_session);
     }
 
     #[test]
-    fn antigravity_uses_generated_wardian_id_until_transcript_reports_provider_session() {
-        assert!(provider_uses_generated_session_id("antigravity"));
+    fn antigravity_uses_a_distinct_wardian_id_and_exact_bootstrap() {
+        let identity = super::new_agent_identity_plan("antigravity");
+        assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
+        assert!(identity.bootstrap_provider_session);
+        assert!(identity.fresh_provider_session_id.is_none());
     }
 
     #[test]
-    fn gemini_clear_starts_visible_fresh_session_without_headless_bootstrap() {
+    fn clear_bootstraps_only_provider_owned_session_ids() {
         assert!(!provider_needs_obtain_session_id_on_clear("gemini"));
         assert!(!provider_needs_obtain_session_id_on_clear("claude"));
-        assert!(!provider_needs_obtain_session_id_on_clear("codex"));
-        assert!(!provider_needs_obtain_session_id_on_clear("opencode"));
+        assert!(provider_needs_obtain_session_id_on_clear("codex"));
+        assert!(provider_needs_obtain_session_id_on_clear("opencode"));
+        assert!(provider_needs_obtain_session_id_on_clear("antigravity"));
     }
 
     #[test]
@@ -6560,79 +6337,25 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn opencode_pause_captures_real_session_id_from_log() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log_path = temp.path().join("opencode.log");
-        std::fs::write(
-            &log_path,
-            "INFO service=session id=ses_old created\nINFO service=session id=ses_new created\n",
-        )
-        .expect("write opencode log");
-        let active = make_test_agent();
-        {
-            let mut config = active.config.lock().unwrap();
-            config.provider = "opencode".to_string();
-            config.resume_session = Some("stale-uuid".to_string());
-        }
-        *active.log_path.lock().unwrap() = Some(log_path);
-
-        capture_opencode_pause_resume_session(&active);
-
+    fn exact_provider_identity_is_persisted_after_initial_spawn() {
         assert_eq!(
-            active.config.lock().unwrap().resume_session.as_deref(),
-            Some("ses_new")
-        );
-    }
-
-    #[test]
-    fn opencode_pause_keeps_existing_real_session_id() {
-        let active = make_test_agent();
-        {
-            let mut config = active.config.lock().unwrap();
-            config.provider = "opencode".to_string();
-            config.resume_session = Some("ses_existing".to_string());
-        }
-
-        capture_opencode_pause_resume_session(&active);
-
-        assert_eq!(
-            active.config.lock().unwrap().resume_session.as_deref(),
-            Some("ses_existing")
-        );
-    }
-
-    #[test]
-    fn claude_persists_resume_session_after_initial_spawn() {
-        assert_eq!(
-            persisted_resume_session_for_provider("claude", None, "claude-session-1"),
+            persisted_resume_session_for_provider(Some("claude-session-1".to_string())),
             Some("claude-session-1".to_string())
         );
     }
 
     #[test]
-    fn gemini_persists_resume_session_after_initial_spawn() {
-        assert_eq!(
-            persisted_resume_session_for_provider("gemini", None, "gemini-session-1"),
-            Some("gemini-session-1".to_string())
-        );
-    }
-
-    #[test]
-    fn non_manual_session_providers_leave_resume_session_unchanged() {
-        assert_eq!(
-            persisted_resume_session_for_provider("codex", None, "codex-session-1"),
-            None
-        );
+    fn wardian_identity_is_never_substituted_for_missing_provider_identity() {
+        assert_eq!(persisted_resume_session_for_provider(None), None);
     }
 
     #[test]
     fn opencode_resume_sets_resume_session_and_clears_off() {
         let (_guard, _temp) = use_isolated_resume_setting();
-        // session_id already in ses_xxx format → resume_session inherits it
         let mut config = AgentConfig {
             provider: "opencode".to_string(),
-            session_id: "ses_test".to_string(),
-            resume_session: None,
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            resume_session: Some("ses_test".to_string()),
             is_off: true,
             ..Default::default()
         };
@@ -6656,10 +6379,11 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("exact OpenCode ID is required");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
@@ -6675,46 +6399,49 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("malformed OpenCode ID must fail");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn non_opencode_resume_clears_off_and_sets_resume_session() {
+    fn claude_resume_without_exact_provider_id_fails_unchanged() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "claude".to_string(),
-            session_id: "claude-session".to_string(),
+            session_id: "wardian-session".to_string(),
             resume_session: None,
             is_off: true,
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("exact Claude ID is required");
 
-        assert_eq!(config.resume_session.as_deref(), Some("claude-session"));
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn gemini_resume_without_recorded_resume_session_uses_manual_session_id() {
+    fn gemini_resume_without_recorded_provider_id_fails_unchanged() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "gemini".to_string(),
-            session_id: "gemini-session".to_string(),
+            session_id: "wardian-session".to_string(),
             resume_session: None,
             is_off: true,
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("exact Gemini ID is required");
 
-        assert_eq!(config.resume_session.as_deref(), Some("gemini-session"));
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
@@ -6729,11 +6456,37 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        let error = prepare_resume_config(&mut config)
+            .expect_err("resume without an exact Codex thread must fail");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert!(error.contains("exact provider session"));
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn new_manual_provider_identity_is_distinct_from_wardian_identity() {
+        let identity = super::new_agent_identity_plan("gemini");
+        let provider_id = identity
+            .fresh_provider_session_id
+            .as_deref()
+            .expect("Gemini must receive a caller-owned provider ID");
+
+        assert_ne!(identity.wardian_session_id, provider_id);
+        assert!(!identity.bootstrap_provider_session);
+        assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
+        assert!(uuid::Uuid::parse_str(provider_id).is_ok());
+    }
+
+    #[test]
+    fn new_codex_identity_requires_exact_provider_bootstrap() {
+        let identity = super::new_agent_identity_plan("codex");
+
+        assert!(identity.fresh_provider_session_id.is_none());
+        assert!(identity.bootstrap_provider_session);
+        assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
     }
 
     #[test]
@@ -6747,15 +6500,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("exact Antigravity ID is required");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn codex_resume_clears_stale_wardian_uuid_resume_session() {
+    fn codex_resume_rejects_stale_wardian_uuid_resume_session() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "codex".to_string(),
@@ -6765,15 +6519,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("Wardian UUID substitution must fail");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn codex_resume_clears_provider_thread_without_local_rollout_file() {
+    fn codex_resume_uses_exact_provider_thread_without_local_rollout_file() {
         let (_guard, temp) = use_isolated_resume_setting();
         let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
         let codex_home = temp
@@ -6793,7 +6548,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 
         prepare_resume_config(&mut config).expect("prepare resume config");
 
-        assert_eq!(config.resume_session, None);
+        assert_eq!(
+            config.resume_session.as_deref(),
+            Some("019e15ff-5793-7bf3-b2fe-3be0233e26b1")
+        );
         assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
@@ -6822,15 +6580,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("index discovery must not resume");
 
-        assert_eq!(config.resume_session, None);
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn codex_resume_recovers_provider_thread_id_from_projected_history() {
+    fn codex_resume_does_not_recover_provider_thread_id_from_projected_history() {
         let (_guard, temp) = use_isolated_resume_setting();
         let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
         let codex_home = temp
@@ -6865,13 +6624,11 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("history discovery must not resume");
 
-        assert_eq!(
-            config.resume_session.as_deref(),
-            Some("019db2f3-22de-7861-8bc6-1b86db1686db")
-        );
-        assert!(!config.is_off);
+        assert_eq!(config.resume_session, before.resume_session);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
@@ -6907,19 +6664,20 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("cleared history must not resume");
 
-        assert_eq!(config.resume_session, None);
+        assert_eq!(config.resume_session, before.resume_session);
         assert_eq!(
             config.codex_config().cleared_provider_sessions,
             vec![old_provider_session_id.to_string()]
         );
-        assert!(!config.is_off);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 
     #[test]
-    fn codex_resume_with_pending_clear_adopts_new_provider_thread() {
+    fn codex_resume_with_pending_clear_does_not_adopt_new_provider_thread() {
         let (_guard, temp) = use_isolated_resume_setting();
         let session_id = "22ff532b-007a-44c9-a4b4-9b7c0f546274";
         let old_provider_session_id = "019db2f3-22de-7861-8bc6-1b86db1686db";
@@ -6964,30 +6722,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        prepare_resume_config(&mut config).expect("prepare resume config");
+        let before = config.clone();
+        prepare_resume_config(&mut config).expect_err("history discovery must not resume");
 
+        assert_eq!(config.resume_session, before.resume_session);
         assert_eq!(
-            config.resume_session.as_deref(),
-            Some(new_provider_session_id)
+            config.codex_config().cleared_provider_sessions,
+            vec![old_provider_session_id.to_string()]
         );
-        assert!(config.codex_config().cleared_provider_sessions.is_empty());
-        assert!(!config.is_off);
+        assert_eq!(config.is_off, before.is_off);
         std::env::remove_var("WARDIAN_HOME");
-    }
-
-    #[test]
-    fn codex_clear_session_candidates_exclude_previous_provider_thread() {
-        let excluded = vec!["019db2f3-22de-7861-8bc6-1b86db1686db".to_string()];
-
-        assert!(!codex_provider_session_is_new("", &excluded));
-        assert!(!codex_provider_session_is_new(
-            "019db2f3-22de-7861-8bc6-1b86db1686db",
-            &excluded
-        ));
-        assert!(codex_provider_session_is_new(
-            "019db30f-12fc-7ef0-8faa-8d88703dc124",
-            &excluded
-        ));
     }
 
     #[test]
@@ -7032,8 +6776,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let remaining_agent_ids =
             std::collections::BTreeSet::from(["kept".to_string(), "other-kept".to_string()]);
 
-        let cleanup = DeletedAgentReferenceCleanup::run(temp.path(), &remaining_agent_ids)
-            .expect("cleanup");
+        let cleanup =
+            DeletedAgentReferenceCleanup::run(temp.path(), &remaining_agent_ids).expect("cleanup");
 
         assert!(cleanup.watchlists_changed);
         assert!(cleanup.topology_changed);
@@ -7332,8 +7076,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 
         let mut config = AgentConfig {
             provider: "claude".to_string(),
-            session_id: "claude-session".to_string(),
-            resume_session: None,
+            session_id: "wardian-session".to_string(),
+            resume_session: Some("claude-session".to_string()),
             session_persistence: AgentSessionPersistenceOverride::Resume,
             is_off: true,
             ..Default::default()
@@ -7382,8 +7126,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "gemini".to_string(),
-            session_id: "gemini-session".to_string(),
-            resume_session: None,
+            session_id: "wardian-session".to_string(),
+            resume_session: Some("gemini-session".to_string()),
             is_off: true,
             ..Default::default()
         };
@@ -7403,8 +7147,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "gemini".to_string(),
-            session_id: "gemini-session".to_string(),
-            resume_session: None,
+            session_id: "wardian-session".to_string(),
+            resume_session: Some("gemini-session".to_string()),
             is_off: false,
             ..Default::default()
         };
@@ -7469,7 +7213,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn gemini_empty_runtime_resume_starts_fresh_session() {
+    fn gemini_runtime_resume_keeps_exact_provider_session() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "gemini".to_string(),
@@ -7482,19 +7226,14 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         prepare_resume_config_for_runtime(&mut config, 0).expect("prepare resume config");
 
         assert_eq!(config.session_id, "wardian-agent-id");
-        assert_eq!(config.resume_session, None);
-        assert_ne!(
-            config.fresh_provider_session_id.as_deref(),
-            Some("wardian-agent-id")
-        );
-        assert_ne!(
-            config.fresh_provider_session_id.as_deref(),
+        assert_eq!(
+            config.resume_session.as_deref(),
             Some("gemini-provider-session")
         );
-        assert!(config.fresh_provider_session_id.is_some());
-        let args = GeminiProvider::new().get_spawn_args(&config, false);
-        assert!(args.contains(&"--session-id".to_string()));
-        assert!(!args.contains(&"--resume".to_string()));
+        assert_eq!(config.fresh_provider_session_id, None);
+        let args = GeminiProvider::new().get_spawn_args(&config, true);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"gemini-provider-session".to_string()));
         std::env::remove_var("WARDIAN_HOME");
     }
 

@@ -60,12 +60,12 @@ fn validate_config_for_launch_with_environment(
         config.resume_session.as_deref(),
         environment.clone(),
     )?;
-    if config.fresh_provider_session_id.as_deref().is_some_and(|value| {
-        value_matches_credentials(value, environment.clone())
-    }) {
-        return Err(
-            "provider session identity matches a credential environment value".to_string(),
-        );
+    if config
+        .fresh_provider_session_id
+        .as_deref()
+        .is_some_and(|value| value_matches_credentials(value, environment.clone()))
+    {
+        return Err("provider session identity matches a credential environment value".to_string());
     }
     Ok(())
 }
@@ -99,6 +99,11 @@ fn apply_provider_identity_with_environment(
             "{provider} session identity matches a credential environment value"
         ));
     }
+    if candidate == config.session_id.trim() {
+        return Err(format!(
+            "{provider} provider identity conflicts with the Wardian agent identity"
+        ));
+    }
 
     match provider {
         "claude" | "gemini" => {
@@ -106,7 +111,9 @@ fn apply_provider_identity_with_environment(
                 format!("{provider} session identity has no caller-owned expectation")
             })?;
             if candidate != expected {
-                return Err(format!("{provider} returned a conflicting session identity"));
+                return Err(format!(
+                    "{provider} returned a conflicting session identity"
+                ));
             }
             Ok(ProviderIdentityOutcome::Confirmed)
         }
@@ -141,7 +148,9 @@ fn capture_or_confirm_provider_identity(
         .filter(|value| !value.trim().is_empty())
     {
         if expected != candidate {
-            return Err(format!("{provider} returned a conflicting session identity"));
+            return Err(format!(
+                "{provider} returned a conflicting session identity"
+            ));
         }
         return Ok(ProviderIdentityOutcome::Confirmed);
     }
@@ -174,9 +183,10 @@ pub(crate) fn apply_provider_identity(
 }
 
 pub(crate) fn clear_credential_resume_session(config: &mut AgentConfig) -> bool {
-    config.resume_session.as_deref().is_some_and(|value| {
-        value_matches_credentials(value, std::env::vars_os())
-    })
+    config
+        .resume_session
+        .as_deref()
+        .is_some_and(|value| value_matches_credentials(value, std::env::vars_os()))
 }
 
 #[cfg(test)]
@@ -256,12 +266,7 @@ mod tests {
     fn claude_init_confirms_but_cannot_replace_expected_id() {
         let mut config = test_config("claude", Some("expected"), None);
         assert_eq!(
-            apply_provider_identity_with_environment(
-                "claude",
-                &mut config,
-                "expected",
-                Vec::new(),
-            ),
+            apply_provider_identity_with_environment("claude", &mut config, "expected", Vec::new(),),
             Ok(ProviderIdentityOutcome::Confirmed),
         );
 
@@ -319,15 +324,26 @@ mod tests {
         let expected = "019db2f3-22de-7861-8bc6-1b86db1686db";
         let candidate = "019db2f3-22de-7861-8bc6-1b86db1686dc";
         let mut config = test_config("codex", Some(expected), None);
-        let error = apply_provider_identity_with_environment(
-            "codex",
-            &mut config,
-            candidate,
-            Vec::new(),
-        )
-        .expect_err("conflicting Codex ID must fail");
+        let error =
+            apply_provider_identity_with_environment("codex", &mut config, candidate, Vec::new())
+                .expect_err("conflicting Codex ID must fail");
         assert!(!error.contains(candidate));
         assert_eq!(config.resume_session.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn provider_identity_cannot_equal_the_wardian_agent_uuid() {
+        let wardian_id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+        let mut config = test_config("codex", Some(wardian_id), None);
+        config.session_id = wardian_id.to_string();
+        let before = config.clone();
+
+        let error =
+            apply_provider_identity_with_environment("codex", &mut config, wardian_id, Vec::new())
+                .expect_err("Wardian identity substitution must fail");
+
+        assert!(!error.contains(wardian_id));
+        assert_eq!(config.resume_session, before.resume_session);
     }
 
     #[test]
