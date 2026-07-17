@@ -2,14 +2,14 @@
 
 use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::Emitter as _;
+use tauri::{Emitter as _, Manager as _};
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 use wardian_core::files::{
@@ -102,6 +102,7 @@ struct FileResourceRuntimeInner {
     max_ticket_snapshot_bytes: u64,
     events: broadcast::Sender<FileResourceEventV1>,
     app_handle: RwLock<Option<tauri::AppHandle>>,
+    agent_config_resolver: RwLock<CurrentAgentConfigResolver>,
     #[cfg(test)]
     issue_ticket_after_validation_hook: Mutex<Option<IssueTicketAfterValidationHook>>,
     #[cfg(test)]
@@ -110,6 +111,10 @@ struct FileResourceRuntimeInner {
     forced_refresh_error: Mutex<Option<FileResourceErrorV1>>,
     #[cfg(test)]
     open_after_entry_miss_hook: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    grant_eviction_before_lock_hook: Mutex<Option<GrantEvictionBeforeLockHook>>,
+    #[cfg(test)]
+    refresh_scan_count: AtomicU64,
 }
 
 #[cfg(test)]
@@ -125,6 +130,13 @@ struct TicketPublicationHook {
     pause_once: Arc<AtomicBool>,
     lease_published: Arc<tokio::sync::Barrier>,
     resume_publication: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct GrantEvictionBeforeLockHook {
+    reached: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
 }
 
 struct FileResourceEntry {
@@ -146,7 +158,7 @@ struct FileSubscriptionAccess {
 #[derive(Clone)]
 struct FileRefreshCandidate {
     subscription_id: String,
-    authorized: AuthorizedPath,
+    access: FileSubscriptionAccess,
 }
 
 #[derive(Clone)]
@@ -156,11 +168,105 @@ enum FileAccessClaim {
 }
 
 #[derive(Clone)]
+enum CurrentAgentConfigResolver {
+    OpeningSnapshots(Arc<StdMutex<HashMap<String, AgentConfig>>>),
+    AppState(tauri::AppHandle),
+}
+
+impl Default for CurrentAgentConfigResolver {
+    fn default() -> Self {
+        Self::OpeningSnapshots(Arc::new(StdMutex::new(HashMap::new())))
+    }
+}
+
+impl CurrentAgentConfigResolver {
+    fn observe_open(&self, agent_id: &str, config: &AgentConfig) {
+        let Self::OpeningSnapshots(configs) = self else {
+            return;
+        };
+        match configs.lock() {
+            Ok(mut configs) => {
+                configs.insert(agent_id.to_string(), config.clone());
+            }
+            Err(poisoned) => {
+                poisoned
+                    .into_inner()
+                    .insert(agent_id.to_string(), config.clone());
+            }
+        }
+    }
+
+    async fn resolve(&self, agent_id: &str) -> Result<AgentConfig, FileResourceErrorV1> {
+        match self {
+            Self::OpeningSnapshots(configs) => {
+                let configs = configs.lock().map_err(|_| {
+                    error(
+                        "runtime_unavailable",
+                        "standalone agent configuration lock is unavailable",
+                    )
+                })?;
+                configs.get(agent_id).cloned().ok_or_else(|| {
+                    error(
+                        "unauthorized_path",
+                        "agent authorization is no longer active",
+                    )
+                })
+            }
+            Self::AppState(app_handle) => {
+                let state = app_handle
+                    .try_state::<crate::state::AppState>()
+                    .ok_or_else(|| {
+                        error(
+                            "runtime_unavailable",
+                            "application state is unavailable for file authorization",
+                        )
+                    })?;
+                let config = {
+                    let agents = state.agents.lock().await;
+                    agents
+                        .get(agent_id)
+                        .map(|agent| agent.config.clone())
+                        .ok_or_else(|| {
+                            error(
+                                "unauthorized_path",
+                                "agent authorization is no longer active",
+                            )
+                        })?
+                };
+                let config = config.lock().map_err(|_| {
+                    error(
+                        "runtime_unavailable",
+                        "agent configuration lock is unavailable",
+                    )
+                })?;
+                Ok(config.clone())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn revoke_opening_snapshot(&self, agent_id: &str) {
+        let Self::OpeningSnapshots(configs) = self else {
+            panic!("test agent revocation requires the standalone resolver");
+        };
+        match configs.lock() {
+            Ok(mut configs) => {
+                configs.remove(agent_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(agent_id);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 struct UserFileGrant {
     canonical_path: String,
     authorized: AuthorizedPath,
     last_used_at: Instant,
     in_flight_uses: usize,
+    active_subscriptions: usize,
 }
 
 #[derive(Clone)]
@@ -285,6 +391,7 @@ impl FileResourceRuntime {
                 max_ticket_snapshot_bytes: MAX_TICKET_SNAPSHOT_BYTES,
                 events,
                 app_handle: RwLock::new(None),
+                agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
                 #[cfg(test)]
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -293,6 +400,10 @@ impl FileResourceRuntime {
                 forced_refresh_error: Mutex::new(None),
                 #[cfg(test)]
                 open_after_entry_miss_hook: Mutex::new(None),
+                #[cfg(test)]
+                grant_eviction_before_lock_hook: Mutex::new(None),
+                #[cfg(test)]
+                refresh_scan_count: AtomicU64::new(0),
             }),
         }
     }
@@ -321,19 +432,44 @@ impl FileResourceRuntime {
                 max_ticket_snapshot_bytes,
                 events,
                 app_handle: RwLock::new(None),
+                agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 ticket_publication_hook: Mutex::new(None),
                 forced_refresh_error: Mutex::new(None),
                 open_after_entry_miss_hook: Mutex::new(None),
+                grant_eviction_before_lock_hook: Mutex::new(None),
+                refresh_scan_count: AtomicU64::new(0),
             }),
         }
     }
 
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
+        match self.inner.agent_config_resolver.write() {
+            Ok(mut current) => {
+                *current = CurrentAgentConfigResolver::AppState(app_handle.clone());
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = CurrentAgentConfigResolver::AppState(app_handle.clone());
+            }
+        }
         match self.inner.app_handle.write() {
             Ok(mut current) => *current = Some(app_handle),
             Err(poisoned) => *poisoned.into_inner() = Some(app_handle),
         }
+    }
+
+    fn current_agent_config_resolver(&self) -> CurrentAgentConfigResolver {
+        self.inner
+            .agent_config_resolver
+            .read()
+            .map(|resolver| resolver.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    #[cfg(test)]
+    fn revoke_test_agent_config(&self, agent_id: &str) {
+        self.current_agent_config_resolver()
+            .revoke_opening_snapshot(agent_id);
     }
 
     #[must_use]
@@ -357,6 +493,8 @@ impl FileResourceRuntime {
         if let Some(app_handle) = app_handle {
             self.attach_app_handle(app_handle);
         }
+        self.current_agent_config_resolver()
+            .observe_open(agent_id, config);
         let roots = AuthorizedRootService::from_agent_config(config)?;
         let authorized = roots.authorize_existing_file(path)?;
         self.open_authorized(
@@ -433,21 +571,29 @@ impl FileResourceRuntime {
                 "selected path changed while its exact capability was being opened",
             ));
         }
-        {
+        let current_grant = {
             let mut grants = self.inner.user_file_grants.lock().await;
-            let current = grants
-                .get_mut(capability_id)
-                .ok_or_else(|| error("unauthorized_path", "user file capability was revoked"))?;
-            if current.canonical_path != requested {
-                return Err(error(
+            match grants.get_mut(capability_id) {
+                Some(current) if current.canonical_path == requested => {
+                    if current.authorized.requested_path() == authorized.requested_path() {
+                        current.authorized = authorized.clone();
+                    }
+                    current.last_used_at = Instant::now();
+                    Ok(())
+                }
+                Some(_) => Err(error(
                     "unauthorized_path",
                     "user file capability changed while it was being opened",
-                ));
+                )),
+                None => Err(error(
+                    "unauthorized_path",
+                    "user file capability was revoked",
+                )),
             }
-            if current.authorized.requested_path() == authorized.requested_path() {
-                current.authorized = authorized.clone();
-            }
-            current.last_used_at = Instant::now();
+        };
+        if let Err(error) = current_grant {
+            self.finish_user_grant_open(capability_id, None).await;
+            return Err(error);
         }
         let result = self
             .open_authorized(
@@ -471,6 +617,7 @@ impl FileResourceRuntime {
         if let Some(grant) = grants.get_mut(capability_id) {
             grant.in_flight_uses = grant.in_flight_uses.saturating_sub(1);
             if let Some(authorized) = authorized {
+                grant.active_subscriptions = grant.active_subscriptions.saturating_add(1);
                 if grant.authorized.requested_path() == authorized.requested_path() {
                     grant.authorized = authorized;
                 }
@@ -484,17 +631,19 @@ impl FileResourceRuntime {
         canonical_path: String,
         authorized: AuthorizedPath,
     ) -> Result<String, FileResourceErrorV1> {
-        let active_capabilities = {
-            let entries = self.inner.entries.lock().await;
-            entries
-                .values()
-                .flat_map(|entry| entry.subscribers.values())
-                .filter_map(|access| match &access.claim {
-                    FileAccessClaim::User { capability_id } => Some(capability_id.clone()),
-                    FileAccessClaim::Agent { .. } => None,
-                })
-                .collect::<HashSet<_>>()
+        #[cfg(test)]
+        let grant_eviction_before_lock_hook = {
+            self.inner
+                .grant_eviction_before_lock_hook
+                .lock()
+                .await
+                .clone()
         };
+        #[cfg(test)]
+        if let Some(hook) = grant_eviction_before_lock_hook {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
         let now = Instant::now();
         let mut grants = self.inner.user_file_grants.lock().await;
         if let Some((capability_id, existing)) = grants
@@ -509,9 +658,7 @@ impl FileResourceRuntime {
         if grants.len() >= self.inner.max_user_file_grants {
             let evict = grants
                 .iter()
-                .filter(|(capability_id, grant)| {
-                    grant.in_flight_uses == 0 && !active_capabilities.contains(*capability_id)
-                })
+                .filter(|(_, grant)| grant.in_flight_uses == 0 && grant.active_subscriptions == 0)
                 .min_by_key(|(_, grant)| grant.last_used_at)
                 .map(|(capability_id, _)| capability_id.clone());
             let Some(evict) = evict else {
@@ -531,6 +678,7 @@ impl FileResourceRuntime {
                 authorized,
                 last_used_at: now,
                 in_flight_uses: 0,
+                active_subscriptions: 0,
             },
         );
         Ok(capability_id)
@@ -599,6 +747,7 @@ impl FileResourceRuntime {
         {
             let mut entries = self.inner.entries.lock().await;
             if let Some(entry) = entries.get_mut(&resource_id) {
+                let incarnation_id = entry.incarnation_id;
                 entry.subscribers.insert(
                     subscription_id.clone(),
                     FileSubscriptionAccess { claim, authorized },
@@ -614,7 +763,8 @@ impl FileResourceRuntime {
                     .subscription_resources
                     .lock()
                     .await
-                    .insert(subscription_id, resource_id);
+                    .insert(subscription_id, resource_id.clone());
+                self.schedule_refresh_for_incarnation(resource_id, incarnation_id);
                 return Ok(result);
             }
         }
@@ -637,19 +787,23 @@ impl FileResourceRuntime {
         )?;
         let snapshot = verified_snapshot(authorized.clone(), self.inner.limits.clone()).await?;
         let (descriptor, revision_token) = snapshot.into_parts();
-        let result = {
+        let (result, existing_incarnation_id) = {
             let mut entries = self.inner.entries.lock().await;
             if let Some(entry) = entries.get_mut(&resource_id) {
+                let existing_incarnation_id = entry.incarnation_id;
                 entry.subscribers.insert(
                     subscription_id.clone(),
                     FileSubscriptionAccess { claim, authorized },
                 );
-                FileResourceSnapshotV1 {
-                    resource_id: resource_id.clone(),
-                    subscription_id: subscription_id.clone(),
-                    revision: entry.revision,
-                    descriptor: entry.descriptor.clone(),
-                }
+                (
+                    FileResourceSnapshotV1 {
+                        resource_id: resource_id.clone(),
+                        subscription_id: subscription_id.clone(),
+                        revision: entry.revision,
+                        descriptor: entry.descriptor.clone(),
+                    },
+                    Some(existing_incarnation_id),
+                )
             } else {
                 let mut subscribers = HashMap::new();
                 subscribers.insert(
@@ -668,12 +822,15 @@ impl FileResourceRuntime {
                         debounce_generation: 0,
                     },
                 );
-                FileResourceSnapshotV1 {
-                    resource_id: resource_id.clone(),
-                    subscription_id: subscription_id.clone(),
-                    revision: 1,
-                    descriptor,
-                }
+                (
+                    FileResourceSnapshotV1 {
+                        resource_id: resource_id.clone(),
+                        subscription_id: subscription_id.clone(),
+                        revision: 1,
+                        descriptor,
+                    },
+                    None,
+                )
             }
         };
         self.inner
@@ -681,7 +838,9 @@ impl FileResourceRuntime {
             .lock()
             .await
             .insert(subscription_id.clone(), resource_id.clone());
-        if pending_event.swap(false, Ordering::AcqRel) {
+        if let Some(existing_incarnation_id) = existing_incarnation_id {
+            self.schedule_refresh_for_incarnation(resource_id, existing_incarnation_id);
+        } else if pending_event.swap(false, Ordering::AcqRel) {
             self.schedule_refresh_for_incarnation(resource_id, incarnation_id);
         }
         Ok(result)
@@ -776,13 +935,14 @@ impl FileResourceRuntime {
                 .iter()
                 .map(|(subscription_id, access)| FileRefreshCandidate {
                     subscription_id: subscription_id.clone(),
-                    authorized: access.authorized.clone(),
+                    access: access.clone(),
                 })
                 .collect::<Vec<_>>();
             candidates.sort_by(|left, right| {
-                left.authorized
+                left.access
+                    .authorized
                     .requested_path()
-                    .cmp(right.authorized.requested_path())
+                    .cmp(right.access.authorized.requested_path())
                     .then_with(|| left.subscription_id.cmp(&right.subscription_id))
             });
             candidates
@@ -798,13 +958,22 @@ impl FileResourceRuntime {
 
         let mut first_failure = None;
         let mut refreshed = None;
+        let mut refreshed_authorizations = HashMap::new();
         for candidate in &candidates {
-            match self
-                .refresh_from_authorization(candidate.authorized.clone())
-                .await
-            {
+            let authorized = match self.validate_refresh_candidate(&candidate.access).await {
+                Ok(authorized) => authorized,
+                Err(failure) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(failure);
+                    }
+                    continue;
+                }
+            };
+            refreshed_authorizations.insert(candidate.subscription_id.clone(), authorized.clone());
+            match self.refresh_from_authorization(authorized).await {
                 Ok((authorized, snapshot)) => {
-                    refreshed = Some((candidate.subscription_id.clone(), authorized, snapshot));
+                    refreshed_authorizations.insert(candidate.subscription_id.clone(), authorized);
+                    refreshed = Some(snapshot);
                     break;
                 }
                 Err(failure) => {
@@ -814,7 +983,7 @@ impl FileResourceRuntime {
                 }
             }
         }
-        let Some((winning_subscription_id, winning_authorized, snapshot)) = refreshed else {
+        let Some(snapshot) = refreshed else {
             let failure = first_failure.unwrap_or_else(|| {
                 error(
                     "unavailable_path",
@@ -832,25 +1001,6 @@ impl FileResourceRuntime {
             return;
         };
         let (descriptor, revision_token) = snapshot.into_parts();
-        let refreshed_authorizations = candidates
-            .iter()
-            .filter_map(|candidate| {
-                if candidate.subscription_id == winning_subscription_id {
-                    return Some((
-                        candidate.subscription_id.clone(),
-                        winning_authorized.clone(),
-                    ));
-                }
-                candidate
-                    .authorized
-                    .reauthorize_same_target()
-                    .ok()
-                    .filter(|authorized| {
-                        authorized.canonical_path == Path::new(&descriptor.canonical_path)
-                    })
-                    .map(|authorized| (candidate.subscription_id.clone(), authorized))
-            })
-            .collect::<HashMap<_, _>>();
         let application = {
             let mut entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get_mut(resource_id) else {
@@ -922,6 +1072,55 @@ impl FileResourceRuntime {
         }
     }
 
+    async fn validate_refresh_candidate(
+        &self,
+        access: &FileSubscriptionAccess,
+    ) -> Result<AuthorizedPath, FileResourceErrorV1> {
+        let rebound = access.authorized.reauthorize_same_target()?;
+        match &access.claim {
+            FileAccessClaim::Agent { agent_id } => {
+                let config = self
+                    .current_agent_config_resolver()
+                    .resolve(agent_id)
+                    .await?;
+                if &config.session_id != agent_id {
+                    return Err(error(
+                        "unauthorized_path",
+                        "current agent authorization does not match the subscription",
+                    ));
+                }
+                let current = AuthorizedRootService::from_agent_config(&config)?
+                    .authorize_existing_file(access.authorized.requested_path())?;
+                if current.canonical_path != access.authorized.canonical_path {
+                    return Err(error(
+                        "unauthorized_path",
+                        "current agent authorization resolves to another file",
+                    ));
+                }
+                Ok(current)
+            }
+            FileAccessClaim::User { capability_id } => {
+                let expected = access.authorized.canonical_path.to_str().ok_or_else(|| {
+                    error(
+                        "unavailable_path",
+                        "canonical path cannot be represented losslessly as UTF-8",
+                    )
+                })?;
+                let grants = self.inner.user_file_grants.lock().await;
+                let grant = grants.get(capability_id).ok_or_else(|| {
+                    error("unauthorized_path", "user file capability was revoked")
+                })?;
+                if grant.canonical_path != expected {
+                    return Err(error(
+                        "unauthorized_path",
+                        "user file capability does not match the resource",
+                    ));
+                }
+                Ok(rebound)
+            }
+        }
+    }
+
     async fn refresh_from_authorization(
         &self,
         authorized: AuthorizedPath,
@@ -946,6 +1145,8 @@ impl FileResourceRuntime {
         &self,
         authorized: AuthorizedPath,
     ) -> Result<VerifiedFileSnapshot, FileResourceErrorV1> {
+        #[cfg(test)]
+        self.inner.refresh_scan_count.fetch_add(1, Ordering::AcqRel);
         #[cfg(test)]
         if let Some(error) = self.inner.forced_refresh_error.lock().await.take() {
             return Err(error);
@@ -1023,14 +1224,41 @@ impl FileResourceRuntime {
         let Some(resource_id) = resource_id else {
             return Ok(());
         };
-        let mut entries = self.inner.entries.lock().await;
-        if let Some(entry) = entries.get_mut(&resource_id) {
-            entry.subscribers.remove(subscription_id);
-            if entry.subscribers.is_empty() {
+        let (removed_access, remaining_incarnation_id) = {
+            let mut entries = self.inner.entries.lock().await;
+            let removed_access = entries
+                .get_mut(&resource_id)
+                .and_then(|entry| entry.subscribers.remove(subscription_id));
+            let entry_became_empty = entries
+                .get(&resource_id)
+                .is_some_and(|entry| entry.subscribers.is_empty());
+            let remaining_incarnation_id = entries
+                .get(&resource_id)
+                .filter(|entry| !entry.subscribers.is_empty())
+                .map(|entry| entry.incarnation_id);
+            if entry_became_empty {
                 entries.remove(&resource_id);
             }
+            (removed_access, remaining_incarnation_id)
+        };
+        if let Some(FileSubscriptionAccess {
+            claim: FileAccessClaim::User { capability_id },
+            ..
+        }) = removed_access
+        {
+            if let Some(grant) = self
+                .inner
+                .user_file_grants
+                .lock()
+                .await
+                .get_mut(&capability_id)
+            {
+                grant.active_subscriptions = grant.active_subscriptions.saturating_sub(1);
+            }
         }
-        drop(entries);
+        if let Some(incarnation_id) = remaining_incarnation_id {
+            self.schedule_refresh_for_incarnation(resource_id.clone(), incarnation_id);
+        }
         self.inner
             .read_tickets
             .lock()
@@ -2084,6 +2312,298 @@ mod tests {
             .await
             .expect("close direct subscription");
         assert_eq!(runtime.watcher_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn valid_direct_join_recovers_alias_only_unavailable_without_file_event() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-current");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "stable\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let mut events = runtime.subscribe_events();
+        let alias = runtime
+            .open_agent_file("agent-a", &config, &alias_path, None)
+            .await
+            .expect("open alias");
+
+        remove_directory_link(&alias_dir);
+        runtime.schedule_refresh(alias.resource_id.clone());
+        let unavailable = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("alias unavailable timeout")
+            .expect("alias unavailable event");
+        assert_eq!(
+            unavailable.descriptor.unavailable_reason.as_deref(),
+            Some("unauthorized_path")
+        );
+
+        let direct = runtime
+            .open_agent_file("agent-a", &config, &canonical_path, None)
+            .await
+            .expect("join valid direct subscription");
+        assert_eq!(direct.revision, unavailable.revision);
+        assert_eq!(
+            direct.descriptor.unavailable_reason.as_deref(),
+            Some("unauthorized_path")
+        );
+        let recovered = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("membership recovery timeout")
+            .expect("membership recovery event");
+        assert_eq!(recovered.revision, unavailable.revision + 1);
+        assert_eq!(recovered.descriptor.unavailable_reason, None);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &direct.resource_id,
+                    &direct.subscription_id,
+                    recovered.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("direct subscription reads recovered revision")
+                .text,
+            "stable\n"
+        );
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "membership recovery must not schedule an infinite refresh loop"
+        );
+
+        runtime
+            .close(&alias.subscription_id)
+            .await
+            .expect("close alias");
+        runtime
+            .close(&direct.subscription_id)
+            .await
+            .expect("close direct");
+    }
+
+    #[tokio::test]
+    async fn closing_last_valid_candidate_marks_invalid_only_resource_unavailable_once() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-current");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "stable\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let alias = runtime
+            .open_agent_file("agent-a", &config, &alias_path, None)
+            .await
+            .expect("open alias");
+        let direct = runtime
+            .open_agent_file("agent-a", &config, &canonical_path, None)
+            .await
+            .expect("open direct");
+        let original_hash = direct.descriptor.content_hash.clone();
+        let mut events = runtime.subscribe_events();
+
+        remove_directory_link(&alias_dir);
+        runtime
+            .close(&direct.subscription_id)
+            .await
+            .expect("close last valid candidate");
+        let unavailable = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("membership unavailable timeout")
+            .expect("membership unavailable event");
+        assert_eq!(unavailable.revision, direct.revision + 1);
+        assert_eq!(unavailable.descriptor.content_hash, original_hash);
+        assert_eq!(
+            unavailable.descriptor.unavailable_reason.as_deref(),
+            Some("unauthorized_path")
+        );
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "invalid-only membership must settle after one unavailable revision"
+        );
+
+        runtime
+            .close(&alias.subscription_id)
+            .await
+            .expect("close invalid alias");
+        assert_eq!(runtime.watcher_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn revoked_agent_candidate_is_skipped_before_valid_picker_refresh_scan() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-agent");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "revision one\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let agent = runtime
+            .open_agent_file("agent-a", &config, &alias_path, None)
+            .await
+            .expect("open agent alias");
+        let grant = runtime
+            .record_user_file(&canonical_path)
+            .await
+            .expect("picker grant");
+        let picker = runtime
+            .open_user_file(&grant.capability_id, &canonical_path, None)
+            .await
+            .expect("open picker direct");
+        let initial_hash = picker.descriptor.content_hash.clone();
+        runtime.revoke_test_agent_config("agent-a");
+        let scans_before = runtime.inner.refresh_scan_count.load(Ordering::Acquire);
+        let mut events = runtime.subscribe_events();
+
+        fs::write(&canonical_path, "revision two\n").expect("updated fixture");
+        runtime.schedule_refresh(picker.resource_id.clone());
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("picker fallback timeout")
+            .expect("picker fallback event");
+        assert_eq!(event.descriptor.unavailable_reason, None);
+        assert_ne!(event.descriptor.content_hash, initial_hash);
+        assert_eq!(
+            runtime.inner.refresh_scan_count.load(Ordering::Acquire),
+            scans_before + 1,
+            "revoked agent candidate must be rejected before descriptor scanning"
+        );
+        assert_eq!(
+            runtime
+                .read_text(
+                    &picker.resource_id,
+                    &picker.subscription_id,
+                    event.revision,
+                    None,
+                )
+                .await
+                .expect("picker reads refreshed revision")
+                .text,
+            "revision two\n"
+        );
+
+        runtime
+            .close(&agent.subscription_id)
+            .await
+            .expect("close revoked agent");
+        runtime
+            .close(&picker.subscription_id)
+            .await
+            .expect("close picker");
+    }
+
+    #[tokio::test]
+    async fn revoked_picker_candidate_is_skipped_before_valid_agent_refresh_scan() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let canonical_dir = temp.path().join("z-approved");
+        let alias_dir = temp.path().join("a-picker");
+        fs::create_dir(&canonical_dir).expect("canonical directory");
+        create_directory_link(&canonical_dir, &alias_dir);
+        let canonical_path = canonical_dir.join("shared.txt");
+        let alias_path = alias_dir.join("shared.txt");
+        fs::write(&canonical_path, "revision one\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let grant = runtime
+            .record_user_file(&alias_path)
+            .await
+            .expect("picker grant");
+        let picker = runtime
+            .open_user_file(&grant.capability_id, &alias_path, None)
+            .await
+            .expect("open picker alias");
+        let agent = runtime
+            .open_agent_file("agent-a", &config, &canonical_path, None)
+            .await
+            .expect("open agent direct");
+        let initial_hash = agent.descriptor.content_hash.clone();
+        runtime
+            .inner
+            .user_file_grants
+            .lock()
+            .await
+            .remove(&grant.capability_id);
+        let scans_before = runtime.inner.refresh_scan_count.load(Ordering::Acquire);
+        let mut events = runtime.subscribe_events();
+
+        fs::write(&canonical_path, "revision two\n").expect("updated fixture");
+        runtime.schedule_refresh(agent.resource_id.clone());
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("agent fallback timeout")
+            .expect("agent fallback event");
+        assert_eq!(event.descriptor.unavailable_reason, None);
+        assert_ne!(event.descriptor.content_hash, initial_hash);
+        assert_eq!(
+            runtime.inner.refresh_scan_count.load(Ordering::Acquire),
+            scans_before + 1,
+            "revoked picker candidate must be rejected before descriptor scanning"
+        );
+
+        runtime
+            .close(&picker.subscription_id)
+            .await
+            .expect("close revoked picker");
+        runtime
+            .close(&agent.subscription_id)
+            .await
+            .expect("close agent");
+    }
+
+    #[tokio::test]
+    async fn invalid_only_live_claim_preserves_prior_hash_without_descriptor_scan() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("shared.txt");
+        fs::write(&path, "revision one\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let agent = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open agent file");
+        let initial_hash = agent.descriptor.content_hash.clone();
+        runtime.revoke_test_agent_config("agent-a");
+        let scans_before = runtime.inner.refresh_scan_count.load(Ordering::Acquire);
+        let mut events = runtime.subscribe_events();
+
+        fs::write(&path, "revision two\n").expect("updated fixture");
+        runtime.schedule_refresh(agent.resource_id.clone());
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("invalid-only timeout")
+            .expect("invalid-only event");
+        assert_eq!(event.descriptor.content_hash, initial_hash);
+        assert_eq!(
+            event.descriptor.unavailable_reason.as_deref(),
+            Some("unauthorized_path")
+        );
+        assert_eq!(
+            runtime.inner.refresh_scan_count.load(Ordering::Acquire),
+            scans_before,
+            "invalid-only authority must not scan or publish the changed hash"
+        );
+        sleep(Duration::from_millis(500)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "invalid-only refresh must settle"
+        );
+
+        runtime
+            .close(&agent.subscription_id)
+            .await
+            .expect("close revoked agent");
     }
 
     #[tokio::test]
@@ -3217,6 +3737,74 @@ mod tests {
             .snapshot(&active_third.resource_id)
             .await
             .expect("remaining active grant is retained");
+    }
+
+    #[tokio::test]
+    async fn active_picker_subscription_cannot_be_evicted_after_membership_interleaving() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let first_path = temp.path().join("first.txt");
+        let second_path = temp.path().join("second.txt");
+        fs::write(&first_path, "first\n").expect("first fixture");
+        fs::write(&second_path, "second\n").expect("second fixture");
+        let runtime = FileResourceRuntime::with_test_limits(
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+            1,
+            MAX_TICKET_SNAPSHOT_BYTES,
+        );
+        let first = runtime
+            .record_user_file(&first_path)
+            .await
+            .expect("first grant");
+        let hook = GrantEvictionBeforeLockHook {
+            reached: Arc::new(tokio::sync::Barrier::new(2)),
+            resume: Arc::new(tokio::sync::Barrier::new(2)),
+        };
+        *runtime.inner.grant_eviction_before_lock_hook.lock().await = Some(hook.clone());
+
+        let competing_selection = {
+            let runtime = runtime.clone();
+            let second_path = second_path.clone();
+            tokio::spawn(async move { runtime.record_user_file(&second_path).await })
+        };
+        hook.reached.wait().await;
+        let active = runtime
+            .open_user_file(&first.capability_id, &first_path, None)
+            .await
+            .expect("open first grant during eviction window");
+        {
+            let grants = runtime.inner.user_file_grants.lock().await;
+            let grant = grants
+                .get(&first.capability_id)
+                .expect("active first capability");
+            assert_eq!(grant.in_flight_uses, 0);
+            assert_eq!(grant.active_subscriptions, 1);
+        }
+        hook.resume.wait().await;
+        let selection_error = competing_selection
+            .await
+            .expect("competing selection task")
+            .expect_err("live subscription must make the only grant ineligible for eviction");
+        assert_eq!(selection_error.code(), "grant_limit_reached");
+        assert!(
+            runtime
+                .inner
+                .user_file_grants
+                .lock()
+                .await
+                .contains_key(&first.capability_id),
+            "authoritative activity must retain the first capability"
+        );
+
+        *runtime.inner.grant_eviction_before_lock_hook.lock().await = None;
+        runtime
+            .close(&active.subscription_id)
+            .await
+            .expect("close active subscription");
+        runtime
+            .record_user_file(&second_path)
+            .await
+            .expect("closed grant becomes evictable");
     }
 
     #[tokio::test]

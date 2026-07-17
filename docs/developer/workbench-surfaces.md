@@ -201,7 +201,9 @@ The Rust lifecycle is:
 1. `open_file_resource` canonicalizes and authorizes the path, creates a
    subscription, and shares one watcher per canonical file. Each subscription
    retains its own access claim and exact requested-path authorization; the
-   shared resource never lends one subscriber's provenance to another.
+   shared resource never lends one subscriber's provenance to another. Joining
+   an existing resource schedules availability reconciliation even when no file
+   event occurred.
 2. A stable content change is debounced for 150 ms, becomes the next monotonic
    revision, and emits `file-resource://revision`. An unchanged hash emits
    nothing. Atomic replacement is accepted only when the original requested
@@ -210,7 +212,10 @@ The Rust lifecycle is:
    requested-path and subscription-ID order. A failed alias candidate cannot
    poison a valid direct candidate, and a typed unavailable revision is
    published only when every active candidate fails. Persistent unreadable or
-   unstable scans recover through the same revision stream.
+   unstable scans recover through the same revision stream. Before any content
+   scan, agent candidates resolve their live configuration from backend
+   `AppState`, picker candidates prove their exact capability is still live,
+   and both revalidate the subscription's original requested pathname.
 3. Text reads are bound to the subscription and current revision. Image/PDF
    streams require a short-lived ticket bound to the subscription, WebView,
    renderer lease, and revision. Renderer calls carry the exact owning
@@ -221,6 +226,8 @@ The Rust lifecycle is:
 4. `close_file_renderer_lease` revokes that renderer's tickets without closing
    another pane's subscription. `close_file_resource` releases one
    subscription; the watcher disappears only after the last subscriber closes.
+   A close that leaves subscribers schedules reconciliation so removing the
+   last valid candidate cannot leave an invalid-only resource marked available.
    Ticket deadlines proactively reclaim abandoned snapshot storage and the
    matching lease. Issuance IDs prevent an older expiry task from revoking a
    newer ticket that reused the same renderer lease ID.
@@ -233,7 +240,9 @@ junction escapes are denied. A saved Workbench document cannot restore access
 that the backend no longer grants. If an alias and a direct pathname share one
 canonical resource, removing or retargeting the alias revokes only subscriptions
 opened through that alias; direct subscriptions retain reads, tickets, refresh,
-and the shared watcher.
+and the shared watcher. Picker-grant eviction uses grant-local in-flight and
+active-subscription counts under one mutex, so a concurrent open cannot become
+evictable between a stale membership snapshot and grant selection.
 
 Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
 5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for

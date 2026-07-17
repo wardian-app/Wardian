@@ -34,6 +34,13 @@ additional directories. Picker access remains an exact live capability; grant
 deduplication by canonical target does not widen either subscription's retained
 pathname.
 
+Refresh uses the same live-claim boundary before it reads content. In the
+desktop runtime, agent configuration is resolved from the AppHandle's managed
+`AppState`; a removed agent or changed root cannot drive a descriptor or hash
+revision. Picker candidates must still have their exact backend capability.
+Revoked candidates fall through without scanning, and a later valid candidate
+may refresh the shared resource.
+
 Refresh tries active subscription authorizations in deterministic requested-
 path and subscription-ID order. A valid candidate may refresh the one shared
 descriptor and revision. Editor-style atomic replacement is reauthorized only
@@ -46,7 +53,18 @@ active candidate fails.
 If subscriptions change while a refresh is scanning, Wardian discards that
 application and schedules a fresh pass. Closing a subscription removes only its
 claim and authorization provenance; the canonical watcher closes after the last
-subscriber.
+subscriber. Joining an existing resource and closing a subscription while
+others remain both schedule debounced reconciliation. This recovers an
+alias-only unavailable descriptor when a valid direct subscriber joins, and
+marks the resource unavailable after its last valid candidate closes, without
+depending on a filesystem event.
+
+Picker capabilities keep `in_flight_uses` and `active_subscriptions` in the
+same grant record and under the same mutex used for eviction. A successful open
+atomically transitions one in-flight use into one active subscription. Close
+removes the subscription before decrementing that active count. Eviction is
+allowed only when both counters are zero, eliminating stale cross-lock
+membership snapshots.
 
 ## Required Invariants
 
@@ -61,6 +79,10 @@ subscriber.
    open installs the shared entry.
 6. Exact picker capabilities never authorize siblings, parents, or another
    subscription's requested pathname.
+7. A candidate whose agent or picker claim is no longer live never reaches the
+   descriptor scanner or publishes a new content hash.
+8. Grant eviction cannot remove a capability with an in-flight open or live
+   subscription.
 
 ## Verification
 
