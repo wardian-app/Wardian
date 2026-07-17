@@ -260,7 +260,7 @@ Expected: the tests fail because the Files client modules do not exist.
 
 - [ ] **Step 3: Install and pin renderer dependencies**
 
-Run: `npm install --save-exact @monaco-editor/react monaco-editor pdfjs-dist`
+Run: `npm install --save-exact monaco-editor pdfjs-dist`
 
 Expected: `package.json` and `package-lock.json` record exact resolved versions. Do not use CDN workers or runtime network imports.
 
