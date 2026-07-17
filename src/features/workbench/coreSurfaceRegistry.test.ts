@@ -87,6 +87,31 @@ describe("core workbench surface registry", () => {
       ok: false,
       error: "unsupported files state version 2",
     });
+
+    for (const persisted of [
+      makeSurface("missing-key", { surface_type: "files", state }),
+      makeSurface("wrong-scheme", {
+        surface_type: "files",
+        resource_key: "https://example.test/report.md",
+        state,
+      }),
+      makeSurface("unnormalized", {
+        surface_type: "files",
+        resource_key: "artifact:C:\\work\\report.md",
+        state: { ...state, resource_kind: "artifact" },
+      }),
+      makeSurface("kind-mismatch", {
+        surface_type: "files",
+        resource_key: "artifact:artifact-1",
+        state,
+      }),
+    ]) {
+      const restored = registry.resolve_surface(persisted).restore_result;
+      expect(restored.ok).toBe(false);
+      expect(registry.presentation(persisted).badges).toEqual([
+        { badge_id: "recovery", label: "Recovery needed" },
+      ]);
+    }
   });
 
   it("derives Files tab metadata from the descriptor with safe resource fallbacks", () => {
@@ -127,6 +152,7 @@ describe("core workbench surface registry", () => {
       unavailable_reason: null,
     };
     useFilesPresentationStore.getState().setPresentation("files-1", {
+      resource_key: surface.resource_key!,
       descriptor,
       dirty: true,
       attention: true,
@@ -163,6 +189,7 @@ describe("core workbench surface registry", () => {
     expect(prompt).not.toHaveBeenCalled();
 
     useFilesPresentationStore.getState().setPresentation("files-1", {
+      resource_key: surface.resource_key!,
       descriptor: null,
       dirty: true,
       attention: false,

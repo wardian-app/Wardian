@@ -6,6 +6,7 @@ import type {
   WorkbenchDocumentV1,
   WorkbenchSurfaceV1,
 } from "../../types";
+import { useFilesPresentationStore } from "../files/filesPresentationStore";
 import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "./navigationService";
 import { createSurfaceRegistry } from "./surfaceRegistry";
@@ -702,6 +703,12 @@ describe("workbench navigation service", () => {
     };
     initial.surfaces[rightTransient.surface_id] = rightTransient;
     const store = createWorkbenchStore({ initial_document: initial });
+    useFilesPresentationStore.getState().setPresentation("left-preview", {
+      resource_key: "file:C:/work/left-a.md",
+      descriptor: null,
+      dirty: true,
+      attention: true,
+    });
     let notifications = 0;
     const unsubscribe = store.subscribe(() => { notifications += 1; });
     const navigation = createWorkbenchNavigationService({ registry, store });
@@ -723,6 +730,40 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["right-preview"]).toEqual(rightTransient);
     expect(store.getState().document.groups.right.surface_ids).toEqual(["right-preview"]);
     expect(store.getState().document.revision).toBe(1);
+    expect(registry.presentation(store.getState().document.surfaces["left-preview"]!))
+      .toMatchObject({
+        title: "left-b.md",
+        icon: "files-markdown",
+        badges: [],
+      });
+  });
+
+  it("does not focus an invalid persisted Files resource as a permanent candidate", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const invalidPermanent = makeSurface("invalid-permanent", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: { ...filesState(false), resource_kind: "artifact" },
+    });
+    const transient = makeSurface("preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/other.md",
+      state: filesState(true),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([invalidPermanent, transient]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    expect(navigation.open_transient({
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: filesState(true),
+    })).toBe("preview");
+    expect(store.getState().document.surfaces.preview).toMatchObject({
+      resource_key: "file:C:/work/report.md",
+      state: filesState(true),
+    });
   });
 
   it("focuses a matching permanent Files surface before replacing a transient", () => {

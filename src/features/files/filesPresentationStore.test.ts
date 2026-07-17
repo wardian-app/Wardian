@@ -29,6 +29,7 @@ describe("Files presentation store", () => {
 
   it("keeps descriptor metadata and status local to a surface presentation", () => {
     useFilesPresentationStore.getState().setPresentation("files-a", {
+      resource_key: "file:/workspace/fallback.txt",
       descriptor,
       dirty: true,
       attention: true,
@@ -38,11 +39,25 @@ describe("Files presentation store", () => {
       .toBe("Quarterly report.pdf");
     expect(filesPresentationIcon("files-a", "file:/workspace/fallback.txt"))
       .toBe("files-pdf");
-    expect(filesPresentationBadges("files-a")).toEqual([
+    expect(filesPresentationBadges("files-a", "file:/workspace/fallback.txt")).toEqual([
       { badge_id: "dirty", label: "Unsaved changes" },
       { badge_id: "attention", label: "Attention requested" },
     ]);
-    expect(filesPresentationBadges("files-b")).toEqual([]);
+    expect(filesPresentationBadges("files-b", "file:/workspace/fallback.txt")).toEqual([]);
+  });
+
+  it("ignores metadata and badges retained for a replaced resource identity", () => {
+    useFilesPresentationStore.getState().setPresentation("files-a", {
+      resource_key: "file:/workspace/old.pdf",
+      descriptor,
+      dirty: true,
+      attention: true,
+    });
+
+    expect(filesPresentationTitle("files-a", "file:/workspace/new.md")).toBe("new.md");
+    expect(filesPresentationIcon("files-a", "file:/workspace/new.md"))
+      .toBe("files-markdown");
+    expect(filesPresentationBadges("files-a", "file:/workspace/new.md")).toEqual([]);
   });
 
   it("falls back safely from normalized resource identity", () => {
@@ -60,8 +75,18 @@ describe("Files presentation store", () => {
 
   it("clears presentation metadata without affecting siblings", () => {
     const store = useFilesPresentationStore.getState();
-    store.setPresentation("files-a", { descriptor, dirty: false, attention: false });
-    store.setPresentation("files-b", { descriptor, dirty: false, attention: true });
+    store.setPresentation("files-a", {
+      resource_key: "file:/workspace/a.pdf",
+      descriptor,
+      dirty: false,
+      attention: false,
+    });
+    store.setPresentation("files-b", {
+      resource_key: "file:/workspace/b.pdf",
+      descriptor,
+      dirty: false,
+      attention: true,
+    });
     store.clearPresentation("files-a");
 
     expect(useFilesPresentationStore.getState().presentations["files-a"]).toBeUndefined();

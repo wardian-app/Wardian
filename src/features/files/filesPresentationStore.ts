@@ -10,6 +10,7 @@ import type {
 import type { DirtySurfacePrompt } from "../workbench/surfaces/dirtySurfaceGuards";
 
 export type FilesPresentationEntry = {
+  resource_key: string;
   descriptor: FileContentDescriptorV1 | null;
   dirty: boolean;
   attention: boolean;
@@ -77,11 +78,20 @@ function fallbackIcon(resourceKey: string | undefined): string {
   return "files";
 }
 
+function presentationEntry(
+  surfaceId: string,
+  resourceKey: string | undefined,
+): FilesPresentationEntry | undefined {
+  if (resourceKey === undefined) return undefined;
+  const entry = useFilesPresentationStore.getState().presentations[surfaceId];
+  return entry?.resource_key === resourceKey ? entry : undefined;
+}
+
 export function filesPresentationTitle(
   surfaceId: string,
   resourceKey: string | undefined,
 ): string {
-  const descriptor = useFilesPresentationStore.getState().presentations[surfaceId]?.descriptor;
+  const descriptor = presentationEntry(surfaceId, resourceKey)?.descriptor;
   return descriptor?.display_name.trim() || basename(resourceKey) || "Files";
 }
 
@@ -89,12 +99,15 @@ export function filesPresentationIcon(
   surfaceId: string,
   resourceKey: string | undefined,
 ): string {
-  const descriptor = useFilesPresentationStore.getState().presentations[surfaceId]?.descriptor;
+  const descriptor = presentationEntry(surfaceId, resourceKey)?.descriptor;
   return descriptor ? ICON_BY_RENDERER[descriptor.renderer_kind] : fallbackIcon(resourceKey);
 }
 
-export function filesPresentationBadges(surfaceId: string): readonly SurfaceBadge[] {
-  const entry = useFilesPresentationStore.getState().presentations[surfaceId];
+export function filesPresentationBadges(
+  surfaceId: string,
+  resourceKey: string | undefined,
+): readonly SurfaceBadge[] {
+  const entry = presentationEntry(surfaceId, resourceKey);
   if (!entry) return [];
   const badges: SurfaceBadge[] = [];
   if (entry.dirty) badges.push({ badge_id: "dirty", label: "Unsaved changes" });
@@ -108,7 +121,7 @@ export function createFilesSurfaceCloseGuard(
 ): NonNullable<SurfaceDefinition["can_close"]> {
   const pendingBySurface = new Map<string, Promise<"allow" | "cancel">>();
   return (surface: WorkbenchSurfaceV1) => {
-    const entry = useFilesPresentationStore.getState().presentations[surface.surface_id];
+    const entry = presentationEntry(surface.surface_id, surface.resource_key);
     if (!entry?.dirty) return "allow";
     const existing = pendingBySurface.get(surface.surface_id);
     if (existing) return existing;

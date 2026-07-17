@@ -349,12 +349,17 @@ describe("surface registry", () => {
     expect(mutationBlocked).toEqual([
       "request",
       "serialize",
+      "restore",
+      "serialize",
+      "request",
       "candidate",
       "serialize",
       "restore",
       "serialize",
+      "request",
       "restore",
       "serialize",
+      "request",
       "title",
       "badges",
       "close",
@@ -413,6 +418,60 @@ describe("surface registry", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toMatch(/restore|invalid|bytes/i);
     }
+  });
+
+  it("wraps transient callbacks with detached state and exact validated results", () => {
+    const mutationBlocked: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("transient", {
+        transient_state: {
+          is_transient: (state) => {
+            try {
+              state.label = "mutated";
+            } catch {
+              mutationBlocked.push("is_transient");
+            }
+            return true;
+          },
+          pin: (state) => {
+            try {
+              state.label = "mutated";
+            } catch {
+              mutationBlocked.push("pin");
+            }
+            return { label: "pinned" };
+          },
+        },
+      }),
+      definition("malformed-transient", {
+        transient_state: {
+          is_transient: (() => 1) as unknown as NonNullable<
+            SurfaceDefinition<TestState>["transient_state"]
+          >["is_transient"],
+          pin: () => ({ label: "pinned" }),
+        },
+      }),
+      definition("invalid-pin", {
+        restore_state: (value) => (value as TestState).label === "invalid"
+          ? { ok: false, error: "invalid pinned state" }
+          : { ok: true, state: value as TestState },
+        transient_state: {
+          is_transient: () => true,
+          pin: () => ({ label: "invalid" }),
+        },
+      }),
+    ]);
+    const original = { label: "original" };
+    const transient = registry.require("transient").transient_state!;
+
+    expect(transient.is_transient(original)).toBe(true);
+    expect(transient.pin(original)).toEqual({ label: "pinned" });
+    expect(original).toEqual({ label: "original" });
+    expect(mutationBlocked).toEqual(["is_transient", "pin"]);
+    expect(() => registry.require("malformed-transient").transient_state!
+      .is_transient(original)).toThrow(/boolean/i);
+    expect(() => registry.require("invalid-pin").transient_state!.pin(original))
+      .toThrow(/invalid pinned state/i);
   });
 
   it("exposes only validated safe callback wrappers from list/get/require", async () => {

@@ -176,7 +176,8 @@ function filesResourceKey(request: OpenSurfaceRequest): FileResourceKey {
     !resourceKey
     || (!fileKey && !artifactKey)
     || !identity
-    || (fileKey && resourceKey.includes("\\"))
+    || identity.trim().length === 0
+    || resourceKey.includes("\\")
   ) {
     throw new Error("Files requires a file: or artifact: resource_key");
   }
@@ -314,7 +315,10 @@ function coreSurfaceDefinitions(
         surface.surface_id,
         surface.resource_key,
       ),
-      badges: (surface) => filesPresentationBadges(surface.surface_id),
+      badges: (surface) => filesPresentationBadges(
+        surface.surface_id,
+        surface.resource_key,
+      ),
       can_close: createFilesSurfaceCloseGuard(dirtySurfacePrompt),
       serialize_state: (state) => {
         const restored = restoreFilesSurfaceState(state, 1);

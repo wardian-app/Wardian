@@ -312,14 +312,20 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
         };
       }
     }
-    return {
-      definition: this.require(surface.surface_type),
-      restore_result: this.restoreKnown(
-        rawDefinition,
-        surface.state,
-        surface.state_schema_version,
-      ),
-    };
+    try {
+      const snapshot = canonicalSurface(surface, rawDefinition.max_state_bytes);
+      return {
+        definition: this.require(surface.surface_type),
+        restore_result: this.restoreKnownSurface(rawDefinition, snapshot),
+      };
+    } catch (error) {
+      return {
+        definition: this.require(surface.surface_type),
+        restore_result: invalidRestore(
+          `restore failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      };
+    }
   }
 
   resolve_existing(
@@ -331,7 +337,8 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     if (requestSnapshot.duplicate === true) return undefined;
     const typedCandidates = Object.freeze(candidates
       .filter((candidate) => candidate.surface_type === definition.type)
-      .map((candidate) => canonicalSurface(candidate, definition.max_state_bytes)));
+      .map((candidate) => canonicalSurface(candidate, definition.max_state_bytes))
+      .filter((candidate) => this.restoreKnownSurface(definition, candidate).ok));
     if (typedCandidates.length === 0 || definition.open_policy === "allow_multiple") {
       return undefined;
     }
@@ -368,11 +375,7 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
       });
     }
     const snapshot = canonicalSurface(surface, rawDefinition.max_state_bytes);
-    const restored = this.restoreKnown(
-      rawDefinition,
-      snapshot.state,
-      snapshot.state_schema_version,
-    );
+    const restored = this.restoreKnownSurface(rawDefinition, snapshot);
     if (!restored.ok) {
       return deepFreeze({
         title: rawDefinition.type,
@@ -464,6 +467,52 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     }
   }
 
+  private restoreKnownSurface(
+    definition: SurfaceDefinition,
+    surface: WorkbenchSurfaceV1,
+  ): SurfaceRestoreResult {
+    const restored = this.restoreKnown(
+      definition,
+      surface.state,
+      surface.state_schema_version,
+    );
+    if (!restored.ok || !definition.resource_key) return restored;
+
+    try {
+      const request = canonicalRequest({
+        surface_type: definition.type,
+        ...(surface.resource_key === undefined ? {} : { resource_key: surface.resource_key }),
+        state: restored.state,
+      }, definition.max_state_bytes);
+      const resourceKey = definition.resource_key(request) ?? request.resource_key;
+      if (resourceKey !== undefined && typeof resourceKey !== "string") {
+        return invalidRestore("resource_key callback returned an invalid result");
+      }
+      if (resourceKey !== surface.resource_key) {
+        return invalidRestore("restored surface resource identity does not match resource_key");
+      }
+      return restored;
+    } catch (error) {
+      return invalidRestore(
+        `surface resource validation failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private validatedTransientState(
+    definition: SurfaceDefinition,
+    state: SurfaceState,
+  ): SurfaceState {
+    const serialized = this.serialize_state(definition.type, state);
+    const restored = this.restoreKnown(
+      definition,
+      serialized.state,
+      serialized.state_schema_version,
+    );
+    if (!restored.ok) throw new Error(restored.error);
+    return restored.state;
+  }
+
   private safeDefinition(definition: SurfaceDefinition): SurfaceDefinition {
     const type = definition.type;
     return deepFreeze({
@@ -476,6 +525,23 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
       serialize_state: (state: SurfaceState) => this.serialize_state(type, state).state,
       restore_state: (value: unknown, version: number) =>
         this.restoreKnown(definition, value, version),
+      transient_state: definition.transient_state
+        ? {
+            is_transient: (state: SurfaceState) => {
+              const callbackState = this.validatedTransientState(definition, state);
+              const result = definition.transient_state!.is_transient(callbackState);
+              if (typeof result !== "boolean") {
+                throw new Error("is_transient callback must return a boolean");
+              }
+              return result;
+            },
+            pin: (state: SurfaceState) => {
+              const callbackState = this.validatedTransientState(definition, state);
+              const pinned = definition.transient_state!.pin(callbackState);
+              return this.validatedTransientState(definition, pinned);
+            },
+          }
+        : undefined,
       resource_key: definition.resource_key
         ? (request: OpenSurfaceRequest) => this.resource_key({ ...request, surface_type: type })
         : undefined,
