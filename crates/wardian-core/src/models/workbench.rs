@@ -71,7 +71,11 @@ pub struct WorkbenchSurfaceV1 {
         skip_serializing_if = "Option::is_none"
     )]
     pub resource_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_presentation_provenance",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub presentation_provenance: Option<WorkbenchPresentationProvenanceV1>,
     pub state_schema_version: u64,
     pub state: serde_json::Value,
@@ -362,6 +366,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
+}
+
+fn deserialize_optional_non_null_presentation_provenance<'de, D>(
+    deserializer: D,
+) -> Result<Option<WorkbenchPresentationProvenanceV1>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    WorkbenchPresentationProvenanceV1::deserialize(deserializer).map(Some)
 }
 
 fn add_error(

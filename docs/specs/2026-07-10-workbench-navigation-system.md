@@ -216,6 +216,9 @@ The registry is Wardian-owned. It validates restored payloads, supplies missing
 surface placeholders, resolves normal-open versus explicit-duplicate behavior,
 exposes commands and accessibility metadata, and defines close guards.
 Third-party layout code never becomes the canonical model.
+Registry-owned presentation synchronization may feed lightweight metadata from
+the current document into a contribution, but the raw mutation callback remains
+internal: `get`, `require`, and `list` expose only guarded public definitions.
 
 Render policies are executable contracts:
 
@@ -597,6 +600,9 @@ publishing a mutation. Failed commands leave the previous document unchanged.
 `recently_closed` keeps at most 20 registry-approved snapshots and powers Reopen
 Closed Surface. Reopening restores the prior group/index when possible and
 falls back to the active group; an ID collision generates a new `surface_id`.
+Presentation provenance is open-layout lifecycle intent, not historical state.
+The model strips it when recording or reopening a closed surface, including
+legacy persisted history and collision-renamed reopens.
 
 The entire document is limited to 2 MiB, split-tree depth to 64 nodes, and each
 registered surface state to 64 KiB. A registry may set a smaller limit. Unknown surface types are preserved
@@ -685,6 +691,8 @@ in visual order, offers Save/Discard/Cancel for dirty state, awaits successful
 saves, and commits one replacement transaction only if every guard resolves.
 Any cancellation or failed save leaves the entire workbench and persisted
 revision unchanged.
+An accepted Reset Surface also detaches persisted duplicate-presentation
+provenance from both endpoints in the same guarded compare-and-swap transaction.
 
 None of these actions stop agents, kill PTYs, delete workspaces, or clear domain
 data.

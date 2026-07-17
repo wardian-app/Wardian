@@ -648,6 +648,15 @@ function reopenedSurfaceId(document: WorkbenchDocumentV1, closedId: string): str
   return `${base}-${suffix}`;
 }
 
+/** Recently-closed history is presentation-neutral and cannot carry pair lifecycle intent. */
+function inertHistorySurface(
+  surface: WorkbenchSurfaceV1,
+  surfaceId = surface.surface_id,
+): WorkbenchSurfaceV1 {
+  const { presentation_provenance: _presentationProvenance, ...inert } = surface;
+  return surfaceId === surface.surface_id ? inert : { ...inert, surface_id: surfaceId };
+}
+
 function splitNodeExists(node: WorkbenchNodeV1, nodeId: string): boolean {
   if (node.kind === "group") return false;
   return node.node_id === nodeId || splitNodeExists(node.first, nodeId) || splitNodeExists(node.second, nodeId);
@@ -880,7 +889,11 @@ function closeGroupSurfaces(
     const surface = document.surfaces[surfaceId];
     delete surfaces[surfaceId];
     recentlyClosed = [
-      { surface, previous_group_id: groupId, previous_index: index },
+      {
+        surface: inertHistorySurface(surface),
+        previous_group_id: groupId,
+        previous_index: index,
+      },
       ...recentlyClosed,
     ].slice(0, MAX_RECENTLY_CLOSED_SURFACES);
   });
@@ -904,7 +917,7 @@ function removeWorkbenchSurface(
   const recentlyClosed = trackInHistory
     ? [
         {
-          surface,
+          surface: inertHistorySurface(surface),
           previous_group_id: location.groupId,
           previous_index: location.index,
         },
@@ -1036,9 +1049,7 @@ export function applyWorkbenchCommand(
       const surfaceId = hasOwn(document.surfaces, closed.surface.surface_id)
         ? reopenedSurfaceId(document, closed.surface.surface_id)
         : closed.surface.surface_id;
-      const surface = surfaceId === closed.surface.surface_id
-        ? closed.surface
-        : { ...closed.surface, surface_id: surfaceId };
+      const surface = inertHistorySurface(closed.surface, surfaceId);
       const index = Math.min(closed.previous_index, group.surface_ids.length);
       const surfaceIds = [...group.surface_ids];
       surfaceIds.splice(index, 0, surfaceId);
@@ -1077,9 +1088,7 @@ export function applyWorkbenchCommand(
       const reopenedId = hasOwn(document.surfaces, closed.surface.surface_id)
         ? reopenedSurfaceId(document, closed.surface.surface_id)
         : closed.surface.surface_id;
-      const reopenedSurface = reopenedId === closed.surface.surface_id
-        ? closed.surface
-        : { ...closed.surface, surface_id: reopenedId };
+      const reopenedSurface = inertHistorySurface(closed.surface, reopenedId);
       const group = document.groups[location.groupId];
       const surfaceIds = [...group.surface_ids];
       surfaceIds[location.index] = reopenedId;

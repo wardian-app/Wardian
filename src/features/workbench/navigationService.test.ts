@@ -438,6 +438,50 @@ describe("workbench navigation service", () => {
     });
   });
 
+  it.each([
+    ["duplicate", "side-resource"],
+    ["partner", "ordinary-resource"],
+  ] as const)(
+    "atomically detaches Open to Side provenance when resetting the %s endpoint",
+    async (_endpoint, resetSurfaceId) => {
+      const registry = createSurfaceRegistry([definition("known-resource", {
+        open_policy: "focus_resource",
+        close_policy: "confirm_if_dirty",
+        resource_key: (request) => request.resource_key,
+        can_close: () => "allow",
+        default_state: () => ({ label: "fresh" }),
+      })]);
+      const ordinary = makeSurface("ordinary-resource", {
+        surface_type: "known-resource",
+        resource_key: "resource:provisional",
+        state: { label: "stale" },
+      });
+      const store = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([ordinary]),
+      });
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds(["side-group", "side-node", "side-resource"]),
+      });
+      navigation.open_to_side({
+        surface_type: "known-resource",
+        resource_key: "resource:provisional",
+        state: { label: "stale" },
+      });
+      expect(store.getState().document.surfaces["side-resource"].presentation_provenance)
+        .toBeDefined();
+      const beforeVersion = store.getState().transaction_version;
+
+      await expect(navigation.reset_surface(resetSurfaceId)).resolves.toBe("allow");
+
+      const document = store.getState().document;
+      expect(document.surfaces[resetSurfaceId].state).toEqual({ label: "fresh" });
+      expect(document.surfaces["side-resource"].presentation_provenance).toBeUndefined();
+      expect(store.getState().transaction_version).toBe(beforeVersion + 1);
+    },
+  );
+
   it("does not mutate a surface, group, or reset when an async guard cancels", async () => {
     const guard = vi.fn(async (entry: WorkbenchSurfaceV1): Promise<"allow" | "cancel"> =>
       entry.surface_id === "surface-2" ? "cancel" : "allow",

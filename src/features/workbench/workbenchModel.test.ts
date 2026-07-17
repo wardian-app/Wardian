@@ -32,6 +32,21 @@ function acceptedDocument(result: ReturnType<typeof applyWorkbenchCommand>) {
   return result.document;
 }
 
+function withDuplicateProvenance(
+  surface: WorkbenchSurfaceV1,
+  partnerSurfaceId: string | null = "surface-partner",
+): WorkbenchSurfaceV1 {
+  return {
+    ...surface,
+    presentation_provenance: {
+      kind: "explicit_duplicate",
+      duplicate_surface_id: surface.surface_id,
+      partner_surface_id: partnerSurfaceId,
+      provisional_resource_key: "file:/workspace/provisional.md",
+    },
+  };
+}
+
 function assertCanonicalInvariants(document: WorkbenchDocumentV1): void {
   const validation = validateWorkbenchDocument(document);
   expect(validation.valid).toBe(true);
@@ -454,6 +469,91 @@ describe("workbench model", () => {
     ]);
     expect(document.groups["group-1"].active_surface_id).toBe("surface-2");
     expect(document.recently_closed).toEqual([]);
+  });
+
+  it("records recently closed surfaces without presentation provenance", () => {
+    const duplicate = withDuplicateProvenance(makeSurface("surface-duplicate", {
+      surface_type: "files",
+      resource_key: "file:/workspace/provisional.md",
+    }));
+    const document = acceptedDocument(applyWorkbenchCommand(
+      makeSingleGroupDocument([duplicate]),
+      { type: "close_surface", surface_id: duplicate.surface_id },
+    ));
+
+    expect(document.recently_closed[0]?.surface.presentation_provenance).toBeUndefined();
+    expect(duplicate.presentation_provenance).toBeDefined();
+  });
+
+  it("strips legacy persisted provenance during a normal reopen", () => {
+    const closed = withDuplicateProvenance(makeSurface("surface-closed", {
+      surface_type: "files",
+      resource_key: "file:/workspace/provisional.md",
+    }));
+    const initial = makeSingleGroupDocument();
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 0,
+    }];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "reopen_closed_surface",
+    }));
+
+    expect(document.surfaces[closed.surface_id].presentation_provenance).toBeUndefined();
+    expect(initial.recently_closed[0]?.surface.presentation_provenance).toBeDefined();
+  });
+
+  it("strips legacy persisted provenance during a placeholder reopen", () => {
+    const placeholder = makeSurface("surface-placeholder", {
+      surface_type: "new-tab",
+      state: {},
+    });
+    const closed = withDuplicateProvenance(makeSurface("surface-closed", {
+      surface_type: "files",
+      resource_key: "file:/workspace/provisional.md",
+    }));
+    const initial = makeSingleGroupDocument([placeholder]);
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 0,
+    }];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "reopen_closed_in_placeholder",
+      surface_id: placeholder.surface_id,
+    }));
+
+    expect(document.surfaces[closed.surface_id].presentation_provenance).toBeUndefined();
+    expect(document.surfaces[placeholder.surface_id]).toBeUndefined();
+  });
+
+  it("strips provenance before assigning a collision-safe reopened surface ID", () => {
+    const collision = makeSurface("surface-closed", { state: { open: true } });
+    const closed = withDuplicateProvenance(makeSurface("surface-closed", {
+      surface_type: "files",
+      resource_key: "file:/workspace/provisional.md",
+      state: { closed: true },
+    }));
+    const initial = makeSingleGroupDocument([collision]);
+    initial.recently_closed = [{
+      surface: closed,
+      previous_group_id: "group-1",
+      previous_index: 1,
+    }];
+
+    const document = acceptedDocument(applyWorkbenchCommand(initial, {
+      type: "reopen_closed_surface",
+    }));
+
+    expect(document.surfaces["surface-closed-reopened"]).toMatchObject({
+      surface_id: "surface-closed-reopened",
+      state: { closed: true },
+    });
+    expect(document.surfaces["surface-closed-reopened"].presentation_provenance)
+      .toBeUndefined();
   });
 
   it("discards a transient surface without adding it to recently closed history", () => {
@@ -1033,7 +1133,7 @@ describe("workbench model", () => {
 
   it("closes a group transactionally, collapses its parent, and activates the sibling's leftmost group", () => {
     let document = makeSingleGroupDocument([
-      makeSurface("surface-1"),
+      withDuplicateProvenance(makeSurface("surface-1"), "surface-2"),
       makeSurface("surface-2"),
     ]);
     document = acceptedDocument(applyWorkbenchCommand(document, {
@@ -1072,6 +1172,9 @@ describe("workbench model", () => {
       "surface-2",
       "surface-1",
     ]);
+    expect(document.recently_closed.every(
+      (entry) => entry.surface.presentation_provenance === undefined,
+    )).toBe(true);
   });
 
   it("retains the only group empty on close and never redistributes its tabs", () => {

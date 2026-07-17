@@ -591,13 +591,25 @@ export function createWorkbenchNavigationService(
       const resetState = definition
         ? registry.serialize_state(surface.surface_type, registry.default_state(surface.surface_type))
         : { state_schema_version: surface.state_schema_version, state: {} };
+      const commands: WorkbenchCommand[] = duplicateProvenance(surface)
+        ? [{
+            type: "replace_surface",
+            surface: withoutPresentationProvenance(surface),
+          }]
+        : [];
+      commands.push(...provenanceDetachCommands(
+        snapshot,
+        new Set([surfaceId]),
+        new Set([surfaceId]),
+      ));
+      commands.push({
+        type: "update_surface_state",
+        surface_id: surfaceId,
+        ...resetState,
+      });
       return closeResult(store.getState().compare_and_apply_commands(
         snapshotState.transaction_version,
-        [{
-          type: "update_surface_state",
-          surface_id: surfaceId,
-          ...resetState,
-        }],
+        commands,
       ));
     },
 

@@ -244,6 +244,15 @@ fn workbench_presentation_provenance_is_strict_and_semantically_validated() {
     });
     assert!(serde_json::from_value::<WorkbenchDocumentV1>(missing_partner).is_err());
 
+    let mut null_provenance = fixture_value();
+    null_provenance["surfaces"]["surface-overview"]["presentation_provenance"] = Value::Null;
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(null_provenance).is_err());
+
+    let mut null_recent_provenance = fixture_value();
+    null_recent_provenance["recently_closed"][0]["surface"]["presentation_provenance"] =
+        Value::Null;
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(null_recent_provenance).is_err());
+
     for invalid in [
         json!({
             "kind": "explicit_duplicate",

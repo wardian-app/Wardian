@@ -70,6 +70,9 @@ describe("surface registry", () => {
     expect(syncAlpha).toHaveBeenCalledWith([alpha]);
     expect(syncBeta).toHaveBeenCalledWith([beta]);
     expect(Object.isFrozen(syncAlpha.mock.calls[0]![0])).toBe(true);
+    expect(registry.get("alpha")).not.toHaveProperty("presentation_sync");
+    expect(registry.require("alpha")).not.toHaveProperty("presentation_sync");
+    expect(registry.list()[0]).not.toHaveProperty("presentation_sync");
 
     registry.sync_presentations([]);
     expect(syncAlpha).toHaveBeenLastCalledWith([]);

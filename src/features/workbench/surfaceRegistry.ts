@@ -585,8 +585,9 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
 
   private safeDefinition(definition: SurfaceDefinition): SurfaceDefinition {
     const type = definition.type;
+    const { presentation_sync: _presentationSync, ...publicDefinition } = definition;
     return deepFreeze({
-      ...definition,
+      ...publicDefinition,
       title: (surface: WorkbenchSurfaceV1) => this.presentation(surface).title,
       presentation_icon: definition.presentation_icon
         ? (surface: WorkbenchSurfaceV1) => this.presentation(surface).icon
