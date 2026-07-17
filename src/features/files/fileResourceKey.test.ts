@@ -9,11 +9,13 @@ describe("file resource identity", () => {
     );
   });
 
-  it("keeps file and artifact identities distinct for the same normalized path", () => {
+  it("keeps stable artifact IDs verbatim and distinct from normalized file paths", () => {
     expect(fileResourceKey("/work/report.md")).toBe("file:/work/report.md");
-    expect(artifactResourceKey("\\work\\report.md")).toBe("artifact:/work/report.md");
+    expect(artifactResourceKey("Artifact\\ID/MixedCase"))
+      .toBe("artifact:Artifact\\ID/MixedCase");
     expect(fileResourceKey("/work/report.md")).not.toBe(
-      artifactResourceKey("/work/report.md"),
+      artifactResourceKey("artifact-123"),
     );
+    expect(() => artifactResourceKey("   ")).toThrow(/non-empty/i);
   });
 });

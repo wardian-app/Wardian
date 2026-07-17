@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -150,6 +151,12 @@ export function WorkbenchHost({
     store.getState,
     store.getInitialState,
   );
+  useLayoutEffect(() => {
+    registry.sync_presentations(Object.values(state.document.surfaces));
+  }, [registry, state.document.surfaces]);
+  useLayoutEffect(() => () => {
+    registry.sync_presentations([]);
+  }, [registry]);
   const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
   const canSplitGroup = useCallback((
     groupId: string,

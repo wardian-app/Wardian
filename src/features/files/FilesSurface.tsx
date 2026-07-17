@@ -111,10 +111,6 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     });
   }, [props.resource_key, props.surface_id, resource.snapshot]);
 
-  useEffect(() => () => {
-    useFilesPresentationStore.getState().clearPresentation(props.surface_id);
-  }, [props.surface_id]);
-
   return (
     <section className="files-surface" data-testid="files-surface">
       <FilesModeBar

@@ -594,6 +594,8 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly presentation_icon?: (surface: WorkbenchSurfaceV1) => SurfaceIcon;
     /** Optional runtime source that invalidates tab presentation metadata. */
     readonly presentation_subscribe?: (listener: () => void) => () => void;
+    /** Synchronizes lightweight metadata for all currently open presentations of this type. */
+    readonly presentation_sync?: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
     readonly render_policy: SurfaceRenderPolicy;
     readonly open_policy: SurfaceOpenPolicy;
     readonly runtime_policy: SurfaceRuntimePolicy;

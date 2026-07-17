@@ -54,6 +54,28 @@ describe("surface registry", () => {
     expect(() => registry.register(definition("zeta"))).toThrow(/already registered/i);
   });
 
+  it("synchronizes validated open presentations by registered surface type", () => {
+    const syncAlpha = vi.fn<(surfaces: readonly WorkbenchSurfaceV1[]) => void>();
+    const syncBeta = vi.fn<(surfaces: readonly WorkbenchSurfaceV1[]) => void>();
+    const registry = createSurfaceRegistry([
+      definition("alpha", { presentation_sync: syncAlpha }),
+      definition("beta", { presentation_sync: syncBeta }),
+    ]);
+    const alpha = surface("alpha-1", "alpha", "resource:alpha");
+    const invalidAlpha = { ...surface("alpha-invalid", "alpha"), state: null };
+    const beta = surface("beta-1", "beta");
+
+    registry.sync_presentations([alpha, invalidAlpha, beta]);
+
+    expect(syncAlpha).toHaveBeenCalledWith([alpha]);
+    expect(syncBeta).toHaveBeenCalledWith([beta]);
+    expect(Object.isFrozen(syncAlpha.mock.calls[0]![0])).toBe(true);
+
+    registry.sync_presentations([]);
+    expect(syncAlpha).toHaveBeenLastCalledWith([]);
+    expect(syncBeta).toHaveBeenLastCalledWith([]);
+  });
+
   it("canonicalizes serialized state and enforces UTF-8 byte bounds", () => {
     const registry = createSurfaceRegistry([
       definition("bounded", {

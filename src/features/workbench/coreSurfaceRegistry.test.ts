@@ -57,7 +57,7 @@ describe("core workbench surface registry", () => {
       state,
     })).toBe("file:C:/work/notes.md");
     expect(fileResourceKey("/work/report.md"))
-      .not.toBe(artifactResourceKey("/work/report.md"));
+      .not.toBe(artifactResourceKey("artifact-123"));
     expect(() => registry.resource_key({
       surface_type: "files",
       resource_key: "https://example.test/report.md",

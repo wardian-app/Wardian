@@ -8,8 +8,10 @@ export function fileResourceKey(path: string): FileResourceKey {
   return `file:${normalizeResourcePath(path)}`;
 }
 
-export function artifactResourceKey(path: string): FileResourceKey {
-  return `artifact:${normalizeResourcePath(path)}`;
+/** Prefixes the backend-owned stable artifact ID without path normalization or encoding. */
+export function artifactResourceKey(artifactId: string): FileResourceKey {
+  if (artifactId.trim().length === 0) throw new Error("artifact ID must be non-empty");
+  return `artifact:${artifactId}`;
 }
 
 /** The complete bounded state contract for an ordinary file presentation. */

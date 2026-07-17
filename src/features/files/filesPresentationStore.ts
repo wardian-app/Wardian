@@ -19,7 +19,7 @@ export type FilesPresentationEntry = {
 type FilesPresentationStore = {
   presentations: Readonly<Record<string, FilesPresentationEntry>>;
   setPresentation: (surfaceId: string, entry: FilesPresentationEntry) => void;
-  clearPresentation: (surfaceId: string) => void;
+  syncPresentations: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
   reset: () => void;
 };
 
@@ -28,11 +28,32 @@ export const useFilesPresentationStore = create<FilesPresentationStore>((set) =>
   setPresentation: (surfaceId, entry) => set((state) => ({
     presentations: { ...state.presentations, [surfaceId]: entry },
   })),
-  clearPresentation: (surfaceId) => set((state) => {
-    if (!(surfaceId in state.presentations)) return state;
-    const presentations = { ...state.presentations };
-    delete presentations[surfaceId];
-    return { presentations };
+  syncPresentations: (surfaces) => set((state) => {
+    const nextEntries: [string, FilesPresentationEntry][] = [];
+    for (const surface of surfaces) {
+      const resourceKey = surface.resource_key;
+      if (surface.surface_type !== "files" || resourceKey === undefined) continue;
+      const current = state.presentations[surface.surface_id];
+      nextEntries.push([
+        surface.surface_id,
+        current?.resource_key === resourceKey
+          ? current
+          : {
+              resource_key: resourceKey,
+              descriptor: null,
+              dirty: false,
+              attention: false,
+            },
+      ]);
+    }
+    const next = Object.fromEntries(nextEntries);
+    const currentIds = Object.keys(state.presentations);
+    const nextIds = Object.keys(next);
+    if (
+      currentIds.length === nextIds.length
+      && nextIds.every((surfaceId) => state.presentations[surfaceId] === next[surfaceId])
+    ) return state;
+    return { presentations: next };
   }),
   reset: () => set({ presentations: {} }),
 }));
@@ -51,6 +72,78 @@ function resourceValue(resourceKey: string | undefined): string | undefined {
   }
   const value = resourceKey.slice(resourceKey.indexOf(":") + 1).replace(/\\/g, "/");
   return value.length > 0 ? value : undefined;
+}
+
+type PresentationPath = {
+  display: readonly string[];
+  comparison: readonly string[];
+  identity: string;
+};
+
+function normalizedPresentationPath(value: string | undefined): PresentationPath | undefined {
+  const normalized = value?.trim().replace(/\\/g, "/").replace(/\/+$/g, "");
+  if (!normalized) return undefined;
+  const display = normalized.split("/").filter(Boolean);
+  if (display.length === 0) return undefined;
+  const windowsPath = /^[a-z]:\//i.test(normalized) || normalized.startsWith("//");
+  const comparison = windowsPath ? display.map((segment) => segment.toLowerCase()) : display;
+  return { display, comparison, identity: comparison.join("/") };
+}
+
+function entryPath(entry: FilesPresentationEntry): PresentationPath | undefined {
+  const descriptorPath = normalizedPresentationPath(entry.descriptor?.canonical_path);
+  if (descriptorPath) return descriptorPath;
+  return normalizedPresentationPath(resourceValue(entry.resource_key));
+}
+
+function entryBaseName(entry: FilesPresentationEntry): string {
+  return entry.descriptor?.display_name.trim() || basename(entry.resource_key) || "Files";
+}
+
+function suffixForDepth(path: PresentationPath | undefined, depth: number): string | undefined {
+  if (!path || path.display.length < 2) return undefined;
+  const parents = path.display.slice(0, -1);
+  return parents.slice(-depth).join("/") || undefined;
+}
+
+function comparisonSuffixForDepth(
+  path: PresentationPath | undefined,
+  depth: number,
+): string | undefined {
+  if (!path || path.comparison.length < 2) return undefined;
+  const parents = path.comparison.slice(0, -1);
+  return parents.slice(-depth).join("/") || undefined;
+}
+
+function distinguishingTitle(surfaceId: string, entry: FilesPresentationEntry): string {
+  const label = entryBaseName(entry);
+  const collisions = Object.entries(useFilesPresentationStore.getState().presentations)
+    .filter(([, candidate]) => entryBaseName(candidate) === label)
+    .sort(([leftId], [rightId]) => leftId.localeCompare(rightId));
+  if (collisions.length < 2) return label;
+
+  const path = entryPath(entry);
+  const maxDepth = Math.max(
+    0,
+    ...collisions.map(([, candidate]) => Math.max(0, (entryPath(candidate)?.display.length ?? 1) - 1)),
+  );
+  for (let depth = 1; depth <= maxDepth; depth += 1) {
+    const candidateSuffix = comparisonSuffixForDepth(path, depth);
+    if (!candidateSuffix) break;
+    const suffixMatches = collisions.filter(([, candidate]) => (
+      comparisonSuffixForDepth(entryPath(candidate), depth) === candidateSuffix
+    ));
+    if (suffixMatches.length === 1) {
+      return `${suffixForDepth(path, depth)}/${label}`;
+    }
+  }
+
+  const sameIdentity = collisions.filter(([, candidate]) => (
+    entryPath(candidate)?.identity === path?.identity
+  ));
+  const fallbackCandidates = sameIdentity.length > 1 ? sameIdentity : collisions;
+  const fallbackIndex = fallbackCandidates.findIndex(([candidateId]) => candidateId === surfaceId);
+  return `${label} (${fallbackIndex >= 0 ? fallbackIndex + 1 : 1})`;
 }
 
 function basename(resourceKey: string | undefined): string | undefined {
@@ -91,8 +184,9 @@ export function filesPresentationTitle(
   surfaceId: string,
   resourceKey: string | undefined,
 ): string {
-  const descriptor = presentationEntry(surfaceId, resourceKey)?.descriptor;
-  return descriptor?.display_name.trim() || basename(resourceKey) || "Files";
+  const entry = presentationEntry(surfaceId, resourceKey);
+  if (!entry) return basename(resourceKey) || "Files";
+  return distinguishingTitle(surfaceId, entry);
 }
 
 export function filesPresentationIcon(

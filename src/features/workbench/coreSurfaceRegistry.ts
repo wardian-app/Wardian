@@ -66,6 +66,7 @@ type DefinitionOptions = {
   presentation_title?: (surface: WorkbenchSurfaceV1) => string;
   presentation_icon?: (surface: WorkbenchSurfaceV1) => string;
   presentation_subscribe?: (listener: () => void) => () => void;
+  presentation_sync?: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
   resource_key?: (request: OpenSurfaceRequest) => string | undefined;
   can_close?: SurfaceDefinition["can_close"];
   commands?: SurfaceDefinition["commands"];
@@ -88,6 +89,7 @@ function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
     ...(options.presentation_subscribe
       ? { presentation_subscribe: options.presentation_subscribe }
       : {}),
+    ...(options.presentation_sync ? { presentation_sync: options.presentation_sync } : {}),
     render_policy: options.render_policy,
     open_policy: options.open_policy,
     runtime_policy: options.runtime_policy ?? "view_only",
@@ -321,6 +323,9 @@ function coreSurfaceDefinitions(
         surface.resource_key,
       ),
       presentation_subscribe: (listener) => useFilesPresentationStore.subscribe(listener),
+      presentation_sync: (surfaces) => {
+        useFilesPresentationStore.getState().syncPresentations(surfaces);
+      },
       badges: (surface) => filesPresentationBadges(
         surface.surface_id,
         surface.resource_key,

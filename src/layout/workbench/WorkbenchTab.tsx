@@ -123,6 +123,7 @@ export function WorkbenchTab({
       ref={descriptorRef}
       className="wardian-workbench-tab"
       data-tab-group-id={group_id}
+      title={title}
     >
       <SurfaceIcon
         aria-hidden="true"

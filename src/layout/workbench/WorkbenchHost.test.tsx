@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { useFilesPresentationStore } from "../../features/files/filesPresentationStore";
 import { createCoreWorkbenchSurfaceRegistry } from "../../features/workbench/coreSurfaceRegistry";
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
 import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore";
@@ -81,7 +82,9 @@ describe("WorkbenchHost", () => {
       ]),
     });
 
-    render(<WorkbenchHost store={store} registry={registry} navigation={makeNavigation()} />);
+    render(
+      <WorkbenchHost store={store} registry={registry} navigation={makeNavigation()} />,
+    );
 
     const tab = await screen.findByRole("tab", { name: "Extension Tool" });
     expect(tab.querySelector('[data-surface-icon="graph"]')).toHaveClass("lucide-network");
@@ -137,6 +140,52 @@ describe("WorkbenchHost", () => {
 
     view.unmount();
     expect(listeners).toHaveLength(0);
+  });
+
+  it("keeps hidden Files title metadata synchronized and prunes it when a tab closes", async () => {
+    useFilesPresentationStore.getState().reset();
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const first = makeSurface("files-a", {
+      surface_type: "files",
+      resource_key: "file:/workspace/client/index.ts",
+      state: {
+        resource_kind: "file",
+        mode: "preview",
+        transient_preview: false,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      },
+    });
+    const second = makeSurface("files-b", {
+      surface_type: "files",
+      resource_key: "file:/workspace/server/index.ts",
+      state: first.state,
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([first, second]),
+    });
+
+    const view = render(
+      <WorkbenchHost store={store} registry={registry} navigation={makeNavigation()} />,
+    );
+
+    const firstTab = await screen.findByRole("tab", { name: "client/index.ts" });
+    expect(firstTab.querySelector(".wardian-workbench-tab"))
+      .toHaveAttribute("title", "client/index.ts");
+    expect(screen.getByRole("tab", { name: "server/index.ts" })).toBeInTheDocument();
+    expect(useFilesPresentationStore.getState().presentations["files-a"]).toBeDefined();
+
+    act(() => {
+      store.getState().apply_commands([{ type: "close_surface", surface_id: "files-b" }]);
+    });
+
+    expect(await screen.findByRole("tab", { name: "index.ts" })).toBeInTheDocument();
+    await waitFor(() => expect(
+      useFilesPresentationStore.getState().presentations["files-b"],
+    ).toBeUndefined());
+    view.unmount();
+    expect(useFilesPresentationStore.getState().presentations).toEqual({});
   });
 
   it("opens an inline New Tab by default and replaces it in place after selection", async () => {

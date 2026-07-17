@@ -103,6 +103,10 @@ type FilesSurfaceStateV1 = {
 };
 ```
 
+`file:` helpers slash-normalize paths. `artifact:` helpers accept a non-empty,
+backend-owned stable ID and prefix it verbatim; artifact IDs are not paths and
+must never be slash-normalized or case-folded.
+
 Only bounded presentation state is serialized in the Workbench document.
 Contents, drafts, comments, versions, capabilities, and watcher state live in
 backend-owned stores and are referenced by ID.
@@ -158,8 +162,13 @@ its current modal.
   Quick Open/recent history continue to expose the persisted thread.
 
 Tab icons come from the renderer/content type. Tab labels use the basename;
-duplicate basenames gain the shortest distinguishing parent path. Artifact
-tabs add review/attention badges instead of verbose title prefixes.
+duplicate basenames gain the shortest distinguishing parent path, using the
+descriptor's canonical path when available and the resource identity as a
+fallback. Windows and POSIX separators display consistently with `/`. Identical
+resource presentations use a deterministic numbered fallback. The Workbench
+keeps only this lightweight title metadata while a Files tab is hidden and
+removes it when the presentation closes; heavyweight renderers still suspend.
+Artifact tabs add review/attention badges instead of verbose title prefixes.
 
 ### Pane layout
 

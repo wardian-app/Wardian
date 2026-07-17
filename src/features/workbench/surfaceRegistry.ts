@@ -40,6 +40,7 @@ export interface WorkbenchSurfaceRegistry {
     candidates: readonly WorkbenchSurfaceV1[],
   ): string | undefined;
   presentation(surface: WorkbenchSurfaceV1): SurfacePresentationMetadata;
+  sync_presentations(surfaces: readonly WorkbenchSurfaceV1[]): void;
   subscribe_presentation(listener: () => void): () => void;
   presentation_version(): number;
   can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision>;
@@ -130,6 +131,10 @@ function validateDefinition(definition: SurfaceDefinition): void {
     definition.presentation_subscribe !== undefined
     && typeof definition.presentation_subscribe !== "function"
   ) throw new Error("presentation_subscribe must be a function");
+  if (
+    definition.presentation_sync !== undefined
+    && typeof definition.presentation_sync !== "function"
+  ) throw new Error("presentation_sync must be a function");
   if (typeof definition.title !== "function") throw new Error("title must be a function");
   if (!Array.isArray(definition.commands) || definition.commands.some(
     (command) => typeof command.command_id !== "string" || typeof command.title !== "string",
@@ -438,6 +443,17 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
       commands: rawDefinition.commands.map((command) => ({ ...command })),
       badges,
     }) as SurfacePresentationMetadata;
+  }
+
+  sync_presentations(surfaces: readonly WorkbenchSurfaceV1[]): void {
+    for (const definition of this.rawDefinitionsByType.values()) {
+      if (!definition.presentation_sync) continue;
+      const snapshots = surfaces
+        .filter((surface) => surface.surface_type === definition.type)
+        .map((surface) => canonicalSurface(surface, definition.max_state_bytes))
+        .filter((surface) => this.restoreKnownSurface(definition, surface).ok);
+      definition.presentation_sync(deepFreeze(snapshots));
+    }
   }
 
   subscribe_presentation(listener: () => void): () => void {
