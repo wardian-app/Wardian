@@ -187,6 +187,10 @@ describe("surface registry", () => {
         commands: [command],
         badges: (entry) => [{ badge_id: "dirty", label: `Dirty ${entry.surface_id}` }],
       }),
+      definition("dynamic-icon", {
+        icon: "fallback-icon",
+        presentation_icon: (entry) => `icon-${entry.state_schema_version}`,
+      }),
     ]);
     const entry = surface("surface-7", "metadata");
 
@@ -196,6 +200,11 @@ describe("surface registry", () => {
       commands: [command],
       badges: [{ badge_id: "dirty", label: "Dirty surface-7" }],
     });
+    expect(registry.presentation(surface("surface-8", "dynamic-icon"))).toMatchObject({
+      icon: "icon-1",
+    });
+    expect(registry.require("metadata").icon).toBe("refresh");
+    expect(registry.require("dynamic-icon").icon).toBe("fallback-icon");
   });
 
   it("awaits dirty close guards, fails closed, and keeps missing surfaces closeable", async () => {

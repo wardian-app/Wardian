@@ -1,16 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  FilesSurfaceStateV1,
   SurfaceDefinition,
   WorkbenchDocumentV1,
   WorkbenchSurfaceV1,
 } from "../../types";
+import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "./navigationService";
 import { createSurfaceRegistry } from "./surfaceRegistry";
 import { createWorkbenchStore } from "./useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
 
 type TestState = { label: string };
+
+function filesState(transient_preview: boolean): FilesSurfaceStateV1 {
+  return {
+    resource_kind: "file",
+    mode: "preview",
+    transient_preview,
+    review_drawer_open: false,
+    selected_version_id: null,
+    optional_checkpoint_id: null,
+  };
+}
 
 function definition(
   type: string,
@@ -659,6 +672,171 @@ describe("workbench navigation service", () => {
     await expect(close).resolves.toBe("cancel");
     expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
     expect(store.getState().launcher_open).toBe(true);
+  });
+
+  it("replaces only the target group's transient Files surface in one transaction", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const leftTransient = makeSurface("left-preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/left-a.md",
+      state: filesState(true),
+    });
+    const rightTransient = makeSurface("right-preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/right-a.md",
+      state: filesState(true),
+    });
+    const initial = makeSingleGroupDocument([leftTransient], "left");
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "left" },
+      second: { kind: "group", group_id: "right" },
+    };
+    initial.groups.right = {
+      group_id: "right",
+      surface_ids: [rightTransient.surface_id],
+      active_surface_id: rightTransient.surface_id,
+    };
+    initial.surfaces[rightTransient.surface_id] = rightTransient;
+    const store = createWorkbenchStore({ initial_document: initial });
+    let notifications = 0;
+    const unsubscribe = store.subscribe(() => { notifications += 1; });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    expect(navigation.open_transient({
+      surface_type: "files",
+      group_id: "left",
+      resource_key: "file:C:/work/left-b.md",
+      state: filesState(true),
+    })).toBe("left-preview");
+
+    unsubscribe();
+    expect(notifications).toBe(1);
+    expect(store.getState().document.surfaces["left-preview"]).toMatchObject({
+      surface_id: "left-preview",
+      resource_key: "file:C:/work/left-b.md",
+      state: filesState(true),
+    });
+    expect(store.getState().document.surfaces["right-preview"]).toEqual(rightTransient);
+    expect(store.getState().document.groups.right.surface_ids).toEqual(["right-preview"]);
+    expect(store.getState().document.revision).toBe(1);
+  });
+
+  it("focuses a matching permanent Files surface before replacing a transient", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const transient = makeSurface("left-preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/other.md",
+      state: filesState(true),
+    });
+    const permanent = makeSurface("right-permanent", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: filesState(false),
+    });
+    const initial = makeSingleGroupDocument([transient], "left");
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "left" },
+      second: { kind: "group", group_id: "right" },
+    };
+    initial.groups.right = {
+      group_id: "right",
+      surface_ids: [permanent.surface_id],
+      active_surface_id: permanent.surface_id,
+    };
+    initial.surfaces[permanent.surface_id] = permanent;
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds([]),
+    });
+
+    expect(navigation.open_transient({
+      surface_type: "files",
+      group_id: "left",
+      resource_key: "file:C:/work/report.md",
+      state: filesState(true),
+    })).toBe("right-permanent");
+    expect(store.getState().document.active_group_id).toBe("right");
+    expect(store.getState().document.surfaces["left-preview"]).toEqual(transient);
+  });
+
+  it("does not reuse a transient Files surface from another group", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const otherGroupTransient = makeSurface("right-preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: filesState(true),
+    });
+    const initial = makeSingleGroupDocument([], "left");
+    initial.root = {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "left" },
+      second: { kind: "group", group_id: "right" },
+    };
+    initial.groups.right = {
+      group_id: "right",
+      surface_ids: [otherGroupTransient.surface_id],
+      active_surface_id: otherGroupTransient.surface_id,
+    };
+    initial.surfaces[otherGroupTransient.surface_id] = otherGroupTransient;
+    const store = createWorkbenchStore({ initial_document: initial });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["left-preview"]),
+    });
+
+    expect(navigation.open_transient({
+      surface_type: "files",
+      group_id: "left",
+      resource_key: "file:C:/work/new.md",
+      state: filesState(true),
+    })).toBe("left-preview");
+    expect(store.getState().document.groups.left.surface_ids).toEqual(["left-preview"]);
+    expect(store.getState().document.surfaces["right-preview"])
+      .toEqual(otherGroupTransient);
+  });
+
+  it("pins a transient Files surface by updating only its bounded state", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const transient = makeSurface("preview", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: {
+        ...filesState(true),
+        review_drawer_open: true,
+        selected_version_id: "version-1",
+      },
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([transient]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    navigation.pin_transient("preview");
+
+    expect(store.getState().document.surfaces.preview).toMatchObject({
+      surface_id: "preview",
+      resource_key: "file:C:/work/report.md",
+      state: {
+        ...filesState(false),
+        review_drawer_open: true,
+        selected_version_id: "version-1",
+      },
+    });
+    expect(store.getState().document.revision).toBe(1);
   });
 
   it("uses explicit runtime MRU rather than persisted object order for resource focus", () => {

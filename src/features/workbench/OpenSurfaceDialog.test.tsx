@@ -52,7 +52,7 @@ describe("OpenSurfaceDialog", () => {
     }
     expect(document.querySelector('[role="option"][data-surface-type="agent-session"]'))
       .toBeNull();
-    expect(document.querySelector('[role="option"][data-surface-type="file-editor"]'))
+    expect(document.querySelector('[role="option"][data-surface-type="files"]'))
       .toBeNull();
     expect(document.querySelector('[role="option"][data-surface-type="browser"]'))
       .toBeNull();

@@ -24,6 +24,10 @@ export type WorkbenchNavigationOptions = {
 
 export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
+  /** Opens one replaceable preview in the target group without disturbing other groups. */
+  open_transient(request: OpenSurfaceRequest): string;
+  /** Converts a replaceable preview into a permanent surface in place. */
+  pin_transient(surface_id: string): void;
   /** Converts an inline New Tab in place, or discards it before focusing a matching singleton. */
   open_from_placeholder(surface_id: string, request: OpenSurfaceRequest): string;
   /** Atomically consumes an inline New Tab before reopening the latest closed surface. */
@@ -87,6 +91,32 @@ export function createWorkbenchNavigationService(
     };
   };
 
+  const transientStatus = (surface: WorkbenchSurfaceV1): boolean | undefined => {
+    const resolved = registry.resolve_surface(surface);
+    if (!resolved.restore_result.ok || !resolved.definition.transient_state) return undefined;
+    try {
+      return resolved.definition.transient_state.is_transient(
+        resolved.restore_result.state,
+      ) === true;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const orderedSurfaces = (
+    state: ReturnType<WorkbenchStore["getState"]>,
+  ): WorkbenchSurfaceV1[] => {
+    const candidates = state.surface_mru
+      .map((surfaceId) => state.document.surfaces[surfaceId])
+      .filter((surface): surface is WorkbenchSurfaceV1 => surface !== undefined);
+    for (const surface of Object.values(state.document.surfaces)) {
+      if (!candidates.some((candidate) => candidate.surface_id === surface.surface_id)) {
+        candidates.push(surface);
+      }
+    }
+    return candidates;
+  };
+
   const guardSurfaces = async (
     snapshot: ReturnType<WorkbenchStore["getState"]>["document"],
     expectedTransactionVersion: number,
@@ -114,15 +144,7 @@ export function createWorkbenchNavigationService(
     open: (request) => {
       const definition = registry.require(request.surface_type);
       const state = store.getState();
-      const document = state.document;
-      const candidates = state.surface_mru
-        .map((surfaceId) => document.surfaces[surfaceId])
-        .filter((surface): surface is WorkbenchSurfaceV1 => surface !== undefined);
-      for (const surface of Object.values(document.surfaces)) {
-        if (!candidates.some((candidate) => candidate.surface_id === surface.surface_id)) {
-          candidates.push(surface);
-        }
-      }
+      const candidates = orderedSurfaces(state);
       const existingId = registry.resolve_existing(
         definition.open_policy === "singleton"
           ? { ...request, duplicate: false }
@@ -142,6 +164,83 @@ export function createWorkbenchNavigationService(
         ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
       }]);
       return surfaceId;
+    },
+
+    open_transient: (request) => {
+      const definition = registry.require(request.surface_type);
+      if (!definition.transient_state) {
+        throw new Error(`surface type ${request.surface_type} does not support transient previews`);
+      }
+      const state = store.getState();
+      const document = state.document;
+      const targetGroupId = request.group_id ?? document.active_group_id;
+      const targetGroup = document.groups[targetGroupId];
+      if (!targetGroup) throw new Error(`group ${targetGroupId} does not exist`);
+
+      const permanentCandidates = orderedSurfaces(state).filter((surface) => (
+        surface.surface_type === definition.type && transientStatus(surface) === false
+      ));
+      const existingPermanent = registry.resolve_existing(
+        { ...request, duplicate: false },
+        permanentCandidates,
+      );
+      if (existingPermanent) {
+        apply([{ type: "focus_surface", surface_id: existingPermanent }]);
+        return existingPermanent;
+      }
+
+      const targetSurfaceIds = [
+        ...(targetGroup.active_surface_id ? [targetGroup.active_surface_id] : []),
+        ...[...targetGroup.surface_ids].reverse().filter(
+          (surfaceId) => surfaceId !== targetGroup.active_surface_id,
+        ),
+      ];
+      const replaceId = targetSurfaceIds.find((surfaceId) => {
+        const surface = document.surfaces[surfaceId];
+        return surface?.surface_type === definition.type && transientStatus(surface) === true;
+      });
+      if (replaceId) {
+        const replacement = createSurface(request, replaceId);
+        if (transientStatus(replacement) !== true) {
+          throw new Error("open_transient requires transient surface state");
+        }
+        apply([
+          { type: "replace_surface", surface: replacement },
+          { type: "focus_surface", surface_id: replaceId },
+        ]);
+        return replaceId;
+      }
+
+      const surfaceId = createId("surface");
+      const surface = createSurface(request, surfaceId);
+      if (transientStatus(surface) !== true) {
+        throw new Error("open_transient requires transient surface state");
+      }
+      apply([{ type: "open_surface", surface, group_id: targetGroupId }]);
+      return surfaceId;
+    },
+
+    pin_transient: (surfaceId) => {
+      const surface = store.getState().document.surfaces[surfaceId];
+      if (!surface) throw new Error(`surface ${surfaceId} does not exist`);
+      const resolved = registry.resolve_surface(surface);
+      if (!resolved.restore_result.ok) {
+        throw new Error(`surface ${surfaceId} has invalid state: ${resolved.restore_result.error}`);
+      }
+      const transientState = resolved.definition.transient_state;
+      if (!transientState) {
+        throw new Error(`surface type ${surface.surface_type} does not support transient previews`);
+      }
+      if (!transientState.is_transient(resolved.restore_result.state)) return;
+      const serialized = registry.serialize_state(
+        surface.surface_type,
+        transientState.pin(resolved.restore_result.state),
+      );
+      apply([{
+        type: "update_surface_state",
+        surface_id: surfaceId,
+        ...serialized,
+      }]);
     },
 
     open_from_placeholder: (surfaceId, request) => {

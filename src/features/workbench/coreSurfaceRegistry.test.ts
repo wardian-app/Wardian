@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useBuilderStore } from "../../store/useBuilderStore";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
+import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
+import { artifactResourceKey, fileResourceKey } from "../files/fileResourceKey";
+import { useFilesPresentationStore } from "../files/filesPresentationStore";
+import {
+  CORE_SURFACE_CONTRIBUTIONS,
+  createCoreWorkbenchSurfaceRegistry,
+} from "./coreSurfaceRegistry";
 import type { DirtySurfacePrompt } from "./surfaces/dirtySurfaceGuards";
 import { makeSurface } from "./workbenchTestUtils";
 
@@ -13,6 +19,159 @@ describe("core workbench surface registry", () => {
   beforeEach(() => {
     useLibraryStore.setState({ _editorDirty: false, _editorResources: {} });
     useBuilderStore.getState().reset();
+    useFilesPresentationStore.getState().reset();
+  });
+
+  it("registers a strict reserved Files resource surface", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const files = registry.require("files");
+    const state: FilesSurfaceStateV1 = {
+      resource_kind: "file",
+      mode: "preview",
+      transient_preview: true,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+
+    expect(files).toMatchObject({
+      render_policy: "suspend_when_hidden",
+      open_policy: "focus_resource",
+      runtime_policy: "view_only",
+      close_policy: "confirm_if_dirty",
+    });
+    expect(CORE_SURFACE_CONTRIBUTIONS).toContainEqual({
+      surface_type: "files",
+      title: "Files",
+      description: "Inspect files and agent artifacts.",
+      group: "Reserved",
+      reserved: true,
+      requires_resource: true,
+    });
+    expect(CORE_SURFACE_CONTRIBUTIONS.some(({ surface_type }) => (
+      surface_type === "file-editor"
+    ))).toBe(false);
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: fileResourceKey("C:\\work\\notes.md"),
+      state,
+    })).toBe("file:C:/work/notes.md");
+    expect(fileResourceKey("/work/report.md"))
+      .not.toBe(artifactResourceKey("/work/report.md"));
+    expect(() => registry.resource_key({
+      surface_type: "files",
+      resource_key: "https://example.test/report.md",
+      state,
+    })).toThrow(/file:.*artifact:/i);
+    expect(() => registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:",
+      state,
+    })).toThrow(/file:.*artifact:/i);
+    expect(() => registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:C:\\work\\notes.md",
+      state,
+    })).toThrow(/file:.*artifact:/i);
+
+    expect(files.restore_state(state, 1)).toEqual({ ok: true, state });
+    expect(files.restore_state({ ...state, extra: true }, 1)).toEqual({
+      ok: false,
+      error: "files state is malformed",
+    });
+    expect(files.restore_state({ ...state, mode: "edit" }, 1)).toEqual({
+      ok: false,
+      error: "files state is malformed",
+    });
+    expect(files.restore_state(state, 2)).toEqual({
+      ok: false,
+      error: "unsupported files state version 2",
+    });
+  });
+
+  it("derives Files tab metadata from the descriptor with safe resource fallbacks", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const state: FilesSurfaceStateV1 = {
+      resource_kind: "file",
+      mode: "preview",
+      transient_preview: false,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const surface = makeSurface("files-1", {
+      surface_type: "files",
+      resource_key: fileResourceKey("C:\\work\\notes\\readme.md"),
+      state,
+    });
+
+    expect(registry.presentation(surface)).toMatchObject({
+      title: "readme.md",
+      icon: "files-markdown",
+      badges: [],
+    });
+
+    const descriptor: FileContentDescriptorV1 = {
+      schema: 1,
+      canonical_path: "C:/work/notes/readme.md",
+      display_name: "Project notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "image",
+      size_bytes: 42,
+      line_count: null,
+      content_hash: "hash",
+      modified_at_ms: 1,
+      capabilities: { preview: true, changes: false, draft: false, stream: true },
+      unavailable_reason: null,
+    };
+    useFilesPresentationStore.getState().setPresentation("files-1", {
+      descriptor,
+      dirty: true,
+      attention: true,
+    });
+
+    expect(registry.presentation(surface)).toEqual({
+      title: "Project notes.md",
+      icon: "files-image",
+      commands: [],
+      badges: [
+        { badge_id: "dirty", label: "Unsaved changes" },
+        { badge_id: "attention", label: "Attention requested" },
+      ],
+    });
+  });
+
+  it("prompts to close Files only when its presentation is dirty", async () => {
+    const prompt = vi.fn<DirtySurfacePrompt>(() => "cancel");
+    const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
+    const surface = makeSurface("files-1", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: {
+        resource_kind: "file",
+        mode: "preview",
+        transient_preview: false,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      } satisfies FilesSurfaceStateV1,
+    });
+
+    await expect(registry.can_close(surface)).resolves.toBe("allow");
+    expect(prompt).not.toHaveBeenCalled();
+
+    useFilesPresentationStore.getState().setPresentation("files-1", {
+      descriptor: null,
+      dirty: true,
+      attention: false,
+    });
+    await expect(registry.can_close(surface)).resolves.toBe("cancel");
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
+      surface_type: "files",
+      title: "report.md",
+    }));
   });
 
   it("registers the exact migration policies and open commands", () => {

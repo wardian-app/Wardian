@@ -582,6 +582,8 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly type: SurfaceType;
     readonly title: (surface: WorkbenchSurfaceV1) => string;
     readonly icon: SurfaceIcon;
+    /** Optional surface-aware tab icon. The static icon remains launcher/fallback metadata. */
+    readonly presentation_icon?: (surface: WorkbenchSurfaceV1) => SurfaceIcon;
     readonly render_policy: SurfaceRenderPolicy;
     readonly open_policy: SurfaceOpenPolicy;
     readonly runtime_policy: SurfaceRuntimePolicy;
@@ -596,6 +598,11 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly default_state: () => TState;
     readonly serialize_state: (state: TState) => unknown;
     readonly restore_state: (value: unknown, version: number) => SurfaceRestoreResult<TState>;
+    /** Optional generic contract for surfaces that support replaceable preview tabs. */
+    readonly transient_state?: {
+        readonly is_transient: (state: TState) => boolean;
+        readonly pin: (state: TState) => TState;
+    };
     readonly can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
     readonly commands: readonly SurfaceCommandDefinition[];
     readonly badges?: (surface: WorkbenchSurfaceV1) => readonly SurfaceBadge[];

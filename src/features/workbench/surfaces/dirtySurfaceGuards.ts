@@ -2,7 +2,7 @@ import type { CloseDecision, SurfaceDefinition } from "../../../types";
 import { useBuilderStore } from "../../../store/useBuilderStore";
 import { useLibraryStore } from "../../../store/useLibraryStore";
 
-export type DirtySurfaceType = "library" | "workflows";
+export type DirtySurfaceType = "library" | "workflows" | "files";
 export type DirtySurfaceChoice = "save" | "discard" | "cancel";
 
 export interface DirtySurfacePromptRequest {

@@ -67,6 +67,9 @@ function copyDefinition<TState extends SurfaceState>(
   const commands = definition.commands.map((command) => deepFreeze({ ...command }));
   return deepFreeze({
     ...definition,
+    ...(definition.transient_state
+      ? { transient_state: { ...definition.transient_state } }
+      : {}),
     commands,
   }) as SurfaceDefinition;
 }
@@ -117,6 +120,10 @@ function validateDefinition(definition: SurfaceDefinition): void {
     throw new Error(`${MISSING_SURFACE_TYPE} is reserved for inert placeholders`);
   }
   if (typeof definition.icon !== "string") throw new Error("icon must be a string");
+  if (
+    definition.presentation_icon !== undefined
+    && typeof definition.presentation_icon !== "function"
+  ) throw new Error("presentation_icon must be a function");
   if (typeof definition.title !== "function") throw new Error("title must be a function");
   if (!Array.isArray(definition.commands) || definition.commands.some(
     (command) => typeof command.command_id !== "string" || typeof command.title !== "string",
@@ -145,6 +152,13 @@ function validateDefinition(definition: SurfaceDefinition): void {
   if (!["close_view", "confirm_if_dirty"].includes(definition.close_policy)) {
     throw new Error("close_policy is invalid");
   }
+  if (
+    definition.transient_state !== undefined
+    && (
+      typeof definition.transient_state.is_transient !== "function"
+      || typeof definition.transient_state.pin !== "function"
+    )
+  ) throw new Error("transient_state must define is_transient and pin functions");
 }
 
 function canonicalRequest(
@@ -374,6 +388,10 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     });
     const title = rawDefinition.title(presentationSurface);
     if (typeof title !== "string") throw new Error("title callback must return a string");
+    const icon = rawDefinition.presentation_icon?.(presentationSurface) ?? rawDefinition.icon;
+    if (typeof icon !== "string") {
+      throw new Error("presentation_icon callback must return a string");
+    }
     const badges = canonicalizeState(
       rawDefinition.badges?.(presentationSurface) ?? [],
       MAX_WORKBENCH_SURFACE_STATE_BYTES,
@@ -386,7 +404,7 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     ) throw new Error("badges callback must return badge_id/label string records");
     return deepFreeze({
       title,
-      icon: rawDefinition.icon,
+      icon,
       commands: rawDefinition.commands.map((command) => ({ ...command })),
       badges,
     }) as SurfacePresentationMetadata;
@@ -451,6 +469,9 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     return deepFreeze({
       ...definition,
       title: (surface: WorkbenchSurfaceV1) => this.presentation(surface).title,
+      presentation_icon: definition.presentation_icon
+        ? (surface: WorkbenchSurfaceV1) => this.presentation(surface).icon
+        : undefined,
       default_state: () => this.default_state(type),
       serialize_state: (state: SurfaceState) => this.serialize_state(type, state).state,
       restore_state: (value: unknown, version: number) =>
