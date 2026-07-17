@@ -23,6 +23,8 @@ const controllersByClient = new WeakMap<
   Map<string, FileResourceController>
 >();
 const MAX_PRE_SNAPSHOT_REOPENS = 2;
+const PRE_SNAPSHOT_RECONCILIATION_ERROR =
+  "The file kept changing while Wardian opened it. Retry to load an authoritative snapshot.";
 
 function requestIdentity(request: OpenFileResourceRequestV1) {
   return JSON.stringify([
@@ -135,13 +137,12 @@ class FileResourceController {
         }
         const observed = this.#preSnapshotRevisions.get(snapshot.resource_id);
         if (observed) this.#preSnapshotRevisions.delete(snapshot.resource_id);
-        if (
-          observed
-          && observed.revision > snapshot.revision
-          && reopenAttempt < MAX_PRE_SNAPSHOT_REOPENS
-        ) {
+        if (observed && observed.revision > snapshot.revision) {
           await this.#client.close(snapshot.subscription_id).catch(() => undefined);
-          continue;
+          if (this.#disposed || generation !== this.#loadGeneration) return;
+          if (reopenAttempt < MAX_PRE_SNAPSHOT_REOPENS) continue;
+          this.#preSnapshotRevisions.clear();
+          throw new Error(PRE_SNAPSHOT_RECONCILIATION_ERROR);
         }
 
         const previousSubscription = this.#state.snapshot?.subscription_id;
@@ -154,32 +155,47 @@ class FileResourceController {
       }
     } catch (error) {
       if (!this.#disposed && generation === this.#loadGeneration) {
+        this.#preSnapshotRevisions.clear();
         this.#fail(error);
       }
     }
   }
 
   #applyRevision(event: FileResourceEventV1) {
+    if (this.#disposed || this.#state.status === "error") return;
     const snapshot = this.#state.snapshot;
-    if (!snapshot) {
-      const previous = this.#preSnapshotRevisions.get(event.resource_id);
-      if (!previous || event.revision > previous.revision) {
-        this.#preSnapshotRevisions.set(event.resource_id, event);
-        if (this.#preSnapshotRevisions.size > 64) {
-          const oldest = this.#preSnapshotRevisions.keys().next().value;
-          if (oldest !== undefined) this.#preSnapshotRevisions.delete(oldest);
-        }
+    if (this.#state.status === "loading") {
+      if (
+        !snapshot
+        || (event.resource_id === snapshot.resource_id && event.revision > snapshot.revision)
+      ) {
+        this.#rememberPreSnapshotRevision(event);
       }
       return;
     }
+    if (!snapshot) {
+      this.#rememberPreSnapshotRevision(event);
+      return;
+    }
     if (
-      this.#disposed
-      || event.resource_id !== snapshot.resource_id
+      event.resource_id !== snapshot.resource_id
       || event.revision <= snapshot.revision
     ) {
       return;
     }
+    this.#rememberPreSnapshotRevision(event);
     void this.#load();
+  }
+
+  #rememberPreSnapshotRevision(event: FileResourceEventV1) {
+    const previous = this.#preSnapshotRevisions.get(event.resource_id);
+    if (!previous || event.revision > previous.revision) {
+      this.#preSnapshotRevisions.set(event.resource_id, event);
+      if (this.#preSnapshotRevisions.size > 64) {
+        const oldest = this.#preSnapshotRevisions.keys().next().value;
+        if (oldest !== undefined) this.#preSnapshotRevisions.delete(oldest);
+      }
+    }
   }
 
   #fail(error: unknown) {

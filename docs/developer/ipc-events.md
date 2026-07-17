@@ -156,6 +156,11 @@ grafting event fields onto a snapshot owned by another subscription. The
 bounded reopen publishes only an authoritative backend snapshot. Its event
 signal is consumed before a retry, so an old-incarnation revision cannot keep a
 new revision-one resource in a reopen loop.
+If every bounded candidate is already behind an observed revision, the
+controller closes the final candidate and reports a retryable resource-local
+error instead of publishing known-stale content. A refresh keeps its previous
+live subscription until a later manual retry publishes an authoritative
+replacement.
 
 The backend owns one watcher per canonical file, shared by every subscription.
 Closing a renderer lease revokes only its stream tickets. Closing the last file
