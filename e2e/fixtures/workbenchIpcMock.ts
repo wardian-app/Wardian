@@ -201,7 +201,7 @@ export async function installWorkbenchIpcMock(
         revision: file.revision ?? 1,
       }]));
       const fileSubscriptions = new Map<string, string>();
-      const resourceIdFor = (path: string) => `mock-file:${normalizePath(path)}`;
+      const resourceIdFor = (path: string) => `file:${normalizePath(path)}`;
       const descriptorFor = (file: typeof files[number]) => {
         const normalizedPath = normalizePath(file.path);
         const displayName = normalizedPath.split("/").pop() ?? normalizedPath;

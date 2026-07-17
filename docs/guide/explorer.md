@@ -71,6 +71,16 @@ file tab. The second pane has already reloaded its stable backend revision.
 
 ## Preview Controls
 
+Rendered Markdown includes a compact **View source** icon beside the file
+actions. It switches the current Preview presentation to the read-only Monaco
+source view; the reading icon switches back to rendered Markdown. This does not
+create another tab or file subscription. Plain text is already source, while
+images and PDFs keep their media-specific controls.
+
+Windows paths are shown without the internal `\\?\` extended-length prefix.
+Wardian still retains and authorizes the original canonical path behind the
+displayed breadcrumb.
+
 Image and PDF previews keep their controls inside the pane. The PDF toolbar
 wraps at narrow split widths, and its search field shrinks without clipping the
 zoom controls. Zooming keeps the visible page anchored while the virtual page

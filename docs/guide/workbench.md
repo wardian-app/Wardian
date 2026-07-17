@@ -53,6 +53,12 @@ that preview. Double-click, `Enter`, the Explorer **Open** action, or opening to
 the side makes the tab permanent. A permanent tab participates in ordinary
 close history and restore. A transient preview does not.
 
+Rendered Markdown can switch to a read-only source presentation and back inside
+the same Files tab. This presentation choice neither opens another tab nor
+starts another file subscription. It is not a **Changes** or **Draft**
+lifecycle: **Changes** would compare resource versions, while **Draft** would
+introduce editable working state. Both remain unavailable in this foundation.
+
 The foundation previews validated text and Markdown, images, and PDFs. It does
 not yet provide Draft, Changes, comments, approval, artifact versions, or live
 HTML/SVG. Unsupported and oversized resources stay local to their tab and offer

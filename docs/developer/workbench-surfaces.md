@@ -188,6 +188,12 @@ that state until a matching definition is installed and validates it.
 `optional_checkpoint_id`. File bytes, canonical authorization, subscriptions,
 watchers, renderer tickets, and renderer leases remain backend-owned.
 
+Renderer-contributed presentation state, including rendered Markdown versus
+read-only Monaco source, is ephemeral React state. It is never serialized into
+`FilesSurfaceStateV1` and never changes subscription ownership. Each mounted
+tab keeps its own presentation choice while the owning Files surface continues
+using its existing backend subscription.
+
 The current Files contribution is reachable from Explorer and restoration but
 is deliberately marked reserved in the New Surface catalog. Ordinary file
 single-click uses `open_transient`; double-click, keyboard open, context

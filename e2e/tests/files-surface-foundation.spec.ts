@@ -174,6 +174,63 @@ test("routes Explorer files through transient, permanent, and side Workbench pre
   await page.screenshot({ path: screenshotPath, fullPage: true });
 });
 
+test("switches Markdown source without reopening the resource and preserves it per tab", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const ipc = await bootFilesWorkbench(page);
+  const alphaRow = page.getByRole("treeitem", { name: "alpha.md" });
+  const betaRow = page.getByRole("treeitem", { name: "beta.md" });
+
+  await alphaRow.dblclick();
+  await expect(page.getByRole("heading", { name: "Alpha document" })).toBeVisible();
+  const openCount = (await ipc.calls("open_file_resource")).length;
+  const alphaTextReads = await ipc.calls("read_file_resource_text");
+  const firstAlphaRead = alphaTextReads[0]?.args?.request as {
+    resource_id?: string;
+  } | undefined;
+  expect(firstAlphaRead?.resource_id).toBe(`file:${ALPHA_PATH}`);
+  expect(JSON.stringify(alphaTextReads)).not.toContain("mock-file:");
+
+  const viewSource = page.getByRole("button", { name: "View source" });
+  await expect(viewSource).toHaveAttribute("aria-pressed", "false");
+  await viewSource.click();
+  await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
+  await expect(page.getByRole("button", { name: "View rendered" }))
+    .toHaveAttribute("aria-pressed", "true");
+  expect((await ipc.calls("open_file_resource")).length).toBe(openCount);
+
+  await betaRow.dblclick();
+  await expect(page.getByRole("heading", { name: "Beta document" })).toBeVisible();
+  await filesTab(page, ALPHA_PATH).click();
+  await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
+  await expect(page.getByRole("button", { name: "View rendered" })).toBeVisible();
+
+  const surface = page.getByTestId("files-surface").filter({
+    has: page.getByRole("button", { name: "View rendered" }),
+  });
+  await surface.evaluate((element) => {
+    element.style.width = "220px";
+    element.style.maxWidth = "220px";
+    element.style.flex = "0 0 220px";
+  });
+  const toggle = surface.getByRole("button", { name: "View rendered" });
+  await toggle.focus();
+  await expect(toggle).toBeFocused();
+  const [toggleBox, surfaceBox] = await Promise.all([toggle.boundingBox(), surface.boundingBox()]);
+  expect(toggleBox).not.toBeNull();
+  expect(surfaceBox).not.toBeNull();
+  expect(toggleBox!.x).toBeGreaterThanOrEqual(surfaceBox!.x - 0.5);
+  expect(toggleBox!.x + toggleBox!.width).toBeLessThanOrEqual(surfaceBox!.x + surfaceBox!.width + 0.5);
+
+  await page.screenshot({
+    path: path.resolve(
+      "e2e/screenshots/files-source-toggle/2026-07-17/markdown-source-toggle.png",
+    ),
+    fullPage: true,
+  });
+});
+
 test("keeps oversized PDF page origins reachable and centers pages that fit", async ({ page }) => {
   await page.setViewportSize({ width: 1800, height: 900 });
   await bootFilesWorkbench(page);
