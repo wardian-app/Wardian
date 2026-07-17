@@ -299,6 +299,52 @@ impl FileResourceRuntime {
         .await
     }
 
+    /// Reopens an exact file selected through the native picker without
+    /// exposing or persisting its capability identifier in Workbench state.
+    ///
+    /// The match is backend-owned and exact: sibling files never inherit a
+    /// picker grant. Capability identifiers are sorted so duplicate live grants
+    /// resolve deterministically.
+    pub async fn open_matching_user_file(
+        &self,
+        path: &Path,
+        app_handle: Option<tauri::AppHandle>,
+    ) -> Result<Option<FileResourceSnapshotV1>, FileResourceErrorV1> {
+        let has_grants = !self.inner.user_file_grants.lock().await.is_empty();
+        if !has_grants {
+            return Ok(None);
+        }
+        let requested = std::fs::canonicalize(path).map_err(|cause| {
+            error(
+                "unavailable_path",
+                format!("cannot resolve selected file: {cause}"),
+            )
+        })?;
+        let requested = requested.to_str().ok_or_else(|| {
+            error(
+                "unavailable_path",
+                "selected file cannot be represented losslessly as UTF-8",
+            )
+        })?;
+        let capability_id = {
+            let grants = self.inner.user_file_grants.lock().await;
+            let mut matching = grants
+                .iter()
+                .filter_map(|(capability_id, grant)| {
+                    (grant.canonical_path == requested).then_some(capability_id.clone())
+                })
+                .collect::<Vec<_>>();
+            matching.sort();
+            matching.into_iter().next()
+        };
+        let Some(capability_id) = capability_id else {
+            return Ok(None);
+        };
+        self.open_user_file(&capability_id, path, app_handle)
+            .await
+            .map(Some)
+    }
+
     async fn open_authorized(
         &self,
         authorized: AuthorizedPath,
