@@ -12,6 +12,14 @@ pub struct AntigravityTranscriptSummary {
 
 pub struct AntigravityProvider;
 
+pub(crate) fn changed_workspace_conversation(
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    let after = after.map(str::trim).filter(|value| !value.is_empty())?;
+    (before.map(str::trim) != Some(after)).then(|| after.to_string())
+}
+
 impl Default for AntigravityProvider {
     fn default() -> Self {
         Self::new()
@@ -262,6 +270,19 @@ fn normalize_path_text(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_requires_a_changed_workspace_mapping() {
+        assert_eq!(
+            changed_workspace_conversation(Some("old"), Some("new")).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            changed_workspace_conversation(Some("same"), Some("same")),
+            None
+        );
+        assert_eq!(changed_workspace_conversation(None, None), None);
+    }
     use wardian_core::models::{AntigravityProviderConfig, ProviderConfig};
 
     fn make_provider() -> AntigravityProvider {

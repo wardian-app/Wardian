@@ -1,4 +1,6 @@
-use crate::providers::antigravity::AntigravityProvider;
+use crate::providers::antigravity::{
+    changed_workspace_conversation, AntigravityProvider,
+};
 use crate::providers::codex::CodexProvider;
 use crate::providers::opencode::OpenCodeProvider;
 use crate::providers::ProviderFactory;
@@ -266,6 +268,17 @@ pub async fn run_headless_with_options(
     let resume_session = options.resume_session;
     let output_format = options.output_format;
     let provider_name = options.provider_name;
+    let antigravity_workspace_before = if provider_name == "antigravity"
+        && options
+            .resume_session
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        AntigravityProvider::antigravity_home().and_then(|home| {
+            AntigravityProvider::conversation_for_workspace(&home, options.cwd)
+        })
+    } else {
+        None
+    };
     let config_override = options.config_override;
     let provider = ProviderFactory::resolve(provider_name)?;
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
@@ -491,8 +504,11 @@ pub async fn run_headless_with_options(
         let summary = OpenCodeProvider::summarize_run_output(&output);
 
         if output_format == "json" {
+            let session_id = summary.session_id.ok_or_else(|| {
+                "opencode did not return an exact session identity for this run".to_string()
+            })?;
             Ok(serde_json::json!({
-                "session_id": summary.session_id.unwrap_or_else(|| wardian_session_id.to_string()),
+                "session_id": session_id,
                 "response": summary.last_text.clone().unwrap_or_default(),
                 "raw": output,
             }))
@@ -504,12 +520,13 @@ pub async fn run_headless_with_options(
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
             .or_else(|| {
-                AntigravityProvider::antigravity_home()
-                    .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd))
-            })
-            .or_else(|| {
-                AntigravityProvider::antigravity_home()
-                    .and_then(|home| AntigravityProvider::latest_conversation_id(&home))
+                let after = AntigravityProvider::antigravity_home().and_then(|home| {
+                    AntigravityProvider::conversation_for_workspace(&home, cwd)
+                });
+                changed_workspace_conversation(
+                    antigravity_workspace_before.as_deref(),
+                    after.as_deref(),
+                )
             });
         let summary = conversation_id.as_deref().and_then(|conversation_id| {
             AntigravityProvider::antigravity_home().and_then(|home| {
@@ -523,8 +540,12 @@ pub async fn run_headless_with_options(
             .unwrap_or_else(|| output.clone());
 
         if output_format == "json" {
+            let conversation_id = conversation_id.ok_or_else(|| {
+                "antigravity did not produce a new workspace conversation mapping for this run"
+                    .to_string()
+            })?;
             Ok(serde_json::json!({
-                "session_id": conversation_id.unwrap_or_else(|| wardian_session_id.to_string()),
+                "session_id": conversation_id,
                 "response": response,
                 "raw": output,
             }))
@@ -573,6 +594,12 @@ pub async fn obtain_session_id(
         habitat_root.as_deref(),
         codex_bootstrap.as_ref(),
     );
+    let antigravity_workspace_before = if provider_name == "antigravity" {
+        AntigravityProvider::antigravity_home()
+            .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd))
+    } else {
+        None
+    };
 
     if provider_name == "codex" {
         provider_args.push("--cd".to_string());
@@ -691,7 +718,7 @@ pub async fn obtain_session_id(
 
             let timeout = tokio::time::Duration::from_secs(60);
             let read_future = async {
-                let session_id: Option<String> = None;
+                let mut output = String::new();
                 if let Some(stdout) = child.stdout.take() {
                     let mut reader = BufReader::new(stdout);
                     let mut line = String::new();
@@ -701,6 +728,8 @@ pub async fn obtain_session_id(
                             break;
                         }
                         let trimmed = line.trim();
+                        output.push_str(trimmed);
+                        output.push('\n');
                         if let Some(start) = trimmed.find('{') {
                             let json_part = &trimmed[start..];
                             if let Some(evt) = provider.parse_output(json_part) {
@@ -725,7 +754,7 @@ pub async fn obtain_session_id(
                         line.clear();
                     }
                 }
-                session_id
+                bootstrap_output_session_id(provider_name, &output)
             };
 
             let timed_out = match tokio::time::timeout(timeout, read_future).await {
@@ -756,6 +785,25 @@ pub async fn obtain_session_id(
                 }
             }
             let _ = child.wait().await;
+            if provider_name == "antigravity" && session_id_res.is_none() {
+                let after = AntigravityProvider::antigravity_home()
+                    .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd));
+                session_id_res = changed_workspace_conversation(
+                    antigravity_workspace_before.as_deref(),
+                    after.as_deref(),
+                );
+            }
+            if let Some(candidate) = session_id_res.as_deref() {
+                let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
+                    provider: provider_name.to_string(),
+                    ..Default::default()
+                });
+                super::apply_provider_identity(
+                    provider_name,
+                    &mut identity_config,
+                    candidate,
+                )?;
+            }
             if session_id_res.is_none() && !stderr_output.trim().is_empty() {
                 log_debug(&format!(
                     "[WARDIAN-DEBUG] obtain_session_id received {} stderr bytes.",
@@ -804,6 +852,29 @@ pub async fn obtain_session_id(
     }
 }
 
+fn bootstrap_output_session_id(provider_name: &str, output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        match provider_name {
+            "codex"
+                if parsed.get("type").and_then(|value| value.as_str())
+                    == Some("thread.started") =>
+            {
+                parsed
+                    .get("thread_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            }
+            "opencode" => parsed
+                .get("sessionID")
+                .and_then(|value| value.as_str())
+                .filter(|value| value.starts_with("ses_") && value.len() > "ses_".len())
+                .map(str::to_string),
+            _ => None,
+        }
+    })
+}
+
 fn apply_headless_identity_env(cmd: &mut tokio::process::Command, wardian_session_id: &str) {
     if let Some(home) = crate::utils::fs::get_wardian_home() {
         cmd.env("WARDIAN_HOME", home);
@@ -817,6 +888,43 @@ fn apply_headless_identity_env(cmd: &mut tokio::process::Command, wardian_sessio
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn codex_bootstrap_uses_thread_started_from_current_output() {
+        let output = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"019db2f3-22de-7861-8bc6-1b86db1686db\"}\n",
+            "{\"type\":\"turn.completed\"}\n"
+        );
+        assert_eq!(
+            bootstrap_output_session_id("codex", output).as_deref(),
+            Some("019db2f3-22de-7861-8bc6-1b86db1686db")
+        );
+    }
+
+    #[test]
+    fn codex_bootstrap_does_not_infer_an_id_without_thread_started() {
+        assert_eq!(
+            bootstrap_output_session_id("codex", "{\"type\":\"turn.completed\"}\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_bootstrap_requires_a_ses_id_from_current_output() {
+        assert_eq!(
+            bootstrap_output_session_id(
+                "opencode",
+                "{\"type\":\"text\",\"sessionID\":\"ses_exact\"}\n"
+            )
+            .as_deref(),
+            Some("ses_exact")
+        );
+        assert_eq!(
+            bootstrap_output_session_id("opencode", "{\"type\":\"text\"}\n"),
+            None
+        );
+    }
+
     #[test]
     fn bootstrap_session_prompt_uses_intro_prompt_for_providers_that_need_bootstrap() {
         assert_eq!(session_bootstrap_prompt(), "Introduce yourself");
