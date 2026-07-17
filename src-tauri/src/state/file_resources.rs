@@ -23,6 +23,7 @@ const DEFAULT_STABILITY_DELAY: Duration = Duration::from_millis(150);
 const DEFAULT_TICKET_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_USER_FILE_GRANTS: usize = 128;
 const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_TICKET_SNAPSHOT_RESERVATION_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +153,7 @@ struct FileReadTicket {
 struct ImmutableTicketSnapshot {
     file: StdMutex<File>,
     size_bytes: u64,
+    reserved_bytes: u64,
     usage: Arc<AtomicU64>,
 }
 
@@ -193,13 +195,14 @@ impl ImmutableTicketSnapshot {
 
 impl Drop for ImmutableTicketSnapshot {
     fn drop(&mut self) {
-        self.usage.fetch_sub(self.size_bytes, Ordering::AcqRel);
+        self.usage.fetch_sub(self.reserved_bytes, Ordering::AcqRel);
     }
 }
 
 struct TicketSnapshotReservation {
     usage: Arc<AtomicU64>,
     size_bytes: u64,
+    reserved_bytes: u64,
     committed: bool,
 }
 
@@ -209,6 +212,7 @@ impl TicketSnapshotReservation {
         Arc::new(ImmutableTicketSnapshot {
             file: StdMutex::new(file),
             size_bytes: self.size_bytes,
+            reserved_bytes: self.reserved_bytes,
             usage: self.usage.clone(),
         })
     }
@@ -217,7 +221,7 @@ impl TicketSnapshotReservation {
 impl Drop for TicketSnapshotReservation {
     fn drop(&mut self) {
         if !self.committed {
-            self.usage.fetch_sub(self.size_bytes, Ordering::AcqRel);
+            self.usage.fetch_sub(self.reserved_bytes, Ordering::AcqRel);
         }
     }
 }
@@ -1260,10 +1264,14 @@ impl FileResourceRuntime {
         &self,
         size_bytes: u64,
     ) -> Result<TicketSnapshotReservation, FileResourceErrorV1> {
+        // The accounting floor bounds both anonymous-file bytes and per-ticket
+        // metadata/handle growth. Under the 1 GiB default it admits at most
+        // 256 tiny tickets, while large PDFs are charged at their exact size.
+        let reserved_bytes = size_bytes.max(MIN_TICKET_SNAPSHOT_RESERVATION_BYTES);
         let usage = &self.inner.ticket_snapshot_usage;
         let mut current = usage.load(Ordering::Acquire);
         loop {
-            let Some(next) = current.checked_add(size_bytes) else {
+            let Some(next) = current.checked_add(reserved_bytes) else {
                 return Err(error(
                     "ticket_capacity_exceeded",
                     "renderer ticket snapshot budget is exhausted",
@@ -1280,6 +1288,7 @@ impl FileResourceRuntime {
                     return Ok(TicketSnapshotReservation {
                         usage: usage.clone(),
                         size_bytes,
+                        reserved_bytes,
                         committed: false,
                     });
                 }
@@ -2228,7 +2237,7 @@ mod tests {
             Duration::from_millis(50),
             Duration::from_secs(60),
             8,
-            second_bytes.len() as u64,
+            MIN_TICKET_SNAPSHOT_RESERVATION_BYTES,
         );
         let first = runtime
             .open_agent_file("agent-a", &config, &first_path, None)
@@ -2250,7 +2259,7 @@ mod tests {
             .expect("first ticket");
         assert_eq!(
             runtime.ticket_snapshot_bytes_in_use(),
-            first_bytes.len() as u64
+            MIN_TICKET_SNAPSHOT_RESERVATION_BYTES
         );
 
         assert_eq!(
