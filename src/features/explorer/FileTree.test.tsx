@@ -143,6 +143,170 @@ describe('FileTree Component', () => {
     }
   });
 
+  it('coordinates pending selections across nested branches when another branch opens', async () => {
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const requestedPath = (args as { path: string }).path;
+      if (requestedPath === '/test') {
+        return [
+          { name: 'left', path: '/test/left', is_dir: true, extension: null },
+          { name: 'right', path: '/test/right', is_dir: true, extension: null },
+        ];
+      }
+      if (requestedPath === '/test/left') {
+        return [{ name: 'a.md', path: '/test/left/a.md', is_dir: false, extension: 'md' }];
+      }
+      if (requestedPath === '/test/right') {
+        return [{ name: 'b.md', path: '/test/right/b.md', is_dir: false, extension: 'md' }];
+      }
+      return [];
+    });
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    render(<FileTree path="/test" onSelect={onSelect} onOpen={onOpen} />);
+
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'left' }), { detail: 1 });
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'right' }), { detail: 1 });
+    const a = await screen.findByRole('treeitem', { name: 'a.md' });
+    const b = await screen.findByRole('treeitem', { name: 'b.md' });
+
+    vi.useFakeTimers();
+    fireEvent.click(a, { detail: 1 });
+    fireEvent.click(b, { detail: 2 });
+    fireEvent.doubleClick(b, { detail: 2 });
+    act(() => vi.advanceTimersByTime(250));
+
+    expect(onSelect).not.toHaveBeenCalledWith('/test/left/a.md', false);
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(onOpen).toHaveBeenCalledWith('/test/right/b.md', false);
+  });
+
+  it('cancels pending selection when the root path changes', async () => {
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const requestedPath = (args as { path: string }).path;
+      return requestedPath === '/first'
+        ? [{ name: 'stale.md', path: '/first/stale.md', is_dir: false, extension: 'md' }]
+        : [{ name: 'fresh.md', path: '/second/fresh.md', is_dir: false, extension: 'md' }];
+    });
+    const onSelect = vi.fn();
+    const { rerender } = render(<FileTree path="/first" onSelect={onSelect} />);
+    const stale = await screen.findByRole('treeitem', { name: 'stale.md' });
+
+    vi.useFakeTimers();
+    fireEvent.click(stale, { detail: 1 });
+    rerender(<FileTree path="/second" onSelect={onSelect} />);
+    act(() => vi.advanceTimersByTime(250));
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending selection when the explorer root identity changes', async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      { name: 'stale.md', path: '/test/stale.md', is_dir: false, extension: 'md' },
+    ]);
+    const onSelect = vi.fn();
+    const { rerender } = render(
+      <FileTree path="/test" explorerRoot="/test" onSelect={onSelect} />,
+    );
+    const stale = await screen.findByRole('treeitem', { name: 'stale.md' });
+
+    vi.useFakeTimers();
+    fireEvent.click(stale, { detail: 1 });
+    rerender(<FileTree path="/test" explorerRoot="/other" onSelect={onSelect} />);
+    act(() => vi.advanceTimersByTime(250));
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending selection when the entire tree unmounts', async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      { name: 'stale.md', path: '/test/stale.md', is_dir: false, extension: 'md' },
+    ]);
+    const onSelect = vi.fn();
+    const { unmount } = render(<FileTree path="/test" onSelect={onSelect} />);
+    const stale = await screen.findByRole('treeitem', { name: 'stale.md' });
+
+    vi.useFakeTimers();
+    fireEvent.click(stale, { detail: 1 });
+    unmount();
+    act(() => vi.advanceTimersByTime(250));
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('keeps only the latest pending selection across branches', async () => {
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const requestedPath = (args as { path: string }).path;
+      if (requestedPath === '/test') {
+        return [
+          { name: 'left', path: '/test/left', is_dir: true, extension: null },
+          { name: 'right', path: '/test/right', is_dir: true, extension: null },
+        ];
+      }
+      return requestedPath === '/test/left'
+        ? [{ name: 'a.md', path: '/test/left/a.md', is_dir: false, extension: 'md' }]
+        : [{ name: 'b.md', path: '/test/right/b.md', is_dir: false, extension: 'md' }];
+    });
+    const onSelect = vi.fn();
+    render(<FileTree path="/test" onSelect={onSelect} />);
+
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'left' }), { detail: 1 });
+    fireEvent.click(await screen.findByRole('treeitem', { name: 'right' }), { detail: 1 });
+    const a = await screen.findByRole('treeitem', { name: 'a.md' });
+    const b = await screen.findByRole('treeitem', { name: 'b.md' });
+
+    vi.useFakeTimers();
+    fireEvent.click(a, { detail: 1 });
+    fireEvent.click(b, { detail: 1 });
+    act(() => vi.advanceTimersByTime(250));
+
+    expect(onSelect).toHaveBeenCalledTimes(3);
+    expect(onSelect).toHaveBeenLastCalledWith('/test/right/b.md', false);
+    expect(onSelect).not.toHaveBeenCalledWith('/test/left/a.md', false);
+  });
+
+  it('uses one roving tab stop and supports tree keyboard navigation', async () => {
+    vi.mocked(invoke).mockImplementation(async (_command, args) => {
+      const requestedPath = (args as { path: string }).path;
+      if (requestedPath === '/test') {
+        return [
+          { name: 'src', path: '/test/src', is_dir: true, extension: null },
+          { name: 'root.md', path: '/test/root.md', is_dir: false, extension: 'md' },
+        ];
+      }
+      return [{ name: 'child.md', path: '/test/src/child.md', is_dir: false, extension: 'md' }];
+    });
+    render(<FileTree path="/test" />);
+
+    const src = await screen.findByRole('treeitem', { name: 'src' });
+    const rootFile = await screen.findByRole('treeitem', { name: 'root.md' });
+    expect(src).toHaveAttribute('tabindex', '0');
+    expect(rootFile).toHaveAttribute('tabindex', '-1');
+
+    src.focus();
+    fireEvent.keyDown(src, { key: 'ArrowRight' });
+    const child = await screen.findByRole('treeitem', { name: 'child.md' });
+    expect(src).toHaveAttribute('aria-expanded', 'true');
+    expect(child.closest('[role="group"]')?.parentElement).toBe(src);
+
+    fireEvent.keyDown(src, { key: 'ArrowRight' });
+    expect(child).toHaveFocus();
+    expect(child).toHaveAttribute('tabindex', '0');
+    expect(src).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(child, { key: 'ArrowDown' });
+    expect(rootFile).toHaveFocus();
+    fireEvent.keyDown(rootFile, { key: 'Home' });
+    expect(src).toHaveFocus();
+    fireEvent.keyDown(src, { key: 'End' });
+    expect(rootFile).toHaveFocus();
+    fireEvent.keyDown(rootFile, { key: 'ArrowUp' });
+    expect(child).toHaveFocus();
+    fireEvent.keyDown(child, { key: 'ArrowLeft' });
+    expect(src).toHaveFocus();
+    fireEvent.keyDown(src, { key: 'ArrowLeft' });
+    expect(src).toHaveAttribute('aria-expanded', 'false');
+  });
+
   it('keeps directories as accessible expand/collapse items without opening Files', async () => {
     vi.mocked(invoke).mockImplementation(async (_command, args) => {
       return (args as { path: string }).path === '/test'

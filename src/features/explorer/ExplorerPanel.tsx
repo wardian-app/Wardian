@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -15,7 +15,7 @@ import { useAppShellWorkbenchNavigation } from '../../layout/AppShell';
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
   agents: AgentConfig[];
-  navigation?: WorkbenchNavigationService;
+  navigation?: WorkbenchNavigationService | null;
 }
 
 interface ExplorerChangedEvent {
@@ -37,7 +37,7 @@ const externalEditorLabel = (editor: string) => {
 export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, agents, navigation }) => {
   const confirm = useConfirm();
   const appShellNavigation = useAppShellWorkbenchNavigation();
-  const workbenchNavigation = navigation ?? appShellNavigation;
+  const workbenchNavigation = navigation === undefined ? appShellNavigation : navigation;
   const externalEditor = useSettingsStore((state) => state.externalEditor);
   const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const explorerFileClickAction = useSettingsStore((state) => state.explorerFileClickAction);
@@ -66,6 +66,8 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   const [refreshToken, setRefreshToken] = useState(0);
   const [changedPaths, setChangedPaths] = useState<string[]>([]);
   const [externalOpenError, setExternalOpenError] = useState<string | null>(null);
+  const [resourceOpenError, setResourceOpenError] = useState<string | null>(null);
+  const navigationAttempt = useRef(0);
 
   const selectedAgentId = selectedAgentIds.size === 1 ? Array.from(selectedAgentIds)[0] : null;
   const selectedAgent = agents.find((agent) => agent.session_id === selectedAgentId) ?? null;
@@ -75,6 +77,10 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     selectedAgent?.git_worktree_source ?? "",
     selectedAgent?.git_worktree_folder ?? "",
   ].join("|");
+
+  useEffect(() => () => {
+    navigationAttempt.current += 1;
+  }, []);
 
   useEffect(() => {
     const fetchPath = async () => {
@@ -223,11 +229,37 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     await openExternalPath(rootPath);
   };
 
-  const requireNavigation = () => {
+  const runNavigationAction = (
+    label: string,
+    action: (currentNavigation: WorkbenchNavigationService) => unknown,
+  ) => {
+    const attempt = navigationAttempt.current + 1;
+    navigationAttempt.current = attempt;
+    const fail = (error: unknown) => {
+      console.error(`${label} failed:`, error);
+      if (navigationAttempt.current === attempt) {
+        setResourceOpenError(`${label} failed: ${String(error)}`);
+      }
+    };
+    const succeed = () => {
+      if (navigationAttempt.current === attempt) setResourceOpenError(null);
+    };
+
     if (!workbenchNavigation) {
-      throw new Error('ExplorerPanel requires AppShell Workbench navigation');
+      fail(new Error('Workbench navigation is unavailable'));
+      return;
     }
-    return workbenchNavigation;
+
+    try {
+      const result = action(workbenchNavigation);
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        void Promise.resolve(result).then(succeed, fail);
+      } else {
+        succeed();
+      }
+    } catch (error) {
+      fail(error);
+    }
   };
 
   const fileSurfaceRequest = (path: string, transientPreview: boolean) => ({
@@ -237,9 +269,15 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   });
 
   const openPermanent = (path: string) => {
-    const currentNavigation = requireNavigation();
-    const surfaceId = currentNavigation.open(fileSurfaceRequest(path, false));
-    currentNavigation.pin_transient(surfaceId);
+    runNavigationAction('File open', (currentNavigation) => {
+      const surfaceId = currentNavigation.open(fileSurfaceRequest(path, false)) as unknown;
+      if (surfaceId && typeof (surfaceId as PromiseLike<string>).then === 'function') {
+        return Promise.resolve(surfaceId as PromiseLike<string>).then((resolvedSurfaceId) => (
+          currentNavigation.pin_transient(resolvedSurfaceId)
+        ));
+      }
+      return currentNavigation.pin_transient(surfaceId as string);
+    });
   };
 
   const handleOpen = () => {
@@ -249,7 +287,9 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
 
   const handleOpenToSide = () => {
     if (activeNode && !activeNode.is_dir) {
-      requireNavigation().open_to_side(fileSurfaceRequest(activeNode.path, false), 'horizontal');
+      runNavigationAction('Open to side', (currentNavigation) => (
+        currentNavigation.open_to_side(fileSurfaceRequest(activeNode.path, false), 'horizontal')
+      ));
     }
     setMenuPos(null);
   };
@@ -271,7 +311,9 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
     if (explorerFileClickAction === 'external') {
       await openExternalEditor(fileNode(path));
     } else {
-      requireNavigation().open_transient(fileSurfaceRequest(path, true));
+      runNavigationAction('File preview', (currentNavigation) => (
+        currentNavigation.open_transient(fileSurfaceRequest(path, true))
+      ));
     }
   };
 
@@ -347,6 +389,15 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
           className="mb-2 rounded-md border border-wardian-error/40 bg-wardian-error/10 px-3 py-2 text-xs leading-relaxed text-wardian-error"
         >
           {externalOpenError}
+        </div>
+      )}
+
+      {resourceOpenError && (
+        <div
+          role="alert"
+          className="mb-2 rounded-md border border-wardian-error/40 bg-wardian-error/10 px-3 py-2 text-xs leading-relaxed text-wardian-error"
+        >
+          {resourceOpenError}
         </div>
       )}
       
