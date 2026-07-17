@@ -73,6 +73,9 @@ import type { WorkbenchSurfaceRenderer } from "../layout/workbench/DockviewLayou
 import { LibrarySurface } from "../features/workbench/surfaces/LibrarySurface";
 import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurface";
 import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
+import { FilesSurface } from "../features/files/FilesSurface";
+import { fileResourceClient } from "../features/files/fileResourceClient";
+import type { FilesSurfaceStateV1 } from "../types";
 
 declare global {
   interface Window {
@@ -1112,6 +1115,18 @@ function AppBody() {
     }
 
     const visibility = lifecycle?.visible === false ? "hidden" : "visible";
+    if (surface.surface_type === "files") {
+      return (
+        <FilesSurface
+          surface_id={surface.surface_id}
+          resource_key={surface.resource_key ?? ""}
+          state={restoredSurface.state as FilesSurfaceStateV1}
+          lifecycle={{ visible: lifecycle?.visible !== false }}
+          client={fileResourceClient}
+        />
+      );
+    }
+
     if (surface.surface_type === "dashboard") {
       return (
         <DashboardSurface

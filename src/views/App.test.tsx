@@ -505,6 +505,81 @@ beforeEach(() => {
 });
 
 describe("Workbench persistence boot integration", () => {
+  it("renders a restored Files resource through the workbench branch while its launcher stays reserved", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("files-surface", {
+              surface_type: "files",
+              resource_key: "file:C:/work/report.txt",
+              state: {
+                resource_kind: "file",
+                mode: "preview",
+                transient_preview: false,
+                review_drawer_open: false,
+                selected_version_id: null,
+                optional_checkpoint_id: null,
+              },
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "files-durable-zero",
+        });
+      }
+      if (command === "open_file_resource") {
+        return Promise.resolve({
+          resource_id: "resource-files-app",
+          subscription_id: "subscription-files-app",
+          revision: 1,
+          descriptor: {
+            schema: 1,
+            canonical_path: "C:/work/report.txt",
+            display_name: "report.txt",
+            extension: "txt",
+            mime_type: "text/plain",
+            encoding: "utf-8",
+            renderer_kind: "text",
+            size_bytes: 12,
+            line_count: 1,
+            content_hash: "sha256:report",
+            modified_at_ms: 1,
+            capabilities: {
+              preview: true,
+              changes: false,
+              draft: false,
+              stream: false,
+            },
+            unavailable_reason: null,
+          },
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    const filesSurface = await screen.findByTestId("files-surface");
+    const previewTab = Array.from(filesSurface.querySelectorAll('[role="tab"]'))
+      .find((tab) => tab.textContent === "Preview");
+    expect(previewTab).toHaveAttribute("aria-selected", "true");
+    expect(mockInvoke).toHaveBeenCalledWith("open_file_resource", {
+      request: {
+        path: "C:/work/report.txt",
+        agent_id: null,
+        user_file_capability_id: null,
+      },
+    });
+
+    expect(await openWorkbenchLauncher()).toBeInTheDocument();
+    expect(document.querySelector('[role="option"][data-surface-type="files"]'))
+      .toBeNull();
+  });
+
   it("boots the canonical workbench and migrates legacy layout state", async () => {
     setupDefaultMocks([], defaultClasses);
     localStorage.setItem("wardian-layout", "legacy-layout-bytes");
