@@ -71,8 +71,21 @@ pub struct WorkbenchSurfaceV1 {
         skip_serializing_if = "Option::is_none"
     )]
     pub resource_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_provenance: Option<WorkbenchPresentationProvenanceV1>,
     pub state_schema_version: u64,
     pub state: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkbenchPresentationProvenanceV1 {
+    ExplicitDuplicate {
+        duplicate_surface_id: String,
+        #[serde(deserialize_with = "deserialize_nullable_string")]
+        partner_surface_id: Option<String>,
+        provisional_resource_key: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -344,6 +357,13 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
 fn add_error(
     errors: &mut Vec<WorkbenchValidationError>,
     path: impl Into<String>,
@@ -446,6 +466,42 @@ fn validate_surface(
             format!("{path}.surface_type"),
             "must be a non-empty string",
         );
+    }
+    if let Some(WorkbenchPresentationProvenanceV1::ExplicitDuplicate {
+        duplicate_surface_id,
+        partner_surface_id,
+        provisional_resource_key,
+    }) = &surface.presentation_provenance
+    {
+        let provenance_path = format!("{path}.presentation_provenance");
+        if duplicate_surface_id != &surface.surface_id {
+            add_error(
+                errors,
+                format!("{provenance_path}.duplicate_surface_id"),
+                "must match the owning surface_id",
+            );
+        }
+        if partner_surface_id.as_ref().is_some_and(String::is_empty) {
+            add_error(
+                errors,
+                format!("{provenance_path}.partner_surface_id"),
+                "must be a non-empty string or null",
+            );
+        }
+        if partner_surface_id.as_deref() == Some(surface.surface_id.as_str()) {
+            add_error(
+                errors,
+                format!("{provenance_path}.partner_surface_id"),
+                "must not reference the duplicate surface itself",
+            );
+        }
+        if provisional_resource_key.is_empty() {
+            add_error(
+                errors,
+                format!("{provenance_path}.provisional_resource_key"),
+                "must be a non-empty string",
+            );
+        }
     }
     validate_safe_integer(
         surface.state_schema_version,

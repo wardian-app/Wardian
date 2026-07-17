@@ -1358,6 +1358,75 @@ describe("workbench navigation service", () => {
     expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
   });
 
+  it("does not resurrect Open to Side intent when a closed duplicate is reopened", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const ordinaryAlias = makeSurface("ordinary-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([ordinaryAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+    });
+    navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+
+    await expect(navigation.close("side-alias")).resolves.toBe("allow");
+    expect(store.getState().document.recently_closed[0]?.surface
+      .presentation_provenance).toBeUndefined();
+    expect(store.getState().apply_commands([{ type: "reopen_closed_surface" }]).accepted)
+      .toBe(true);
+    expect(store.getState().document.surfaces["side-alias"].presentation_provenance)
+      .toBeUndefined();
+
+    const canonicalRequest = {
+      surface_type: "files" as const,
+      resource_key: "file:C:/real/report.md",
+      state: filesState(false),
+    };
+    await navigation.canonicalize_resource("ordinary-alias", canonicalRequest);
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+
+    expect(Object.keys(store.getState().document.surfaces)).toHaveLength(1);
+  });
+
+  it("stores group-closed duplicates without stale presentation provenance", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const ordinaryAlias = makeSurface("ordinary-alias", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([ordinaryAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+    });
+    navigation.open_to_side({
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+
+    await expect(navigation.close_group("side-group")).resolves.toBe("allow");
+
+    expect(store.getState().document.recently_closed[0]?.surface.surface_id)
+      .toBe("side-alias");
+    expect(store.getState().document.recently_closed[0]?.surface
+      .presentation_provenance).toBeUndefined();
+  });
+
   it("prunes retained pair provenance when the matching partner is already missing", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const ordinaryAlias = makeSurface("ordinary-alias", {

@@ -610,7 +610,14 @@ export function createWorkbenchNavigationService(
       if (
         await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) !== "allow"
       ) return "cancel";
-      const commands: WorkbenchCommand[] = [{ type: "close_surface", surface_id: surfaceId }];
+      const surface = snapshot.surfaces[surfaceId];
+      const commands: WorkbenchCommand[] = duplicateProvenance(surface)
+        ? [{
+            type: "replace_surface",
+            surface: withoutPresentationProvenance(surface),
+          }]
+        : [];
+      commands.push({ type: "close_surface", surface_id: surfaceId });
       commands.push(...provenanceDetachCommands(
         snapshot,
         new Set([surfaceId]),
@@ -632,7 +639,16 @@ export function createWorkbenchNavigationService(
           !== "allow"
       ) return "cancel";
       const affectedSurfaceIds = new Set(group.surface_ids);
-      const commands: WorkbenchCommand[] = [{ type: "close_group", group_id: groupId }];
+      const commands: WorkbenchCommand[] = group.surface_ids.flatMap((surfaceId) => {
+        const surface = snapshot.surfaces[surfaceId];
+        return duplicateProvenance(surface)
+          ? [{
+              type: "replace_surface" as const,
+              surface: withoutPresentationProvenance(surface),
+            }]
+          : [];
+      });
+      commands.push({ type: "close_group", group_id: groupId });
       commands.push(...provenanceDetachCommands(
         snapshot,
         affectedSurfaceIds,
