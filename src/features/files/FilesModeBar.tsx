@@ -8,13 +8,18 @@ import {
   type FocusEvent,
   type KeyboardEvent,
 } from "react";
+import { BookOpen, Pencil } from "lucide-react";
 import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
+import type { FilePreviewPresentation } from "./rendererRegistry";
 
 type FilesModeBarProps = {
   resource_key: string;
   state: FilesSurfaceStateV1;
   descriptor: FileContentDescriptorV1 | null;
+  preview_presentation: FilePreviewPresentation;
+  source_available: boolean;
+  on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
 };
@@ -58,6 +63,9 @@ export function FilesModeBar({
   resource_key,
   state,
   descriptor,
+  preview_presentation,
+  source_available,
+  on_preview_presentation_change,
   on_open_with,
   on_reveal,
 }: FilesModeBarProps) {
@@ -75,6 +83,9 @@ export function FilesModeBar({
   const draftReasonId = `${unavailableReasonId}-draft`;
   const changesReason = "Changes is not available in this foundation.";
   const draftReason = "Draft is not available in this foundation.";
+  const sourceActive = preview_presentation === "source";
+  const sourceLabel = sourceActive ? "View rendered" : "View source";
+  const SourceIcon = sourceActive ? BookOpen : Pencil;
   const closeMenu = useCallback((restoreTrigger = false) => {
     setMenuOpen(false);
     if (restoreTrigger) triggerRef.current?.focus();
@@ -162,7 +173,20 @@ export function FilesModeBar({
           {draftReason}
         </span>
       </div>
-      <div ref={overflowRef} className="files-overflow" onBlur={onOverflowBlur}>
+      <div className="files-header-actions">
+        {source_available ? (
+          <button
+            type="button"
+            className="files-presentation-toggle"
+            aria-label={sourceLabel}
+            aria-pressed={sourceActive}
+            title={sourceLabel}
+            onClick={() => on_preview_presentation_change(sourceActive ? "rendered" : "source")}
+          >
+            <SourceIcon size={15} aria-hidden="true" />
+          </button>
+        ) : null}
+        <div ref={overflowRef} className="files-overflow" onBlur={onOverflowBlur}>
         <button
           ref={triggerRef}
           type="button"
@@ -216,6 +240,7 @@ export function FilesModeBar({
             </button>
           </div>
         ) : null}
+        </div>
       </div>
     </header>
   );

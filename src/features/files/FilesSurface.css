@@ -86,6 +86,31 @@
   opacity: 0.5;
 }
 
+.files-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.files-presentation-toggle {
+  display: inline-grid;
+  width: 28px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-wardian-text-muted-neutral);
+}
+
+.files-presentation-toggle:hover,
+.files-presentation-toggle:focus-visible,
+.files-presentation-toggle[aria-pressed="true"] {
+  background: var(--color-wardian-card-bg-muted);
+  color: var(--color-wardian-text);
+}
+
 .files-overflow {
   position: relative;
   flex: 0 0 auto;
@@ -497,7 +522,7 @@
   }
 
   .files-breadcrumb,
-  .files-overflow {
+  .files-header-actions {
     align-self: center;
   }
 
@@ -506,7 +531,7 @@
     grid-row: 1;
   }
 
-  .files-overflow {
+  .files-header-actions {
     grid-column: 2;
     grid-row: 1;
   }

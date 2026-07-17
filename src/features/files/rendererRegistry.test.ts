@@ -116,6 +116,37 @@ describe("RendererRegistry", () => {
     })).renderer_id).toBe("unsupported");
   });
 
+  it("contributes Monaco source presentation only for Markdown", () => {
+    const markdown = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "markdown",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+    }));
+    const text = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    }));
+    const pdf = defaultRendererRegistry.resolve(descriptor());
+
+    expect(markdown.source).toBeDefined();
+    expect(markdown.source?.create_renderer).toBeTypeOf("function");
+    expect(text.source).toBeUndefined();
+    expect(pdf.source).toBeUndefined();
+  });
+
+  it("rejects source presentations without a retry factory", () => {
+    const invalidSource = {
+      ...renderer("markdown"),
+      source: { render: EmptyRenderer },
+    } as unknown as FileRendererDefinition;
+
+    expect(() => new RendererRegistry([
+      invalidSource,
+      renderer("unsupported"),
+    ])).toThrow(/markdown.*source.*create_renderer/i);
+  });
+
   it("rejects duplicate renderer identifiers", () => {
     expect(() => new RendererRegistry([
       renderer("pdf"),

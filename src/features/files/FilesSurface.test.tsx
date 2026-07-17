@@ -1,5 +1,6 @@
 import { lazy, type ComponentProps } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileContentDescriptorV1, FileResourceSnapshotV1 } from "../../types";
@@ -54,11 +55,16 @@ const PreviewRenderer = lazy(async () => ({
   ),
 }));
 
+const SourceRenderer = lazy(async () => ({
+  default: () => <div data-testid="source-renderer">Source</div>,
+}));
+
 const UnsupportedPreview = lazy(() => import("./UnsupportedRenderer"));
 
 function definition(
   renderer_id: string,
   renderComponent: FileRendererDefinition["render"] = PreviewRenderer,
+  sourceComponent?: FileRendererDefinition["render"],
 ): FileRendererDefinition {
   return {
     renderer_id,
@@ -71,6 +77,9 @@ function definition(
     },
     render: renderComponent,
     create_renderer: () => renderComponent,
+    source: sourceComponent
+      ? { render: sourceComponent, create_renderer: () => sourceComponent }
+      : undefined,
   };
 }
 
@@ -153,6 +162,168 @@ describe("FilesSurface", () => {
     );
     expect(screen.getByTestId("files-content-region")).toHaveClass("files-content-region");
     expect(await screen.findByTestId("preview-renderer")).toHaveTextContent("report.pdf");
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+  });
+
+  it("switches Markdown between rendered and source presentations", async () => {
+    const user = userEvent.setup();
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(descriptor({
+        display_name: "notes.md",
+        extension: "md",
+        mime_type: "text/markdown",
+        encoding: "utf-8",
+        renderer_kind: "markdown",
+        line_count: 2,
+        capabilities: { preview: true, changes: true, draft: true, stream: false },
+      })),
+      error: null,
+      retry: vi.fn(),
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    render(<FilesSurface {...props({ registry: markdownRegistry })} />);
+
+    const viewSource = screen.getByRole("button", { name: "View source" });
+    expect(viewSource).toHaveAttribute("aria-pressed", "false");
+    expect(viewSource).toHaveAttribute("title", "View source");
+    fireEvent.click(viewSource);
+    expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View rendered" }))
+      .toHaveAttribute("aria-pressed", "true");
+    const viewRendered = screen.getByRole("button", { name: "View rendered" });
+    viewRendered.focus();
+    expect(viewRendered).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByTestId("preview-renderer")).toBeInTheDocument();
+  });
+
+  it("omits the presentation control for plain text without source", () => {
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(descriptor({
+        display_name: "notes.txt",
+        extension: "txt",
+        mime_type: "text/plain",
+        encoding: "utf-8",
+        renderer_kind: "text",
+        line_count: 2,
+        capabilities: { preview: true, changes: true, draft: true, stream: false },
+      })),
+      error: null,
+      retry: vi.fn(),
+    });
+    const textRegistry = new RendererRegistry([
+      definition("text"),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+
+    render(<FilesSurface {...props({ registry: textRegistry })} />);
+
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+  });
+
+  it("preserves source while hidden and resets it when the resource changes", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const visibleProps = props({
+      resource_key: "file:C:/work/docs/notes.md",
+      registry: markdownRegistry,
+    });
+    const view = render(<FilesSurface {...visibleProps} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+    expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
+    view.rerender(<FilesSurface {...visibleProps} lifecycle={{ visible: false }} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/preview suspended/i);
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+    view.rerender(<FilesSurface {...visibleProps} lifecycle={{ visible: true }} />);
+    expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View rendered" })).toBeInTheDocument();
+
+    const nextDescriptor = {
+      ...markdownDescriptor,
+      canonical_path: "C:/work/docs/next.md",
+      display_name: "next.md",
+      content_hash: "sha256:next",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(nextDescriptor),
+        resource_id: "file:C:/work/docs/next.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    view.rerender(<FilesSurface
+      {...visibleProps}
+      resource_key="file:C:/work/docs/next.md"
+      lifecycle={{ visible: true }}
+    />);
+
+    expect(await screen.findByTestId("preview-renderer")).toHaveTextContent("next.md");
+    expect(screen.getByRole("button", { name: "View source" }))
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("contains source renderer errors and clears them when returning to rendered", async () => {
+    const FailingSourceRenderer = lazy(async () => ({
+      default: () => {
+        throw new Error("Source renderer failed");
+      },
+    }));
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(descriptor({
+        display_name: "notes.md",
+        extension: "md",
+        mime_type: "text/markdown",
+        encoding: "utf-8",
+        renderer_kind: "markdown",
+        line_count: 2,
+        capabilities: { preview: true, changes: true, draft: true, stream: false },
+      })),
+      error: null,
+      retry: vi.fn(),
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, FailingSourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    render(<FilesSurface {...props({ registry: markdownRegistry })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Source renderer failed");
+    fireEvent.click(screen.getByRole("button", { name: "View rendered" }));
+    expect(await screen.findByTestId("preview-renderer")).toBeInTheDocument();
+    expect(screen.queryByText("Source renderer failed")).toBeNull();
+    consoleError.mockRestore();
   });
 
   it("requests trusted backend restore without persisting authorization identifiers", () => {
@@ -232,6 +403,7 @@ describe("FilesSurface", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(/preview suspended/i);
     expect(useFileResourceMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
   });
 
   it("contains resource load errors and offers applicable recovery actions", async () => {
@@ -258,6 +430,7 @@ describe("FilesSurface", () => {
       expect(onOpenWith).toHaveBeenCalledWith("C:/work/docs/report.pdf");
       expect(onReveal).toHaveBeenCalledWith("C:/work/docs/report.pdf");
     });
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
   });
 
   it("shows unsupported metadata without attempting the renderer", async () => {
@@ -278,6 +451,7 @@ describe("FilesSurface", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/preview unavailable/i);
     expect(screen.getByRole("button", { name: "Open With" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reveal" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
   });
 
   it("keeps active HTML metadata-only with the live renderer reason and no text read", async () => {

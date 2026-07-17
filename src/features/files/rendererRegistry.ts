@@ -12,7 +12,15 @@ export type FileRendererProps = {
   on_reveal: (path: string) => Promise<void> | void;
 };
 
-export type FileRendererDefinition = {
+export type FilePreviewPresentation = "rendered" | "source";
+
+export type FileRendererPresentationDefinition = {
+  render: LazyExoticComponent<ComponentType<FileRendererProps>>;
+  /** Creates a new lazy wrapper so a rejected module load can be retried. */
+  create_renderer: () => LazyExoticComponent<ComponentType<FileRendererProps>>;
+};
+
+export type FileRendererDefinition = FileRendererPresentationDefinition & {
   renderer_id: string;
   matches: (descriptor: FileContentDescriptorV1) => boolean;
   capabilities: {
@@ -21,9 +29,7 @@ export type FileRendererDefinition = {
     draft: boolean;
     annotations: "line_range" | "spatial" | "general";
   };
-  render: LazyExoticComponent<ComponentType<FileRendererProps>>;
-  /** Creates a new lazy wrapper so a rejected module load can be retried. */
-  create_renderer: () => LazyExoticComponent<ComponentType<FileRendererProps>>;
+  source?: FileRendererPresentationDefinition;
 };
 
 const MIME_RENDERER_IDS = Object.freeze({
@@ -67,9 +73,13 @@ export class RendererRegistry {
       if (typeof definition.create_renderer !== "function") {
         throw new Error(`renderer ${definition.renderer_id} requires a create_renderer factory`);
       }
+      if (definition.source && typeof definition.source.create_renderer !== "function") {
+        throw new Error(`renderer ${definition.renderer_id} source requires a create_renderer factory`);
+      }
       this.#definitionsById.set(definition.renderer_id, Object.freeze({
         ...definition,
         capabilities: Object.freeze({ ...definition.capabilities }),
+        source: definition.source ? Object.freeze({ ...definition.source }) : undefined,
       }));
     }
     if (!this.#definitionsById.has("unsupported")) {
@@ -104,12 +114,19 @@ export class RendererRegistry {
   }
 }
 
+type RendererLoader = () => Promise<{ default: ComponentType<FileRendererProps> }>;
+
+function rendererPresentation(load: RendererLoader): FileRendererPresentationDefinition {
+  const createRenderer = () => lazy(load);
+  return { render: createRenderer(), create_renderer: createRenderer };
+}
+
 function rendererDefinition(
   renderer_id: string,
   capabilities: FileRendererDefinition["capabilities"],
-  load: () => Promise<{ default: ComponentType<FileRendererProps> }>,
+  load: RendererLoader,
+  loadSource?: RendererLoader,
 ): FileRendererDefinition {
-  const createRenderer = () => lazy(load);
   return {
     renderer_id,
     matches: (descriptor) => (
@@ -117,8 +134,8 @@ function rendererDefinition(
       || rendererIdForValidatedMime(descriptor) === renderer_id
     ),
     capabilities,
-    render: createRenderer(),
-    create_renderer: createRenderer,
+    ...rendererPresentation(load),
+    source: loadSource ? rendererPresentation(loadSource) : undefined,
   };
 }
 
@@ -134,7 +151,7 @@ export const defaultRendererRegistry = new RendererRegistry([
     changes: "line",
     draft: true,
     annotations: "line_range",
-  }, () => import("./renderers/MarkdownRenderer")),
+  }, () => import("./renderers/MarkdownRenderer"), () => import("./renderers/MonacoTextRenderer")),
   rendererDefinition("image", {
     preview: true,
     changes: "version",

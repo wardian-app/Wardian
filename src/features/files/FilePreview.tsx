@@ -9,7 +9,10 @@ import {
 
 import type { FileResourceSnapshotV1 } from "../../types";
 import type { FileResourceClient } from "./fileResourceClient";
-import type { RendererRegistry } from "./rendererRegistry";
+import type {
+  FilePreviewPresentation,
+  RendererRegistry,
+} from "./rendererRegistry";
 
 type RendererErrorBoundaryProps = {
   children: ReactNode;
@@ -63,6 +66,7 @@ export type FilePreviewProps = {
   client: FileResourceClient;
   lifecycle: { visible: boolean };
   registry: RendererRegistry;
+  presentation: FilePreviewPresentation;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -73,20 +77,27 @@ export function FilePreview({
   client,
   lifecycle,
   registry,
+  presentation,
   on_open_file,
   on_open_with,
   on_reveal,
 }: FilePreviewProps) {
   const [resetToken, setResetToken] = useState(0);
   const definition = registry.resolve(snapshot.descriptor);
+  const activePresentation = presentation === "source" && definition.source
+    ? "source"
+    : "rendered";
+  const createRenderer = activePresentation === "source"
+    ? definition.source!.create_renderer
+    : definition.create_renderer;
   const Renderer = useMemo(
-    () => definition.create_renderer(),
-    [definition, resetToken],
+    () => createRenderer(),
+    [createRenderer, resetToken],
   );
   const path = snapshot.descriptor.canonical_path;
   return (
     <RendererErrorBoundary
-      key={`${snapshot.resource_id}@${snapshot.revision}`}
+      key={`${snapshot.resource_id}@${snapshot.revision}:${activePresentation}`}
       display_name={snapshot.descriptor.display_name}
       reset_token={resetToken}
       on_reset={() => setResetToken((value) => value + 1)}

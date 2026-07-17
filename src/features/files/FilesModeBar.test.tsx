@@ -42,6 +42,9 @@ function modeBar(overrides: {
       resource_key="file:C:/work/report.pdf"
       state={state}
       descriptor={overrides.descriptor ?? descriptor}
+      preview_presentation="rendered"
+      source_available={false}
+      on_preview_presentation_change={vi.fn()}
       on_open_with={overrides.on_open_with ?? vi.fn()}
       on_reveal={overrides.on_reveal ?? vi.fn()}
     />
@@ -58,7 +61,9 @@ describe("FilesModeBar actions menu", () => {
     const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
     expect(css).toMatch(/\.files-overflow-menu\s*\{[^}]*max-width:\s*calc\(100cqw - 8px\)/s);
     expect(css).toMatch(/@container \(max-width:\s*220px\)[\s\S]*\.files-mode-tabs\s*\{[^}]*overflow-x:\s*auto/s);
+    expect(css).toMatch(/@container \(max-width:\s*220px\)[\s\S]*\.files-header-actions\s*\{[^}]*grid-column:\s*2/s);
     expect(container.querySelector(".files-mode-bar")).toBeInTheDocument();
+    expect(container.querySelector(".files-header-actions")).toBeInTheDocument();
   });
 
   it("opens from the trigger at the directional edge requested by the arrow key", async () => {

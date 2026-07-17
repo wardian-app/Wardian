@@ -9,6 +9,7 @@ import { FilesModeBar } from "./FilesModeBar";
 import { useFilesPresentationStore } from "./filesPresentationStore";
 import {
   defaultRendererRegistry,
+  type FilePreviewPresentation,
   type RendererRegistry,
 } from "./rendererRegistry";
 import { useFileResource } from "./useFileResource";
@@ -60,6 +61,13 @@ type ActiveFilesSurfaceProps = Required<Pick<
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
   action_error: string | null;
+  preview_presentation: FilePreviewPresentation;
+  on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
+};
+
+type PreviewPresentationState = {
+  resource_key: string;
+  presentation: FilePreviewPresentation;
 };
 
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
@@ -72,6 +80,9 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     agent_id: null,
     user_file_capability_id: null,
   }, props.client);
+  const sourceAvailable = resource.status === "ready" && resource.snapshot
+    ? props.registry.resolve(resource.snapshot.descriptor).source !== undefined
+    : false;
 
   useEffect(() => {
     canonicalCallback.current = props.on_canonical_resource;
@@ -117,6 +128,9 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         resource_key={props.resource_key}
         state={props.state}
         descriptor={resource.snapshot?.descriptor ?? null}
+        preview_presentation={props.preview_presentation}
+        source_available={sourceAvailable}
+        on_preview_presentation_change={props.on_preview_presentation_change}
         on_open_with={props.on_open_with}
         on_reveal={props.on_reveal}
       />
@@ -148,6 +162,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             client={props.client}
             lifecycle={props.lifecycle}
             registry={props.registry}
+            presentation={props.preview_presentation}
             on_open_file={props.on_open_file}
             on_open_with={props.on_open_with}
             on_reveal={props.on_reveal}
@@ -168,6 +183,21 @@ export function FilesSurface({
   ...props
 }: FilesSurfaceProps) {
   const [actionError, setActionError] = useState<string | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewPresentationState>({
+    resource_key: props.resource_key,
+    presentation: "rendered",
+  });
+  const previewPresentation = previewState.resource_key === props.resource_key
+    ? previewState.presentation
+    : "rendered";
+
+  useEffect(() => {
+    setPreviewState({ resource_key: props.resource_key, presentation: "rendered" });
+  }, [props.resource_key]);
+
+  const setPreviewPresentation = useCallback((presentation: FilePreviewPresentation) => {
+    setPreviewState({ resource_key: props.resource_key, presentation });
+  }, [props.resource_key]);
   const guardedCanonicalResource = useCallback(async (resourceKey: string) => {
     try {
       const decision = await on_canonical_resource(resourceKey);
@@ -204,6 +234,9 @@ export function FilesSurface({
           resource_key={props.resource_key}
           state={props.state}
           descriptor={null}
+          preview_presentation={previewPresentation}
+          source_available={false}
+          on_preview_presentation_change={setPreviewPresentation}
           on_open_with={guardedOpenWith}
           on_reveal={guardedReveal}
         />
@@ -226,6 +259,8 @@ export function FilesSurface({
       on_open_with={guardedOpenWith}
       on_reveal={guardedReveal}
       action_error={actionError}
+      preview_presentation={previewPresentation}
+      on_preview_presentation_change={setPreviewPresentation}
     />
   );
 }
