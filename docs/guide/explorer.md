@@ -71,11 +71,13 @@ file tab. The second pane has already reloaded its stable backend revision.
 
 ## Preview Controls
 
-Rendered Markdown includes a compact **View source** icon beside the file
-actions. It switches the current Preview presentation to the read-only Monaco
-source view; the reading icon switches back to rendered Markdown. This does not
-create another tab or file subscription. Plain text is already source, while
-images and PDFs keep their media-specific controls.
+Rendered Markdown includes a compact presentation icon beside the file actions.
+The reading icon indicates rendered Markdown; activating it switches the current
+Preview presentation to the read-only Monaco source view. The pencil indicates
+source; activating it switches back to rendered Markdown. The tooltip and
+accessible label describe that action. This does not create another tab or file
+subscription. Plain text is already source, while images and PDFs keep their
+media-specific controls.
 
 Windows paths are shown without the internal `\\?\` extended-length prefix.
 Wardian still retains and authorizes the original canonical path behind the
