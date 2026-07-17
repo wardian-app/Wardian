@@ -93,6 +93,7 @@ struct FileResourceRuntimeInner {
     user_file_grants: Mutex<HashMap<String, UserFileGrant>>,
     read_tickets: Mutex<HashMap<String, FileReadTicket>>,
     renderer_leases: Mutex<HashMap<RendererLeaseKey, RendererLease>>,
+    ticket_publication: Mutex<()>,
     limits: FileResourceLimits,
     stability_delay: Duration,
     ticket_ttl: Duration,
@@ -103,12 +104,24 @@ struct FileResourceRuntimeInner {
     app_handle: RwLock<Option<tauri::AppHandle>>,
     #[cfg(test)]
     issue_ticket_after_validation_hook: Mutex<Option<IssueTicketAfterValidationHook>>,
+    #[cfg(test)]
+    ticket_publication_hook: Mutex<Option<TicketPublicationHook>>,
+    #[cfg(test)]
+    forced_refresh_error: Mutex<Option<FileResourceErrorV1>>,
 }
 
 #[cfg(test)]
 #[derive(Clone)]
 struct IssueTicketAfterValidationHook {
     validation_reached: Arc<tokio::sync::Barrier>,
+    resume_publication: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TicketPublicationHook {
+    pause_once: Arc<AtomicBool>,
+    lease_published: Arc<tokio::sync::Barrier>,
     resume_publication: Arc<tokio::sync::Barrier>,
 }
 
@@ -250,6 +263,7 @@ impl FileResourceRuntime {
                 user_file_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
+                ticket_publication: Mutex::new(()),
                 limits: FileResourceLimits::default(),
                 stability_delay,
                 ticket_ttl,
@@ -260,6 +274,10 @@ impl FileResourceRuntime {
                 app_handle: RwLock::new(None),
                 #[cfg(test)]
                 issue_ticket_after_validation_hook: Mutex::new(None),
+                #[cfg(test)]
+                ticket_publication_hook: Mutex::new(None),
+                #[cfg(test)]
+                forced_refresh_error: Mutex::new(None),
             }),
         }
     }
@@ -279,6 +297,7 @@ impl FileResourceRuntime {
                 user_file_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
+                ticket_publication: Mutex::new(()),
                 limits: FileResourceLimits::default(),
                 stability_delay,
                 ticket_ttl,
@@ -288,6 +307,8 @@ impl FileResourceRuntime {
                 events,
                 app_handle: RwLock::new(None),
                 issue_ticket_after_validation_hook: Mutex::new(None),
+                ticket_publication_hook: Mutex::new(None),
+                forced_refresh_error: Mutex::new(None),
             }),
         }
     }
@@ -728,51 +749,32 @@ impl FileResourceRuntime {
             }
             entry.authorized.clone()
         };
-        let (authorized, snapshot) =
-            match verified_snapshot(authorized.clone(), self.inner.limits.clone()).await {
-                Ok(snapshot) => (authorized, snapshot),
-                Err(initial_error)
-                    if matches!(
-                        initial_error.code(),
-                        "unauthorized_path" | "unavailable_path"
-                    ) =>
-                {
-                    let replacement = match authorized.reauthorize_same_target() {
-                        Ok(replacement) => {
-                            match verified_snapshot(replacement.clone(), self.inner.limits.clone())
-                                .await
-                            {
-                                Ok(snapshot) => Some((replacement, snapshot)),
-                                Err(error) => {
-                                    self.publish_refresh_failure(
-                                        resource_id,
-                                        incarnation_id,
-                                        generation,
-                                        &error,
-                                    )
-                                    .await;
-                                    None
-                                }
+        let (authorized, snapshot) = match self.refresh_verified_snapshot(authorized.clone()).await
+        {
+            Ok(snapshot) => (authorized, snapshot),
+            Err(initial_error)
+                if matches!(
+                    initial_error.code(),
+                    "unauthorized_path" | "unavailable_path"
+                ) =>
+            {
+                let replacement = match authorized.reauthorize_same_target() {
+                    Ok(replacement) => {
+                        match self.refresh_verified_snapshot(replacement.clone()).await {
+                            Ok(snapshot) => Some((replacement, snapshot)),
+                            Err(error) => {
+                                self.publish_refresh_failure(
+                                    resource_id,
+                                    incarnation_id,
+                                    generation,
+                                    &error,
+                                )
+                                .await;
+                                None
                             }
                         }
-                        Err(error) => {
-                            self.publish_refresh_failure(
-                                resource_id,
-                                incarnation_id,
-                                generation,
-                                &error,
-                            )
-                            .await;
-                            None
-                        }
-                    };
-                    let Some(replacement) = replacement else {
-                        return;
-                    };
-                    replacement
-                }
-                Err(error) => {
-                    if error.code() != "unstable_file" {
+                    }
+                    Err(error) => {
                         self.publish_refresh_failure(
                             resource_id,
                             incarnation_id,
@@ -780,10 +782,20 @@ impl FileResourceRuntime {
                             &error,
                         )
                         .await;
+                        None
                     }
+                };
+                let Some(replacement) = replacement else {
                     return;
-                }
-            };
+                };
+                replacement
+            }
+            Err(error) => {
+                self.publish_refresh_failure(resource_id, incarnation_id, generation, &error)
+                    .await;
+                return;
+            }
+        };
         let (descriptor, revision_token) = snapshot.into_parts();
         let (event, user_capability_ids) = {
             let mut entries = self.inner.entries.lock().await;
@@ -835,6 +847,17 @@ impl FileResourceRuntime {
         if let Some(event) = event {
             self.emit(event);
         }
+    }
+
+    async fn refresh_verified_snapshot(
+        &self,
+        authorized: AuthorizedPath,
+    ) -> Result<VerifiedFileSnapshot, FileResourceErrorV1> {
+        #[cfg(test)]
+        if let Some(error) = self.inner.forced_refresh_error.lock().await.take() {
+            return Err(error);
+        }
+        verified_snapshot(authorized, self.inner.limits.clone()).await
     }
 
     async fn publish_refresh_failure(
@@ -1045,6 +1068,12 @@ impl FileResourceRuntime {
                 }
             }
         }
+        if let Some(reason) = expected.unavailable_reason.as_deref() {
+            return Err(error(
+                reason,
+                format!("file resource is unavailable at revision {revision}"),
+            ));
+        }
         Ok((authorized, expected, revision_token))
     }
 
@@ -1163,6 +1192,7 @@ impl FileResourceRuntime {
             webview_label: webview_label.map(str::to_string),
             renderer_lease_id: renderer_lease_id.to_string(),
         };
+        let publication = self.inner.ticket_publication.lock().await;
         {
             let mut leases = self.inner.renderer_leases.lock().await;
             if let Some(existing) = leases.get(&renderer_lease) {
@@ -1184,11 +1214,16 @@ impl FileResourceRuntime {
                 },
             );
         }
-        self.inner
-            .read_tickets
-            .lock()
-            .await
-            .retain(|_, ticket| ticket.renderer_lease != renderer_lease);
+        #[cfg(test)]
+        {
+            let hook = self.inner.ticket_publication_hook.lock().await.clone();
+            if let Some(hook) = hook {
+                if hook.pause_once.swap(false, Ordering::AcqRel) {
+                    hook.lease_published.wait().await;
+                    hook.resume_publication.wait().await;
+                }
+            }
+        }
         let expires_at_ms = now_epoch_ms().saturating_add(
             self.inner
                 .ticket_ttl
@@ -1199,7 +1234,7 @@ impl FileResourceRuntime {
         let ticket = FileReadTicket {
             issuance_id,
             webview_label: webview_label.map(str::to_string),
-            renderer_lease,
+            renderer_lease: renderer_lease.clone(),
             subscription_id: subscription_id.to_string(),
             resource_id: resource_id.to_string(),
             snapshot,
@@ -1207,15 +1242,22 @@ impl FileResourceRuntime {
             mime_type: descriptor.mime_type,
             expires_at,
         };
-        self.inner
-            .read_tickets
-            .lock()
-            .await
-            .insert(ticket_id.clone(), ticket.clone());
+        {
+            let mut tickets = self.inner.read_tickets.lock().await;
+            tickets.retain(|_, existing| existing.renderer_lease != renderer_lease);
+            tickets.insert(ticket_id.clone(), ticket.clone());
+        }
         if let Err(error) = self.ensure_ticket_lease_active(&ticket).await {
             self.rollback_ticket_publication(&ticket_id, &ticket).await;
             return Err(error);
         }
+        drop(publication);
+        self.schedule_ticket_expiry(
+            ticket_id.clone(),
+            issuance_id,
+            ticket.renderer_lease.clone(),
+            expires_at,
+        );
         Ok(FileResourceTicketV1 {
             schema: 1,
             ticket_id: ticket_id.clone(),
@@ -1294,6 +1336,59 @@ impl FileResourceRuntime {
                 }
                 Err(observed) => current = observed,
             }
+        }
+    }
+
+    fn schedule_ticket_expiry(
+        &self,
+        ticket_id: String,
+        issuance_id: Uuid,
+        renderer_lease: RendererLeaseKey,
+        expires_at: Instant,
+    ) {
+        let weak = Arc::downgrade(&self.inner);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let remaining = expires_at.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(remaining).await;
+            }
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            FileResourceRuntime { inner }
+                .expire_ticket_issuance(&ticket_id, issuance_id, &renderer_lease, expires_at)
+                .await;
+        });
+    }
+
+    async fn expire_ticket_issuance(
+        &self,
+        ticket_id: &str,
+        issuance_id: Uuid,
+        renderer_lease: &RendererLeaseKey,
+        expires_at: Instant,
+    ) {
+        if expires_at > Instant::now() {
+            return;
+        }
+        {
+            let mut tickets = self.inner.read_tickets.lock().await;
+            if tickets
+                .get(ticket_id)
+                .is_some_and(|ticket| ticket.issuance_id == issuance_id)
+            {
+                tickets.remove(ticket_id);
+            }
+        }
+        let mut leases = self.inner.renderer_leases.lock().await;
+        if leases
+            .get(renderer_lease)
+            .is_some_and(|lease| lease.issuance_id == issuance_id)
+        {
+            leases.remove(renderer_lease);
         }
     }
 
@@ -1451,7 +1546,13 @@ impl FileResourceRuntime {
             .cloned()
             .ok_or_else(|| error("invalid_ticket", "file read ticket is unavailable"))?;
         if ticket.expires_at <= Instant::now() {
-            self.inner.read_tickets.lock().await.remove(ticket_id);
+            self.expire_ticket_issuance(
+                ticket_id,
+                ticket.issuance_id,
+                &ticket.renderer_lease,
+                ticket.expires_at,
+            )
+            .await;
             return Err(error("expired_ticket", "file read ticket has expired"));
         }
         if let Some(expected_label) = ticket.webview_label.as_deref() {
@@ -1866,10 +1967,10 @@ mod tests {
         let path = temp.path().join("unavailable.txt");
         let moved = temp.path().join("unavailable.moved");
         fs::write(&path, "stable\n").expect("fixture");
-        let config = agent_config("agent-a", temp.path());
         let runtime = test_runtime();
+        let grant = runtime.record_user_file(&path).await.expect("picker grant");
         let subscription = runtime
-            .open_agent_file("agent-a", &config, &path, None)
+            .open_user_file(&grant.capability_id, &path, None)
             .await
             .expect("open");
         let mut events = runtime.subscribe_events();
@@ -1886,6 +1987,33 @@ mod tests {
             Some("unauthorized_path")
         );
         assert!(!unavailable.descriptor.capabilities.preview);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    unavailable.revision,
+                    None,
+                )
+                .await
+                .expect_err("unavailable text revision must not read the old handle")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    unavailable.revision,
+                    None,
+                    "unavailable-lease",
+                )
+                .await
+                .expect_err("unavailable revision must not mint a stream ticket")
+                .code(),
+            "unauthorized_path"
+        );
 
         runtime.schedule_refresh(subscription.resource_id.clone());
         sleep(Duration::from_millis(300)).await;
@@ -1903,6 +2031,81 @@ mod tests {
         assert_eq!(recovered.revision, 3);
         assert_eq!(recovered.descriptor.unavailable_reason, None);
         assert!(recovered.descriptor.capabilities.preview);
+    }
+
+    #[tokio::test]
+    async fn persistent_unstable_scan_is_typed_once_and_recovers() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("unstable.txt");
+        fs::write(&path, "stable\n").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let subscription = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let mut events = runtime.subscribe_events();
+
+        *runtime.inner.forced_refresh_error.lock().await = Some(error(
+            "unstable_file",
+            "file changed during every descriptor scan attempt",
+        ));
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        let unavailable = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("unstable event timeout")
+            .expect("unstable event");
+        assert_eq!(unavailable.revision, 2);
+        assert_eq!(
+            unavailable.descriptor.unavailable_reason.as_deref(),
+            Some("unstable_file")
+        );
+        assert_eq!(
+            runtime
+                .read_text(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    unavailable.revision,
+                    Some(&config),
+                )
+                .await
+                .expect_err("unstable text revision must reject reads")
+                .code(),
+            "unstable_file"
+        );
+        assert_eq!(
+            runtime
+                .issue_ticket(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    unavailable.revision,
+                    Some(&config),
+                    "unstable-lease",
+                )
+                .await
+                .expect_err("unstable revision must reject stream tickets")
+                .code(),
+            "unstable_file"
+        );
+
+        *runtime.inner.forced_refresh_error.lock().await = Some(error(
+            "unstable_file",
+            "file changed during every descriptor scan attempt",
+        ));
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            events.try_recv().is_err(),
+            "identical unstable state repeated"
+        );
+
+        runtime.schedule_refresh(subscription.resource_id.clone());
+        let recovered = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("unstable recovery timeout")
+            .expect("unstable recovery event");
+        assert_eq!(recovered.revision, 3);
+        assert_eq!(recovered.descriptor.unavailable_reason, None);
     }
 
     #[tokio::test]
@@ -2153,12 +2356,24 @@ mod tests {
         assert_eq!(repeated_range.bytes, first_range.bytes);
         assert_eq!(first_range.mime_type, "application/pdf");
 
-        sleep(Duration::from_millis(300)).await;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.ticket_count().await == 0
+                    && runtime.renderer_lease_count().await == 0
+                    && runtime.ticket_snapshot_bytes_in_use() == 0
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("abandoned ticket state must be reclaimed at its deadline");
         let expired = runtime
             .read_ticket_range_for_webview(&ticket.ticket_id, Some("bytes=0-3"), Some("main"))
             .await
             .expect_err("expired ticket must fail");
-        assert_eq!(expired.code(), "expired_ticket");
+        assert_eq!(expired.code(), "invalid_ticket");
     }
 
     #[tokio::test]
@@ -2501,6 +2716,94 @@ mod tests {
             .await
             .expect("idempotent repeated close");
         assert_eq!(runtime.ticket_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_lease_publication_keeps_the_newer_ticket() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("concurrent-reissue.pdf");
+        fs::write(&path, b"%PDF-1.7 concurrent reissue payload").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let subscription = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let hook = TicketPublicationHook {
+            pause_once: Arc::new(AtomicBool::new(true)),
+            lease_published: Arc::new(tokio::sync::Barrier::new(2)),
+            resume_publication: Arc::new(tokio::sync::Barrier::new(2)),
+        };
+        *runtime.inner.ticket_publication_hook.lock().await = Some(hook.clone());
+
+        let first_runtime = runtime.clone();
+        let first_config = config.clone();
+        let first_resource_id = subscription.resource_id.clone();
+        let first_subscription_id = subscription.subscription_id.clone();
+        let revision = subscription.revision;
+        let first_issue = tokio::spawn(async move {
+            first_runtime
+                .issue_ticket(
+                    &first_resource_id,
+                    &first_subscription_id,
+                    revision,
+                    Some(&first_config),
+                    "renderer-concurrent-reissue",
+                )
+                .await
+        });
+
+        hook.lease_published.wait().await;
+        let second_runtime = runtime.clone();
+        let second_config = config.clone();
+        let second_resource_id = subscription.resource_id.clone();
+        let second_subscription_id = subscription.subscription_id.clone();
+        let second_issue = tokio::spawn(async move {
+            second_runtime
+                .issue_ticket(
+                    &second_resource_id,
+                    &second_subscription_id,
+                    revision,
+                    Some(&second_config),
+                    "renderer-concurrent-reissue",
+                )
+                .await
+        });
+
+        sleep(Duration::from_millis(75)).await;
+        assert!(
+            !second_issue.is_finished(),
+            "same-lease publication must serialize behind the in-flight issue"
+        );
+        hook.resume_publication.wait().await;
+
+        let first = first_issue
+            .await
+            .expect("first issuance task")
+            .expect("first ticket");
+        let second = second_issue
+            .await
+            .expect("second issuance task")
+            .expect("replacement ticket");
+        assert_eq!(runtime.ticket_count().await, 1);
+        assert_eq!(runtime.renderer_lease_count().await, 1);
+        assert_eq!(
+            runtime
+                .read_ticket_range(&first.ticket_id, Some("bytes=0-3"))
+                .await
+                .expect_err("older concurrent ticket must be purged")
+                .code(),
+            "invalid_ticket"
+        );
+        assert_eq!(
+            runtime
+                .read_ticket_range(&second.ticket_id, Some("bytes=0-3"))
+                .await
+                .expect("newer concurrent ticket remains active")
+                .bytes,
+            b"%PDF"
+        );
+        *runtime.inner.ticket_publication_hook.lock().await = None;
     }
 
     #[tokio::test]

@@ -57,6 +57,10 @@ The foundation previews validated text and Markdown, images, and PDFs. It does
 not yet provide Draft, Changes, comments, approval, artifact versions, or live
 HTML/SVG. Unsupported and oversized resources stay local to their tab and offer
 metadata, Retry, **Open With**, or Reveal rather than failing the Workbench.
+Ordinary saves and atomic editor saves refresh through the same stable revision
+stream. If a file is temporarily unreadable or keeps changing during a scan,
+its tab shows one local unavailable state and automatically recovers when the
+source stabilizes.
 
 Files is intentionally absent from the New Surface launcher in this slice.
 Open files from Explorer; the launcher will become available only when the
@@ -70,6 +74,12 @@ the intentional second presentation.
 PDF text search is deliberately bounded so a very large document cannot lock
 the Workbench. It searches at most 128 pages or for two seconds per query and
 labels partial results with the number of pages inspected.
+
+Image and PDF previews use short-lived immutable snapshots. A preview therefore
+keeps serving the exact revision it opened even if the source changes or is
+deleted; the next revision opens a new snapshot. Wardian automatically reclaims
+the snapshot and renderer lease at the ticket deadline, including when a pane
+abandons the preview without sending a later request.
 
 ## Reopen and Reset
 

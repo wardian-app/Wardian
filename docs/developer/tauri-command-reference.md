@@ -210,6 +210,14 @@ The URL accepts `GET` and `HEAD`, advertises `Accept-Ranges: bytes`, returns
 `Content-Range: bytes */<size>` for an unsatisfiable range. Responses are
 `no-store` and `nosniff`; a `HEAD` response never carries a body.
 
+Ticket issuance copies and verifies the requested revision into an immutable,
+backend-owned snapshot before returning the URL. Later source edits, atomic
+file replacement, or deletion do not change bytes served by that ticket. A
+new revision requires a new ticket. Snapshot storage is bounded, and the
+ticket deadline actively removes an abandoned snapshot and its matching
+renderer lease. Expiry cleanup is issuance-aware, so an older timer cannot
+revoke a newer ticket that reused the same renderer lease ID.
+
 ### `close_file_renderer_lease`
 
 Revokes only the matching WebView renderer lease and every ticket it owns. The
@@ -246,6 +254,8 @@ Response: `null`.
 
 Opens the native picker and records a backend-owned grant for the exact selected
 canonical file. The grant does not authorize a sibling or parent directory.
+Picker grants are deduplicated by canonical target and bounded to 128 entries;
+dormant least-recently-used grants are evicted before a new grant is rejected.
 
 ```json
 {
@@ -275,10 +285,14 @@ Files commands:
 ```
 
 Stable codes include `invalid_request`, `unauthorized_path`,
-`unavailable_path`, `resource_not_found`, `stale_revision`,
-`unsupported_content`, `file_too_large`, `invalid_ticket`,
-`unauthorized_ticket`, `expired_ticket`, `invalid_range`, and
-`range_not_satisfiable`.
+`unavailable_path`, `unstable_file`, `resource_not_found`, `stale_revision`,
+`unsupported_content`, `file_too_large`, `grant_limit_reached`,
+`ticket_capacity_exceeded`, `invalid_ticket`, `unauthorized_ticket`,
+`expired_ticket`, `invalid_range`, and `range_not_satisfiable`.
+`grant_limit_reached` means all 128 exact picker grants are currently active;
+closing an unused file makes a grant evictable. `ticket_capacity_exceeded`
+means immutable renderer snapshots have reached their bounded storage budget;
+closing the owning renderer lease or waiting for active expiry releases it.
 
 Debug builds additionally register `debug_grant_file_resource_for_e2e` and
 `debug_file_resource_stats` for the native harness. The former delegates to the

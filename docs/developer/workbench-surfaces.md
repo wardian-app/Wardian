@@ -191,15 +191,23 @@ The Rust lifecycle is:
    subscription, and shares one watcher per canonical file.
 2. A stable content change is debounced for 150 ms, becomes the next monotonic
    revision, and emits `file-resource://revision`. An unchanged hash emits
-   nothing.
+   nothing. Atomic replacement is accepted only when the original requested
+   path still resolves to the same canonical target under the same authorized
+   root. Persistent unreadable or unstable scans publish one typed unavailable
+   revision and recover through the same revision stream.
 3. Text reads are bound to the subscription and current revision. Image/PDF
    streams require a short-lived ticket bound to the subscription, WebView,
    renderer lease, and revision. Renderer calls carry the exact owning
    snapshot's `subscription_id`; the client never selects a newer subscription
-   merely because another pane opened the same resource.
+   merely because another pane opened the same resource. Each issued ticket
+   serves a verified immutable snapshot of that revision, so range reads do not
+   reopen or rehash a changing source file.
 4. `close_file_renderer_lease` revokes that renderer's tickets without closing
    another pane's subscription. `close_file_resource` releases one
    subscription; the watcher disappears only after the last subscriber closes.
+   Ticket deadlines proactively reclaim abandoned snapshot storage and the
+   matching lease. Issuance IDs prevent an older expiry task from revoking a
+   newer ticket that reused the same renderer lease ID.
 
 Every open and read rechecks current backend authority. A trusted restore with
 no frontend capability selects a current matching agent primary workspace or
