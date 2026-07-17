@@ -33,6 +33,27 @@ Old workflow system commands such as `run_workflow`, `stop_all_triggers`,
 - **`load_queue_preferences` / `save_queue_preferences`**: Load or persist per-event-type Queue visibility, desktop alert, and sound alert preferences.
 - **`list_provider_readiness`**: Returns install/auth readiness for provider commands before spawn. This is separate from live provider input readiness, which is tracked per agent runtime generation.
 
+### Files Resources
+
+The Files IPC contract uses snake-case DTOs nested under `request`:
+
+- `open_file_resource` returns a canonical descriptor, subscription, and
+  monotonic revision after backend authorization.
+- `read_file_resource_text` requires that resource, subscription, and revision.
+- `issue_file_resource_ticket` requires those fields plus a non-empty
+  `renderer_lease_id` and returns a short-lived, WebView-bound image/PDF URL.
+- `close_file_renderer_lease` revokes the matching renderer lease and its
+  tickets without closing the subscription.
+- `close_file_resource` releases one subscription.
+- `pick_file_resource` opens a native picker and returns an exact-file grant or
+  `null` when cancelled.
+
+For complete request and response JSON, see
+[Tauri Command Reference](./tauri-command-reference.md#files-resources-commandsfilesrs).
+Do not persist picker capability IDs, subscriptions, revisions, tickets, or
+leases in Workbench state. Restoration sends the canonical path with both
+authorization IDs set to `null`; the backend resolves current authority again.
+
 ## 🔔 Events (Backend to Frontend)
 
 The UI listens for these events using `listen("event-name", (event) => { ... })`.
@@ -84,6 +105,52 @@ Pushed when the backend accepts a provider runtime status transition for an agen
 ```
 
 Provider runtime status is authoritative for provider-internal states such as `idle`, `processing`, `action_required`, `off`, and `error`. Wardian interaction status must not replace provider status. For example, a Codex permission prompt is provider runtime evidence; a queued Wardian ask waiting for delivery remains an interaction delivery state.
+
+### `file-resource://revision`
+
+Subscribe before invoking `open_file_resource` so the watcher cannot publish a
+revision between the open and listener setup. The event has no frontend request
+payload. It is emitted once after 150 ms of stable changed content and carries
+the complete next descriptor:
+
+```json
+{
+  "schema": 1,
+  "resource_id": "file:<canonical-path>",
+  "revision": 2,
+  "descriptor": {
+    "schema": 1,
+    "canonical_path": "<absolute-workspace-path>/README.md",
+    "display_name": "README.md",
+    "extension": "md",
+    "mime_type": "text/markdown",
+    "encoding": "utf-8",
+    "renderer_kind": "markdown",
+    "size_bytes": 2112,
+    "line_count": 44,
+    "content_hash": "sha256:<content-hash>",
+    "modified_at_ms": 1784242800150,
+    "capabilities": {
+      "preview": true,
+      "changes": true,
+      "draft": true,
+      "stream": false
+    },
+    "unavailable_reason": null
+  }
+}
+```
+
+An unchanged content hash emits no event. Consumers ignore unrelated resource
+IDs and revisions not newer than their snapshot, then reopen through
+`open_file_resource`; they do not read a new revision through an old
+subscription snapshot. A stale `read_file_resource_text` or stream ticket
+request fails with `stale_revision`.
+
+The backend owns one watcher per canonical file, shared by every subscription.
+Closing a renderer lease revokes only its stream tickets. Closing the last file
+subscription removes the watcher and any remaining ticket/lease state for that
+subscription.
 
 ### Interaction and Delivery Watch Events
 

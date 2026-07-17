@@ -96,6 +96,196 @@ Queue commands persist the frontend Queue projection and preferences for the act
 - `reveal_in_explorer`
 - `read_file_preview`
 
+## Files resources (`commands/files.rs`)
+
+These commands back Explorer-opened Files tabs. The frontend passes one
+snake-case `request` object. Paths below are placeholders; callers must supply
+an absolute local path.
+
+### `open_file_resource`
+
+Use one authorization mode: an `agent_id`, an exact live
+`user_file_capability_id`, or neither for backend-trusted Workbench restore.
+Supplying both is invalid. Trusted restore scans current agent primary and
+additional roots in deterministic agent order, then exact live picker grants;
+it never trusts persisted frontend state.
+
+Request:
+
+```json
+{
+  "request": {
+    "path": "<absolute-workspace-path>/README.md",
+    "agent_id": "agent-session-id",
+    "user_file_capability_id": null
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "resource_id": "file:<canonical-path>",
+  "subscription_id": "subscription-uuid",
+  "revision": 1,
+  "descriptor": {
+    "schema": 1,
+    "canonical_path": "<absolute-workspace-path>/README.md",
+    "display_name": "README.md",
+    "extension": "md",
+    "mime_type": "text/markdown",
+    "encoding": "utf-8",
+    "renderer_kind": "markdown",
+    "size_bytes": 2048,
+    "line_count": 42,
+    "content_hash": "sha256:<content-hash>",
+    "modified_at_ms": 1784242800000,
+    "capabilities": {
+      "preview": true,
+      "changes": true,
+      "draft": true,
+      "stream": false
+    },
+    "unavailable_reason": null
+  }
+}
+```
+
+### `read_file_resource_text`
+
+Reads complete validated UTF-8 text only when the subscription and revision are
+still current.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "revision": 1
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "resource_id": "file:<canonical-path>",
+  "revision": 1,
+  "text": "# Project\n"
+}
+```
+
+### `issue_file_resource_ticket`
+
+Mints a short-lived image/PDF stream ticket bound to the resource,
+subscription, current revision, calling WebView, and caller-owned renderer
+lease.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "revision": 1,
+    "renderer_lease_id": "files-pane-renderer-1"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "ticket_id": "ticket-uuid",
+  "url": "wardian-resource://localhost/ticket-uuid",
+  "resource_id": "file:<canonical-path>",
+  "revision": 1,
+  "renderer_lease_id": "files-pane-renderer-1",
+  "expires_at_ms": 1784242860000
+}
+```
+
+The URL accepts `GET` and `HEAD`, advertises `Accept-Ranges: bytes`, returns
+`206` plus `Content-Range` for a valid single range, and returns `416` plus
+`Content-Range: bytes */<size>` for an unsatisfiable range. Responses are
+`no-store` and `nosniff`; a `HEAD` response never carries a body.
+
+### `close_file_renderer_lease`
+
+Revokes only the matching WebView renderer lease and every ticket it owns. The
+file subscription remains open for the pane and other renderers.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "renderer_lease_id": "files-pane-renderer-1"
+  }
+}
+```
+
+Response: `null`.
+
+### `close_file_resource`
+
+Releases one subscription. It is idempotent; the shared watcher is removed only
+after the final subscription closes.
+
+```json
+{
+  "request": {
+    "subscription_id": "subscription-uuid"
+  }
+}
+```
+
+Response: `null`.
+
+### `pick_file_resource`
+
+Opens the native picker and records a backend-owned grant for the exact selected
+canonical file. The grant does not authorize a sibling or parent directory.
+
+```json
+{
+  "request": {
+    "title": "Open a file"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "capability_id": "capability-uuid",
+  "canonical_path": "<absolute-workspace-path>/report.pdf"
+}
+```
+
+Cancel returns `null`. Resource-local failures use the same typed shape for all
+Files commands:
+
+```json
+{
+  "schema": 1,
+  "code": "stale_revision",
+  "message": "requested revision is no longer current"
+}
+```
+
+Stable codes include `invalid_request`, `unauthorized_path`,
+`unavailable_path`, `resource_not_found`, `stale_revision`,
+`unsupported_content`, `file_too_large`, `invalid_ticket`,
+`unauthorized_ticket`, `expired_ticket`, `invalid_range`, and
+`range_not_satisfiable`.
+
+Debug builds additionally register `debug_grant_file_resource_for_e2e` and
+`debug_file_resource_stats` for the native harness. The former delegates to the
+same exact grant function as the native picker; the latter exposes aggregate
+ownership counts only. Both are compiled out of release builds and are not
+frontend application APIs.
+
 ## Workflows (`commands/workflow.rs`)
 
 Current workflow commands:
@@ -240,6 +430,7 @@ Common app-level events:
 - `scheduled-runs-updated`
 - `git-changed`
 - `library-changed` with payload `{ "library_type": "skills" }`
+- `file-resource://revision` with the next stable Files descriptor
 
 For payload semantics, see [IPC and Event Governance](./ipc-events.md) and the workflow engine docs.
 

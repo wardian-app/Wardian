@@ -1178,6 +1178,11 @@ impl FileResourceRuntime {
     }
 
     #[must_use]
+    pub async fn renderer_lease_count(&self) -> usize {
+        self.inner.renderer_leases.lock().await.len()
+    }
+
+    #[must_use]
     pub async fn user_grant_count(&self) -> usize {
         self.inner.user_file_grants.lock().await.len()
     }

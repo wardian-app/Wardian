@@ -45,6 +45,26 @@ Surfaces respond to the size of their own pane. In compact splits, toolbars wrap
 
 When a move or close removes the last tab from a non-final pane, Wardian collapses that pane automatically and expands its sibling into the released space. The final pane is never removed; if its last tab closes, it remains in place and shows the Home surface chooser.
 
+## Files Previews
+
+Explorer file opens use normal Workbench tabs. A single click opens one
+transient Files preview in the current pane; selecting another file replaces
+that preview. Double-click, `Enter`, the Explorer **Open** action, or opening to
+the side makes the tab permanent. A permanent tab participates in ordinary
+close history and restore. A transient preview does not.
+
+The foundation previews validated text and Markdown, images, and PDFs. It does
+not yet provide Draft, Changes, comments, approval, artifact versions, or live
+HTML/SVG. Unsupported and oversized resources stay local to their tab and offer
+metadata, Retry, **Open With**, or Reveal rather than failing the Workbench.
+
+Files is intentionally absent from the New Surface launcher in this slice.
+Open files from Explorer; the launcher will become available only when the
+artifact review and isolated active-content contracts are complete. A restored
+file tab is resolved again by the Rust backend against current agent primary
+and additional directory grants, or an exact live native-picker grant. Layout
+state never confers filesystem authority.
+
 ## Reopen and Reset
 
 Closing a surface adds it to the recently closed history. Press `Ctrl+Shift+T` / `Cmd+Shift+T`, choose **Reopen Closed Surface** in the command palette, or use the **Reopen** action on an empty pane's Home state. Wardian restores the most recently closed presentation first.

@@ -98,6 +98,11 @@ non-JSON values fail validation.
 Normal Agent Session opens use `focus_resource`. The agent runtime is shared;
 duplicate surfaces are independent presentations of it.
 
+Files also uses `focus_resource`. Its canonical resource key is either
+`file:<slash-normalized-canonical-path>` or, in the future artifact slice,
+`artifact:<artifact-id>`. These identities never collapse into each other even
+when an artifact is backed by the same file.
+
 ### Render policies
 
 - `keep_alive` retains the logical component while its tab is hidden. Expensive
@@ -151,6 +156,47 @@ sequential and tested there. A restore failure yields a recoverable placeholder
 instead of silently discarding the tab. Unknown surface types are retained as
 inert opaque JSON within the same size limit; Wardian does not execute or merge
 that state until a matching definition is installed and validates it.
+
+### Files foundation state and runtime
+
+`FilesSurfaceStateV1` serializes only `resource_kind`, `mode`,
+`transient_preview`, `review_drawer_open`, `selected_version_id`, and
+`optional_checkpoint_id`. File bytes, canonical authorization, subscriptions,
+watchers, renderer tickets, and renderer leases remain backend-owned.
+
+The current Files contribution is reachable from Explorer and restoration but
+is deliberately marked reserved in the New Surface catalog. Ordinary file
+single-click uses `open_transient`; double-click, keyboard open, context
+**Open**, and **Open to Side** create or pin permanent presentations. Artifact
+resources, Draft/Changes, review, and active HTML/SVG isolation are not part of
+this foundation, so activating the launcher would overstate the available
+contract.
+
+The Rust lifecycle is:
+
+1. `open_file_resource` canonicalizes and authorizes the path, creates a
+   subscription, and shares one watcher per canonical file.
+2. A stable content change is debounced for 150 ms, becomes the next monotonic
+   revision, and emits `file-resource://revision`. An unchanged hash emits
+   nothing.
+3. Text reads are bound to the subscription and current revision. Image/PDF
+   streams require a short-lived ticket bound to the subscription, WebView,
+   renderer lease, and revision.
+4. `close_file_renderer_lease` revokes that renderer's tickets without closing
+   another pane's subscription. `close_file_resource` releases one
+   subscription; the watcher disappears only after the last subscriber closes.
+
+Every open and read rechecks current backend authority. A trusted restore with
+no frontend capability selects a current matching agent primary workspace or
+`include_directories`, in deterministic agent order, then an exact live picker
+grant. `system_include_directories`, sibling paths, and canonical symlink or
+junction escapes are denied. A saved Workbench document cannot restore access
+that the backend no longer grants.
+
+Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
+5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for
+images, and 256 MiB for PDFs. HTML and SVG resolve to the unsupported renderer
+until the zero-Tauri-capability, networkless active artifact host is available.
 
 ## Persistence and Migration
 
