@@ -113,6 +113,8 @@ matching source presentation; the pair converges to the same canonical key and
 remains in separate panes regardless of which response publishes first.
 Repeated same-key acknowledgements do not consume this provenance while the
 matching presentation still has its provisional key.
+An accepted explicit resource rebind detaches either endpoint from the pair;
+cancelled or stale rebinds leave the original provenance intact.
 The frontend never resolves symlinks, junctions, or filesystem authority.
 Canonicalization re-resolves the current Workbench document after a stale
 compare-and-swap. A close guard cancellation remains a user veto, while a

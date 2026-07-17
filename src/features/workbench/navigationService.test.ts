@@ -988,6 +988,150 @@ describe("workbench navigation service", () => {
     },
   );
 
+  it.each([
+    ["explicit endpoint", "side-alias"],
+    ["partner endpoint", "ordinary-alias"],
+  ] as const)(
+    "does not carry old duplicate provenance when rebinding the %s",
+    async (_endpoint, reboundSurfaceId) => {
+      const registry = createCoreWorkbenchSurfaceRegistry();
+      const ordinaryAlias = makeSurface("ordinary-alias", {
+        surface_type: "files",
+        resource_key: "file:C:/alias-a/report.md",
+        state: filesState(false),
+      });
+      const canonicalB = makeSurface("canonical-b", {
+        surface_type: "files",
+        resource_key: "file:C:/real-b/report.md",
+        state: filesState(false),
+      });
+      const store = createWorkbenchStore({
+        initial_document: makeSingleGroupDocument([ordinaryAlias, canonicalB]),
+      });
+      const navigation = createWorkbenchNavigationService({
+        registry,
+        store,
+        create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+      });
+      const canonicalBRequest = {
+        surface_type: "files" as const,
+        resource_key: "file:C:/real-b/report.md",
+        state: filesState(false),
+      };
+
+      navigation.open_to_side({
+        surface_type: "files",
+        resource_key: "file:C:/alias-a/report.md",
+        state: filesState(false),
+      });
+      await expect(navigation.rebind_resource(reboundSurfaceId, {
+        surface_type: "files",
+        resource_key: "file:C:/alias-b/report.md",
+        state: filesState(false),
+      })).resolves.toBe("allow");
+      await navigation.canonicalize_resource("side-alias", canonicalBRequest);
+      await navigation.canonicalize_resource("ordinary-alias", canonicalBRequest);
+
+      expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical-b"]);
+    },
+  );
+
+  it("retains duplicate provenance when a rebind guard vetoes the change", async () => {
+    let guardDecision: "allow" | "cancel" = "cancel";
+    const registry = createSurfaceRegistry([
+      definition("guarded-resource", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+        close_policy: "confirm_if_dirty",
+        can_close: async () => guardDecision,
+      }),
+    ]);
+    const ordinaryAlias = makeSurface("ordinary-alias", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:alias-a",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([ordinaryAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+    });
+    navigation.open_to_side({
+      surface_type: "guarded-resource",
+      resource_key: "resource:alias-a",
+    });
+
+    await expect(navigation.rebind_resource("side-alias", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:unrelated-b",
+    })).resolves.toBe("cancel");
+    expect(store.getState().document.surfaces["side-alias"].resource_key)
+      .toBe("resource:alias-a");
+
+    guardDecision = "allow";
+    const canonicalRequest = {
+      surface_type: "guarded-resource" as const,
+      resource_key: "resource:canonical-a",
+    };
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+    await navigation.canonicalize_resource("ordinary-alias", canonicalRequest);
+    expect(Object.keys(store.getState().document.surfaces).sort())
+      .toEqual(["ordinary-alias", "side-alias"]);
+  });
+
+  it("retains duplicate provenance when a rebind CAS becomes stale", async () => {
+    let releaseGuard: ((decision: "allow") => void) | undefined;
+    const pendingGuard = new Promise<"allow">((resolve) => { releaseGuard = resolve; });
+    const canClose = vi.fn()
+      .mockImplementationOnce(() => pendingGuard)
+      .mockResolvedValue("allow" as const);
+    const registry = createSurfaceRegistry([
+      definition("guarded-resource", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+        close_policy: "confirm_if_dirty",
+        can_close: canClose,
+      }),
+    ]);
+    const ordinaryAlias = makeSurface("ordinary-alias", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:alias-a",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([ordinaryAlias]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["side-group", "side-node", "side-alias"]),
+    });
+    navigation.open_to_side({
+      surface_type: "guarded-resource",
+      resource_key: "resource:alias-a",
+    });
+
+    const rebind = navigation.rebind_resource("side-alias", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:unrelated-b",
+    });
+    store.getState().apply_commands([{ type: "focus_surface", surface_id: "ordinary-alias" }]);
+    releaseGuard?.("allow");
+    await expect(rebind).resolves.toBe("cancel");
+    expect(store.getState().document.surfaces["side-alias"].resource_key)
+      .toBe("resource:alias-a");
+
+    const canonicalRequest = {
+      surface_type: "guarded-resource" as const,
+      resource_key: "resource:canonical-a",
+    };
+    await navigation.canonicalize_resource("side-alias", canonicalRequest);
+    await navigation.canonicalize_resource("ordinary-alias", canonicalRequest);
+    expect(Object.keys(store.getState().document.surfaces).sort())
+      .toEqual(["ordinary-alias", "side-alias"]);
+  });
+
   it("preserves an explicit Open to Side duplicate through canonical rekeying", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const canonical = makeSurface("canonical", {

@@ -478,10 +478,12 @@ export function createWorkbenchNavigationService(
       if (
         await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) !== "allow"
       ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
+      const decision = closeResult(store.getState().compare_and_apply_commands(
         snapshotState.transaction_version,
         [{ type: "replace_surface", surface: replacement }],
       ));
+      if (decision === "allow") discardDuplicateProvenance(surfaceId);
+      return decision;
     },
 
     reset_surface: async (surfaceId) => {
