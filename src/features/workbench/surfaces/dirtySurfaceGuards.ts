@@ -77,16 +77,6 @@ function preparedChoice(
 export function createLibrarySurfaceCloseAdapter(
   prompt: DirtySurfacePrompt,
 ): SurfaceCloseResourceAdapter {
-  const generations = new WeakMap<object, number>();
-  let nextGeneration = 1;
-  const generationFor = (resource: object | undefined): number => {
-    if (!resource) return 1;
-    const existing = generations.get(resource);
-    if (existing !== undefined) return existing;
-    nextGeneration += 1;
-    generations.set(resource, nextGeneration);
-    return nextGeneration;
-  };
   const collectChoice = createChoiceCollector(prompt, {
     surface_type: "library",
     title: "Library",
@@ -97,7 +87,7 @@ export function createLibrarySurfaceCloseAdapter(
       const resource = useLibraryStore.getState()._editorResources[surface.surface_id];
       return {
         resource_id: `library:${surface.surface_id}`,
-        resource_generation: generationFor(resource),
+        resource_generation: resource?.generation ?? 0,
         dirty: resource?.dirty ?? false,
       };
     },
@@ -107,10 +97,19 @@ export function createLibrarySurfaceCloseAdapter(
         surfaceId === undefined
         || request.resource.resource_id !== `library:${surfaceId}`
       ) return null;
+      const observed = useLibraryStore.getState()._editorResources[surfaceId];
+      if (
+        !observed
+        || observed.generation !== request.resource.resource_generation
+      ) return null;
+      const expected = {
+        generation: observed.generation,
+        identity: observed.identity,
+      };
       const choice = await collectChoice(request.resource.resource_id);
       return preparedChoice(request, choice, {
-        save: () => useLibraryStore.getState().saveEditorDraft(surfaceId),
-        discard: () => useLibraryStore.getState().discardEditorDraft(surfaceId),
+        save: () => useLibraryStore.getState().saveEditorDraft(surfaceId, expected),
+        discard: () => useLibraryStore.getState().discardEditorDraft(surfaceId, expected),
       });
     },
   };
@@ -129,16 +128,29 @@ export function createWorkflowsSurfaceCloseAdapter(
       const state = useBuilderStore.getState();
       return {
         resource_id: "workflows:builder",
-        resource_generation: state.editRevision,
+        resource_generation: state.resourceRevision,
         dirty: state.dirty,
       };
     },
     prepare: async (request) => {
       if (request.resource.resource_id !== "workflows:builder") return null;
+      const observed = useBuilderStore.getState();
+      if (observed.resourceRevision !== request.resource.resource_generation) return null;
+      const expected = {
+        resourceRevision: observed.resourceRevision,
+        path: observed.path,
+        blueprintId: observed.blueprint?.id ?? null,
+      };
+      const matchesExpected = () => {
+        const live = useBuilderStore.getState();
+        return live.resourceRevision === expected.resourceRevision
+          && live.path === expected.path
+          && (live.blueprint?.id ?? null) === expected.blueprintId;
+      };
       const choice = await collectChoice(request.resource.resource_id);
       return preparedChoice(request, choice, {
-        save: () => useBuilderStore.getState().save(),
-        discard: () => useBuilderStore.getState().discard(),
+        save: () => matchesExpected() && useBuilderStore.getState().save(),
+        discard: () => matchesExpected() && useBuilderStore.getState().discard(),
       });
     },
   };

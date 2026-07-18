@@ -4,6 +4,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { DetailPane } from './DetailPane';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryIndex } from '../../types';
+import { createCoreWorkbenchSurfaceRegistry } from '../workbench/coreSurfaceRegistry';
+import { createWorkbenchNavigationService } from '../workbench/navigationService';
+import { createWorkbenchStore } from '../workbench/useWorkbenchStore';
+import { makeSingleGroupDocument, makeSurface } from '../workbench/workbenchTestUtils';
+import type { DirtySurfacePrompt } from '../workbench/surfaces/dirtySurfaceGuards';
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -73,6 +78,7 @@ describe('DetailPane — discard-confirm Cancel preserves the dirty draft (regre
       contentStale: false,
       _editorDirty: false,
       _editorResources: {},
+      _editorGenerationClock: 0,
     });
   });
 
@@ -125,5 +131,45 @@ describe('DetailPane — discard-confirm Cancel preserves the dirty draft (regre
       ([cmd, args]) => cmd === 'read_library_item' && (args as { path?: string } | undefined)?.path === 'alpha',
     );
     expect(alphaReads).toHaveLength(1);
+  });
+
+  it('cancels a pending close before effects when an already-dirty draft changes', async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_library_item') return '# Alpha original';
+      return null;
+    });
+    const saveItem = vi.fn().mockResolvedValue(undefined);
+    useLibraryStore.setState({ saveItem });
+    await act(async () => {
+      await useLibraryStore.getState().select('skills/alpha');
+    });
+    render(<DetailPane surfaceId="library-1" selectedAgentIds={new Set()} />);
+    const textarea = await screen.findByTestId('markdown-editor-textarea');
+    fireEvent.change(textarea, { target: { value: '# First dirty draft' } });
+    await waitFor(() => expect(
+      useLibraryStore.getState().isEditorSurfaceDirty('library-1'),
+    ).toBe(true));
+
+    let releaseChoice: ((choice: 'save') => void) | undefined;
+    const prompt = vi.fn<DirtySurfacePrompt>(() => new Promise((resolve) => {
+      releaseChoice = resolve as (choice: 'save') => void;
+    }));
+    const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
+    const librarySurface = makeSurface('library-1', { surface_type: 'library', state: {} });
+    const workbench = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([librarySurface]),
+    });
+    const before = workbench.getState().document;
+    const navigation = createWorkbenchNavigationService({ registry, store: workbench });
+
+    const closing = navigation.close(librarySurface.surface_id);
+    await waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+    fireEvent.change(textarea, { target: { value: '# Newer dirty draft' } });
+    releaseChoice?.('save');
+
+    await expect(closing).resolves.toBe('cancel');
+    expect(saveItem).not.toHaveBeenCalled();
+    expect(workbench.getState().document).toBe(before);
+    expect(textarea).toHaveValue('# Newer dirty draft');
   });
 });

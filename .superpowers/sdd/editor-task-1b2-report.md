@@ -23,8 +23,9 @@ runs Saves; compare-and-applies layout; then runs Discard cleanup.
 
 The registry now exposes resource observation, preparation, and exact
 revalidation through narrow resource adapters. Library uses presentation-keyed
-editor bridges, Workflows uses the shared builder and edit revision, and Files
-uses an injected adapter whose default reports clean/no effects until Task 4.
+editor bridges with store-owned monotonic generations, Workflows uses the shared
+builder and a monotonic resource revision, and Files uses an injected adapter
+whose default reports clean/no effects until Task 4.
 The sequential `can_close` contract and Files placeholder that treated Save or
 Discard as unconditional permission were removed.
 
@@ -95,7 +96,10 @@ Integration tests prove:
 - Library and Workflows preparation is choice-only;
 - group close and Workbench reset do not partially discard when another
   resource cancels; and
-- exact identity, generation, and membership changes fail revalidation.
+- registry generation changes and navigation membership changes fail
+  revalidation; and
+- concrete Library and Workflows identity/generation changes cancel prepared
+  effects before Save, layout, or Discard.
 
 ## Documentation
 
@@ -108,3 +112,59 @@ Integration tests prove:
 The pre-existing `package-lock.json` modification was not edited or staged.
 No Files editor buffer, native save, recovery state, or recovery UI was added.
 No implementation concerns remain within Task 1B.2.
+
+## Review remediation evidence
+
+Review RED, before the generation owners and effect bindings were implemented:
+
+```text
+npm run test -- src/store/useLibraryStore.test.ts src/store/useBuilderStore.test.ts src/features/library/DetailPane.discardGuard.test.tsx src/features/workbench/surfaces/dirtySurfaceGuards.test.ts src/features/workbench/navigationService.test.ts
+Test Files  4 failed | 1 passed (5)
+Tests       4 failed | 96 passed (100)
+Exit code 1
+```
+
+Focused GREEN after remediation:
+
+```text
+npm run test -- src/features/workbench/closeTransactionCoordinator.test.ts src/features/workbench/navigationService.test.ts src/features/workbench/surfaceRegistry.test.ts src/features/workbench/coreSurfaceRegistry.test.ts src/features/workbench/surfaces/dirtySurfaceGuards.test.ts src/store/useLibraryStore.test.ts src/features/library/DetailPane.test.tsx src/features/library/DetailPane.discardGuard.test.tsx src/store/useBuilderStore.test.ts src/store/useWorkflowsView.test.ts
+Test Files  10 passed (10)
+Tests       152 passed (152)
+Exit code 0
+```
+
+Final gates:
+
+```text
+npm run test
+Test Files  182 passed (182)
+Tests       2179 passed | 1 skipped (2180)
+
+npm run lint
+tsc --noEmit
+Exit code 0
+
+npm run build
+tsc && vite build
+3797 modules transformed
+Exit code 0
+```
+
+## Review remediation self-review
+
+- Library generations are store-owned and advance on every editor-state
+  publication, including a second draft edit while the surface remains dirty
+  and an entry-identity switch.
+- Workflows `resourceRevision` never resets and advances through
+  load/initialize/edit/save/discard/reset; a separate monotonic identity token
+  prevents an in-flight save response from applying across resource ABA.
+- Prepared Library and Workflows Save/Discard closures are bound to the exact
+  observed identity and generation and fail closed before invoking stale work.
+- Integration regressions hold choices pending across already-dirty Library
+  edits and Workflows reset/initialize ABA, proving cancellation before Save,
+  layout, or Discard.
+- Canonical convergence onto an existing transient observes and revalidates
+  both the permanent source and transient target surface IDs.
+- The earlier coverage claim was narrowed to match the exact direct and
+  integration evidence. The pre-existing `package-lock.json` modification
+  remains untouched and unstaged.

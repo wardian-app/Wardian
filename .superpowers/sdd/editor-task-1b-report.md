@@ -39,3 +39,36 @@ npm run build: passed (3797 modules transformed)
 
 The pre-existing `package-lock.json` modification remained untouched and
 unstaged. Task 1B adds no Files buffers, native saving, recovery state, or UI.
+
+## Task 1B.2 review remediation
+
+The integration review exposed two non-monotonic generation paths: Library
+draft edits made while already dirty and Workflows state replacement that reset
+its edit revision. Library now publishes a store-owned monotonic generation for
+every draft/baseline/entry identity change. Workflows now advances a monotonic
+resource revision across load, initialize, edit, save, discard, and reset.
+Prepared Save/Discard effects bind to their observed identity/generation and
+fail closed if either changes before invocation.
+
+```text
+Review RED: 5 files, 4 failed | 1 passed; 4 failed | 96 passed tests
+Focused GREEN: 10 files passed, 152 tests passed
+Full Vitest: 182 files passed, 2179 passed | 1 skipped tests
+npm run lint: passed
+npm run build: passed (3797 modules transformed)
+```
+
+## Task 1B.2 remediation self-review
+
+- Pending choices now cancel before Save, layout, and Discard when an
+  already-dirty Library draft changes or Workflows switches through an ABA
+  reset/initialize sequence.
+- Canonical convergence onto an existing transient proves that both closing IDs
+  are observed and revalidated.
+- Deferred effects independently reject stale identity/generation bindings
+  immediately before their resource actions.
+- The detailed report's earlier exact-change claim was narrowed to distinguish
+  direct registry/navigation coverage from concrete adapter integration
+  coverage.
+- The pre-existing `package-lock.json` modification remains untouched and
+  unstaged. No Files buffer, native save, recovery, or UI scope was added.

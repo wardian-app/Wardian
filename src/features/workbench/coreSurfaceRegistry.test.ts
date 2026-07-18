@@ -21,7 +21,11 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 describe("core workbench surface registry", () => {
   beforeEach(() => {
-    useLibraryStore.setState({ _editorDirty: false, _editorResources: {} });
+    useLibraryStore.setState({
+      _editorDirty: false,
+      _editorResources: {},
+      _editorGenerationClock: 0,
+    });
     useBuilderStore.getState().reset();
     useFilesPresentationStore.getState().reset();
   });
@@ -308,8 +312,11 @@ describe("core workbench surface registry", () => {
             save: vi.fn().mockResolvedValue(true),
             discard: vi.fn().mockResolvedValue(true),
           },
+          generation: 1,
+          identity: "skills/library-1",
         },
       },
+      _editorGenerationClock: 1,
     });
     expect(registry.presentation(library).badges).toEqual([
       { badge_id: "dirty", label: "Unsaved changes" },

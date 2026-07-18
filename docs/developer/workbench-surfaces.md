@@ -166,10 +166,15 @@ once, then runs Discard/release cleanup. A cancel, stale preparation, or failed
 save performs no layout commit and no discard.
 
 Library resources remain presentation-keyed because their editor bridges are
-presentation-owned. Workflows uses one shared builder resource across every
-presentation. Files receives a narrow injected adapter; until the Files editor
-controller is added, the default adapter reports clean state and performs no
-Save or Discard work.
+presentation-owned. The Library store publishes a monotonic generation for
+every draft, baseline, and entry-identity change, even when the dirty boolean
+does not change. Workflows uses one shared builder resource across every
+presentation and advances a monotonic resource revision on load, initialize,
+edit, save, discard, and reset. Prepared Save and Discard effects recheck their
+observed identity and generation immediately before invoking the resource
+action; stale effects fail closed. Files receives a narrow injected adapter;
+until the Files editor controller is added, the default adapter reports clean
+state and performs no Save or Discard work.
 
 Closing an Agent Session or every presentation of an agent never pauses,
 kills, clears, or removes the agent. Runtime lifecycle actions remain explicit

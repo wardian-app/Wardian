@@ -791,8 +791,11 @@ describe("workbench navigation service", () => {
         library: {
           dirty: true,
           actions: { save: vi.fn().mockResolvedValue(true), discard: libraryDiscard },
+          generation: 1,
+          identity: "skills/library",
         },
       },
+      _editorGenerationClock: 1,
     });
     useBuilderStore.setState({
       dirty: true,
@@ -1198,6 +1201,39 @@ describe("workbench navigation service", () => {
     expect(Object.keys(store.getState().document.surfaces)).toEqual(["canonical"]);
     expect(store.getState().document.active_group_id).toBe("right");
     expect(store.getState().document.groups.right.active_surface_id).toBe("canonical");
+  });
+
+  it("supplies both closing IDs when canonical convergence replaces an existing transient", async () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const observeCloseResources = vi.spyOn(registry, "observe_close_resources");
+    const source = makeSurface("source-permanent", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(false),
+    });
+    const existingTransient = makeSurface("existing-transient", {
+      surface_type: "files",
+      resource_key: "file:C:/real/report.md",
+      state: filesState(true),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([source, existingTransient]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    await expect(navigation.canonicalize_resource(source.surface_id, {
+      surface_type: "files",
+      resource_key: existingTransient.resource_key,
+    })).resolves.toBe("allow");
+
+    expect(observeCloseResources.mock.calls.map(([, closingIds]) => closingIds))
+      .toEqual([
+        ["source-permanent", "existing-transient"],
+        ["source-permanent", "existing-transient"],
+      ]);
+    expect(Object.keys(store.getState().document.surfaces)).toEqual(["existing-transient"]);
+    expect(store.getState().document.surfaces["existing-transient"].state)
+      .toMatchObject({ transient_preview: false });
   });
 
   it("preserves a transient pin while canonical resource replacement is in flight", async () => {

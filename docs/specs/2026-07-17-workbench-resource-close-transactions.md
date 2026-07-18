@@ -31,10 +31,20 @@ no Discard runs.
 ## Surface Adapters
 
 - Library uses presentation-keyed resources matching its mounted editor bridge.
-- Workflows uses one shared builder resource and its edit revision as generation.
+  Its store owns a monotonic generation that advances for every published draft,
+  baseline, or entry-identity change, including edits made while already dirty.
+- Workflows uses one shared builder resource and a monotonic resource revision
+  that advances across load, initialize, edit, save, discard, and reset. The
+  revision never resets when builder state is replaced, so identity-switch and
+  reset/initialize ABA sequences cannot reuse an observed generation.
 - Files accepts a narrow injected resource adapter. The default adapter reports
   clean/no effects until the Files editor controller supplies dirty buffers,
   saving, discard, and recovery cleanup.
+
+Deferred Save and Discard effects are bound to the identity and generation
+observed during preparation. Each adapter checks that binding immediately before
+invoking its resource action, and the Library store repeats the check at the
+mutation boundary. Any intervening identity or generation change fails closed.
 
 Missing or malformed adapters fail closed for `confirm_if_dirty` surfaces.
 `close_view` surfaces do not participate in resource preparation.

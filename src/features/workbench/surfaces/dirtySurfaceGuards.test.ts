@@ -20,6 +20,7 @@ describe("Library and Workflows close preparation", () => {
     useLibraryStore.setState({
       _editorDirty: false,
       _editorResources: {},
+      _editorGenerationClock: 0,
     });
     useBuilderStore.getState().reset();
   });
@@ -45,8 +46,11 @@ describe("Library and Workflows close preparation", () => {
         "library-1": {
           dirty: true,
           actions: { save: librarySave, discard: libraryDiscard },
+          generation: 1,
+          identity: "skills/library-1",
         },
       },
+      _editorGenerationClock: 1,
     });
     const baseline = { schema: 2 as const, id: "wf", name: "Saved", nodes: [], edges: [] };
     useBuilderStore.setState({ blueprint: baseline, baseline, dirty: false });
@@ -89,6 +93,69 @@ describe("Library and Workflows close preparation", () => {
     expect(libraryDiscard).toHaveBeenCalledOnce();
   });
 
+  it("binds deferred Library and Workflows effects to the observed identity and generation", async () => {
+    const librarySave = vi.fn().mockResolvedValue(true);
+    useLibraryStore.getState().registerEditorCloseActions("library-1", {
+      save: librarySave,
+      discard: vi.fn(),
+    });
+    useLibraryStore.getState().markEditorSurfaceDirty(
+      "library-1",
+      true,
+      "skills/alpha",
+    );
+    const library = createLibrarySurfaceCloseAdapter(() => "save");
+    const librarySurface = makeSurface("library-1", { surface_type: "library" });
+    const libraryDocument = makeSingleGroupDocument([librarySurface]);
+    const libraryObservation = library.observe(librarySurface)!;
+    const libraryPreparation = await library.prepare({
+      context: {
+        snapshot: libraryDocument,
+        transaction_version: 1,
+        closing_surface_ids: [librarySurface.surface_id],
+      },
+      resource: {
+        resource_id: libraryObservation.resource_id,
+        resource_generation: libraryObservation.resource_generation,
+        presentation_ids: [librarySurface.surface_id],
+      },
+    });
+
+    useLibraryStore.getState().markEditorSurfaceDirty(
+      "library-1",
+      true,
+      "skills/beta",
+    );
+    await expect(libraryPreparation?.save?.()).resolves.toBe(false);
+    expect(librarySave).not.toHaveBeenCalled();
+
+    const workflow = { schema: 2 as const, id: "wf", name: "Workflow", nodes: [], edges: [] };
+    useBuilderStore.getState().initialize(workflow);
+    useBuilderStore.getState().setBlueprint({ ...workflow, name: "Draft" });
+    const workflowDiscard = vi.fn().mockReturnValue(true);
+    useBuilderStore.setState({ discard: workflowDiscard });
+    const workflows = createWorkflowsSurfaceCloseAdapter(() => "discard");
+    const workflowsSurface = makeSurface("workflows-1", { surface_type: "workflows" });
+    const workflowsDocument = makeSingleGroupDocument([workflowsSurface]);
+    const workflowsObservation = workflows.observe(workflowsSurface)!;
+    const workflowsPreparation = await workflows.prepare({
+      context: {
+        snapshot: workflowsDocument,
+        transaction_version: 2,
+        closing_surface_ids: [workflowsSurface.surface_id],
+      },
+      resource: {
+        resource_id: workflowsObservation.resource_id,
+        resource_generation: workflowsObservation.resource_generation,
+        presentation_ids: [workflowsSurface.surface_id],
+      },
+    });
+
+    useBuilderStore.getState().setBlueprint({ ...workflow, name: "Newer draft" });
+    await workflowsPreparation?.discard?.();
+    expect(workflowDiscard).not.toHaveBeenCalled();
+  });
+
   it("coalesces concurrent choice collection for one resource", async () => {
     let releaseChoice: ((choice: "cancel") => void) | undefined;
     const prompt = vi.fn<DirtySurfacePrompt>(() => new Promise((resolve) => {
@@ -100,8 +167,11 @@ describe("Library and Workflows close preparation", () => {
         "library-1": {
           dirty: true,
           actions: { save: vi.fn(), discard: vi.fn() },
+          generation: 1,
+          identity: "skills/library-1",
         },
       },
+      _editorGenerationClock: 1,
     });
     const adapter = createLibrarySurfaceCloseAdapter(prompt);
     const snapshot = makeSingleGroupDocument([
@@ -160,8 +230,11 @@ describe("Library and Workflows close preparation", () => {
         "library-1": {
           dirty: true,
           actions: { save, discard: vi.fn() },
+          generation: 1,
+          identity: "skills/library-1",
         },
       },
+      _editorGenerationClock: 1,
     });
     const surface = makeSurface("library-1", { surface_type: "library", state: {} });
     const registry = createCoreWorkbenchSurfaceRegistry({
@@ -180,6 +253,45 @@ describe("Library and Workflows close preparation", () => {
     expect(useLibraryStore.getState().isEditorSurfaceDirty("library-1")).toBe(true);
   });
 
+  it("cancels before effects when Workflows switches resources through an edit-revision ABA", async () => {
+    const first = { schema: 2 as const, id: "first", name: "First", nodes: [], edges: [] };
+    const second = { schema: 2 as const, id: "second", name: "Second", nodes: [], edges: [] };
+    useBuilderStore.getState().initialize(first);
+    useBuilderStore.setState({ path: "/workflows/first.md" });
+    useBuilderStore.getState().setBlueprint({ ...first, name: "First draft" });
+    expect(useBuilderStore.getState().editRevision).toBe(1);
+
+    let releaseChoice: ((choice: "save") => void) | undefined;
+    const prompt = vi.fn<DirtySurfacePrompt>(() => new Promise((resolve) => {
+      releaseChoice = resolve as (choice: "save") => void;
+    }));
+    const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
+    const surface = makeSurface("workflows-1", { surface_type: "workflows", state: {} });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([surface]),
+    });
+    const before = store.getState().document;
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    const closing = navigation.close(surface.surface_id);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+
+    useBuilderStore.getState().reset();
+    useBuilderStore.getState().initialize(second);
+    useBuilderStore.setState({ path: "/workflows/second.md" });
+    useBuilderStore.getState().setBlueprint({ ...second, name: "Second draft" });
+    expect(useBuilderStore.getState().editRevision).toBe(1);
+    const save = vi.fn().mockResolvedValue(true);
+    const discard = vi.fn().mockReturnValue(true);
+    useBuilderStore.setState({ save, discard });
+    releaseChoice?.("save");
+
+    await expect(closing).resolves.toBe("cancel");
+    expect(save).not.toHaveBeenCalled();
+    expect(discard).not.toHaveBeenCalled();
+    expect(store.getState().document).toBe(before);
+  });
+
   it.each(["close_group", "reset_workbench"] as const)(
     "does not partially discard Library when Workflows cancels %s",
     async (action) => {
@@ -190,8 +302,11 @@ describe("Library and Workflows close preparation", () => {
           "library-1": {
             dirty: true,
             actions: { save: vi.fn(), discard: libraryDiscard },
+            generation: 1,
+            identity: "skills/library-1",
           },
         },
+        _editorGenerationClock: 1,
       });
       const baseline = { schema: 2 as const, id: "wf", name: "Saved", nodes: [], edges: [] };
       useBuilderStore.setState({ blueprint: baseline, baseline, dirty: false });
