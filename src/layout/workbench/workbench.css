@@ -86,7 +86,6 @@
   padding: 0 0.125rem;
 }
 
-.wardian-workbench-group-actions .wardian-workbench-header-action,
 .wardian-workbench-new-surface-action .wardian-workbench-header-action {
   display: grid;
   width: 1.625rem;
@@ -100,8 +99,6 @@
   padding: 0;
 }
 
-.wardian-workbench-group-actions .wardian-workbench-header-action:hover,
-.wardian-workbench-group-actions .wardian-workbench-header-action[aria-expanded="true"],
 .wardian-workbench-new-surface-action .wardian-workbench-header-action:hover {
   background: var(--color-wardian-card-bg-muted);
   color: var(--color-wardian-text);

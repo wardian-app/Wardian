@@ -8,8 +8,9 @@ import {
   type FocusEvent,
   type KeyboardEvent,
 } from "react";
-import { BookOpen, Ellipsis, FileDiff, Pencil } from "lucide-react";
+import { BookOpen, FileDiff, Pencil } from "lucide-react";
 
+import { CompactOverflowButton } from "../../components/CompactOverflowButton";
 import type { FileContentDescriptorV1 } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
 import { decodeFileResourceKey, isWindowsAbsoluteFilePath } from "./fileResourceKey";
@@ -247,11 +248,9 @@ export function FilesHeader({
         ) : null}
         {resource_actions_available ? (
           <div ref={overflowRef} className="files-overflow" onBlur={onOverflowBlur}>
-            <button
+            <CompactOverflowButton
               ref={triggerRef}
-              type="button"
               className="files-overflow-trigger"
-              data-hit-size="26"
               aria-label="File actions"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
@@ -268,9 +267,7 @@ export function FilesHeader({
                   : 0;
                 setMenuOpen(true);
               }}
-            >
-              <Ellipsis size={17} strokeWidth={1.75} aria-hidden="true" />
-            </button>
+            />
             {menuOpen ? (
               <div
                 id={menuId}

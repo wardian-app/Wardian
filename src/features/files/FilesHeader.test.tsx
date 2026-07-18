@@ -92,14 +92,15 @@ describe("FilesHeader", () => {
     expect(css).toMatch(/\.files-breadcrumb-part\s*\{[^}]*gap:\s*0/s);
   });
 
-  it("uses the exact Workbench overflow geometry and no legacy mode tabs", () => {
+  it("uses the shared compact overflow control and no legacy mode tabs", () => {
     const { container } = render(header());
     const trigger = screen.getByRole("button", { name: "File actions" });
     const icon = trigger.querySelector("svg.lucide-ellipsis");
     expect(trigger).toHaveClass("files-overflow-trigger");
-    expect(trigger).toHaveAttribute("data-hit-size", "26");
-    expect(icon).toHaveAttribute("width", "17");
-    expect(icon).toHaveAttribute("height", "17");
+    expect(trigger).toHaveClass("wardian-compact-overflow-trigger");
+    expect(trigger).toHaveAttribute("data-hit-size", "22");
+    expect(icon).toHaveAttribute("width", "14");
+    expect(icon).toHaveAttribute("height", "14");
     expect(icon).toHaveAttribute("stroke-width", "1.75");
     expect(container.querySelector('[role="tablist"]')).toBeNull();
     expect(screen.queryByText("Preview")).toBeNull();
@@ -107,7 +108,7 @@ describe("FilesHeader", () => {
     expect(screen.queryByText("Draft")).toBeNull();
 
     const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
-    expect(css).toMatch(/\.files-overflow-trigger\s*\{[^}]*width:\s*26px[^}]*height:\s*26px/s);
+    expect(css).not.toMatch(/\.files-overflow-trigger\s*\{/);
     expect(css).toMatch(/\.files-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/s);
   });
 

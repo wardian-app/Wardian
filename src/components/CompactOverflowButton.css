@@ -1,0 +1,24 @@
+.wardian-compact-overflow-trigger.wardian-compact-overflow-trigger {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  flex: 0 0 22px;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-wardian-text-muted-neutral);
+  padding: 0;
+}
+
+.wardian-compact-overflow-trigger.wardian-compact-overflow-trigger:hover,
+.wardian-compact-overflow-trigger.wardian-compact-overflow-trigger:focus-visible,
+.wardian-compact-overflow-trigger.wardian-compact-overflow-trigger[aria-expanded="true"] {
+  background: var(--color-wardian-card-bg-muted);
+  color: var(--color-wardian-text);
+}
+
+.wardian-compact-overflow-trigger.wardian-compact-overflow-trigger:disabled {
+  opacity: 0.4;
+}

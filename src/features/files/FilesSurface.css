@@ -115,24 +115,6 @@
   flex: 0 0 auto;
 }
 
-.files-overflow-trigger {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  place-items: center;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-wardian-text-muted-neutral);
-  padding: 0;
-}
-
-.files-overflow-trigger:hover,
-.files-overflow-trigger[aria-expanded="true"] {
-  background: var(--color-wardian-card-bg-muted);
-  color: var(--color-wardian-text);
-}
-
 .files-overflow-menu {
   position: absolute;
   top: calc(100% + 4px);

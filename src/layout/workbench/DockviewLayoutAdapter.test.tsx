@@ -1270,6 +1270,8 @@ describe("DockviewLayoutAdapter", () => {
       .not.toHaveAttribute("data-tauri-drag-region");
 
     const paneActions = within(group).getByRole("button", { name: "Pane actions" });
+    expect(paneActions).toHaveClass("wardian-compact-overflow-trigger");
+    expect(paneActions).toHaveAttribute("data-hit-size", "22");
     fireEvent.click(paneActions);
     let menu = screen.getByRole("menu", { name: "Pane actions" });
     expect(within(menu).getByRole("menuitem", { name: "Restore pane" })).toBeInTheDocument();
