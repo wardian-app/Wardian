@@ -9,6 +9,7 @@ import type {
   FileRecoverySummaryV1,
   FileRecoveryV1,
   FileResourceSnapshotV1,
+  FileResourceTextV1,
   FilesSurfaceStateV2,
 } from "../../types";
 import { FileResourceClient } from "./fileResourceClient";
@@ -145,6 +146,15 @@ function props(
     on_reveal: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+function expectBlockingContent(blocker: HTMLElement) {
+  const region = screen.getByTestId("files-content-region");
+  expect(blocker.parentElement).toBe(region);
+  expect(blocker).toHaveClass("files-content-blocker");
+  const host = within(region).getByTestId("files-content-host-shell");
+  expect(host).toHaveAttribute("inert", "");
+  expect(host).toHaveAttribute("aria-hidden", "true");
 }
 
 describe("FilesSurface", () => {
@@ -352,6 +362,57 @@ describe("FilesSurface", () => {
     render(<FilesSurface {...props({ registry: textRegistry })} />);
 
     expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+  });
+
+  it("blocks a source-only editor until its authorized buffer is initialized", async () => {
+    const textDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.txt",
+      display_name: "notes.txt",
+      extension: "txt",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+      renderer_kind: "text",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    const textSnapshot = {
+      ...snapshot(textDescriptor),
+      resource_id: "file:C:/work/docs/notes.txt",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: textSnapshot,
+      error: null,
+      retry: vi.fn(),
+    });
+    const pendingRead = deferred<FileResourceTextV1>();
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockReturnValue(pendingRead.promise);
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const editorRegistry = new FileEditorControllerRegistry(client);
+    render(<FilesSurface {...props({
+      resource_key: textSnapshot.resource_id,
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("text", SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+
+    const initializing = screen.getByRole("status", { name: "" });
+    expect(initializing).toHaveTextContent("Preparing editor");
+    expectBlockingContent(initializing);
+    pendingRead.resolve({
+      schema: 1,
+      resource_id: textSnapshot.resource_id,
+      revision: textSnapshot.revision,
+      text: "authorized source\n",
+    });
+
+    await waitFor(() => expect(screen.queryByText("Preparing editor…")).toBeNull());
+    expect(screen.getByTestId("files-content-host-shell")).not.toHaveAttribute("inert");
+    expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
   });
 
   it("preserves source while hidden and resets it when the resource changes", async () => {
@@ -955,6 +1016,7 @@ describe("FilesSurface", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/file editor initialization failed: read denied/i);
+    expectBlockingContent(alert);
     await waitFor(() => expect(
       filesPresentationBadges("files-1", "file:C:/work/docs/notes.md"),
     ).toContainEqual({
@@ -1040,6 +1102,7 @@ describe("FilesSurface", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/recovery conflict/i);
+    expectBlockingContent(alert);
     expect(alert).toHaveTextContent(/both versions were preserved/i);
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
     expect(listRecoveries).toHaveBeenCalledOnce();
@@ -1136,8 +1199,13 @@ describe("FilesSurface", () => {
       editor_registry: new FileEditorControllerRegistry(client),
     })} />);
 
-    expect(await screen.findByRole("heading", { name: "Recovered unsaved changes" }))
-      .toBeInTheDocument();
+    const recoveryHeading = await screen.findByRole("heading", {
+      name: "Recovered unsaved changes",
+    });
+    const recoveryState = recoveryHeading.closest("section");
+    expect(recoveryState).toHaveClass("files-content-blocker");
+    expect(recoveryState?.parentElement).toBe(screen.getByTestId("files-content-region"));
+    expect(screen.queryByTestId("files-content-host-shell")).toBeNull();
     expect(screen.getByLabelText("Recovered buffer")).toHaveTextContent(
       "unsaved recovered buffer",
     );

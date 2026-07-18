@@ -148,9 +148,13 @@ export default function MonacoTextRenderer({
   editor_language,
 }: FileRendererProps) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
-  const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const retry = useCallback(() => {
+    setLoadError(null);
+    setRetryToken((value) => value + 1);
+  }, []);
   const controller = editor_controller ?? null;
   const modelKey = snapshot.resource_id;
   const language = editor_language ?? "plaintext";
@@ -164,7 +168,7 @@ export default function MonacoTextRenderer({
     let model: Monaco.editor.ITextModel | null = null;
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
-    setError(null);
+    setLoadError(null);
 
     void loadMonaco().then((monaco) => {
       if (cancelled) return;
@@ -182,12 +186,15 @@ export default function MonacoTextRenderer({
         theme: monacoTheme(),
         wordWrap: "off",
       });
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => (
-        controller.save(surface_id).catch((cause) => {
-          setError(`Save failed: ${errorMessage(cause)}`);
-          throw cause;
-        })
-      ));
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
+        setSaveError(null);
+        try {
+          await controller.save(surface_id);
+          if (!cancelled) setSaveError(null);
+        } catch (cause) {
+          if (!cancelled) setSaveError(`Save failed: ${errorMessage(cause)}`);
+        }
+      });
       themeObserver = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
       themeObserver.observe(document.documentElement, {
         attributes: true,
@@ -208,7 +215,7 @@ export default function MonacoTextRenderer({
       });
       observer.observe(host);
     }).catch((cause) => {
-      if (!cancelled) setError(errorMessage(cause));
+      if (!cancelled) setLoadError(errorMessage(cause));
     });
 
     return () => {
@@ -230,14 +237,21 @@ export default function MonacoTextRenderer({
       </div>
     );
   }
-  if (error) {
+  if (loadError) {
     return (
       <section className="files-resource-state" role="alert">
         <h2>Text editor unavailable</h2>
-        <p>{error}</p>
+        <p>{loadError}</p>
         <button type="button" onClick={retry}>Retry</button>
       </section>
     );
   }
-  return <div ref={hostRef} className="files-monaco-renderer" data-testid="monaco-text-renderer" />;
+  return (
+    <div className="files-monaco-shell">
+      {saveError ? (
+        <div className="files-monaco-save-error" role="alert">{saveError}</div>
+      ) : null}
+      <div ref={hostRef} className="files-monaco-renderer" data-testid="monaco-text-renderer" />
+    </div>
+  );
 }

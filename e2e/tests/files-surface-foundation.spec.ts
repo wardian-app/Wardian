@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { AppSettings } from "../../src/types/settings";
@@ -47,6 +48,32 @@ function filesTab(page: Page, filePath: string): Locator {
   return page.getByRole("tab").and(page.locator(
     `[data-surface-type="files"][data-resource-key=${JSON.stringify(`file:${filePath}`)}]`,
   ));
+}
+
+function contentHash(text: string) {
+  return `sha256:${createHash("sha256").update(text).digest("hex")}`;
+}
+
+async function invokeMock<T>(
+  page: Page,
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  return await page.evaluate(async ({ mockCommand, mockArgs }) => {
+    const invoke = (window as Window & {
+      __TAURI_INTERNALS__: {
+        invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    }).__TAURI_INTERNALS__.invoke;
+    return await invoke(mockCommand, mockArgs);
+  }, { mockCommand: command, mockArgs: args }) as T;
+}
+
+interface RecoveryCheckpoint {
+  recovery_id: string;
+  recovery_revision: number;
+  base_content_hash: string;
+  base_opaque_revision: string;
 }
 
 async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockController> {
@@ -245,6 +272,99 @@ test("switches Markdown source without reopening the resource and preserves it p
     ),
     fullPage: true,
   });
+
+  const recoveryOwner = await invokeMock<{
+    resource_id: string;
+    subscription_id: string;
+  }>(page, "open_file_resource", {
+    request: {
+      path: ALPHA_PATH,
+      agent_id: null,
+      user_file_capability_id: null,
+    },
+  });
+  await ipc.updateFile(ALPHA_PATH, "# External disk head\n");
+  const recoveryBase = "# Alpha document\n\nFirst file.";
+  const firstCheckpoint = await invokeMock<RecoveryCheckpoint>(
+    page,
+    "checkpoint_file_recovery",
+    {
+      request: {
+        recovery_id: null,
+        expected_recovery_revision: null,
+        resource_id: recoveryOwner.resource_id,
+        subscription_id: recoveryOwner.subscription_id,
+        base_content_hash: contentHash(recoveryBase),
+        resource_key: recoveryOwner.resource_id,
+        base: recoveryBase,
+        buffer: "first unsaved generation\n",
+      },
+    },
+  );
+  expect(firstCheckpoint).toMatchObject({
+    recovery_revision: 1,
+    base_content_hash: contentHash(recoveryBase),
+  });
+
+  const rebased = "# Accepted rebased base\n";
+  const rebasedCheckpoint = await invokeMock<RecoveryCheckpoint>(
+    page,
+    "checkpoint_file_recovery",
+    {
+      request: {
+        recovery_id: firstCheckpoint.recovery_id,
+        expected_recovery_revision: firstCheckpoint.recovery_revision,
+        resource_id: recoveryOwner.resource_id,
+        subscription_id: recoveryOwner.subscription_id,
+        base_content_hash: contentHash(rebased),
+        resource_key: recoveryOwner.resource_id,
+        base: rebased,
+        buffer: "rebased unsaved generation\n",
+      },
+    },
+  );
+  expect(rebasedCheckpoint).toMatchObject({
+    recovery_id: firstCheckpoint.recovery_id,
+    recovery_revision: 2,
+    base_content_hash: contentHash(rebased),
+  });
+  expect(rebasedCheckpoint.base_opaque_revision)
+    .not.toBe(firstCheckpoint.base_opaque_revision);
+
+  await expect(invokeMock(
+    page,
+    "checkpoint_file_recovery",
+    {
+      request: {
+        recovery_id: rebasedCheckpoint.recovery_id,
+        expected_recovery_revision: 1,
+        resource_id: recoveryOwner.resource_id,
+        subscription_id: recoveryOwner.subscription_id,
+        base_content_hash: contentHash(rebased),
+        resource_key: recoveryOwner.resource_id,
+        base: rebased,
+        buffer: "stale CAS generation\n",
+      },
+    },
+  )).rejects.toThrow(/stale_recovery_revision/);
+
+  await expect(invokeMock(
+    page,
+    "checkpoint_file_recovery",
+    {
+      request: {
+        recovery_id: null,
+        expected_recovery_revision: null,
+        resource_id: recoveryOwner.resource_id,
+        subscription_id: recoveryOwner.subscription_id,
+        base_content_hash: "sha256:not-the-base",
+        resource_key: recoveryOwner.resource_id,
+        base: recoveryBase,
+        buffer: "invalid hash generation\n",
+      },
+    },
+  ))
+    .rejects.toThrow(/base content does not match/i);
 });
 
 test("edits and saves in place, then Save As opens an ordinary file without retargeting", async ({
@@ -279,7 +399,7 @@ test("edits and saves in place, then Save As opens an ordinary file without reta
   } | undefined;
   expect(saveRequest).toMatchObject({
     expected_revision: 1,
-    buffer_base_hash: "mock-hash-1",
+    buffer_base_hash: contentHash("# Alpha document\n\nFirst file."),
     text: savedText,
   });
 

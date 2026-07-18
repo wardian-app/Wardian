@@ -1,4 +1,4 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
@@ -188,6 +188,46 @@ describe("MonacoTextRenderer", () => {
     });
     expect(client.saveText).toHaveBeenCalledWith(expect.objectContaining({ text: "save me\n" }));
     expect(controller.getSnapshot().dirty).toBe(false);
+  });
+
+  it("contains rejected keyboard saves without replacing or detaching the editor", async () => {
+    const { client, controller, props } = await editorHarness();
+    const saveText = vi.mocked(client.saveText);
+    saveText.mockRejectedValueOnce(new Error("write access revoked"));
+    act(() => { controller.mutate("unsaved text\n"); });
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    const editor = createEditor.mock.results[0]?.value as {
+      addCommand: ReturnType<typeof vi.fn>;
+    };
+    const saveCommand = editor.addCommand.mock.calls[0]?.[1] as () => Promise<void>;
+    const unhandled = vi.fn();
+    window.addEventListener("unhandledrejection", unhandled);
+
+    await expect(act(async () => saveCommand())).resolves.toBeUndefined();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /save failed: write access revoked/i,
+    );
+    expect(view.getByTestId("monaco-text-renderer")).toBeVisible();
+    expect(createModel).toHaveBeenCalledOnce();
+    expect(createEditor).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "unsaved text\n",
+      dirty: true,
+    });
+    expect(unhandled).not.toHaveBeenCalled();
+
+    saveText.mockResolvedValueOnce({
+      status: "saved",
+      revision: 5,
+      content_hash: "hash-5",
+    });
+    await expect(act(async () => saveCommand())).resolves.toBeUndefined();
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(createModel).toHaveBeenCalledOnce();
+    expect(createEditor).toHaveBeenCalledOnce();
+    window.removeEventListener("unhandledrejection", unhandled);
   });
 
   it("does not recreate the model or editor for a newer snapshot revision", async () => {

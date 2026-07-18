@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { createHash } from "node:crypto";
 
 import type {
   ClosedSurfaceV1,
@@ -153,7 +154,7 @@ type BrowserWorkbenchMockRuntime = {
   set_load_result: (result: WorkbenchLoadResult) => void;
   set_agents: (agents: WorkbenchAgentFixture[], emit: boolean) => void;
   emit: (event: string, payload: unknown) => void;
-  update_file: (path: string, content: string) => void;
+  update_file: (path: string, content: string) => Promise<void>;
 };
 
 export type WorkbenchIpcMockController = {
@@ -184,6 +185,10 @@ export async function installWorkbenchIpcMock(
     durable_revision: initialDocument.revision,
     durable_token: `mock-token-${initialDocument.revision}`,
   };
+  const browserFiles = (options.files ?? []).map((file) => ({
+    ...file,
+    content_hash: `sha256:${createHash("sha256").update(file.content).digest("hex")}`,
+  }));
 
   await page.addInitScript(
     ({
@@ -209,6 +214,12 @@ export async function installWorkbenchIpcMock(
       let saveTargetGrantId = 1;
       let recoveryId = 1;
       const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/$/, "");
+      const hashText = async (text: string) => {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+        return `sha256:${[...new Uint8Array(digest)]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("")}`;
+      };
       const fileFixtures = new Map(files.map((file) => [normalizePath(file.path), {
         ...file,
         path: normalizePath(file.path),
@@ -250,7 +261,7 @@ export async function installWorkbenchIpcMock(
           renderer_kind: rendererKind,
           size_bytes: new TextEncoder().encode(file.content).byteLength,
           line_count: streamed ? null : lines,
-          content_hash: `mock-hash-${file.revision}`,
+          content_hash: file.content_hash,
           modified_at_ms: 1_752_624_000_000 + file.revision,
           capabilities: { preview: true, changes: false, draft: false, stream: streamed },
           unavailable_reason: null,
@@ -298,11 +309,12 @@ export async function installWorkbenchIpcMock(
             });
           }
         },
-        update_file: (path, content) => {
+        update_file: async (path, content) => {
           const normalizedPath = normalizePath(path);
           const file = fileFixtures.get(normalizedPath);
           if (!file) throw new Error(`mock file not found: ${normalizedPath}`);
           file.content = content;
+          file.content_hash = await hashText(content);
           file.revision += 1;
           if ([...fileSubscriptions.values()].includes(normalizedPath)) {
             runtime.emit("file-resource://revision", {
@@ -514,6 +526,7 @@ export async function installWorkbenchIpcMock(
               recoveries.delete(recovery.recovery_id);
             }
             file.content = request.text;
+            file.content_hash = await hashText(request.text);
             file.revision += 1;
             return {
               status: "saved",
@@ -546,11 +559,13 @@ export async function installWorkbenchIpcMock(
             const existing = fileFixtures.get(path);
             if (existing) {
               existing.content = request.text;
+              existing.content_hash = await hashText(request.text);
               existing.revision += 1;
             } else {
               fileFixtures.set(path, {
                 path,
                 content: request.text,
+                content_hash: await hashText(request.text),
                 revision: 1,
               });
             }
@@ -595,36 +610,49 @@ export async function installWorkbenchIpcMock(
             const subscriptionId = String(request?.subscription_id ?? "");
             const path = fileSubscriptions.get(subscriptionId);
             const file = path ? fileFixtures.get(path) : undefined;
-            if (!path || !file || request?.resource_id !== resourceIdFor(path)) {
+            if (typeof request?.base !== "string" || typeof request.buffer !== "string") {
+              throw new Error("mock recovery text is required");
+            }
+            if (await hashText(request.base) !== request.base_content_hash) {
+              throw new Error("recovery base content does not match its declared hash");
+            }
+            if (
+              !path
+              || !file
+              || request.resource_id !== resourceIdFor(path)
+              || request.resource_key !== request.resource_id
+            ) {
               throw new Error("mock recovery subscription is not active");
             }
-            if (request.base_content_hash !== descriptorFor(file).content_hash) {
-              throw new Error("stale_file_revision");
-            }
-            const existing = request.recovery_id
-              ? recoveries.get(request.recovery_id)
-              : undefined;
-            if (
-              request.recovery_id !== null
-              && (
+            let existing: (typeof recoveries extends Map<string, infer T> ? T : never) | undefined;
+            if (request.recovery_id === null) {
+              if (request.expected_recovery_revision !== null) {
+                throw new Error("stale_recovery_revision");
+              }
+            } else if (typeof request.recovery_id === "string" && request.recovery_id !== "") {
+              existing = recoveries.get(request.recovery_id);
+              if (
                 !existing
+                || existing.resource_key !== request.resource_key
                 || existing.recovery_revision !== request.expected_recovery_revision
-              )
-            ) throw new Error("stale_recovery_revision");
-            if (typeof request.resource_key !== "string") throw new Error("mock resource key is required");
-            if (typeof request.base !== "string" || typeof request.buffer !== "string") {
-              throw new Error("mock recovery text is required");
+              ) throw new Error("stale_recovery_revision");
+            } else {
+              throw new Error("stale_recovery_revision");
             }
             const now = Date.now();
             const recovery_id = existing?.recovery_id ?? `mock-recovery-${recoveryId++}`;
             const recovery_revision = (existing?.recovery_revision ?? 0) + 1;
             const descriptor = descriptorFor(file);
+            const base_opaque_revision = existing
+              && existing.base_content_hash === request.base_content_hash
+              ? existing.base_opaque_revision
+              : `mock-base-${recovery_id}-${recovery_revision}`;
             const recovery = {
               schema: 1 as const,
               recovery_id,
               resource_key: request.resource_key,
               base_content_hash: request.base_content_hash,
-              base_opaque_revision: `mock-revision-${file.revision}`,
+              base_opaque_revision,
               recovery_revision,
               created_at_ms: existing?.created_at_ms ?? now,
               updated_at_ms: now,
@@ -798,7 +826,7 @@ export async function installWorkbenchIpcMock(
       resetOutcome: options.reset_outcome ?? "saved",
       responses: options.responses ?? {},
       explorerRoot: options.explorer_root ?? "/workspace",
-      files: options.files ?? [],
+      files: browserFiles,
       saveTargetPath: options.save_target_path ?? null,
     },
   );
@@ -843,7 +871,7 @@ export async function installWorkbenchIpcMock(
         const runtime = (window as unknown as {
           __WARDIAN_WORKBENCH_IPC_MOCK__: BrowserWorkbenchMockRuntime;
         }).__WARDIAN_WORKBENCH_IPC_MOCK__;
-        runtime.update_file(targetPath, nextContent);
+      return runtime.update_file(targetPath, nextContent);
       },
       { targetPath: path, nextContent: content },
     ),

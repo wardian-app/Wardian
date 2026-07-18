@@ -132,6 +132,19 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const presentationToggleAvailable = Boolean(renderer?.rendered && renderer.editor);
   const editorReady = props.editor_snapshot?.status === "ready";
   const editable = Boolean(renderer?.editor && props.editor_controller && editorReady);
+  const editorInitializing = Boolean(
+    activePresentation === "editor"
+    &&
+    renderer?.editor
+    && props.editor_controller
+    && !editorReady
+    && !props.editor_error,
+  );
+  const editorBlocked = Boolean(
+    editorInitializing
+    || props.editor_error
+    || props.editor_recovery_conflict,
+  );
   const bufferSnapshot = useMemo<FileEditorBufferSnapshot | null>(() => {
     const editor = props.editor_snapshot;
     if (!editor || editor.status !== "ready" || editor.resource_id === null) return null;
@@ -192,10 +205,10 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         resource_key={props.resource_key}
         descriptor={resource.snapshot?.descriptor ?? null}
         presentation={activePresentation}
-        presentation_toggle_available={presentationToggleAvailable}
+        presentation_toggle_available={presentationToggleAvailable && !editorBlocked}
         dirty={props.editor_snapshot?.dirty ?? false}
-        save_available={editable}
-        save_as_available={editable}
+        save_available={editable && !editorBlocked}
+        save_as_available={editable && !editorBlocked}
         saving={props.editor_snapshot?.save_state === "saving"}
         resource_actions_available={props.recovery_only.status !== "ready"}
         on_presentation_change={props.on_presentation_change}
@@ -209,13 +222,13 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           <div className="files-action-error" role="alert">{props.action_error}</div>
         ) : null}
         {props.editor_error ? (
-          <section className="files-resource-state" role="alert">
+          <section className="files-resource-state files-content-blocker" role="alert">
             <p>{props.editor_error}</p>
             <button type="button" onClick={props.on_retry_editor}>Retry Editor</button>
           </section>
         ) : null}
-        {props.editor_recovery_conflict ? (
-          <section className="files-resource-state" role="alert">
+        {!props.editor_error && props.editor_recovery_conflict ? (
+          <section className="files-resource-state files-content-blocker" role="alert">
             <h2>Recovery conflict</h2>
             <p>{props.editor_recovery_conflict.message}</p>
             <p>
@@ -240,11 +253,21 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             </div>
           </section>
         ) : null}
+        {editorInitializing ? (
+          <div className="files-resource-state files-content-blocker" role="status">
+            Preparing editor…
+          </div>
+        ) : null}
         {resource.status === "loading" ? (
-          <div className="files-resource-state" role="status">Loading preview…</div>
+          <div className="files-resource-state files-content-blocker" role="status">
+            Loading preview…
+          </div>
         ) : null}
         {resource.status === "error" && props.recovery_only.status === "ready" ? (
-          <section className="files-resource-state" aria-label="Read-only recovery">
+          <section
+            className="files-resource-state files-content-blocker"
+            aria-label="Read-only recovery"
+          >
             <h2>Recovered unsaved changes</h2>
             <p>
               File access is unavailable. The recovered content is read-only until access is
@@ -268,7 +291,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           </section>
         ) : null}
         {resource.status === "error" && props.recovery_only.status !== "ready" ? (
-          <section className="files-resource-state" role="alert">
+          <section className="files-resource-state files-content-blocker" role="alert">
             <h2>File unavailable</h2>
             <p>{resource.error?.message ?? "The file resource could not be loaded."}</p>
             {props.recovery_only.status === "loading" ? (
@@ -294,19 +317,27 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           </section>
         ) : null}
         {resource.status === "ready" && resource.snapshot ? (
-          <FileContentHost
-            snapshot={resource.snapshot}
-            client={props.client}
-            lifecycle={props.lifecycle}
-            registry={props.registry}
-            presentation={activePresentation}
-            surface_id={props.surface_id}
-            editor_controller={props.editor_controller}
-            buffer_snapshot={bufferSnapshot}
-            on_open_file={props.on_open_file}
-            on_open_with={props.on_open_with}
-            on_reveal={props.on_reveal}
-          />
+          <div
+            className="files-content-host-shell"
+            data-testid="files-content-host-shell"
+            data-blocked={editorBlocked ? "true" : "false"}
+            aria-hidden={editorBlocked ? true : undefined}
+            inert={editorBlocked ? true : undefined}
+          >
+            <FileContentHost
+              snapshot={resource.snapshot}
+              client={props.client}
+              lifecycle={props.lifecycle}
+              registry={props.registry}
+              presentation={activePresentation}
+              surface_id={props.surface_id}
+              editor_controller={props.editor_controller}
+              buffer_snapshot={bufferSnapshot}
+              on_open_file={props.on_open_file}
+              on_open_with={props.on_open_with}
+              on_reveal={props.on_reveal}
+            />
+          </div>
         ) : null}
       </main>
     </section>

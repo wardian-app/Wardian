@@ -654,6 +654,7 @@ describe("Workbench persistence boot integration", () => {
           text: "[Open linked preview](../linked.md)",
         });
       }
+      if (command === "list_file_recoveries") return Promise.resolve([]);
       return defaultInvoke?.(command, args) ?? Promise.resolve(null);
     });
 
