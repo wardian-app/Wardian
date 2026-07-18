@@ -354,6 +354,21 @@ Recovery is mandatory for every dirty editable Files buffer:
 5. Explicit discard removes recovery only after the Workbench state no longer
    references it.
 
+Each checkpoint carries the exact retained editor base together with its
+`base_content_hash`. The backend bounds both the base and buffer as complete
+UTF-8 text models, hashes the submitted base, and rejects a mismatch. Creating
+the first record still requires the exact live resource, subscription, resource
+key, and calling WebView scope, but it does not require the disk head to remain
+equal to the editor base. If the disk advances before the debounced checkpoint,
+Wardian stores the verified submitted base and later reports the recovery merge
+as `disk_changed`. Recovery records remain read-only recovery data: they do not
+grant filesystem authority, revive a subscription, or relax guarded Save.
+When a guarded Save or accepted rebase advances the editor base but cleanup of
+an older recovery record did not complete, the next exact recovery CAS may
+replace that record's base/hash and buffer together. The backend rotates the
+opaque base revision and publishes the new manifest only after both immutable
+blobs are durable, so restart discovery sees either complete generation.
+
 ## Accessibility
 
 - Every icon control has an action-oriented accessible label and a tooltip.
@@ -411,6 +426,12 @@ adopts the new disk head as both editor and buffer base.
 - Concurrent file changes enter merge/conflict handling without data loss.
 - Unsaved recovery survives a forced application restart and is deleted after
   explicit discard.
+- A first dirty checkpoint survives an intervening disk update, restores the
+  exact hash-verified old base and buffer, and enters `disk_changed` merge.
+- Recovery creation rejects a mismatched submitted base/hash and retains exact
+  resource, subscription, and WebView scoping.
+- An exact recovery CAS can advance the stored base after guarded Save without
+  writing the file, and restart discovery never mixes base/buffer generations.
 - Prompt and presented-version baselines resolve to immutable content hashes.
 - Sending an unsaved artifact buffer produces the expected patch without
   writing the backing file.

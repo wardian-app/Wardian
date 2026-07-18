@@ -14,8 +14,9 @@ pub struct CheckpointFileRecoveryRequestV1 {
     pub expected_recovery_revision: Option<u64>,
     pub resource_id: String,
     pub subscription_id: String,
-    pub base_revision: u64,
     pub base_content_hash: String,
+    /// Exact retained editor base whose digest is `base_content_hash`.
+    pub base: String,
     pub resource_key: String,
     pub buffer: String,
 }
@@ -51,8 +52,9 @@ pub struct MergeFileRecoveryRequestV1 {
     pub subscription_id: String,
 }
 
-/// Checkpoints one dirty buffer using the calling WebView label as recovery
-/// scope. Scope is never accepted from serialized frontend input.
+/// Checkpoints one dirty buffer and its exact hash-verified editor base using
+/// the calling WebView label as recovery scope. Scope is never accepted from
+/// serialized frontend input.
 #[tauri::command]
 pub async fn checkpoint_file_recovery(
     request: CheckpointFileRecoveryRequestV1,
@@ -66,8 +68,8 @@ pub async fn checkpoint_file_recovery(
             request.expected_recovery_revision,
             &request.resource_id,
             &request.subscription_id,
-            request.base_revision,
             &request.base_content_hash,
+            &request.base,
             &request.resource_key,
             webview.label(),
             &request.buffer,
@@ -153,17 +155,53 @@ mod tests {
                 "expected_recovery_revision": null,
                 "resource_id": "file:/workspace/readme.md",
                 "subscription_id": "subscription-a",
-                "base_revision": 3,
                 "base_content_hash": "sha256:base",
+                "base": "saved base",
                 "resource_key": "file:/workspace/readme.md",
                 "buffer": "edited"
             }))
             .expect("checkpoint request");
-        assert_eq!(checkpoint.base_revision, 3);
-
         let serialized = serde_json::to_value(&checkpoint).expect("serialize checkpoint");
+        assert_eq!(serialized["base"], "saved base");
         assert!(serialized.get("webview_scope").is_none());
         assert!(serialized.get("expectedRecoveryRevision").is_none());
+
+        let missing_base =
+            serde_json::from_value::<CheckpointFileRecoveryRequestV1>(serde_json::json!({
+                "recovery_id": null,
+                "expected_recovery_revision": null,
+                "resource_id": "file:/workspace/readme.md",
+                "subscription_id": "subscription-a",
+                "base_content_hash": "sha256:base",
+                "resource_key": "file:/workspace/readme.md",
+                "buffer": "edited"
+            }));
+        assert!(missing_base.is_err());
+        let camel_case_base =
+            serde_json::from_value::<CheckpointFileRecoveryRequestV1>(serde_json::json!({
+                "recovery_id": null,
+                "expected_recovery_revision": null,
+                "resource_id": "file:/workspace/readme.md",
+                "subscription_id": "subscription-a",
+                "base_content_hash": "sha256:base",
+                "baseText": "saved base",
+                "resource_key": "file:/workspace/readme.md",
+                "buffer": "edited"
+            }));
+        assert!(camel_case_base.is_err());
+        let legacy_base_revision =
+            serde_json::from_value::<CheckpointFileRecoveryRequestV1>(serde_json::json!({
+                "recovery_id": null,
+                "expected_recovery_revision": null,
+                "resource_id": "file:/workspace/readme.md",
+                "subscription_id": "subscription-a",
+                "base_revision": 3,
+                "base_content_hash": "sha256:base",
+                "base": "saved base",
+                "resource_key": "file:/workspace/readme.md",
+                "buffer": "edited"
+            }));
+        assert!(legacy_base_revision.is_err());
 
         let scope_injection =
             serde_json::from_value::<GetFileRecoveryRequestV1>(serde_json::json!({

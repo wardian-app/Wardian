@@ -2138,7 +2138,10 @@ impl FileResourceRuntime {
     }
 
     /// Durably checkpoints one dirty editor buffer under the exact live file
-    /// subscription and a compare-and-swap recovery revision.
+    /// subscription and a compare-and-swap recovery revision. New records
+    /// retain the submitted hash-verified editor base even when the authorized
+    /// disk head advanced before the first checkpoint. An exact CAS update may
+    /// advance the stored base after a guarded Save or accepted rebase.
     #[allow(clippy::too_many_arguments)]
     pub async fn checkpoint_recovery(
         &self,
@@ -2146,13 +2149,21 @@ impl FileResourceRuntime {
         expected_recovery_revision: Option<u64>,
         resource_id: &str,
         subscription_id: &str,
-        base_revision: u64,
         base_content_hash: &str,
+        submitted_base: &str,
         resource_key: &str,
         webview_scope: &str,
         buffer: &str,
     ) -> Result<FileRecoveryCheckpointV1, FileResourceErrorV1> {
+        validate_submitted_text(submitted_base, &self.inner.limits)?;
         validate_submitted_text(buffer, &self.inner.limits)?;
+        let submitted_base_hash = format!("sha256:{:x}", Sha256::digest(submitted_base.as_bytes()));
+        if submitted_base_hash != base_content_hash {
+            return Err(error(
+                "invalid_request",
+                "recovery base content does not match its declared hash",
+            ));
+        }
         if resource_key.trim().is_empty() || webview_scope.trim().is_empty() {
             return Err(error(
                 "invalid_request",
@@ -2173,7 +2184,7 @@ impl FileResourceRuntime {
             entry.operation.clone()
         };
         let _operation = operation.lock().await;
-        let (current_revision, authorized, descriptor, revision_token) = self
+        let (_, _, descriptor, _) = self
             .validated_save_authorization(resource_id, subscription_id)
             .await?;
         if file_resource_id(&descriptor.canonical_path) != resource_key
@@ -2191,7 +2202,7 @@ impl FileResourceRuntime {
         let now = now_epoch_ms();
         let (manifest, base) = match recovery_id {
             Some(recovery_id) => {
-                let current = load_recovery_manifest(&recovery_root, recovery_id)?;
+                let mut current = load_recovery_manifest(&recovery_root, recovery_id)?;
                 authorize_recovery_manifest(&current, resource_key, webview_scope)?;
                 if expected_recovery_revision != Some(current.recovery_revision) {
                     return Err(error(
@@ -2199,13 +2210,11 @@ impl FileResourceRuntime {
                         "recovery checkpoint revision is no longer current",
                     ));
                 }
-                let base = read_recovery_blob(
-                    &recovery_root,
-                    &current,
-                    &current.base_blob,
-                    &self.inner.limits,
-                )?;
-                (current, base)
+                if current.base_content_hash != base_content_hash {
+                    current.base_content_hash = base_content_hash.to_string();
+                    current.base_opaque_revision = Uuid::new_v4().to_string();
+                }
+                (current, submitted_base.to_string())
             }
             None => {
                 if expected_recovery_revision.is_some() {
@@ -2214,19 +2223,6 @@ impl FileResourceRuntime {
                         "a new recovery checkpoint has no prior revision",
                     ));
                 }
-                if current_revision != base_revision || descriptor.content_hash != base_content_hash
-                {
-                    return Err(error(
-                        "stale_revision",
-                        "recovery base no longer matches the authorized file",
-                    ));
-                }
-                let maximum_length_bytes = self.inner.limits.monaco_max_size_bytes;
-                let base = tauri::async_runtime::spawn_blocking(move || {
-                    authorized.read_verified_text(&revision_token, maximum_length_bytes)
-                })
-                .await
-                .map_err(join_error)??;
                 let recovery_id = Uuid::new_v4().to_string();
                 (
                     FileRecoveryManifestV1 {
@@ -2236,7 +2232,7 @@ impl FileResourceRuntime {
                         display_name: descriptor.display_name,
                         extension: descriptor.extension,
                         mime_type: descriptor.mime_type,
-                        base_content_hash: descriptor.content_hash,
+                        base_content_hash: base_content_hash.to_string(),
                         base_opaque_revision: Uuid::new_v4().to_string(),
                         base_blob: String::new(),
                         buffer_blob: String::new(),
@@ -2245,7 +2241,7 @@ impl FileResourceRuntime {
                         created_at_ms: now,
                         updated_at_ms: now,
                     },
-                    base,
+                    submitted_base.to_string(),
                 )
             }
         };
@@ -4749,8 +4745,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base text",
                 &opened.resource_id,
                 "main",
                 "first edit",
@@ -4759,14 +4755,30 @@ mod tests {
             .expect("create recovery");
         assert_eq!(created.recovery_revision, 1);
 
+        let wrong_scope = runtime
+            .checkpoint_recovery(
+                Some(&created.recovery_id),
+                Some(created.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base text",
+                &opened.resource_id,
+                "other",
+                "cross-scope edit",
+            )
+            .await
+            .expect_err("another webview scope must not update recovery");
+        assert_eq!(wrong_scope.code(), "unauthorized_recovery");
+
         let updated = runtime
             .checkpoint_recovery(
                 Some(&created.recovery_id),
                 Some(created.recovery_revision),
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base text",
                 &opened.resource_id,
                 "main",
                 "second edit",
@@ -4781,8 +4793,8 @@ mod tests {
                 Some(created.recovery_revision),
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base text",
                 &opened.resource_id,
                 "main",
                 "stale edit",
@@ -4790,6 +4802,273 @@ mod tests {
             .await
             .expect_err("stale recovery CAS must fail");
         assert_eq!(conflict.code(), "recovery_conflict");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_cas_update_can_advance_base_after_guarded_save() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let first = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "saved base",
+            )
+            .await
+            .expect("first recovery");
+
+        let (saved_revision, saved_hash) = match runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                "saved base",
+            )
+            .await
+            .expect("guarded save")
+        {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            other => panic!("expected saved result, got {other:?}"),
+        };
+        assert!(saved_revision > opened.revision);
+        let updated = runtime
+            .checkpoint_recovery(
+                Some(&first.recovery_id),
+                Some(first.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                &saved_hash,
+                "saved base",
+                &opened.resource_id,
+                "main",
+                "saved base\nnext edit",
+            )
+            .await
+            .expect("next edit advances the existing recovery base");
+        assert_eq!(updated.recovery_revision, first.recovery_revision + 1);
+        assert_eq!(updated.base_content_hash, saved_hash);
+        assert_ne!(updated.base_opaque_revision, first.base_opaque_revision);
+
+        drop(runtime);
+        let restarted = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let restored = restarted
+            .get_recovery(&updated.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect("restart reads one complete advanced generation");
+        assert_eq!(restored.base_content_hash, saved_hash);
+        assert_eq!(restored.base, "saved base");
+        assert_eq!(restored.buffer, "saved base\nnext edit");
+        assert_eq!(fs::read_to_string(path).expect("disk bytes"), "saved base");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_checkpoint_rejects_unverified_or_oversized_submitted_bases() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            temp.path().join("recovery"),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        let mismatch = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "forged base",
+                &opened.resource_id,
+                "main",
+                "dirty buffer",
+            )
+            .await
+            .expect_err("mismatched submitted base and hash must fail closed");
+        assert_eq!(mismatch.code(), "invalid_request");
+
+        let other_path = workspace.join("other.txt");
+        fs::write(&other_path, "other base").expect("other fixture");
+        let other = runtime
+            .open_agent_file("agent-a", &config, &other_path, None)
+            .await
+            .expect("open other resource");
+        let wrong_subscription = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &other.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "dirty buffer",
+            )
+            .await
+            .expect_err("another resource subscription must not checkpoint this resource");
+        assert_eq!(wrong_subscription.code(), "unauthorized_resource");
+        let wrong_resource_key = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &other.resource_id,
+                "main",
+                "dirty buffer",
+            )
+            .await
+            .expect_err("another resource key must not receive this recovery");
+        assert_eq!(wrong_resource_key.code(), "unauthorized_resource");
+
+        let oversized = "x".repeat(
+            usize::try_from(FileResourceLimits::default().monaco_max_size_bytes)
+                .expect("limit fits usize")
+                + 1,
+        );
+        let oversized_hash = format!("sha256:{:x}", Sha256::digest(oversized.as_bytes()));
+        let too_large = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &oversized_hash,
+                &oversized,
+                &opened.resource_id,
+                "main",
+                "dirty buffer",
+            )
+            .await
+            .expect_err("oversized submitted base must fail closed");
+        assert_eq!(too_large.code(), "file_too_large");
+        assert!(runtime
+            .list_recoveries(&opened.resource_id, "main")
+            .await
+            .expect("failed requests leave no recovery")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_recovery_first_checkpoint_survives_an_advanced_disk_head() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        let original_base = "one\ntwo\nthree\n";
+        let dirty_buffer = "ONE\ntwo\nthree\n";
+        fs::write(&path, original_base).expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        fs::write(&path, "one\ntwo\nTHREE\n").expect("external disk update");
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                original_base,
+                &opened.resource_id,
+                "main",
+                dirty_buffer,
+            )
+            .await
+            .expect("hash-verified editor base must remain checkpointable");
+
+        drop(runtime);
+        let restarted = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let discovered = restarted
+            .list_recoveries(&opened.resource_id, "main")
+            .await
+            .expect("list after restart");
+        assert_eq!(discovered.len(), 1);
+        let restored = restarted
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect("get after restart");
+        assert_eq!(restored.base, original_base);
+        assert_eq!(restored.buffer, dirty_buffer);
+
+        let reopened = restarted
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("restore live authorization");
+        let merged = restarted
+            .merge_recovery(
+                &checkpoint.recovery_id,
+                checkpoint.recovery_revision,
+                &opened.resource_id,
+                "main",
+                &reopened.resource_id,
+                &reopened.subscription_id,
+            )
+            .await
+            .expect("merge against advanced disk head");
+        match merged {
+            FileRecoveryMergeResultV1::Clean {
+                disk_changed,
+                merged_text,
+                ..
+            } => {
+                assert!(disk_changed);
+                assert_eq!(merged_text, "ONE\ntwo\nTHREE\n");
+            }
+            other => panic!("expected clean stale merge, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -4816,8 +5095,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "stored base",
                 &opened.resource_id,
                 "main",
                 "stored buffer",
@@ -4934,8 +5213,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                base_revision,
                 &base_hash,
+                "revision two",
                 &opened.resource_id,
                 "main",
                 "first recovered edit",
@@ -4982,8 +5261,8 @@ mod tests {
                 Some(discovered[0].recovery_revision),
                 &reopened.resource_id,
                 &reopened.subscription_id,
-                reopened.revision,
-                &reopened.descriptor.content_hash,
+                &base_hash,
+                "revision two",
                 &resource_key,
                 "main",
                 "second recovered edit",
@@ -5028,8 +5307,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "durable base",
                 &opened.resource_id,
                 "main",
                 "first generation",
@@ -5041,6 +5320,24 @@ mod tests {
         assert!(first_manifest.base_blob.starts_with("sha256-"));
         assert!(first_manifest.buffer_blob.starts_with("sha256-"));
 
+        let (rebased_revision, rebased_hash) = match runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                "rebased base",
+            )
+            .await
+            .expect("advance editor base")
+        {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            other => panic!("expected saved result, got {other:?}"),
+        };
+        assert!(rebased_revision > opened.revision);
         runtime.fail_next_recovery_before_manifest();
         let interrupted = runtime
             .checkpoint_recovery(
@@ -5048,8 +5345,8 @@ mod tests {
                 Some(first.recovery_revision),
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
-                &opened.descriptor.content_hash,
+                &rebased_hash,
+                "rebased base",
                 &opened.resource_id,
                 "main",
                 "uncommitted generation",
@@ -5069,6 +5366,8 @@ mod tests {
             .await
             .expect("restore committed generation");
         assert_eq!(restored.recovery_revision, first.recovery_revision);
+        assert_eq!(restored.base_content_hash, first.base_content_hash);
+        assert_eq!(restored.base_opaque_revision, first.base_opaque_revision);
         assert_eq!(restored.base, "durable base");
         assert_eq!(restored.buffer, "first generation");
         assert_ne!(restored.buffer, "uncommitted generation");
@@ -5120,8 +5419,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "lost",
@@ -5150,8 +5449,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "one",
@@ -5164,8 +5463,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "two",
@@ -5178,8 +5477,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "new",
@@ -5194,8 +5493,8 @@ mod tests {
                 Some(first.recovery_revision),
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "three",
@@ -5271,8 +5570,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "one\ntwo\nthree\n",
                 &opened.resource_id,
                 "main",
                 "ONE\ntwo\nthree\n",
@@ -5320,8 +5619,8 @@ mod tests {
                 None,
                 &conflict_opened.resource_id,
                 &conflict_opened.subscription_id,
-                conflict_opened.revision,
                 &conflict_opened.descriptor.content_hash,
+                "shared line\n",
                 &conflict_opened.resource_id,
                 "main",
                 "buffer line\n",
@@ -5384,8 +5683,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "buffer",
@@ -5454,8 +5753,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 &oversized,
@@ -5470,8 +5769,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "buffer",
@@ -5557,8 +5856,8 @@ mod tests {
                 None,
                 &opened.resource_id,
                 &opened.subscription_id,
-                opened.revision,
                 &opened.descriptor.content_hash,
+                "base",
                 &opened.resource_id,
                 "main",
                 "saved buffer",

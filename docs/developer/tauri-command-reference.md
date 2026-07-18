@@ -247,11 +247,16 @@ and does not change a committed save into an error.
 
 Creates or updates a durable dirty editor buffer through an exact live file
 subscription. Create uses `null` for both recovery fields. Update supplies the
-returned ID and exact current recovery revision. `base_revision` and
-`base_content_hash` are checked against the live file when creating; an update
-preserves the stored base and instead reauthorizes the ID, CAS generation,
-resource/WebView scope, and current exact live subscription. A restarted
-runtime therefore does not need to reproduce an old private logical revision.
+returned ID and exact current recovery revision. Every request supplies the
+exact retained editor `base`; the backend bounds it and `buffer` as complete
+UTF-8 text models and requires the base's SHA-256 digest to equal
+`base_content_hash`. Creation reauthorizes the exact current subscription and
+resource key but does not require the disk head to equal the editor base, so an
+external change before the first debounced checkpoint cannot make the dirty
+buffer non-durable. An exact update CAS may replace the stored base/hash after
+a guarded Save or accepted rebase; base and buffer become visible together in
+one manifest-last recovery generation. Recovery has no `base_revision` field
+because process-local file revisions do not identify durable recovery content.
 
 ```json
 {
@@ -260,8 +265,8 @@ runtime therefore does not need to reproduce an old private logical revision.
     "expected_recovery_revision": null,
     "resource_id": "file:<canonical-path>",
     "subscription_id": "subscription-uuid",
-    "base_revision": 1,
     "base_content_hash": "sha256:<base-content-hash>",
+    "base": "# Saved base\n",
     "resource_key": "file:<canonical-path>",
     "buffer": "# Unsaved edit\n"
   }
