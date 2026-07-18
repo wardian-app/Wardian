@@ -2,13 +2,23 @@ import type { WorkbenchDocumentV1 } from "../../types";
 
 type Awaitable<T> = T | Promise<T>;
 
+export type SurfaceCloseDeepReadonly<T> =
+  T extends (...args: never[]) => unknown
+    ? T
+    : T extends readonly (infer TItem)[]
+      ? readonly SurfaceCloseDeepReadonly<TItem>[]
+      : T extends object
+        ? { readonly [TKey in keyof T]: SurfaceCloseDeepReadonly<T[TKey]> }
+        : T;
+
 export type SurfaceCloseChoice = "save" | "discard" | "cancel";
 export type SurfaceCloseResult = "allow" | "cancel";
 export type SurfaceCloseGeneration = string | number;
+export type SurfaceCloseSnapshot = SurfaceCloseDeepReadonly<WorkbenchDocumentV1>;
 
 /** Immutable Workbench state captured before a close transaction is prepared. */
 export interface SurfaceCloseContext {
-  readonly snapshot: WorkbenchDocumentV1;
+  readonly snapshot: SurfaceCloseSnapshot;
   readonly transaction_version: number;
   readonly closing_surface_ids: readonly string[];
 }
@@ -50,6 +60,27 @@ export interface SurfaceCloseCoordinatorOptions {
     request: SurfaceCloseRevalidationRequest,
   ) => Awaitable<boolean>;
   readonly commit_layout: (context: SurfaceCloseContext) => Awaitable<boolean>;
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+    return value;
+  }
+  if (seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && "value" in descriptor) deepFreeze(descriptor.value, seen);
+  }
+  return Object.freeze(value);
+}
+
+function captureContext(context: SurfaceCloseContext): SurfaceCloseContext {
+  return Object.freeze({
+    snapshot: deepFreeze(context.snapshot),
+    transaction_version: context.transaction_version,
+    closing_surface_ids: Object.freeze([...context.closing_surface_ids]),
+  });
 }
 
 function isValidGeneration(value: SurfaceCloseGeneration): boolean {
@@ -141,7 +172,14 @@ function groupFinalClosingResources(
 export async function coordinateSurfaceClose(
   options: SurfaceCloseCoordinatorOptions,
 ): Promise<SurfaceCloseResult> {
-  const resources = groupFinalClosingResources(options.context, options.resources);
+  let context: SurfaceCloseContext;
+  try {
+    context = captureContext(options.context);
+  } catch {
+    return "cancel";
+  }
+
+  const resources = groupFinalClosingResources(context, options.resources);
   if (resources === null) return "cancel";
 
   const preparations: SurfaceClosePreparation[] = [];
@@ -149,10 +187,13 @@ export async function coordinateSurfaceClose(
   for (const resource of resources) {
     try {
       const preparation = await options.prepare_resource({
-        context: options.context,
+        context,
         resource,
       });
-      if (preparation === null) continue;
+      if (preparation === null) {
+        preparationFailed = true;
+        continue;
+      }
       if (!matchesResource(preparation, resource) || !hasValidChoiceEffect(preparation)) {
         preparationFailed = true;
         continue;
@@ -175,7 +216,7 @@ export async function coordinateSurfaceClose(
   }));
   try {
     if (!await options.revalidate({
-      context: options.context,
+      context,
       resources: revalidationResources,
     })) return "cancel";
   } catch {
@@ -192,7 +233,7 @@ export async function coordinateSurfaceClose(
   }
 
   try {
-    if (!await options.commit_layout(options.context)) return "cancel";
+    if (!await options.commit_layout(context)) return "cancel";
   } catch {
     return "cancel";
   }

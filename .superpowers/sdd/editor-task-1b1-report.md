@@ -116,3 +116,86 @@ The focused tests prove:
 
 None within Task 1B.1. Navigation, registry, and concrete Files/Library/Workflow
 adapters remain intentionally deferred to Task 1B.2.
+
+## Independent review fixes
+
+The independent review found two Important contract gaps: the public snapshot
+type was only shallowly readonly at the context level and not frozen at runtime,
+and a final-closing resource could return `null`, disappear from exact-state
+revalidation, and still permit layout commit.
+
+### Resolution
+
+- Added a pure recursive `SurfaceCloseDeepReadonly<T>` type and exposed the
+  Workbench snapshot as `SurfaceCloseSnapshot`, without importing the Workbench
+  store module.
+- Captured one context before grouping or awaiting preparation. The captured
+  context, complete closing-ID copy, Workbench document, nested records, arrays,
+  surfaces, and opaque state are recursively frozen before any injected callback
+  receives them. The same captured context reaches preparation, revalidation,
+  and layout commit.
+- A `null` result for an observed final-closing resource is now a preparation
+  failure. The coordinator still collects later resources' choices, then
+  cancels before revalidation, saves, commit, or discard.
+
+### Review-fix RED evidence
+
+Command:
+
+```text
+npm run test -- src/features/workbench/closeTransactionCoordinator.test.ts
+```
+
+Outcome before the fix:
+
+```text
+Test Files  1 failed (1)
+Tests       2 failed | 7 passed (9)
+Exit code   1
+```
+
+The runtime immutability regression received `cancel` because its freeze
+assertions failed inside preparation, and the missing-preparation regression
+received `allow` because the empty revalidation set still reached layout commit.
+
+### Review-fix GREEN verification
+
+```text
+npm run test -- src/features/workbench/closeTransactionCoordinator.test.ts
+Test Files  1 passed (1)
+Tests       9 passed (9)
+Exit code   0
+
+npm run lint
+tsc --noEmit
+Exit code   0
+
+npm run build
+tsc && vite build
+3795 modules transformed
+Exit code   0
+```
+
+The build printed only the repository's existing non-fatal large-chunk
+advisories.
+
+### Review-fix self-review
+
+- Confirmed compile-time assertions reject mutation of surface records, group
+  membership arrays, and the complete closing-ID set.
+- Confirmed runtime preparation observes a frozen context, document, surface
+  record graph, opaque state, group membership array, and closing-ID array.
+- Confirmed attempted array mutation throws and leaves both the captured
+  Workbench snapshot and closing membership unchanged.
+- Confirmed context capture occurs synchronously before the first preparation
+  await, and every later phase receives that same frozen capture.
+- Confirmed `null` cannot omit a final-closing resource from revalidation and
+  cannot reach layout commit.
+- Confirmed `null` failure does not short-circuit preparation of later resources,
+  preserving the all-choice-collection rule.
+- Confirmed no store, navigation, registry, React, Monaco, Files buffer, or Tauri
+  dependency was added.
+- Confirmed the pre-existing `package-lock.json` change remains untouched and
+  unstaged.
+
+No remaining concerns from the two Important review findings.

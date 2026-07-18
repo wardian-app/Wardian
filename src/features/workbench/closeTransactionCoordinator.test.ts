@@ -38,7 +38,69 @@ function prepared(
   return { ...input, choice, ...effects };
 }
 
+function assertContextIsDeeplyReadonly(input: SurfaceCloseContext): void {
+  if (false) {
+    // @ts-expect-error close snapshots expose deeply readonly surface records
+    input.snapshot.surfaces["surface-a"].resource_key = "resource:mutated";
+    // @ts-expect-error close snapshots expose deeply readonly group arrays
+    input.snapshot.groups["group-1"].surface_ids.push("surface-mutated");
+    // @ts-expect-error complete closing membership cannot be changed by callbacks
+    input.closing_surface_ids.push("surface-mutated");
+  }
+}
+
 describe("coordinateSurfaceClose", () => {
+  it("captures a deeply frozen snapshot and closing set before preparation", async () => {
+    const closeContext = context(["surface-a"]);
+    assertContextIsDeeplyReadonly(closeContext);
+    const snapshotBefore = structuredClone(closeContext.snapshot);
+    const closingIdsBefore = [...closeContext.closing_surface_ids];
+    const input = resource("resource:a", ["surface-a"]);
+
+    await expect(coordinateSurfaceClose({
+      context: closeContext,
+      resources: [input],
+      prepare_resource: async ({ context: captured }) => {
+        expect(Object.isFrozen(captured)).toBe(true);
+        expect(Object.isFrozen(captured.snapshot)).toBe(true);
+        expect(Object.isFrozen(captured.snapshot.surfaces)).toBe(true);
+        expect(Object.isFrozen(captured.snapshot.surfaces["surface-a"].state)).toBe(true);
+        expect(Object.isFrozen(captured.snapshot.groups["group-1"].surface_ids)).toBe(true);
+        expect(Object.isFrozen(captured.closing_surface_ids)).toBe(true);
+
+        expect(() => {
+          (captured.snapshot.groups["group-1"].surface_ids as string[])
+            .push("surface-mutated");
+        }).toThrow(TypeError);
+        expect(() => {
+          (captured.closing_surface_ids as string[]).push("surface-mutated");
+        }).toThrow(TypeError);
+        return prepared(input, "save", { save: async () => true });
+      },
+      revalidate: async () => true,
+      commit_layout: async () => true,
+    })).resolves.toBe("allow");
+
+    expect(closeContext.snapshot).toEqual(snapshotBefore);
+    expect(closeContext.closing_surface_ids).toEqual(closingIdsBefore);
+  });
+
+  it("fails closed when a final-closing resource returns no preparation", async () => {
+    const revalidate = vi.fn().mockResolvedValue(true);
+    const commit_layout = vi.fn().mockResolvedValue(true);
+
+    await expect(coordinateSurfaceClose({
+      context: context(["surface-a"]),
+      resources: [resource("resource:a", ["surface-a"])],
+      prepare_resource: async () => null,
+      revalidate,
+      commit_layout,
+    })).resolves.toBe("cancel");
+
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(commit_layout).not.toHaveBeenCalled();
+  });
+
   it("collects every choice and cancels with zero effects when any resource cancels", async () => {
     const save = vi.fn().mockResolvedValue(true);
     const discard = vi.fn().mockResolvedValue(undefined);
