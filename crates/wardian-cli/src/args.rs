@@ -10,6 +10,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Agent(AgentArgs),
+    Artifact(ArtifactArgs),
     Conversation(ConversationArgs),
     Library(LibraryArgs),
     Workflow(WorkflowArgs),
@@ -19,6 +20,57 @@ pub enum Command {
     Send(SendArgs),
     Ask(AskArgs),
     Reply(ReplyArgs),
+}
+
+// ---------------------------------------------------------------------------
+// wardian artifact
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct ArtifactArgs {
+    #[command(subcommand)]
+    pub command: ArtifactCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArtifactCommand {
+    /// Present an authorized local file as a durable artifact version.
+    Present {
+        path: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, conflicts_with = "force_new")]
+        artifact: Option<String>,
+        #[arg(long = "new", conflicts_with = "artifact")]
+        force_new: bool,
+        #[arg(long = "address")]
+        addressed_comment_ids: Vec<String>,
+    },
+    /// Show an artifact thread and one selected immutable version.
+    Show {
+        artifact_id: String,
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Inspect reviews associated with an artifact thread.
+    Review {
+        #[command(subcommand)]
+        command: ArtifactReviewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArtifactReviewCommand {
+    /// Show one review or the latest review for an artifact.
+    Show {
+        artifact_id: String,
+        #[arg(long, conflicts_with = "latest")]
+        review: Option<String>,
+        #[arg(long, conflicts_with = "review")]
+        latest: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

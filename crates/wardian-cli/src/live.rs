@@ -78,6 +78,9 @@ enum ControlOperation {
     AgentWorktreeDisable,
     ConversationList,
     ConversationShow,
+    ArtifactPresent,
+    ArtifactShow,
+    ArtifactReviewShow,
     WatchlistsChanged,
     WorkflowRun,
     SendMessage,
@@ -422,6 +425,61 @@ pub fn conversation_show(conversation_id: &str) -> io::Result<ConversationShowRe
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn artifact_present(
+    path: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    artifact_id: Option<&str>,
+    force_new: bool,
+    addressed_comment_ids: &[String],
+    origin: MessageOrigin,
+) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::ArtifactPresent,
+        send_request(ControlRequest::ArtifactPresent {
+            path: path.to_string(),
+            title: title.map(str::to_string),
+            description: description.map(str::to_string),
+            artifact_id: artifact_id.map(str::to_string),
+            force_new,
+            addressed_comment_ids: addressed_comment_ids.to_vec(),
+            origin,
+        }),
+    )
+}
+
+pub fn artifact_show(artifact_id: &str, version_id: Option<&str>) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::ArtifactShow,
+        send_request(ControlRequest::ArtifactShow {
+            artifact_id: artifact_id.to_string(),
+            version_id: version_id.map(str::to_string),
+        }),
+    )
+}
+
+pub fn artifact_review_show(
+    artifact_id: &str,
+    review_id: Option<&str>,
+    latest: bool,
+) -> io::Result<serde_json::Value> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::ArtifactReviewShow,
+        send_request(ControlRequest::ArtifactReviewShow {
+            artifact_id: artifact_id.to_string(),
+            review_id: review_id.map(str::to_string),
+            latest,
+        }),
+    )
 }
 
 pub fn notify_watchlists_changed() -> io::Result<()> {
@@ -790,6 +848,8 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         ControlOperation::AgentList => CONTROL_TIMEOUT,
         ControlOperation::ConversationList
         | ControlOperation::ConversationShow
+        | ControlOperation::ArtifactShow
+        | ControlOperation::ArtifactReviewShow
         | ControlOperation::WatchlistsChanged => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
         | ControlOperation::AgentPause
@@ -801,6 +861,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentWorktreeJoin
         | ControlOperation::AgentWorktreeDisable
         | ControlOperation::WorkflowRun
+        | ControlOperation::ArtifactPresent
         | ControlOperation::SendMessage
         | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,
