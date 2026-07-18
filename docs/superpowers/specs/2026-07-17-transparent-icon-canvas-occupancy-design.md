@@ -8,10 +8,13 @@ keeping the lantern artwork, centering, and cross-platform identity unchanged.
 ## Decision
 
 Increase the non-transparent artwork in the `src-tauri/icons/transparent/`
-asset family by approximately 7 percent around its visual center. The change
-applies to every transparent PNG, ICO, ICNS, Windows tile, Android, and iOS
-variant so every platform receives the same mark scale. The opaque default and
-white icon families are intentionally out of scope.
+asset family by up to 7 percent around its visual center. Apply the full scale
+where the target canvas retains its required safety margin; retain the existing
+16px and 24px raster art where a larger mark would leave less than a 1px edge
+buffer. The change otherwise applies to every transparent PNG, ICO, ICNS,
+Windows tile, Android, and iOS variant so every platform receives the same
+mark scale. The opaque default and white icon families are intentionally out
+of scope.
 
 The current 32px Windows frame occupies 28px by 28px and leaves a 2px border.
 The adjusted frame must remain centered, preserve at least a 1px transparent
