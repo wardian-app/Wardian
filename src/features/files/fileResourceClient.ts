@@ -1,11 +1,26 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  CheckpointFileRecoveryRequestV1,
+  DiscardFileRecoveryRequestV1,
+  FileRecoveryCheckpointV1,
+  FileRecoveryMergeResultV1,
+  FileRecoverySummaryV1,
+  FileRecoveryV1,
   FileResourceEventV1,
+  FileResourceSaveAsResultV1,
+  FileResourceSaveResultV1,
   FileResourceSnapshotV1,
   FileResourceTextV1,
   FileResourceTicketV1,
+  GetFileRecoveryRequestV1,
+  ListFileRecoveriesRequestV1,
+  MergeFileRecoveryRequestV1,
   OpenFileResourceRequestV1,
+  PickFileResourceSaveTargetRequestV1,
+  SaveFileResourceAsTextRequestV1,
+  SaveFileResourceTextRequestV1,
+  SaveTargetGrantV1,
 } from "../../types";
 import { fileResourceUrlForWebview } from "./resourceTicketUrl.mjs";
 
@@ -30,6 +45,48 @@ export class FileResourceClient {
         revision: owner.revision,
       },
     });
+  }
+
+  saveText(request: SaveFileResourceTextRequestV1): Promise<FileResourceSaveResultV1> {
+    return invoke<FileResourceSaveResultV1>("save_file_resource_text", { request });
+  }
+
+  pickSaveTarget(
+    request: PickFileResourceSaveTargetRequestV1,
+  ): Promise<SaveTargetGrantV1 | null> {
+    return invoke<SaveTargetGrantV1 | null>("pick_file_resource_save_target", { request });
+  }
+
+  saveAsText(
+    request: SaveFileResourceAsTextRequestV1,
+  ): Promise<FileResourceSaveAsResultV1> {
+    return invoke<FileResourceSaveAsResultV1>("save_file_resource_as_text", { request });
+  }
+
+  checkpointRecovery(
+    request: CheckpointFileRecoveryRequestV1,
+  ): Promise<FileRecoveryCheckpointV1> {
+    return invoke<FileRecoveryCheckpointV1>("checkpoint_file_recovery", { request });
+  }
+
+  getRecovery(request: GetFileRecoveryRequestV1): Promise<FileRecoveryV1> {
+    return invoke<FileRecoveryV1>("get_file_recovery", { request });
+  }
+
+  listRecoveries(
+    request: ListFileRecoveriesRequestV1,
+  ): Promise<FileRecoverySummaryV1[]> {
+    return invoke<FileRecoverySummaryV1[]>("list_file_recoveries", { request });
+  }
+
+  discardRecovery(request: DiscardFileRecoveryRequestV1): Promise<void> {
+    return invoke<void>("discard_file_recovery", { request });
+  }
+
+  mergeRecovery(
+    request: MergeFileRecoveryRequestV1,
+  ): Promise<FileRecoveryMergeResultV1> {
+    return invoke<FileRecoveryMergeResultV1>("merge_file_recovery", { request });
   }
 
   async issueTicket(

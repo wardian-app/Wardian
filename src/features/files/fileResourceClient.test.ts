@@ -54,6 +54,134 @@ beforeEach(() => {
 });
 
 describe("FileResourceClient", () => {
+  it("wraps save, Save As, and recovery IPC in strict request objects", async () => {
+    mockInvoke
+      .mockResolvedValueOnce({ status: "saved", revision: 5, content_hash: "hash-2" })
+      .mockResolvedValueOnce({
+        schema: 1,
+        save_target_grant_id: "save-target-1",
+        selected_path: "C:/work/Copy.md",
+      })
+      .mockResolvedValueOnce({
+        schema: 1,
+        capability_id: "capability-2",
+        canonical_path: "C:/work/Copy.md",
+        resource_id: "file:C:/work/Copy.md",
+        content_hash: "hash-copy",
+      })
+      .mockResolvedValueOnce({
+        schema: 1,
+        recovery_id: "recovery-1",
+        resource_key: snapshot.resource_id,
+        base_content_hash: "hash-1",
+        base_opaque_revision: "opaque-1",
+        recovery_revision: 1,
+        created_at_ms: 10,
+        updated_at_ms: 10,
+      })
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({
+        schema: 1,
+        recovery_id: "recovery-1",
+        resource_key: snapshot.resource_id,
+        display_name: "Notes.md",
+        extension: "md",
+        mime_type: "text/markdown",
+        base_content_hash: "hash-1",
+        base_opaque_revision: "opaque-1",
+        recovery_revision: 1,
+        base: "base",
+        buffer: "edited",
+        created_at_ms: 10,
+        updated_at_ms: 10,
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        status: "clean",
+        recovery_revision: 1,
+        current_revision: 5,
+        current_content_hash: "hash-2",
+        disk_changed: true,
+        merged_text: "merged",
+      });
+
+    const client = new FileResourceClient();
+    const save = {
+      resource_id: snapshot.resource_id,
+      subscription_id: snapshot.subscription_id,
+      expected_revision: snapshot.revision,
+      buffer_base_hash: "hash-1",
+      text: "edited",
+      recovery_cleanup: {
+        recovery_id: "recovery-1",
+        expected_recovery_revision: 1,
+      },
+    } as const;
+    const checkpoint = {
+      recovery_id: "recovery-1",
+      expected_recovery_revision: 1,
+      resource_id: snapshot.resource_id,
+      subscription_id: snapshot.subscription_id,
+      base_revision: snapshot.revision,
+      base_content_hash: "hash-1",
+      resource_key: snapshot.resource_id,
+      buffer: "edited",
+    } as const;
+
+    await client.saveText(save);
+    await client.pickSaveTarget({ title: "Save a copy", default_name: "Copy.md" });
+    await client.saveAsText({ save_target_grant_id: "save-target-1", text: "edited" });
+    await client.checkpointRecovery(checkpoint);
+    await client.listRecoveries({ resource_key: snapshot.resource_id });
+    await client.getRecovery({
+      recovery_id: "recovery-1",
+      resource_key: snapshot.resource_id,
+    });
+    await client.discardRecovery({
+      recovery_id: "recovery-1",
+      expected_recovery_revision: 1,
+      resource_key: snapshot.resource_id,
+    });
+    await client.mergeRecovery({
+      recovery_id: "recovery-1",
+      expected_recovery_revision: 1,
+      resource_key: snapshot.resource_id,
+      resource_id: snapshot.resource_id,
+      subscription_id: snapshot.subscription_id,
+    });
+
+    expect(mockInvoke.mock.calls).toEqual([
+      ["save_file_resource_text", { request: save }],
+      ["pick_file_resource_save_target", {
+        request: { title: "Save a copy", default_name: "Copy.md" },
+      }],
+      ["save_file_resource_as_text", {
+        request: { save_target_grant_id: "save-target-1", text: "edited" },
+      }],
+      ["checkpoint_file_recovery", { request: checkpoint }],
+      ["list_file_recoveries", { request: { resource_key: snapshot.resource_id } }],
+      ["get_file_recovery", {
+        request: { recovery_id: "recovery-1", resource_key: snapshot.resource_id },
+      }],
+      ["discard_file_recovery", {
+        request: {
+          recovery_id: "recovery-1",
+          expected_recovery_revision: 1,
+          resource_key: snapshot.resource_id,
+        },
+      }],
+      ["merge_file_recovery", {
+        request: {
+          recovery_id: "recovery-1",
+          expected_recovery_revision: 1,
+          resource_key: snapshot.resource_id,
+          resource_id: snapshot.resource_id,
+          subscription_id: snapshot.subscription_id,
+        },
+      }],
+    ]);
+  });
+
   it("uses exact request-wrapped snake_case invoke payloads", async () => {
     const text: FileResourceTextV1 = {
       schema: 1,

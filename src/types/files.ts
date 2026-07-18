@@ -130,3 +130,120 @@ export type CloseFileRendererLeaseRequestV1 = {
 export type PickFileResourceRequestV1 = {
   title: string | null;
 };
+
+export type FileRecoveryCleanupV1 = {
+  recovery_id: string;
+  expected_recovery_revision: number;
+};
+
+export type SaveFileResourceTextRequestV1 = {
+  resource_id: string;
+  subscription_id: string;
+  expected_revision: number;
+  buffer_base_hash: string;
+  text: string;
+  recovery_cleanup: FileRecoveryCleanupV1 | null;
+};
+
+export type FileResourceSaveResultV1 =
+  | { status: "saved"; revision: number; content_hash: string }
+  | { status: "unchanged"; revision: number; content_hash: string }
+  | { status: "stale_conflict"; revision: number; content_hash: string };
+
+export type PickFileResourceSaveTargetRequestV1 = {
+  title: string | null;
+  default_name: string | null;
+};
+
+export type SaveTargetGrantV1 = {
+  schema: 1;
+  save_target_grant_id: string;
+  selected_path: string;
+};
+
+export type SaveFileResourceAsTextRequestV1 = {
+  save_target_grant_id: string;
+  text: string;
+};
+
+export type FileResourceSaveAsResultV1 = {
+  schema: 1;
+  capability_id: string;
+  canonical_path: string;
+  resource_id: string;
+  content_hash: string;
+};
+
+export type CheckpointFileRecoveryRequestV1 = {
+  recovery_id: string | null;
+  expected_recovery_revision: number | null;
+  resource_id: string;
+  subscription_id: string;
+  base_revision: number;
+  base_content_hash: string;
+  resource_key: string;
+  buffer: string;
+};
+
+export type FileRecoveryCheckpointV1 = {
+  schema: 1;
+  recovery_id: string;
+  resource_key: string;
+  base_content_hash: string;
+  base_opaque_revision: string;
+  recovery_revision: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+export type FileRecoverySummaryV1 = FileRecoveryCheckpointV1 & {
+  display_name: string;
+  extension: string | null;
+  mime_type: string;
+};
+
+export type FileRecoveryV1 = FileRecoverySummaryV1 & {
+  base: string;
+  buffer: string;
+};
+
+export type GetFileRecoveryRequestV1 = {
+  recovery_id: string;
+  resource_key: string;
+};
+
+export type ListFileRecoveriesRequestV1 = {
+  resource_key: string;
+};
+
+export type DiscardFileRecoveryRequestV1 = {
+  recovery_id: string;
+  expected_recovery_revision: number;
+  resource_key: string;
+};
+
+export type MergeFileRecoveryRequestV1 = {
+  recovery_id: string;
+  expected_recovery_revision: number;
+  resource_key: string;
+  resource_id: string;
+  subscription_id: string;
+};
+
+export type FileRecoveryMergeResultV1 =
+  | {
+      status: "clean";
+      recovery_revision: number;
+      current_revision: number;
+      current_content_hash: string;
+      disk_changed: boolean;
+      merged_text: string;
+    }
+  | {
+      status: "conflicted";
+      recovery_revision: number;
+      current_revision: number;
+      current_content_hash: string;
+      disk_changed: boolean;
+      merged_text: string;
+    };
