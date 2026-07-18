@@ -31,6 +31,7 @@
 - Modify: `src/types/files.ts`
 - Modify: `src/features/workbench/coreSurfaceRegistry.ts`
 - Modify: `src/features/workbench/surfaceRegistry.ts`
+- Modify: `src/features/workbench/navigationService.ts`
 - Modify: `src/features/workbench/useWorkbenchPersistence.ts`
 - Modify: `src/features/files/fileResourceKey.ts`
 - Modify: `src/features/files/filesPresentationStore.ts`
@@ -44,8 +45,9 @@ Cover:
 - V1 migration intent: `preview` requests the renderer default; `changes` and `draft` request editor; `changes` opens comparison only when its checkpoint/artifact baseline resolves.
 - V2 round-trip persistence.
 - Renderer normalization follows the approved fallback order: unsupported editor → renderer default; unsupported rendered → editor when available; unavailable baseline closes comparison; an unfit side-by-side layout degrades without losing the saved preference.
-- A group close receives the complete set of `closing_surface_ids`, so duplicate dirty file views only prompt when all remaining presentations close.
+- A group close receives the complete set of `closing_surface_ids`, groups them by canonical resource, and only prompts when every remaining presentation of a dirty resource is closing.
 - Single-pane close does not prompt when another pane still presents the resource.
+- Cancelling any prepared close leaves every buffer untouched; a stale presentation set cannot discard or clean a buffer.
 - Legacy state must never resurrect a Draft buffer. The shipped foundation did not persist editable Draft bytes.
 
 ### Step 2: Define V2 state
@@ -76,11 +78,23 @@ Keep artifact fields inert until the artifact tasks implement them. Validate all
 
 The synchronous registry restores only validated schema state. Add a Workbench persistence migration/normalization phase that can finish after the Files descriptor and baseline providers are available, then durably save normalized V2 state before recording migration completion. Current shipped V1 state contains no Draft bytes or base hash; prove that invariant and migrate legacy `draft` as a clean editor. If any legacy byte-bearing format is discovered, stop and route it through Task 3 recovery before removing it.
 
-### Step 3: Make close guards transaction-aware
+### Step 3: Add a two-phase close coordinator
 
-Add a `SurfaceCloseContext` to the registry guard contract containing the current surface snapshot and the complete `closing_surface_ids`. Update every invocation, including pane/group/workspace close. Existing non-Files guards may ignore the context.
+Add a `SurfaceCloseContext` to the registry close contract containing the immutable Workbench snapshot, transaction version, and complete `closing_surface_ids`. Update every invocation, including replace/rebind/reset, pane close, group close, and workspace reset.
 
-The Files guard must query resource-owned dirty state through an injected interface; do not import a React component or reach into Monaco.
+Replace sequential effectful per-surface guards with a coordinator that:
+
+1. groups closing presentations by canonical resource and tracks the exact presentation IDs;
+2. collects every Save / Don't Save / Cancel choice without mutating a resource;
+3. cancels without side effects when any choice cancels;
+4. revalidates the Workbench transaction and exact presentation membership before resource effects;
+5. resolves each resource once, running successful Save work before the layout transaction;
+6. applies the Workbench close transaction; and
+7. runs discard/in-memory release and recovery cleanup only after that transaction commits.
+
+A pane opened or rebound during a prompt makes the preparation stale before destructive effects. If a precommit Save succeeds but a later Save fails, the close cancels safely; the successful Save remains an explicit user-approved operation. Do not run any discard before commit. Registry definitions for existing dirty surfaces must adapt to the same preparation contract so mixed Files/Library/Workflow group closes cannot partially discard state.
+
+The Files preparation must query resource-owned dirty/generation state through an injected interface; do not import a React component or reach into Monaco. Task 4 supplies its save/discard implementation.
 
 ### Step 4: Verify and commit
 
@@ -135,7 +149,9 @@ Request fields:
 resource_id, subscription_id, expected_revision, buffer_base_hash, text
 ```
 
-Return a tagged result with `saved`, `unchanged`, or `stale_conflict`. The saved/unchanged variants return the current opaque revision and content hash. Stale conflict returns current metadata only; it must not disclose bytes through an unauthorized or expired subscription.
+Implement save as `FileResourceRuntime::save_text`, not as a command-layer filesystem operation. It must resolve the caller's exact live subscription, rerun the existing claim/root validation for that subscription, obtain the backend-private `FileRevisionToken` held by the resource entry, and only then call the core primitive. Neither `resource_id`, frontend revision number, content hash, nor a retained snapshot is authority on its own.
+
+Return a tagged result with `saved`, `unchanged`, or `stale_conflict`. The saved/unchanged variants return the current frontend revision and content hash; the private `FileRevisionToken` never crosses IPC. Stale conflict returns current metadata only; it must not disclose bytes through an unauthorized or expired subscription.
 
 Serialize save, explicit refresh, watcher refresh, and final-close cleanup through one per-resource operation mutex. A successful save emits exactly one resource revision event.
 
@@ -163,7 +179,7 @@ Commit: `feat(files): add guarded atomic text saves`
 
 ### Step 1: Write RED recovery tests
 
-Cover checkpoint create/update, app restart, authorized restore, read-only restore while file authorization is unavailable, discard, recovery compare-and-swap conflicts, stale file detection, clean three-way merge, overlapping-conflict markers, and cleanup after successful save. Prove recovery access cannot read current file bytes, write the file, or revive an expired/revoked file capability.
+Cover checkpoint create/update, app restart, authorized restore, read-only restore while file authorization is unavailable, discard, recovery compare-and-swap conflicts, manifest-last crash recovery without mixed generations, stale file detection, clean three-way merge, overlapping-conflict markers, and cleanup after successful save. Prove recovery access cannot read current file bytes, write the file, or revive an expired/revoked file capability.
 
 ### Step 2: Implement the recovery store
 
@@ -179,7 +195,7 @@ The manifest records a schema version, opaque recovery id, canonical resource id
 
 Recovery lookup/read is separately scoped to the same Wardian app webview and exact stable `resource_key`, permitting the approved read-only recovery screen after restart even when file authorization is unavailable. That access may reveal only the saved recovery base/buffer. Saving, merging with the disk head, or reading current file bytes still requires a newly verified live file subscription for the same target. **Restore access** performs normal authorization and never revives an old file capability.
 
-Writes use sibling temporary files plus atomic rename. Enforce text and storage limits from the Files resource limits; reject invalid UTF-8 and oversized buffers consistently.
+Store base and buffer bodies as immutable hash-addressed blobs, then atomically replace the manifest last. A crash can leave unreachable blobs, but can never pair one manifest generation with the wrong bytes. Garbage-collect unreachable blobs conservatively. Enforce text and storage limits from the Files resource limits; reject invalid UTF-8 and oversized buffers consistently.
 
 ### Step 3: Expose narrow commands
 
@@ -218,6 +234,7 @@ Prove:
 - explicit save sends the exact base revision/hash and advances the baseline only on success;
 - stale save keeps the buffer dirty and opens comparison state;
 - recovery checkpoints are debounced without losing the final mutation;
+- edits made while Save or recovery checkpoint is in flight remain dirty and recoverable; completion only clears the exact snapshotted buffer generation;
 - only the final close offers Save / Don't Save / Cancel;
 - failed Save cancels closing;
 - Don't Save discards both in-memory and durable recovery state;
@@ -231,7 +248,8 @@ Each session owns at least:
 
 ```text
 resource_id, subscription_id, authorized revision, base hash, saved text,
-working text, dirty flag, save state, stale state, recovery state, view refcount
+working text, dirty flag, save state, stale state, recovery state,
+monotonic buffer generation, and the exact set of presenting surface IDs
 ```
 
 The runtime may drop a clean zero-view session. A dirty zero-view session remains only long enough to resolve the close transaction/recovery checkpoint, then releases native subscriptions deterministically.
@@ -261,7 +279,8 @@ Commit: `feat(files): share editor sessions across panes`
 
 Cover:
 
-- Markdown/HTML/active SVG default rendered and show the Book/Pencil current-state control;
+- Markdown defaults rendered and shows the Book/Pencil current-state control;
+- HTML and active SVG remain source/editor-only until the downstream isolated live renderer registers a safe rendered presentation;
 - source-only text opens editable Monaco with no redundant toggle;
 - images/PDF stay read-only with no misleading Pencil;
 - the icon reflects current state, while label/tooltip describe the action;
@@ -282,7 +301,7 @@ Use Lucide `BookOpen`/`Pencil` for current presentation and `Ellipsis` at exactl
 
 Key the Monaco model by canonical resource identity, not by revision. Bind it to the shared controller, preserve undo/redo and selection across presentation switches, and suppress feedback loops when applying external/controller state. Set language from the renderer registry. Route keybindings through the active resource session.
 
-Rendered presentation always renders the working buffer when dirty so Book/Pencil switching is lossless and unsurprising.
+Safe in-process rendered presentations such as Markdown always render the working buffer when dirty so Book/Pencil switching is lossless and unsurprising. Define an immutable buffer-snapshot adapter for downstream HTML/SVG capabilities; do not inject dirty HTML/SVG into Wardian's DOM in this task.
 
 ### Step 4: Verify and commit
 
@@ -357,6 +376,8 @@ Amend the three downstream artifact plans so they consume this editor core and d
 1. artifact lifecycle owns persistence, CLI presentation, provenance, and attention;
 2. artifact review owns prompt checkpoint adapters, comments, Send to agent, and approval;
 3. live isolation owns HTML/SVG sandboxing and final activation.
+
+Define the artifact attachment boundary explicitly: an `artifact:<id>` surface retains artifact provenance/version identity while an adapter resolves its currently presented backing version to the canonical file/blob editor-session identity. The adapter must attach to the common controller rather than create an artifact-specific second buffer. Save As produces an ordinary file resource and never changes that artifact attachment.
 
 ### Step 4: Run complete required verification
 
