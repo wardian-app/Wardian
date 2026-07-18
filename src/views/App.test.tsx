@@ -591,10 +591,15 @@ describe("Workbench persistence boot integration", () => {
   it("pins an existing transient Files preview when a Markdown link opens it", async () => {
     setupDefaultMocks([], defaultClasses);
     const defaultInvoke = mockInvoke.getMockImplementation();
+    // Keep this fixture on the current schema so the assertion covers link-driven
+    // pinning, not the independent legacy presentation migration lifecycle.
     const fileState = (transientPreview: boolean) => ({
       resource_kind: "file" as const,
-      mode: "preview" as const,
       transient_preview: transientPreview,
+      presentation: "rendered" as const,
+      comparison_open: false,
+      comparison_layout_preference: "auto" as const,
+      comparison_baseline: null,
       review_drawer_open: false,
       selected_version_id: null,
       optional_checkpoint_id: null,
@@ -609,11 +614,13 @@ describe("Workbench persistence boot integration", () => {
             makeSurface("linked-preview", {
               surface_type: "files",
               resource_key: `file:${targetPath}`,
+              state_schema_version: 2,
               state: fileState(true),
             }),
             makeSurface("markdown-source", {
               surface_type: "files",
               resource_key: `file:${sourcePath}`,
+              state_schema_version: 2,
               state: fileState(false),
             }),
           ]),
@@ -647,11 +654,16 @@ describe("Workbench persistence boot integration", () => {
         });
       }
       if (command === "read_file_resource_text") {
+        const resourceId = (
+          args as { request?: { resource_id?: string } } | undefined
+        )?.request?.resource_id ?? `file:${sourcePath}`;
         return Promise.resolve({
           schema: 1,
-          resource_id: `file:${sourcePath}`,
+          resource_id: resourceId,
           revision: 1,
-          text: "[Open linked preview](../linked.md)",
+          text: resourceId === `file:${sourcePath}`
+            ? "[Open linked preview](../linked.md)"
+            : "linked file",
         });
       }
       if (command === "list_file_recoveries") return Promise.resolve([]);
