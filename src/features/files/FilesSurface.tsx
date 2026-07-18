@@ -5,15 +5,18 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  ArtifactResourceV1,
   CloseDecision,
   FileRecoveryV1,
   FilesComparisonBaseline,
   FilesSurfaceState,
   FilesSurfaceStateV2,
+  OpenFileResourceRequestV1,
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FileContentHost } from "./FileContentHost";
@@ -24,10 +27,12 @@ import {
   FileEditorControllerRegistry,
 } from "./fileEditorController";
 import { decodeFileResourceKey } from "./fileResourceKey";
+import { ArtifactDetails } from "./ArtifactDetails";
 import { FilesHeader } from "./FilesHeader";
-import { fileDiffForController } from "./fileDiffModel";
+import { buildFileDiffModel, fileDiffForController } from "./fileDiffModel";
 import {
   type FilesLegacyPresentationIntent,
+  migrateFilesSurfaceStateV1,
   normalizeFilesSurfaceState,
 } from "./filesSurfaceState";
 import { useFilesPresentationStore } from "./filesPresentationStore";
@@ -38,6 +43,7 @@ import {
   type RendererRegistry,
 } from "./rendererRegistry";
 import { useFileResource, type UseFileResourceResult } from "./useFileResource";
+import { useArtifactResource } from "./useArtifactResource";
 import "./FilesSurface.css";
 
 export type FilesSurfaceProps = {
@@ -110,6 +116,8 @@ type ActiveFilesSurfaceProps = Required<Pick<
   on_presentation_change: (presentation: FileContentPresentation) => void;
   on_save: () => Promise<void>;
   on_save_as: () => Promise<void>;
+  artifact_details: ReactNode;
+  artifact_resource: ArtifactResourceV1 | null;
 };
 
 type PresentationState = {
@@ -196,7 +204,11 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     if (stateV2.comparison_baseline?.kind === "saved_file") {
       return stateV2.comparison_baseline;
     }
-    // Historical baselines require their own provider. Never substitute saved bytes.
+    if (
+      stateV2.comparison_baseline?.kind === "presented_version"
+      && props.artifact_resource?.selected_version.version_id
+        === stateV2.comparison_baseline.version_id
+    ) return stateV2.comparison_baseline;
     if (stateV2.comparison_baseline !== null) return null;
     if (
       stateV2.resource_kind === "file"
@@ -204,7 +216,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
       && props.editor_snapshot.dirty
     ) return { kind: "saved_file" };
     return null;
-  }, [props.editor_snapshot?.dirty, props.editor_snapshot?.status, stateV2]);
+  }, [props.artifact_resource, props.editor_snapshot?.dirty, props.editor_snapshot?.status, stateV2]);
   const savedFileDiff = useMemo(() => (
     inlineComparisonBaseline?.kind === "saved_file" && props.editor_snapshot?.status === "ready"
       ? fileDiffForController(props.editor_controller!)
@@ -217,34 +229,55 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     props.editor_snapshot?.status,
     inlineComparisonBaseline,
   ]);
+  const artifactDiff = useMemo(() => (
+    props.artifact_resource?.selected_text !== null
+    && props.artifact_resource?.selected_text !== undefined
+    && props.editor_snapshot?.status === "ready"
+      ? buildFileDiffModel(
+          props.artifact_resource.selected_text,
+          props.editor_snapshot.working_text,
+        )
+      : null
+  ), [
+    props.artifact_resource?.selected_text,
+    props.artifact_resource?.selected_version.version_id,
+    props.editor_snapshot?.buffer_generation,
+    props.editor_snapshot?.status,
+    props.editor_snapshot?.working_text,
+  ]);
   const comparisonOpen = Boolean(stateV2?.comparison_open && stateV2.comparison_baseline);
-  const savedComparisonOpen = Boolean(
-    stateV2?.comparison_open && stateV2.comparison_baseline?.kind === "saved_file",
-  );
+  const activeComparisonOpen = Boolean(stateV2?.comparison_open);
   const updateComparisonState = useCallback((patch: Partial<FilesSurfaceStateV2>) => {
     if (!stateV2) return;
     void props.on_state_change({ ...stateV2, ...patch });
   }, [props.on_state_change, stateV2]);
-  const toggleSavedComparison = useCallback(() => {
+  const toggleComparison = useCallback(() => {
     if (!stateV2) return;
-    if (savedComparisonOpen) {
+    if (activeComparisonOpen) {
       updateComparisonState({ comparison_open: false });
       return;
     }
     updateComparisonState({
       comparison_open: true,
-      comparison_baseline: { kind: "saved_file" },
+      comparison_baseline: props.artifact_resource
+        ? {
+            kind: "presented_version",
+            version_id: props.artifact_resource.selected_version.version_id,
+          }
+        : { kind: "saved_file" },
     });
-  }, [savedComparisonOpen, stateV2, updateComparisonState]);
+  }, [activeComparisonOpen, props.artifact_resource, stateV2, updateComparisonState]);
 
   useEffect(() => {
     if (!("presentation" in props.state) || !resource.snapshot) return;
     const renderer = props.registry.resolve(resource.snapshot.descriptor);
     const baselineAvailability = props.state.comparison_baseline === null
       ? "unavailable"
-      : props.state.comparison_baseline.kind === "saved_file"
-        ? renderer.capabilities.changes === "line" ? "available" : "unavailable"
-        : "unknown";
+        : props.state.comparison_baseline.kind === "saved_file"
+          ? renderer.capabilities.changes === "line" ? "available" : "unavailable"
+          : props.artifact_resource?.selected_text !== null
+            ? "available"
+            : "unavailable";
     const normalized = normalizeFilesSurfaceState(props.state, {
       default_presentation: renderer.default_presentation ?? "rendered",
       rendered: renderer.rendered !== undefined,
@@ -274,6 +307,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     props.on_state_change,
     props.registry,
     props.resource_key,
+    props.artifact_resource,
     props.state,
     props.surface_id,
     resource.snapshot,
@@ -291,16 +325,17 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         save_disabled={authorizationUnavailable}
         save_as_available={editorAvailable && !editorBlocked}
         saving={props.editor_snapshot?.save_state === "saving"}
-        changes={savedFileDiff?.summary ?? null}
-        comparison_open={savedComparisonOpen}
+        changes={(props.artifact_resource ? artifactDiff : savedFileDiff)?.summary ?? null}
+        comparison_open={activeComparisonOpen}
         resource_actions_available={props.recovery_only.status !== "ready"}
         on_presentation_change={props.on_presentation_change}
-        on_comparison_toggle={toggleSavedComparison}
+        on_comparison_toggle={toggleComparison}
         on_save={props.on_save}
         on_save_as={props.on_save_as}
         on_open_with={props.on_open_with}
         on_reveal={props.on_reveal}
       />
+      {props.artifact_details}
       <main className="files-content-region" data-testid="files-content-region">
         {props.action_error ? (
           <div className="files-action-error" role="alert">{props.action_error}</div>
@@ -483,6 +518,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               on_reload_from_disk={() => props.editor_controller!.reloadFromDisk()}
               on_keep_working_buffer={() => props.editor_controller!.keepWorkingBuffer()}
               on_merge={() => props.editor_controller!.mergeStaleBuffer()}
+              baseline_text={props.artifact_resource?.selected_text ?? null}
             />
           ) : (
             <section className="files-comparison-lens" aria-label="File comparison">
@@ -505,7 +541,13 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   );
 }
 
-export function FilesSurface({
+type FileBackedFilesSurfaceProps = FilesSurfaceProps & {
+  resource_request?: OpenFileResourceRequestV1;
+  artifact_details?: (currentContentHash: string | null) => ReactNode;
+  artifact_resource?: ArtifactResourceV1;
+};
+
+function FileBackedFilesSurface({
   client = fileResourceClient,
   registry = defaultRendererRegistry,
   on_canonical_resource = () => "allow",
@@ -513,8 +555,11 @@ export function FilesSurface({
   on_open_with = openWithConfiguredEditor,
   on_reveal = revealPath,
   on_state_change = () => undefined,
+  resource_request,
+  artifact_details,
+  artifact_resource,
   ...props
-}: FilesSurfaceProps) {
+}: FileBackedFilesSurfaceProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorRetryToken, setEditorRetryToken] = useState(0);
@@ -543,7 +588,7 @@ export function FilesSurface({
   const [canonicalRetryToken, setCanonicalRetryToken] = useState(0);
   const stateCallback = useRef({ state: props.state, on_state_change });
   stateCallback.current = { state: props.state, on_state_change };
-  const resource = useFileResource({
+  const resource = useFileResource(resource_request ?? {
     path: pathFromResourceKey(props.resource_key),
     agent_id: null,
     user_file_capability_id: null,
@@ -817,23 +862,32 @@ export function FilesSurface({
   }, [editorController]);
 
   useEffect(() => {
-    useFilesPresentationStore.getState().setPresentation(props.surface_id, {
+    const presentationStore = useFilesPresentationStore.getState();
+    const previous = presentationStore.presentations[props.surface_id];
+    const operationalAttention = Boolean(
+      editorSnapshot?.stale
+      || editorSnapshot?.last_error
+      || editorSnapshot?.recovery.status === "error"
+      || editorError
+      || recoveryOnlyState.status === "ready"
+      || recoveryOnlyState.status === "error"
+    );
+    presentationStore.setPresentation(props.surface_id, {
       resource_key: props.resource_key,
       descriptor: resource.snapshot?.descriptor ?? null,
       dirty: editorSnapshot?.dirty ?? false,
-      attention: Boolean(
-        editorSnapshot?.stale
-        || editorSnapshot?.last_error
-        || editorSnapshot?.recovery.status === "error"
-        || editorError
-        || recoveryOnlyState.status === "ready"
-        || recoveryOnlyState.status === "error"
+      attention: operationalAttention || Boolean(
+        props.resource_key.startsWith("artifact:")
+        && !props.lifecycle.visible
+        && previous?.resource_key === props.resource_key
+        && previous.attention
       ),
     });
   }, [
     editorError,
     editorSnapshot,
     props.resource_key,
+    props.lifecycle.visible,
     props.surface_id,
     recoveryOnlyState.status,
     resource.snapshot,
@@ -954,6 +1008,7 @@ export function FilesSurface({
           on_open_with={guardedOpenWith}
           on_reveal={guardedReveal}
         />
+        {artifact_details?.(resource.snapshot?.descriptor.content_hash ?? null)}
         <main className="files-content-region" data-testid="files-content-region">
           {actionError ? (
             <div className="files-action-error" role="alert">{actionError}</div>
@@ -999,6 +1054,103 @@ export function FilesSurface({
       on_presentation_change={setFilePresentation}
       on_save={saveFile}
       on_save_as={saveFileAs}
+      artifact_details={artifact_details?.(
+        resource.snapshot?.descriptor.content_hash ?? null,
+      ) ?? null}
+      artifact_resource={artifact_resource ?? null}
     />
   );
+}
+
+function ArtifactFilesSurface(props: FilesSurfaceProps & { artifact_id: string }) {
+  const client = props.client ?? fileResourceClient;
+  const stateV2 = "presentation" in props.state
+    ? props.state
+    : migrateFilesSurfaceStateV1(props.state);
+  const artifact = useArtifactResource(
+    props.artifact_id,
+    stateV2.selected_version_id,
+    client,
+  );
+
+  useEffect(() => {
+    if (!props.lifecycle.visible || artifact.status !== "ready" || !artifact.resource.attention) {
+      return;
+    }
+    let active = true;
+    void artifact.clearAttention().then(() => {
+      if (!active) return;
+      const store = useFilesPresentationStore.getState();
+      const current = store.presentations[props.surface_id];
+      if (current?.resource_key === props.resource_key) {
+        store.setPresentation(props.surface_id, { ...current, attention: false });
+      }
+    }).catch((cause) => {
+      console.error("Failed to clear artifact attention", cause);
+    });
+    return () => { active = false; };
+  }, [artifact, props.lifecycle.visible, props.resource_key, props.surface_id]);
+
+  if (artifact.status !== "ready") {
+    return (
+      <section className="files-surface" data-testid="files-surface">
+        <FilesHeader
+          resource_key={props.resource_key}
+          descriptor={null}
+          presentation={stateV2.presentation}
+          presentation_toggle_available={false}
+          dirty={false}
+          save_available={false}
+          save_as_available={false}
+          saving={false}
+          resource_actions_available={false}
+          on_presentation_change={() => undefined}
+          on_save={() => undefined}
+          on_save_as={() => undefined}
+          on_open_with={() => undefined}
+          on_reveal={() => undefined}
+        />
+        <main className="files-content-region">
+          <section className="files-resource-state" role={artifact.status === "error" ? "alert" : "status"}>
+            <p>{artifact.status === "error" ? artifact.error.message : "Loading artifact…"}</p>
+            {artifact.status === "error" ? (
+              <button type="button" onClick={artifact.retry}>Retry</button>
+            ) : null}
+          </section>
+        </main>
+      </section>
+    );
+  }
+
+  const resource = artifact.resource;
+  return (
+    <FileBackedFilesSurface
+      {...props}
+      client={client}
+      state={stateV2}
+      resource_request={{
+        path: resource.working.canonical_path,
+        agent_id: resource.working.agent_id,
+        user_file_capability_id: null,
+      }}
+      on_canonical_resource={() => "allow"}
+      artifact_details={(currentContentHash) => (
+        <ArtifactDetails
+          resource={resource}
+          current_content_hash={currentContentHash ?? resource.working.content_hash}
+          on_select_version={(versionId) => {
+            void props.on_state_change?.({ ...stateV2, selected_version_id: versionId });
+          }}
+        />
+      )}
+      artifact_resource={resource}
+    />
+  );
+}
+
+export function FilesSurface(props: FilesSurfaceProps) {
+  const decoded = decodeFileResourceKey(props.resource_key);
+  return decoded.resource_kind === "artifact"
+    ? <ArtifactFilesSurface {...props} artifact_id={decoded.artifact_id} />
+    : <FileBackedFilesSurface {...props} />;
 }

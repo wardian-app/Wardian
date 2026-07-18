@@ -98,6 +98,51 @@ export type FileResourceErrorV1 = {
   message: string;
 };
 
+export type ArtifactOriginV1 = {
+  session_id: string;
+  agent_id: string;
+  agent_name: string;
+  provider: string;
+};
+
+export type ArtifactVersionV1 = {
+  version_id: string;
+  sequence: number;
+  content_hash: string;
+  size_bytes: number;
+  presented_at_ms: number;
+  addressed_comment_ids: string[];
+};
+
+export type ArtifactManifestV1 = {
+  schema: 1;
+  artifact_id: string;
+  canonical_path: string;
+  title: string;
+  description: string | null;
+  origin: ArtifactOriginV1;
+  status: "presented" | "feedback_sent" | "updated" | "approved";
+  active: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+  versions: ArtifactVersionV1[];
+  latest_review_id: string | null;
+};
+
+export type ArtifactResourceV1 = {
+  schema: 1;
+  manifest: ArtifactManifestV1;
+  selected_version: ArtifactVersionV1;
+  selected_text: string | null;
+  working: {
+    canonical_path: string;
+    agent_id: string;
+    content_hash: string | null;
+    unavailable_reason: string | null;
+  };
+  attention: boolean;
+};
+
 export type OpenFileResourceRequestV1 = {
   path: string;
   agent_id: string | null;

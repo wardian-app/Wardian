@@ -652,15 +652,60 @@ describe("FilesSurface", () => {
       status: "ready",
       snapshot: {
         ...snapshot(artifactDescriptor),
-        resource_id: "artifact:artifact-1",
+        resource_id: "file:C:/work/docs/artifact.md",
       },
       error: null,
       retry: vi.fn(),
     });
     const client = new FileResourceClient();
+    vi.spyOn(client, "getArtifactResource").mockResolvedValue({
+      schema: 1,
+      manifest: {
+        schema: 1,
+        artifact_id: "artifact-1",
+        canonical_path: "C:/work/docs/artifact.md",
+        title: "Artifact",
+        description: null,
+        origin: {
+          session_id: "agent-1",
+          agent_id: "agent-1",
+          agent_name: "Writer",
+          provider: "codex",
+        },
+        status: "presented",
+        active: true,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        versions: [{
+          version_id: "version-1",
+          sequence: 1,
+          content_hash: "sha256:original",
+          size_bytes: 11,
+          presented_at_ms: 1,
+          addressed_comment_ids: [],
+        }],
+        latest_review_id: null,
+      },
+      selected_version: {
+        version_id: "version-1",
+        sequence: 1,
+        content_hash: "sha256:original",
+        size_bytes: 11,
+        presented_at_ms: 1,
+        addressed_comment_ids: [],
+      },
+      selected_text: "# Original\n",
+      working: {
+        canonical_path: "C:/work/docs/artifact.md",
+        agent_id: "agent-1",
+        content_hash: "sha256:original",
+        unavailable_reason: null,
+      },
+      attention: false,
+    });
     vi.spyOn(client, "readText").mockResolvedValue({
       schema: 1,
-      resource_id: "artifact:artifact-1",
+      resource_id: "file:C:/work/docs/artifact.md",
       revision: 1,
       text: "# Original\n",
     });
@@ -703,7 +748,7 @@ describe("FilesSurface", () => {
       on_canonical_resource: onCanonicalResource,
     })} />);
 
-    const controller = editorRegistry.forResource("artifact:artifact-1");
+    const controller = editorRegistry.forResource("file:C:/work/docs/artifact.md");
     await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
     act(() => { controller.mutate("# Copy me\n"); });
     await userEvent.click(screen.getByRole("button", { name: "File actions" }));
@@ -727,9 +772,8 @@ describe("FilesSurface", () => {
       content_hash: "hash-copy",
     });
     await waitFor(() => expect(onOpenFile).toHaveBeenCalledWith("C:/work/docs/copy.md"));
-    expect(controller.getSnapshot().resource_id).toBe("artifact:artifact-1");
-    expect(onCanonicalResource).toHaveBeenCalledTimes(1);
-    expect(onCanonicalResource).toHaveBeenCalledWith("artifact:artifact-1");
+    expect(controller.getSnapshot().resource_id).toBe("file:C:/work/docs/artifact.md");
+    expect(onCanonicalResource).not.toHaveBeenCalled();
   });
 
   it("retains the native resource and editor session while the renderer is suspended", async () => {

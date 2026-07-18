@@ -39,6 +39,8 @@ export type FileComparisonLensProps = {
   on_reload_from_disk: () => Promise<void>;
   on_keep_working_buffer: () => void;
   on_merge: () => Promise<FileRecoveryMergeResultV1 | void>;
+  /** Exact immutable text for artifact/checkpoint baselines. */
+  baseline_text?: string | null;
 };
 
 function theme(): string {
@@ -81,6 +83,7 @@ export function FileComparisonLens({
   on_reload_from_disk,
   on_keep_working_buffer,
   on_merge,
+  baseline_text = null,
 }: FileComparisonLensProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -95,13 +98,27 @@ export function FileComparisonLens({
   const authorizationUnavailable = snapshot.authorization.status === "unavailable";
   const authorizationUnavailableRef = useRef(authorizationUnavailable);
   authorizationUnavailableRef.current = authorizationUnavailable;
-  const available = baseline.kind === "saved_file"
+  const originalText = baseline.kind === "saved_file" ? snapshot.saved_text : baseline_text;
+  const available = originalText !== null
     && snapshot.status === "ready"
     && snapshot.resource_id !== null
     && snapshot.buffer_base_hash !== null;
   const diff = useMemo(
-    () => available ? fileDiffForController(controller) : null,
-    [available, controller, snapshot.base_revision, snapshot.buffer_base_hash, snapshot.buffer_generation],
+    () => available
+      ? baseline.kind === "saved_file"
+        ? fileDiffForController(controller)
+        : buildFileDiffModel(originalText, snapshot.working_text)
+      : null,
+    [
+      available,
+      baseline.kind,
+      controller,
+      originalText,
+      snapshot.base_revision,
+      snapshot.buffer_base_hash,
+      snapshot.buffer_generation,
+      snapshot.working_text,
+    ],
   );
   const effectiveLayout = contentWidth === null
     ? null
@@ -131,7 +148,9 @@ export function FileComparisonLens({
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
     const resourceId = snapshot.resource_id!;
-    const baselineKey = `${resourceId}\0saved_file\0${snapshot.buffer_base_hash}`;
+    const baselineKey = `${resourceId}\0${baseline.kind}\0${
+      "version_id" in baseline ? baseline.version_id : snapshot.buffer_base_hash
+    }`;
     setLoadError(null);
 
     void loadFileMonaco().then((monaco) => {
@@ -139,7 +158,7 @@ export function FileComparisonLens({
       original = acquireFileBaselineModel(
         monaco,
         baselineKey,
-        snapshot.saved_text,
+        originalText!,
         language,
       );
       modified = acquireCanonicalFileModel(monaco, resourceId, controller, language);
@@ -215,6 +234,8 @@ export function FileComparisonLens({
     snapshot.buffer_base_hash,
     snapshot.resource_id,
     snapshot.saved_text,
+    originalText,
+    baseline,
     surface_id,
   ]);
 
@@ -290,7 +311,7 @@ export function FileComparisonLens({
           <X size={16} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </header>
-      {available && snapshot.stale ? (
+      {available && baseline.kind === "saved_file" && snapshot.stale ? (
         <div className="files-stale-actions" role="group" aria-label="Resolve external changes">
           <span>The saved file changed on disk.</span>
           <button type="button" disabled={action !== null || authorizationUnavailable} onClick={() => void runMerge()}>Merge</button>
@@ -299,11 +320,7 @@ export function FileComparisonLens({
         </div>
       ) : null}
       {actionError ? <div className="files-comparison-error" role="alert">{actionError}</div> : null}
-      {baseline.kind !== "saved_file" ? (
-        <div className="files-resource-state" role="status">
-          Comparison baseline unavailable. This baseline provider is not registered yet.
-        </div>
-      ) : !available ? (
+      {!available ? (
         <div className="files-resource-state" role="status">Comparison baseline unavailable.</div>
       ) : loadError ? (
         <div className="files-resource-state" role="alert">Comparison unavailable: {loadError}</div>

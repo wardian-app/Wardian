@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ArtifactResourceV1,
   CheckpointFileRecoveryRequestV1,
   DiscardFileRecoveryRequestV1,
   FileRecoveryCheckpointV1,
@@ -33,6 +34,21 @@ export class FileResourceClient {
   async open(request: OpenFileResourceRequestV1): Promise<FileResourceSnapshotV1> {
     const snapshot = await invoke<FileResourceSnapshotV1>("open_file_resource", { request });
     return snapshot;
+  }
+
+  getArtifactResource(
+    artifact_id: string,
+    selected_version_id: string | null,
+  ): Promise<ArtifactResourceV1> {
+    return invoke<ArtifactResourceV1>("get_artifact_resource", {
+      request: { artifact_id, selected_version_id },
+    });
+  }
+
+  markArtifactAttentionRead(artifact_id: string): Promise<void> {
+    return invoke<void>("mark_artifact_attention_read", {
+      request: { artifact_id },
+    });
   }
 
   readText(
