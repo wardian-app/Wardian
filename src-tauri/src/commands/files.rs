@@ -166,7 +166,7 @@ async fn open_trusted_workbench_file(
     }
     Err(resource_error(
         "unauthorized_path",
-        "file is outside every current agent root and exact live picker grant",
+        "file is outside every current agent root and remembered exact picker grant",
     ))
 }
 

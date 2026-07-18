@@ -13,7 +13,7 @@ import { BookOpen, FileDiff, Pencil } from "lucide-react";
 import { CompactOverflowButton } from "../../components/CompactOverflowButton";
 import type { FileContentDescriptorV1 } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
-import { decodeFileResourceKey, isWindowsAbsoluteFilePath } from "./fileResourceKey";
+import { decodeFileResourceKey } from "./fileResourceKey";
 import type { FileContentPresentation } from "./rendererRegistry";
 import type { FileDiffSummary } from "./fileDiffModel";
 
@@ -37,40 +37,6 @@ export type FilesHeaderProps = {
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
 };
-
-type BreadcrumbPart = { separator: string; label: string; elided?: boolean };
-
-function breadcrumbParts(path: string): BreadcrumbPart[] {
-  const windowsPath = isWindowsAbsoluteFilePath(path);
-  const separator = windowsPath && path.includes("\\") ? "\\" : "/";
-  const drive = windowsPath ? /^[A-Za-z]:[\\/]/.exec(path)?.[0].slice(0, 2) : undefined;
-  const unc = windowsPath && (path.startsWith("\\\\") || path.startsWith("//"));
-  const rooted = !unc && path.startsWith("/");
-  const rest = drive ? path.slice(3) : unc ? path.slice(2) : rooted ? path.slice(1) : path;
-  const segments = rest.split(windowsPath ? /[\\/]+/ : /\/+/).filter(Boolean);
-  let parts: BreadcrumbPart[];
-  if (drive) {
-    parts = [{ separator: "", label: drive }, ...segments.map((label) => ({ separator, label }))];
-  } else if (unc) {
-    parts = [
-      { separator: "", label: separator.repeat(2) },
-      ...segments.map((label, index) => ({ separator: index === 0 ? "" : separator, label })),
-    ];
-  } else if (rooted) {
-    parts = [
-      { separator: "", label: "/" },
-      ...segments.map((label, index) => ({ separator: index === 0 ? "" : "/", label })),
-    ];
-  } else {
-    parts = segments.map((label, index) => ({ separator: index === 0 ? "" : separator, label }));
-  }
-  if (parts.length <= 4) return parts;
-  return [
-    parts[0]!,
-    { separator, label: "…", elided: true },
-    ...parts.slice(-2),
-  ];
-}
 
 type MenuAction = {
   label: string;
@@ -111,9 +77,6 @@ export function FilesHeader({
     ? decodedResource.path
     : decodedResource.artifact_id);
   const displayPath = opaqueFallback ? actionPath : formatExplorerPathForDisplay(actionPath);
-  const parts = useMemo(() => opaqueFallback
-    ? [{ separator: "", label: displayPath }]
-    : breadcrumbParts(displayPath), [displayPath, opaqueFallback]);
   const closeMenu = useCallback((restoreTrigger = false) => {
     setMenuOpen(false);
     if (restoreTrigger) triggerRef.current?.focus();
@@ -202,16 +165,7 @@ export function FilesHeader({
   return (
     <header className="files-header">
       <nav className="files-breadcrumb" aria-label="File location" title={displayPath}>
-        {parts.map((part, index) => (
-          <span
-            className={part.elided
-              ? "files-breadcrumb-part files-breadcrumb-ellipsis"
-              : "files-breadcrumb-part"}
-            key={`${part.separator}${part.label}-${index}`}
-          >
-            {part.separator}{part.label}
-          </span>
-        ))}
+        <span className="files-breadcrumb-path">{displayPath}</span>
         {dirty ? (
           <span
             className="files-breadcrumb-dirty"

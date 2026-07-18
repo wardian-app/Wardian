@@ -107,8 +107,10 @@ an absolute local path.
 Use one authorization mode: an `agent_id`, an exact live
 `user_file_capability_id`, or neither for backend-trusted Workbench restore.
 Supplying both is invalid. Trusted restore scans current agent primary and
-additional roots in deterministic agent order, then exact live picker grants;
-it never trusts persisted frontend state.
+additional roots in deterministic agent order, then exact picker paths from the
+backend-owned durable grant registry. A durable match is reauthorized into a
+new live capability and retained handle; persisted frontend state is never
+treated as authority.
 
 The returned subscription retains the exact requested pathname and its own
 authorization claim even when another pathname resolves to the same canonical
@@ -538,10 +540,13 @@ Stable codes include `invalid_request`, `unauthorized_path`,
 `unsupported_content`, `file_too_large`, `monaco_size_limit_exceeded`,
 `monaco_line_limit_exceeded`, `image_dimensions_unavailable`,
 `image_limit_exceeded`, `pdf_size_limit_exceeded`, `grant_limit_reached`,
-`ticket_capacity_exceeded`, `invalid_ticket`, `unauthorized_ticket`,
+`grant_store_unavailable`, `ticket_capacity_exceeded`, `invalid_ticket`,
+`unauthorized_ticket`,
 `expired_ticket`, `invalid_range`, and `range_not_satisfiable`.
 `grant_limit_reached` means all 128 exact picker grants are currently active;
-closing an unused file makes a grant evictable. `ticket_capacity_exceeded`
+closing an unused file makes a live grant evictable. The durable exact-path
+registry is also capped at 128 least-recently-used entries and contains no
+capability identifiers. `ticket_capacity_exceeded`
 means immutable renderer snapshots have reached their bounded storage budget;
 closing the owning renderer lease or waiting for active expiry releases it.
 

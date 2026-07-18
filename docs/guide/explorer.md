@@ -121,7 +121,9 @@ When the selected root is a Git repository, the Explorer uses status colors and 
   artifact review lifecycle ship.
 - A native picker grant applies only to the exact selected canonical file. It
   never grants the parent directory or a sibling file. The picker capability is
-  backend-owned and is not stored in the Workbench document.
+  backend-owned and is not stored in the Workbench document. Wardian remembers
+  the exact canonical path across relaunches and creates a newly verified live
+  capability when that file is restored.
 - **Files** is not offered in the New Surface launcher yet. Open ordinary files
   from Explorer. The launcher remains reserved until artifact presentation,
   review, and active-content isolation are complete.

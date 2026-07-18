@@ -26,6 +26,7 @@ pub const FILE_RESOURCE_REVISION_EVENT: &str = "file-resource://revision";
 const DEFAULT_STABILITY_DELAY: Duration = Duration::from_millis(150);
 const DEFAULT_TICKET_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_USER_FILE_GRANTS: usize = 128;
+const USER_FILE_GRANT_STORE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MAX_SAVE_TARGET_GRANTS: usize = 32;
 const DEFAULT_SAVE_TARGET_TTL: Duration = Duration::from_secs(60);
 const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -268,6 +269,8 @@ struct FileResourceRuntimeInner {
     entries: Mutex<HashMap<String, FileResourceEntry>>,
     subscription_resources: Mutex<HashMap<String, String>>,
     user_file_grants: Arc<Mutex<HashMap<String, UserFileGrant>>>,
+    user_file_grant_store_path: RwLock<Option<PathBuf>>,
+    user_file_grant_store_io: Mutex<()>,
     save_target_grants: Mutex<HashMap<String, SaveTargetGrant>>,
     read_tickets: Mutex<HashMap<String, FileReadTicket>>,
     renderer_leases: Mutex<HashMap<RendererLeaseKey, RendererLease>>,
@@ -464,6 +467,13 @@ struct UserFileGrant {
     active_subscriptions: usize,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableUserFileGrantStoreV1 {
+    schema_version: u32,
+    canonical_paths: Vec<String>,
+}
+
 struct UserFileGrantReservation {
     grants: OwnedMutexGuard<HashMap<String, UserFileGrant>>,
     capability_id: String,
@@ -632,6 +642,8 @@ impl FileResourceRuntime {
                 entries: Mutex::new(HashMap::new()),
                 subscription_resources: Mutex::new(HashMap::new()),
                 user_file_grants: Arc::new(Mutex::new(HashMap::new())),
+                user_file_grant_store_path: RwLock::new(None),
+                user_file_grant_store_io: Mutex::new(()),
                 save_target_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
@@ -683,6 +695,8 @@ impl FileResourceRuntime {
                 entries: Mutex::new(HashMap::new()),
                 subscription_resources: Mutex::new(HashMap::new()),
                 user_file_grants: Arc::new(Mutex::new(HashMap::new())),
+                user_file_grant_store_path: RwLock::new(None),
+                user_file_grant_store_io: Mutex::new(()),
                 save_target_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
@@ -727,7 +741,15 @@ impl FileResourceRuntime {
         runtime
     }
 
+    #[cfg(test)]
+    fn configure_user_file_grant_store_for_test(&self, path: PathBuf) {
+        self.configure_user_file_grant_store(path);
+    }
+
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
+        if let Some(path) = default_user_file_grant_store_path() {
+            self.configure_user_file_grant_store(path);
+        }
         match self.inner.agent_config_resolver.write() {
             Ok(mut current) => {
                 *current = CurrentAgentConfigResolver::AppState(app_handle.clone());
@@ -739,6 +761,22 @@ impl FileResourceRuntime {
         match self.inner.app_handle.write() {
             Ok(mut current) => *current = Some(app_handle),
             Err(poisoned) => *poisoned.into_inner() = Some(app_handle),
+        }
+    }
+
+    fn configure_user_file_grant_store(&self, path: PathBuf) {
+        match self.inner.user_file_grant_store_path.write() {
+            Ok(mut current) => {
+                if current.is_none() {
+                    *current = Some(path);
+                }
+            }
+            Err(poisoned) => {
+                let mut current = poisoned.into_inner();
+                if current.is_none() {
+                    *current = Some(path);
+                }
+            }
         }
     }
 
@@ -824,6 +862,8 @@ impl FileResourceRuntime {
         let canonical_path = snapshot.descriptor().canonical_path.clone();
         let capability_id = self
             .upsert_user_file_grant(canonical_path.clone(), authorized)
+            .await?;
+        self.persist_durable_user_file_grant(&canonical_path)
             .await?;
         Ok(UserFileGrantV1 {
             schema: 1,
@@ -1032,6 +1072,8 @@ impl FileResourceRuntime {
         let canonical_path = snapshot.descriptor().canonical_path.clone();
         let content_hash = snapshot.descriptor().content_hash.clone();
         let capability_id = user_grant_reservation.publish(authorized);
+        self.persist_durable_user_file_grant(&canonical_path)
+            .await?;
         Ok(FileResourceSaveAsResultV1 {
             schema: 1,
             capability_id,
@@ -1177,6 +1219,47 @@ impl FileResourceRuntime {
         Ok(reservation.publish(authorized))
     }
 
+    fn user_file_grant_store_path(&self) -> Option<PathBuf> {
+        self.inner
+            .user_file_grant_store_path
+            .read()
+            .map(|path| path.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    async fn persist_durable_user_file_grant(
+        &self,
+        canonical_path: &str,
+    ) -> Result<(), FileResourceErrorV1> {
+        let Some(store_path) = self.user_file_grant_store_path() else {
+            return Ok(());
+        };
+        let _io = self.inner.user_file_grant_store_io.lock().await;
+        let canonical_path = canonical_path.to_string();
+        let max_grants = self.inner.max_user_file_grants;
+        tauri::async_runtime::spawn_blocking(move || {
+            upsert_durable_user_file_grant(&store_path, &canonical_path, max_grants)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
+    async fn durable_user_file_grant_matches(
+        &self,
+        canonical_path: &str,
+    ) -> Result<bool, FileResourceErrorV1> {
+        let Some(store_path) = self.user_file_grant_store_path() else {
+            return Ok(false);
+        };
+        let _io = self.inner.user_file_grant_store_io.lock().await;
+        let canonical_path = canonical_path.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            durable_user_file_grant_matches(&store_path, &canonical_path)
+        })
+        .await
+        .map_err(join_error)?
+    }
+
     async fn reserve_user_file_grant(
         &self,
         canonical_path: String,
@@ -1233,10 +1316,6 @@ impl FileResourceRuntime {
         path: &Path,
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<Option<FileResourceSnapshotV1>, FileResourceErrorV1> {
-        let has_grants = !self.inner.user_file_grants.lock().await.is_empty();
-        if !has_grants {
-            return Ok(None);
-        }
         let requested = std::fs::canonicalize(path).map_err(|cause| {
             error(
                 "unavailable_path",
@@ -1260,8 +1339,12 @@ impl FileResourceRuntime {
             matching.sort();
             matching.into_iter().next()
         };
-        let Some(capability_id) = capability_id else {
-            return Ok(None);
+        let capability_id = match capability_id {
+            Some(capability_id) => capability_id,
+            None if self.durable_user_file_grant_matches(requested).await? => {
+                self.record_user_file(path).await?.capability_id
+            }
+            None => return Ok(None),
         };
         self.open_user_file(&capability_id, path, app_handle)
             .await
@@ -4043,8 +4126,105 @@ fn same_subscriptions(entry: &FileResourceEntry, expected: &[String]) -> bool {
 
 fn file_resource_id(canonical_path: &str) -> String {
     #[cfg(windows)]
-    let canonical_path = canonical_path.replace('\\', "/");
+    let canonical_path = windows_file_resource_identity(canonical_path);
+    #[cfg(not(windows))]
+    let canonical_path = canonical_path.to_string();
     format!("file:{canonical_path}")
+}
+
+#[cfg(windows)]
+fn windows_file_resource_identity(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    if slashed
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+    {
+        return format!("//{}", &slashed[8..]);
+    }
+    if slashed
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/"))
+        && slashed
+            .get(4..7)
+            .is_some_and(|drive| drive.as_bytes().get(1) == Some(&b':'))
+    {
+        return slashed[4..].to_string();
+    }
+    slashed
+}
+
+fn default_user_file_grant_store_path() -> Option<PathBuf> {
+    crate::utils::fs::get_wardian_home().map(|home| home.join("settings").join("file-grants.json"))
+}
+
+fn load_durable_user_file_grants(
+    store_path: &Path,
+) -> Result<DurableUserFileGrantStoreV1, FileResourceErrorV1> {
+    let bytes = match std::fs::read(store_path) {
+        Ok(bytes) => bytes,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DurableUserFileGrantStoreV1 {
+                schema_version: USER_FILE_GRANT_STORE_SCHEMA_VERSION,
+                canonical_paths: Vec::new(),
+            });
+        }
+        Err(cause) => {
+            return Err(error(
+                "grant_store_unavailable",
+                format!("cannot read exact file grants: {cause}"),
+            ));
+        }
+    };
+    let store = serde_json::from_slice::<DurableUserFileGrantStoreV1>(&bytes).map_err(|cause| {
+        error(
+            "grant_store_unavailable",
+            format!("exact file grants are malformed: {cause}"),
+        )
+    })?;
+    if store.schema_version != USER_FILE_GRANT_STORE_SCHEMA_VERSION
+        || store
+            .canonical_paths
+            .iter()
+            .any(|path| path.trim().is_empty())
+    {
+        return Err(error(
+            "grant_store_unavailable",
+            "exact file grants use an unsupported or invalid schema",
+        ));
+    }
+    Ok(store)
+}
+
+fn durable_user_file_grant_matches(
+    store_path: &Path,
+    canonical_path: &str,
+) -> Result<bool, FileResourceErrorV1> {
+    Ok(load_durable_user_file_grants(store_path)?
+        .canonical_paths
+        .iter()
+        .any(|granted| granted == canonical_path))
+}
+
+fn upsert_durable_user_file_grant(
+    store_path: &Path,
+    canonical_path: &str,
+    max_grants: usize,
+) -> Result<(), FileResourceErrorV1> {
+    let mut store = load_durable_user_file_grants(store_path)?;
+    store
+        .canonical_paths
+        .retain(|granted| granted != canonical_path);
+    store.canonical_paths.push(canonical_path.to_string());
+    if store.canonical_paths.len() > max_grants {
+        let overflow = store.canonical_paths.len() - max_grants;
+        store.canonical_paths.drain(..overflow);
+    }
+    wardian_core::conversations::write_json_atomic(store_path, &store).map_err(|cause| {
+        error(
+            "grant_store_unavailable",
+            format!("cannot persist exact file grants: {cause}"),
+        )
+    })
 }
 
 fn default_recovery_root() -> Option<PathBuf> {
@@ -8255,6 +8435,57 @@ mod tests {
             )
             .await
             .expect("released budget admits another snapshot");
+    }
+
+    #[tokio::test]
+    async fn picker_grants_survive_runtime_relaunch_without_persisting_capability_ids() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let selected_path = temp.path().join("selected.txt");
+        let sibling_path = temp.path().join("sibling.txt");
+        let grant_store = temp.path().join("settings").join("file-grants.json");
+        fs::write(&selected_path, "selected\n").expect("selected fixture");
+        fs::write(&sibling_path, "sibling\n").expect("sibling fixture");
+
+        let first_runtime = FileResourceRuntime::default();
+        first_runtime.configure_user_file_grant_store_for_test(grant_store.clone());
+        let grant = first_runtime
+            .record_user_file(&selected_path)
+            .await
+            .expect("record durable picker grant");
+        let persisted = fs::read_to_string(&grant_store).expect("read durable grant store");
+        assert!(persisted.contains("selected.txt"));
+        assert!(!persisted.contains(&grant.capability_id));
+        first_runtime.close_all().await;
+
+        let relaunched_runtime = FileResourceRuntime::default();
+        relaunched_runtime.configure_user_file_grant_store_for_test(grant_store);
+        let reopened = relaunched_runtime
+            .open_matching_user_file(&selected_path, None)
+            .await
+            .expect("restore durable exact grant")
+            .expect("selected path remains granted");
+        assert!(relaunched_runtime
+            .open_matching_user_file(&sibling_path, None)
+            .await
+            .expect("check sibling")
+            .is_none());
+        relaunched_runtime
+            .close(&reopened.subscription_id)
+            .await
+            .expect("close restored grant");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_resource_ids_drop_extended_length_prefixes() {
+        assert_eq!(
+            file_resource_id(r"\\?\C:\work\Notes.md"),
+            "file:C:/work/Notes.md"
+        );
+        assert_eq!(
+            file_resource_id(r"\\?\UNC\server\share\Notes.md"),
+            "file://server/share/Notes.md"
+        );
     }
 
     #[tokio::test]

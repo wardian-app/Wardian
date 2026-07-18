@@ -21,7 +21,18 @@ export function isWindowsAbsoluteFilePath(path: string) {
  * their separators so drive, UNC, and extended-length spellings converge.
  */
 export function filePathIdentity(path: string) {
-  return isWindowsAbsoluteFilePath(path) ? path.replace(/\\/g, "/") : path;
+  if (!isWindowsAbsoluteFilePath(path)) return path;
+  let normalized = path;
+  if (/^\\\\\?\\UNC\\/i.test(path)) {
+    normalized = `//${path.slice(8)}`;
+  } else if (/^\\\\\?\\(?=[a-z]:[\\/])/i.test(path)) {
+    normalized = path.slice(4);
+  } else if (/^\/\/\?\/UNC\//i.test(path)) {
+    normalized = `//${path.slice(8)}`;
+  } else if (/^\/\/\?\/(?=[a-z]:[\\/])/i.test(path)) {
+    normalized = path.slice(4);
+  }
+  return normalized.replace(/\\/g, "/");
 }
 
 export function fileResourceKey(path: string): FileResourceKey {

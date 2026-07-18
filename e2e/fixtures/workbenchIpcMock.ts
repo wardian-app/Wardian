@@ -213,7 +213,15 @@ export async function installWorkbenchIpcMock(
       let fileSubscriptionId = 1;
       let saveTargetGrantId = 1;
       let recoveryId = 1;
-      const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/$/, "");
+      const normalizePath = (path: string) => {
+        let normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+        if (/^\/\/\?\/UNC\//i.test(normalized)) {
+          normalized = `//${normalized.slice(8)}`;
+        } else if (/^\/\/\?\/(?=[a-z]:\/)/i.test(normalized)) {
+          normalized = normalized.slice(4);
+        }
+        return normalized;
+      };
       const hashText = async (text: string) => {
         const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
         return `sha256:${[...new Uint8Array(digest)]

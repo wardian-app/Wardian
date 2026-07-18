@@ -553,6 +553,18 @@ describe("FilesSurface", () => {
     }, expect.any(FileResourceClient));
   });
 
+  it("migrates a persisted extended Windows resource key before reopening", () => {
+    render(<FilesSurface {...props({
+      resource_key: "file://?/C:/Users/test/report.md",
+    })} />);
+
+    expect(useFileResourceMock).toHaveBeenCalledWith({
+      path: "C:/Users/test/report.md",
+      agent_id: null,
+      user_file_capability_id: null,
+    }, expect.any(FileResourceClient));
+  });
+
   it("preserves literal backslashes when decoding a POSIX file resource key", () => {
     render(<FilesSurface {...props({ resource_key: "file:/tmp/a\\b.md" })} />);
 

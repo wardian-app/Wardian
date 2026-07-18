@@ -164,10 +164,10 @@ describe("MarkdownRenderer", () => {
   it("keeps POSIX root-relative targets rooted and rejects unsafe schemes", () => {
     expect(resolveLocalMarkdownTarget("/work/readme.md", "/docs/a.md")).toBe("/docs/a.md");
     expect(resolveLocalMarkdownTarget("C:/work/readme.md", "/docs/a.md")).toBe("C:/docs/a.md");
-    expect(resolveLocalMarkdownTarget("//?/C:/work/readme.md", "/docs/a.md")).toBe("//?/C:/docs/a.md");
+    expect(resolveLocalMarkdownTarget("//?/C:/work/readme.md", "/docs/a.md")).toBe("C:/docs/a.md");
     expect(resolveLocalMarkdownTarget("//server/share/work/readme.md", "/docs/a.md")).toBe("//server/share/docs/a.md");
     expect(resolveLocalMarkdownTarget("//?/UNC/server/share/work/readme.md", "/docs/a.md"))
-      .toBe("//?/UNC/server/share/docs/a.md");
+      .toBe("//server/share/docs/a.md");
     expect(resolveLocalMarkdownTarget(
       "C:/work/readme.md",
       "file://server/share/folder%20name/report.md",

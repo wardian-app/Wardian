@@ -58,9 +58,11 @@ The file system operations strictly enforce security and platform agnosticism:
   `system_include_directories` are excluded. Symlinks and junctions are
   canonicalized and cannot escape an authorized root.
 - **Exact picker grants**: `pick_file_resource` records one backend-owned grant
-  for the selected canonical file. Siblings inherit nothing. Workbench restore
-  submits only the file path, and the backend resolves it against current agent
-  roots or an exact live picker grant; no capability token is serialized.
+  for the selected canonical file. Siblings inherit nothing. The backend keeps
+  a bounded durable list of canonical paths, while capability identifiers and
+  retained handles remain live-only. Workbench restore submits only the file
+  path, and the backend resolves it against current agent roots or an exact
+  remembered picker grant; no capability token is serialized.
 - **Launcher boundary**: The `files` surface is registered so Explorer and
   restored tabs can render it, but its New Surface contribution remains
   reserved. Do not activate that launcher until artifact review and isolated

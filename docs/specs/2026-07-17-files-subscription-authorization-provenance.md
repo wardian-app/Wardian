@@ -30,9 +30,9 @@ revision, and subscriber map.
 Reads and renderer-ticket issuance validate the calling subscription's own
 claim and requested pathname. They do not borrow authorization from another
 subscriber. Agent access is rechecked against the current primary and
-additional directories. Picker access remains an exact live capability; grant
-deduplication by canonical target does not widen either subscription's retained
-pathname.
+additional directories. Picker access remains exact; after relaunch a durable
+backend path record may mint a new live capability, but grant deduplication by
+canonical target never widens either subscription's retained pathname.
 
 Refresh uses the same live-claim boundary before it reads content. In the
 desktop runtime, agent configuration is resolved from the AppHandle's managed

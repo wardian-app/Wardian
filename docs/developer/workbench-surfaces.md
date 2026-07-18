@@ -314,8 +314,10 @@ The Rust lifecycle is:
 
 Every open and read rechecks current backend authority. A trusted restore with
 no frontend capability selects a current matching agent primary workspace or
-`include_directories`, in deterministic agent order, then an exact live picker
-grant. `system_include_directories`, sibling paths, and canonical symlink or
+`include_directories`, in deterministic agent order, then an exact picker path
+from the backend-owned durable registry. A durable path match mints a fresh
+live capability and retained handle. `system_include_directories`, sibling
+paths, and canonical symlink or
 junction escapes are denied. A saved Workbench document cannot restore access
 that the backend no longer grants. If an alias and a direct pathname share one
 canonical resource, removing or retargeting the alias revokes only subscriptions

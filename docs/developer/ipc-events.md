@@ -53,7 +53,8 @@ For complete request and response JSON, see
 Do not persist picker capability IDs, subscriptions, revisions, tickets, or
 leases in Workbench state. Restoration sends its saved path with both
 authorization IDs set to `null`; the backend resolves current authority again
-and the Workbench converges the tab to the returned canonical `resource_id`.
+from agent roots or its bounded exact-path grant registry and the Workbench
+converges the tab to the returned canonical `resource_id`.
 
 ## 🔔 Events (Backend to Frontend)
 

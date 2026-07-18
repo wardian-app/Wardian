@@ -66,17 +66,17 @@ describe("FilesHeader", () => {
     expect(rendered.querySelector("svg.lucide-pencil")).not.toBeNull();
   });
 
-  it("uses an Explorer-safe middle-elided path and a separate dirty breadcrumb dot", () => {
+  it("uses the full Explorer-safe path and a separate dirty breadcrumb dot", () => {
     const { container } = render(header({ dirty: true }));
     const breadcrumb = screen.getByRole("navigation", { name: "File location" });
     expect(breadcrumb).toHaveAttribute("title", "C:\\work\\deep\\nested\\report.md");
     expect(breadcrumb).not.toHaveTextContent("\\\\?\\");
-    expect(breadcrumb).toHaveTextContent("report.md");
-    expect(container.querySelector(".files-breadcrumb-ellipsis")).not.toBeNull();
+    expect(breadcrumb).toHaveTextContent("C:\\work\\deep\\nested\\report.md");
+    expect(container.querySelector(".files-breadcrumb-path")).not.toHaveTextContent("…");
     expect(screen.getByLabelText("Unsaved changes")).toHaveClass("files-breadcrumb-dirty");
   });
 
-  it("uses stable Windows separators without visual spaces around breadcrumb separators", () => {
+  it("uses stable Windows separators without synthetic middle path segments", () => {
     const slashDescriptor = {
       ...descriptor,
       canonical_path: "//?/C:/work/deep/nested/report.md",
@@ -85,11 +85,10 @@ describe("FilesHeader", () => {
 
     const breadcrumb = screen.getByRole("navigation", { name: "File location" });
     expect(breadcrumb).toHaveAttribute("title", "C:\\work\\deep\\nested\\report.md");
-    expect(breadcrumb).toHaveTextContent("C:\\…\\nested\\report.md");
+    expect(breadcrumb).toHaveTextContent("C:\\work\\deep\\nested\\report.md");
 
     const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
-    expect(css).toMatch(/\.files-breadcrumb\s*\{[^}]*gap:\s*0/s);
-    expect(css).toMatch(/\.files-breadcrumb-part\s*\{[^}]*gap:\s*0/s);
+    expect(css).toMatch(/\.files-breadcrumb-path\s*\{[^}]*text-overflow:\s*ellipsis/s);
   });
 
   it("uses the shared compact overflow control and no legacy mode tabs", () => {

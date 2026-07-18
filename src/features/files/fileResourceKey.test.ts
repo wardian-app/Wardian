@@ -8,6 +8,11 @@ describe("file resource identity", () => {
       .toBe(fileResourceKey("//server/share/Notes.md"));
     expect(fileResourceKey("\\\\?\\C:\\work\\Notes.md"))
       .toBe(fileResourceKey("//?/C:/work/Notes.md"));
+    expect(fileResourceKey("\\\\?\\C:\\work\\Notes.md"))
+      .toBe(fileResourceKey("C:/work/Notes.md"));
+    expect(fileResourceKey("//?/C:/work/Notes.md")).toBe("file:C:/work/Notes.md");
+    expect(fileResourceKey("\\\\?\\UNC\\server\\share\\Notes.md"))
+      .toBe(fileResourceKey("//server/share/Notes.md"));
     expect(fileResourceKey("C:\\work\\Notes.md")).not.toBe(
       fileResourceKey("C:\\WORK\\notes.md"),
     );

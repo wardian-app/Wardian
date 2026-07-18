@@ -119,8 +119,10 @@ require the native desktop test harness.
 Open files from Explorer; the launcher will become available only when the
 artifact review and isolated active-content contracts are complete. A restored
 file tab is resolved again by the Rust backend against current agent primary
-and additional directory grants, or an exact live native-picker grant. Layout
-state never confers filesystem authority. If two spellings resolve to the same
+and additional directory grants, or an exact native-picker grant remembered by
+the backend. Layout state never confers filesystem authority. Picker grants
+survive relaunch by reauthorizing only the same canonical file; the Workbench
+document never stores a capability token. If two spellings resolve to the same
 file, normal opens focus one canonical tab; an explicit **Open to Side** keeps
 the intentional second presentation. Each presentation keeps the pathname that
 authorized it. If a symlink or junction used by one presentation is removed or
