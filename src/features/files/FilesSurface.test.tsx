@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   FileContentDescriptorV1,
+  FileRecoveryCheckpointV1,
   FileRecoverySummaryV1,
   FileRecoveryV1,
   FileResourceSnapshotV1,
@@ -919,6 +920,7 @@ describe("FilesSurface", () => {
       retry: vi.fn(),
     });
     const pendingDiscovery = deferred<FileRecoverySummaryV1[]>();
+    const pendingCheckpoint = deferred<FileRecoveryCheckpointV1>();
     const recoverySummaryValue: FileRecoverySummaryV1 = {
       schema: 1,
       recovery_id: "recovery-raced",
@@ -947,16 +949,7 @@ describe("FilesSurface", () => {
       base: "base\n",
       buffer: "older recovered edit\n",
     });
-    vi.spyOn(client, "checkpointRecovery").mockResolvedValue({
-      schema: 1,
-      recovery_id: "recovery-current",
-      resource_key: markdownSnapshot.resource_id,
-      base_content_hash: markdownDescriptor.content_hash,
-      base_opaque_revision: "opaque-current",
-      recovery_revision: 1,
-      created_at_ms: 30,
-      updated_at_ms: 30,
-    });
+    vi.spyOn(client, "checkpointRecovery").mockReturnValue(pendingCheckpoint.promise);
     const editorRegistry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
     });
@@ -980,8 +973,23 @@ describe("FilesSurface", () => {
     expect(alert).toHaveTextContent(/both versions were preserved/i);
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
     expect(listRecoveries).toHaveBeenCalledOnce();
+    expect(within(alert).getByRole("button", { name: "Keep current edits" }))
+      .toBeDisabled();
     expect(within(alert).getByRole("button", { name: "Use recovered edits" }))
-      .toBeEnabled();
+      .toBeDisabled();
+    pendingCheckpoint.resolve({
+      schema: 1,
+      recovery_id: "recovery-current",
+      resource_key: markdownSnapshot.resource_id,
+      base_content_hash: markdownDescriptor.content_hash,
+      base_opaque_revision: "opaque-current",
+      recovery_revision: 1,
+      created_at_ms: 30,
+      updated_at_ms: 30,
+    });
+    await waitFor(() => expect(
+      within(alert).getByRole("button", { name: "Use recovered edits" }),
+    ).toBeEnabled());
     fireEvent.click(within(alert).getByRole("button", { name: "Keep current edits" }));
     await waitFor(() => expect(screen.queryByText("Recovery conflict")).toBeNull());
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");

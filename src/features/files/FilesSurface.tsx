@@ -202,6 +202,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               </button>
               <button
                 type="button"
+                disabled={!props.editor_recovery_conflict.current_durable}
                 onClick={() => props.on_resolve_recovery_conflict("use_recovered")}
               >
                 Use recovered edits

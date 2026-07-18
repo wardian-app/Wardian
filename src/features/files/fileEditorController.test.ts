@@ -192,6 +192,120 @@ describe("FileEditorController", () => {
     });
   });
 
+  it("blocks both recovery conflict choices while the current checkpoint is pending", async () => {
+    const discovery = deferred<FileRecoverySummaryV1[]>();
+    const pendingCheckpoint = deferred<FileRecoveryCheckpointV1>();
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockReturnValue(discovery.promise);
+    vi.mocked(client.checkpointRecovery).mockReturnValue(pendingCheckpoint.promise);
+    const controller = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+
+    const initialization = controller.initialize({
+      owner,
+      text: "base\n",
+      discover_recovery: true,
+    });
+    controller.mutate("newer current edit\n");
+    discovery.resolve([recoverySummary()]);
+    await vi.waitFor(() => expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "conflict",
+      current_durable: false,
+      buffer_generation: 1,
+    }));
+
+    expect(() => controller.resolveRecoveryConflict("keep_current"))
+      .toThrow("Current edits must be durable before resolving the recovery conflict.");
+    expect(() => controller.resolveRecoveryConflict("use_recovered"))
+      .toThrow("Current edits must be durable before resolving the recovery conflict.");
+    expect(controller.getSnapshot().working_text).toBe("newer current edit\n");
+
+    pendingCheckpoint.resolve(checkpoint(1, { recovery_id: "recovery-current" }));
+    await initialization;
+    controller.resolveRecoveryConflict("use_recovered");
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "recovered edit\n",
+      recovery: { status: "durable", recovery_id: "recovery-1" },
+    });
+    await Promise.resolve();
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "recovered edit\n",
+      recovery: { status: "durable", recovery_id: "recovery-1" },
+    });
+  });
+
+  it("blocks both recovery conflict choices after the current checkpoint fails", async () => {
+    const discovery = deferred<FileRecoverySummaryV1[]>();
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockReturnValue(discovery.promise);
+    vi.mocked(client.checkpointRecovery).mockRejectedValue(new Error("checkpoint unavailable"));
+    const controller = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+
+    const initialization = controller.initialize({
+      owner,
+      text: "base\n",
+      discover_recovery: true,
+    });
+    controller.mutate("newer current edit\n");
+    discovery.resolve([recoverySummary()]);
+    await expect(initialization).rejects.toThrow("checkpoint unavailable");
+
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "newer current edit\n",
+      recovery_discovery: "conflict",
+      recovery: {
+        status: "conflict",
+        current_durable: false,
+      },
+    });
+    expect(() => controller.resolveRecoveryConflict("keep_current"))
+      .toThrow("Current edits must be durable before resolving the recovery conflict.");
+    expect(() => controller.resolveRecoveryConflict("use_recovered"))
+      .toThrow("Current edits must be durable before resolving the recovery conflict.");
+    expect(client.discardRecovery).not.toHaveBeenCalled();
+  });
+
+  it("invalidates conflict durability immediately when the current buffer advances", async () => {
+    const discovery = deferred<FileRecoverySummaryV1[]>();
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockReturnValue(discovery.promise);
+    vi.mocked(client.checkpointRecovery)
+      .mockResolvedValueOnce(checkpoint(1, { recovery_id: "recovery-current" }))
+      .mockResolvedValueOnce(checkpoint(2, { recovery_id: "recovery-current" }));
+    const controller = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    }).forResource(owner.resource_id);
+
+    const initialization = controller.initialize({
+      owner,
+      text: "base\n",
+      discover_recovery: true,
+    });
+    controller.mutate("first current edit\n");
+    discovery.resolve([recoverySummary()]);
+    await initialization;
+    expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "conflict",
+      current_durable: true,
+      buffer_generation: 1,
+    });
+
+    controller.mutate("second current edit\n");
+    expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "conflict",
+      current_durable: false,
+      buffer_generation: 2,
+    });
+    expect(() => controller.resolveRecoveryConflict("use_recovered"))
+      .toThrow("Current edits must be durable before resolving the recovery conflict.");
+
+    await controller.flushRecovery();
+    expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "conflict",
+      current_durable: true,
+      buffer_generation: 2,
+    });
+  });
+
   it("pins an attached transient presentation when later recovery discovery restores dirty text", async () => {
     const discovery = deferred<FileRecoverySummaryV1[]>();
     const client = fakeClient();
@@ -470,7 +584,7 @@ describe("FileEditorController", () => {
         status: "conflict",
         conflicting_recovery_id: "recovery-older",
         current_recovery_id: "recovery-current",
-        current_durable: false,
+        current_durable: true,
       },
     });
     expect(client.discardRecovery).not.toHaveBeenCalled();

@@ -432,13 +432,21 @@ export class FileEditorController {
     });
     if (dirty) {
       this.#pinPresentations();
+      if (this.#recoveryConflict) {
+        this.#publish({
+          recovery: this.#recoveryConflictState(
+            false,
+            "Recovered changes conflict with newer in-memory edits. Both versions were preserved.",
+          ),
+        });
+      }
       this.#scheduleCheckpoint(bufferGeneration);
     } else {
       this.#clearCheckpointTimer();
       if (this.#recoveryConflict) {
         this.#publish({
           recovery: this.#recoveryConflictState(
-            false,
+            this.#checkpointLoop === null,
             "Recovered changes conflict with newer in-memory edits. Both versions were preserved.",
           ),
         });
@@ -627,15 +635,11 @@ export class FileEditorController {
     if (!conflict || this.#snapshot.recovery.status !== "conflict") {
       throw new Error("The file editor has no recovery conflict to resolve.");
     }
+    if (!this.#hasDurableCurrentConflictBuffer()) {
+      throw new Error("Current edits must be durable before resolving the recovery conflict.");
+    }
     if (choice === "keep_current") {
       const current = this.#recoveryMetadata;
-      if (this.#snapshot.dirty && (
-        !current
-        || current.buffer_generation !== this.#snapshot.buffer_generation
-        || !this.#snapshot.recovery.current_durable
-      )) {
-        throw new Error("Current edits must be durable before resolving the recovery conflict.");
-      }
       this.#recoveryConflict = null;
       if (!this.#snapshot.dirty) this.#recoveryMetadata = null;
       this.#publish({
@@ -833,6 +837,18 @@ export class FileEditorController {
     });
   }
 
+  #hasDurableCurrentConflictBuffer(): boolean {
+    const state = this.#snapshot.recovery;
+    if (state.status !== "conflict" || !state.current_durable) return false;
+    if (!this.#snapshot.dirty) return this.#checkpointLoop === null;
+    const current = this.#recoveryMetadata;
+    return current !== null
+      && current.buffer_generation === this.#snapshot.buffer_generation
+      && state.buffer_generation === this.#snapshot.buffer_generation
+      && state.current_recovery_id === current.recovery_id
+      && state.current_recovery_revision === current.recovery_revision;
+  }
+
   #pinPresentations(): void {
     for (const [surfaceId, presentation] of this.#presentations) {
       if (this.#pinnedPresentations.has(surfaceId)) continue;
@@ -865,7 +881,16 @@ export class FileEditorController {
     const wrapped = this.#runCheckpointLoop().finally(() => {
       if (this.#checkpointLoop === wrapped) {
         this.#checkpointLoop = null;
-        this.#publish({});
+        this.#publish({
+          ...(this.#recoveryConflict && !this.#snapshot.dirty
+            ? {
+                recovery: this.#recoveryConflictState(
+                  true,
+                  "Recovered changes conflict with newer in-memory edits. Both versions were preserved.",
+                ),
+              }
+            : {}),
+        });
       }
     });
     this.#checkpointLoop = wrapped;
@@ -935,6 +960,7 @@ export class FileEditorController {
     const conflictMessage = this.#recoveryConflict
       ? "Recovered changes conflict with newer in-memory edits. Both versions were preserved."
       : null;
+    const checkpointConflict = this.#recoveryConflict;
     this.#publish({
       recovery: conflictMessage
         ? this.#recoveryConflictState(false, conflictMessage)
@@ -967,6 +993,7 @@ export class FileEditorController {
     if (committed.resource_key !== this.#resourceKey) {
       throw new Error("The recovery checkpoint does not match this editor resource.");
     }
+    if (checkpointConflict && this.#recoveryConflict !== checkpointConflict) return null;
     this.#recoveryMetadata = {
       recovery_id: committed.recovery_id,
       recovery_revision: committed.recovery_revision,
