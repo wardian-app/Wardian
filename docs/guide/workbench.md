@@ -86,10 +86,22 @@ If the file changes on disk while the shared buffer is dirty, Wardian marks the
 editor stale and offers **Merge**, **Reload from disk**, or **Cancel**. Merge
 rebases the working text and keeps it dirty until an explicit Save. Reload
 discards the working buffer and its recovery record. Cancel leaves the stale
-state unchanged. Saved-file comparison is available now; prompt checkpoints
-and presented artifact versions are explicit unavailable baselines until their
-downstream adapters are installed. Wardian never substitutes another revision
-and labels it as the requested history.
+state unchanged. Saved-file and presented-artifact comparison are available
+now; prompt checkpoints remain explicit unavailable baselines until their
+adapter is installed. Wardian never substitutes another revision and labels it
+as the requested history.
+
+An agent can present an authorized file as a durable artifact. Wardian opens or
+refreshes its `artifact:<id>` tab in the background, marks it for attention, and
+keeps the user's current tab focused. Opening the artifact attaches its current
+working file to the same editor buffer used by an ordinary Files tab. The
+provenance strip shows the origin agent, presented time, review status, and
+version selector. **Changed since presented** compares the live working hash to
+the selected immutable version; the change-count control opens the usual Monaco
+line comparison. Attention clears only when the artifact is actually visible.
+Closing the tab does not delete the artifact thread, and a restored Workbench
+reauthorizes the canonical file against the origin agent's current primary and
+additional directories.
 
 The foundation renders Markdown, images, and PDFs and edits validated text.
 HTML and SVG are available as inert source only; Wardian never injects them into

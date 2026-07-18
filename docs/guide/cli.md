@@ -390,6 +390,34 @@ Output options:
 
 Default JSON is indented for terminal readability. It includes `schema: 1` and an `agent` or `agents` payload with `name`, `uuid`, `class`, `provider`, `workspace`, and `status`.
 
+## Presenting artifacts
+
+Agents running inside a Wardian-managed terminal can present any file under
+their primary workspace or additional granted directories:
+
+```bash
+wardian artifact present ./report.md --title "Report for review"
+```
+
+PowerShell:
+
+```powershell
+wardian artifact present .\report.md --title "Report for review"
+```
+
+The desktop app must be running, and `WARDIAN_SESSION_ID` identifies the origin
+agent. Re-presenting the same canonical path normally appends a version to the
+active thread; use `--new` for a distinct thread or `--artifact <id>` to require
+an exact existing thread. `--address <comment-id>` can be repeated. The command
+returns the durable artifact, version, and presentation IDs as JSON only after
+the Workbench accepts the background tab transaction. A UI delivery failure
+reports the already-persisted artifact details and does not delete the version.
+
+Use `wardian artifact show <artifact-id> [--version <version-id>]` to inspect
+durable metadata. Show can fall back to the on-disk artifact store when the app
+is not running; present never does, because authorization and UI delivery are
+live runtime contracts.
+
 ## Important Limits
 
 - The desktop app must be running for live-control commands such as `send`, `spawn`, `pause`, `resume`, `kill`, and default `workflow exec`.

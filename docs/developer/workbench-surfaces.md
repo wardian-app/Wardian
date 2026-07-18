@@ -104,9 +104,8 @@ non-JSON values fail validation.
 Normal Agent Session opens use `focus_resource`. The agent runtime is shared;
 duplicate surfaces are independent presentations of it.
 
-Files also uses `focus_resource`. Its canonical resource key is either
-`file:<canonical-path>` or, in the future artifact slice,
-`artifact:<artifact-id>`. Syntactic Windows absolute drive, UNC, and
+Files also uses `focus_resource`. Its durable navigation key is either
+`file:<canonical-path>` or `artifact:<artifact-id>`. Syntactic Windows absolute drive, UNC, and
 extended-length paths normalize separators for identity; POSIX paths preserve
 literal backslashes. Opaque artifact IDs remain verbatim. File and artifact
 identities never collapse into each other even when an artifact is backed by
@@ -220,15 +219,15 @@ not recreate the model or discard undo history. The controller registry owns
 model lifetime and disposes it only after the final presentation and durable
 recovery hold are released.
 
-The current Files contribution is reachable from Explorer and restoration but
-is deliberately marked reserved in the New Surface catalog. Ordinary file
+The Files contribution is reachable from Explorer, artifact presentations, and
+restoration but requires a concrete resource. Ordinary file
 single-click uses `open_transient`; double-click, keyboard open, context
 **Open**, and **Open to Side** create or pin permanent presentations. The first
 buffer mutation also pins a transient source-only file. The shipped comparison
-surface uses the Saved-file baseline; prompt-checkpoint and presented-version
-baselines remain explicit unavailable variants until downstream adapters supply
-their exact historical content. Files never falls back to a nearby revision or
-adds top-level Preview/Changes/Draft modes.
+surface uses the Saved-file baseline for ordinary files and the exact selected
+immutable version for artifacts. Prompt-checkpoint baselines remain unavailable
+until their provider supplies exact historical content. Files never falls back
+to a nearby revision or adds top-level Preview/Changes/Draft modes.
 
 The Files header contains a current-state Book/Pencil presentation control only
 when both rendered and editor presentations exist. Source-only resources open
@@ -267,14 +266,25 @@ record and adopts the new disk head, and **Cancel** preserves the stale state.
 All three actions validate the same canonical controller identity and observed
 generation before taking effect.
 
-The reserved downstream artifact integration keeps `artifact:<id>` as its
-durable provenance/navigation identity. Its attachment adapter must resolve the
-currently presented backing version to an authorized canonical file or
-immutable blob controller and then attach the Files presentation to that
-controller. Duplicate file and artifact presentations therefore share one
-editor model when they resolve to the same canonical file; artifacts do not own
-a second buffer. **Save As** always creates an ordinary file presentation and
-never retargets the artifact thread.
+Artifact integration keeps `artifact:<id>` as its durable provenance/navigation
+identity. `get_artifact_resource` returns one selected immutable version plus
+the currently authorized working-file identity; it never returns every
+version's bytes. The Files surface opens that working path under the origin
+agent's current authorization and attaches through the ordinary file resource
+and editor-controller registries. Duplicate file and artifact presentations
+therefore share one editor model when they resolve to the same canonical file;
+artifacts do not own a second buffer. The immutable selected text supplies the
+presented-version comparison baseline without replacing the editable working
+model. **Save As** always creates an ordinary file presentation and never
+retargets the artifact thread.
+
+`artifact://presented` is handled once at App scope. Navigation applies an
+`open_surface` transaction with `activate: false`, or refreshes an existing
+artifact surface's selected version, before acknowledging the exact
+presentation ID. The presentation service does not roll back durable storage
+when UI delivery fails. Attention is held in both the artifact index and Files
+presentation metadata until the surface lifecycle reports actual visibility;
+mounting or receiving the event alone is not sufficient.
 
 The Rust lifecycle is:
 
