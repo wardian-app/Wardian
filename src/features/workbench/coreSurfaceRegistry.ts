@@ -18,7 +18,6 @@ import {
   filesPresentationTitle,
   useFilesPresentationStore,
 } from "../files/filesPresentationStore";
-import { createCleanFilesCloseAdapter } from "../files/filesCloseAdapter";
 import { decodeFileResourceKey } from "../files/fileResourceKey";
 import {
   isFilesSurfaceStateV1,
@@ -132,6 +131,10 @@ export type CoreWorkbenchSurfaceRegistryOptions = {
 };
 
 const failClosedDirtyPrompt: DirtySurfacePrompt = () => "cancel";
+const inertFilesCloseAdapter: SurfaceCloseResourceAdapter = {
+  observe: () => null,
+  prepare: async () => null,
+};
 
 const DEFAULT_AGENTS_OVERVIEW_STATE: AgentsOverviewSurfaceState = {
   mode: "auto",
@@ -332,7 +335,7 @@ export function createCoreWorkbenchSurfaceRegistry(
   registry.register_close_adapter("workflows", createWorkflowsSurfaceCloseAdapter(prompt));
   registry.register_close_adapter(
     "files",
-    options.files_close_adapter ?? createCleanFilesCloseAdapter(),
+    options.files_close_adapter ?? inertFilesCloseAdapter,
   );
   return registry;
 }

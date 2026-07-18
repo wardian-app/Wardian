@@ -1,5 +1,5 @@
 import { lazy, type ComponentProps } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +9,12 @@ import type {
   FilesSurfaceStateV2,
 } from "../../types";
 import { FileResourceClient } from "./fileResourceClient";
+import { FileEditorControllerRegistry } from "./fileEditorController";
 import { FilesSurface } from "./FilesSurface";
+import {
+  filesPresentationBadges,
+  useFilesPresentationStore,
+} from "./filesPresentationStore";
 import {
   RendererRegistry,
   type FileRendererDefinition,
@@ -97,6 +102,18 @@ function registry(renderComponent = PreviewRenderer) {
 function props(
   overrides: Partial<ComponentProps<typeof FilesSurface>> = {},
 ): ComponentProps<typeof FilesSurface> {
+  const client = overrides.client ?? new FileResourceClient();
+  if (!vi.isMockFunction(client.readText)) {
+    vi.spyOn(client, "readText").mockImplementation(async (resource) => ({
+      schema: 1,
+      resource_id: resource.resource_id,
+      revision: resource.revision,
+      text: "base\n",
+    }));
+  }
+  if (!vi.isMockFunction(client.listRecoveries)) {
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+  }
   return {
     surface_id: "files-1",
     resource_key: "file:C:/work/docs/report.pdf",
@@ -109,7 +126,9 @@ function props(
       optional_checkpoint_id: null,
     },
     lifecycle: { visible: true },
-    client: new FileResourceClient(),
+    client,
+    editor_registry: overrides.editor_registry
+      ?? new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 }),
     registry: registry(),
     on_open_with: vi.fn().mockResolvedValue(undefined),
     on_reveal: vi.fn().mockResolvedValue(undefined),
@@ -119,6 +138,7 @@ function props(
 
 describe("FilesSurface", () => {
   beforeEach(() => {
+    useFilesPresentationStore.getState().reset();
     useFileResourceMock.mockReset();
     useFileResourceMock.mockReturnValue({
       status: "ready",
@@ -533,12 +553,339 @@ describe("FilesSurface", () => {
     expect(within(menu).getByRole("menuitem", { name: "Reveal" })).toBeInTheDocument();
   });
 
-  it("does not acquire a resource while the surface lifecycle is suspended", () => {
-    render(<FilesSurface {...props({ lifecycle: { visible: false } })} />);
+  it("retains the native resource and editor session while the renderer is suspended", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    const editorRegistry = new FileEditorControllerRegistry(client);
+    const view = render(<FilesSurface {...props({
+      resource_key: "file:C:/work/docs/notes.md",
+      lifecycle: { visible: false },
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
 
     expect(screen.getByRole("status")).toHaveTextContent(/preview suspended/i);
-    expect(useFileResourceMock).not.toHaveBeenCalled();
+    expect(useFileResourceMock).toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+    await waitFor(() => expect(
+      editorRegistry.getExisting("file:C:/work/docs/notes.md")?.getSnapshot().status,
+    ).toBe("ready"));
+
+    view.rerender(<FilesSurface {...props({
+      resource_key: "file:C:/work/docs/notes.md",
+      lifecycle: { visible: true },
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+    expect(editorRegistry.getExisting("file:C:/work/docs/notes.md")?.getSnapshot())
+      .toMatchObject({ status: "ready", presentation_ids: ["files-1"] });
+  });
+
+  it("shares one hydrated controller, dirty badges, and first-mutation pinning across panes", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    const readText = vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: "file:C:/work/docs/notes.md",
+      revision: 1,
+      text: "base\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const state: FilesSurfaceStateV2 = {
+      resource_kind: "file",
+      transient_preview: true,
+      presentation: "rendered",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const firstStateChange = vi.fn();
+    const secondStateChange = vi.fn();
+    render(<>
+      <FilesSurface {...props({
+        surface_id: "files-a",
+        resource_key: "file:C:/work/docs/notes.md",
+        state,
+        client,
+        editor_registry: editorRegistry,
+        registry: markdownRegistry,
+        on_state_change: firstStateChange,
+      })} />
+      <FilesSurface {...props({
+        surface_id: "files-b",
+        resource_key: "file:C:/work/docs/notes.md",
+        state,
+        client,
+        editor_registry: editorRegistry,
+        registry: markdownRegistry,
+        on_state_change: secondStateChange,
+      })} />
+    </>);
+
+    const controller = editorRegistry.forResource("file:C:/work/docs/notes.md");
+    await waitFor(() => expect(controller.getSnapshot()).toMatchObject({
+      status: "ready",
+      presentation_ids: ["files-a", "files-b"],
+    }));
+    expect(readText).toHaveBeenCalledOnce();
+
+    act(() => { controller.mutate("shared edit\n"); });
+    await waitFor(() => {
+      expect(filesPresentationBadges("files-a", "file:C:/work/docs/notes.md")).toEqual([
+        { badge_id: "dirty", label: "Unsaved changes" },
+      ]);
+      expect(filesPresentationBadges("files-b", "file:C:/work/docs/notes.md")).toEqual([
+        { badge_id: "dirty", label: "Unsaved changes" },
+      ]);
+    });
+    expect(firstStateChange).toHaveBeenCalledWith({ ...state, transient_preview: false });
+    expect(secondStateChange).toHaveBeenCalledWith({ ...state, transient_preview: false });
+
+    act(() => {
+      controller.applyAuthoritative({
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+        revision: 2,
+        descriptor: { ...markdownDescriptor, content_hash: "hash-external" },
+      }, "external\n");
+    });
+    await waitFor(() => expect(
+      filesPresentationBadges("files-a", "file:C:/work/docs/notes.md"),
+    ).toEqual([
+      { badge_id: "dirty", label: "Unsaved changes" },
+      { badge_id: "attention", label: "Attention requested" },
+    ]));
+  });
+
+  it("opens comparison from a stale Save using the latest surface state callback", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: "file:C:/work/docs/notes.md",
+      revision: 1,
+      text: "base\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    vi.spyOn(client, "saveText").mockResolvedValue({
+      status: "stale_conflict",
+      revision: 2,
+      content_hash: "hash-external",
+    });
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const initialState: FilesSurfaceStateV2 = {
+      resource_kind: "file",
+      transient_preview: false,
+      presentation: "editor",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const initialStateChange = vi.fn();
+    const latestStateChange = vi.fn();
+    const sharedProps = props({
+      resource_key: "file:C:/work/docs/notes.md",
+      state: initialState,
+      client,
+      editor_registry: editorRegistry,
+      registry: markdownRegistry,
+      on_state_change: initialStateChange,
+    });
+    const view = render(<FilesSurface {...sharedProps} />);
+    const controller = editorRegistry.forResource("file:C:/work/docs/notes.md");
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+
+    const latestState = { ...initialState, review_drawer_open: true };
+    view.rerender(<FilesSurface
+      {...sharedProps}
+      state={latestState}
+      on_state_change={latestStateChange}
+    />);
+    act(() => { controller.mutate("local edit\n"); });
+    await act(async () => { await controller.save("files-1"); });
+
+    expect(latestStateChange).toHaveBeenCalledWith({
+      ...latestState,
+      comparison_open: true,
+    });
+    expect(initialStateChange).not.toHaveBeenCalledWith(expect.objectContaining({
+      comparison_open: true,
+    }));
+  });
+
+  it("detaches and releases a clean controller only after React unmount", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    const editorRegistry = new FileEditorControllerRegistry(client);
+    const view = render(<FilesSurface {...props({
+      resource_key: "file:C:/work/docs/notes.md",
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+    await waitFor(() => expect(
+      editorRegistry.getExisting("file:C:/work/docs/notes.md")?.getSnapshot().status,
+    ).toBe("ready"));
+
+    expect(editorRegistry.getExisting("file:C:/work/docs/notes.md")).toBeDefined();
+    view.unmount();
+    expect(editorRegistry.getExisting("file:C:/work/docs/notes.md")).toBeUndefined();
+  });
+
+  it("surfaces editor synchronization failures as attention and retries in place", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(markdownDescriptor),
+        resource_id: "file:C:/work/docs/notes.md",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    const readText = vi.spyOn(client, "readText")
+      .mockRejectedValueOnce(new Error("read denied"))
+      .mockResolvedValueOnce({
+        schema: 1,
+        resource_id: "file:C:/work/docs/notes.md",
+        revision: 1,
+        text: "base\n",
+      });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const editorRegistry = new FileEditorControllerRegistry(client);
+    render(<FilesSurface {...props({
+      resource_key: "file:C:/work/docs/notes.md",
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/file editor initialization failed: read denied/i);
+    expect(filesPresentationBadges("files-1", "file:C:/work/docs/notes.md")).toContainEqual({
+      badge_id: "attention",
+      label: "Attention requested",
+    });
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry Editor" }));
+
+    await waitFor(() => expect(readText).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry Editor" })).toBeNull());
+    expect(editorRegistry.getExisting("file:C:/work/docs/notes.md")?.getSnapshot().status)
+      .toBe("ready");
   });
 
   it("contains resource load errors and offers applicable recovery actions", async () => {

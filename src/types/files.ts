@@ -179,9 +179,9 @@ export type CheckpointFileRecoveryRequestV1 = {
   expected_recovery_revision: number | null;
   resource_id: string;
   subscription_id: string;
-  base_revision: number;
   base_content_hash: string;
   resource_key: string;
+  base: string;
   buffer: string;
 };
 

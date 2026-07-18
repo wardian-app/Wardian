@@ -6,6 +6,7 @@ import type {
   FileRecoveryV1,
   FileResourceSaveResultV1,
   FileResourceSnapshotV1,
+  FileResourceTextV1,
   ListFileRecoveriesRequestV1,
   SaveFileResourceTextRequestV1,
 } from "../../types";
@@ -129,8 +130,11 @@ export class FileEditorController {
   readonly #pinnedPresentations = new Set<string>();
   #snapshot: FileEditorSnapshot;
   #owner: FileResourceSnapshotV1 | null = null;
+  #ownerGeneration = 0;
   #baseRevision: number | null = null;
   #initializationGeneration = 0;
+  #pendingInitializationCount = 0;
+  #saveOperationCount = 0;
   #recoveryMetadata: RecoveryMetadata | null = null;
   #checkpointTimer: ReturnType<typeof setTimeout> | null = null;
   #checkpointRequestedGeneration: number | null = null;
@@ -215,33 +219,44 @@ export class FileEditorController {
   }
 
   async initialize(input: FileEditorInitialization): Promise<void> {
+    this.#pendingInitializationCount += 1;
     const initializationGeneration = ++this.#initializationGeneration;
-    const alreadyDirty = this.#snapshot.dirty;
-    this.applyAuthoritative(input.owner, input.text);
-    const bufferGeneration = this.#snapshot.buffer_generation;
-    if (input.discover_recovery === false || alreadyDirty) return;
+    try {
+      const alreadyDirty = this.#snapshot.dirty;
+      this.#applyAuthoritative(input.owner, input.text);
+      const bufferGeneration = this.#snapshot.buffer_generation;
+      if (input.discover_recovery === false || alreadyDirty) return;
 
-    const recoveries = await this.#client.listRecoveries({
-      resource_key: this.#resourceKey,
-    } satisfies ListFileRecoveriesRequestV1);
-    if (
-      initializationGeneration !== this.#initializationGeneration
-      || bufferGeneration !== this.#snapshot.buffer_generation
-    ) return;
-    const newest = newestRecovery(recoveries);
-    if (!newest) return;
-    const recovered = await this.#client.getRecovery({
-      recovery_id: newest.recovery_id,
-      resource_key: this.#resourceKey,
-    });
-    if (
-      initializationGeneration !== this.#initializationGeneration
-      || bufferGeneration !== this.#snapshot.buffer_generation
-    ) return;
-    this.#applyRecovery(recovered);
+      const recoveries = await this.#client.listRecoveries({
+        resource_key: this.#resourceKey,
+      } satisfies ListFileRecoveriesRequestV1);
+      if (
+        initializationGeneration !== this.#initializationGeneration
+        || bufferGeneration !== this.#snapshot.buffer_generation
+      ) return;
+      const newest = newestRecovery(recoveries);
+      if (!newest) return;
+      const recovered = await this.#client.getRecovery({
+        recovery_id: newest.recovery_id,
+        resource_key: this.#resourceKey,
+      });
+      if (
+        initializationGeneration !== this.#initializationGeneration
+        || bufferGeneration !== this.#snapshot.buffer_generation
+      ) return;
+      this.#applyRecovery(recovered);
+    } finally {
+      this.#pendingInitializationCount = Math.max(0, this.#pendingInitializationCount - 1);
+      this.#publish({});
+    }
   }
 
   applyAuthoritative(owner: FileResourceSnapshotV1, text: string): void {
+    this.#initializationGeneration += 1;
+    this.#applyAuthoritative(owner, text);
+  }
+
+  #applyAuthoritative(owner: FileResourceSnapshotV1, text: string): void {
     if (owner.resource_id !== this.#resourceKey) {
       throw new Error("The authoritative file does not match this editor resource.");
     }
@@ -250,6 +265,9 @@ export class FileEditorController {
       && this.#snapshot.disk_head_revision !== null
       && owner.revision <= this.#snapshot.disk_head_revision
     ) return;
+    if (this.#owner?.subscription_id !== owner.subscription_id) {
+      this.#ownerGeneration += 1;
+    }
     this.#owner = owner;
     const diskHeadHash = owner.descriptor.content_hash;
     if (this.#snapshot.status === "uninitialized" || !this.#snapshot.dirty) {
@@ -271,12 +289,15 @@ export class FileEditorController {
       });
       return;
     }
+    const matchesBufferBase = diskHeadHash === this.#snapshot.buffer_base_hash;
+    if (matchesBufferBase) this.#baseRevision = owner.revision;
     this.#publish({
       resource_id: owner.resource_id,
       subscription_id: owner.subscription_id,
+      ...(matchesBufferBase ? { base_revision: owner.revision } : {}),
       disk_head_revision: owner.revision,
       disk_head_hash: diskHeadHash,
-      stale: diskHeadHash !== this.#snapshot.buffer_base_hash,
+      stale: !matchesBufferBase,
     });
   }
 
@@ -312,85 +333,130 @@ export class FileEditorController {
   }
 
   async save(presentationId?: string): Promise<FileResourceSaveResultV1> {
-    const owner = this.#owner;
-    const baseRevision = this.#baseRevision;
-    const baseHash = this.#snapshot.buffer_base_hash;
-    if (!owner || baseRevision === null || baseHash === null) {
+    if (!this.#owner || this.#baseRevision === null || this.#snapshot.buffer_base_hash === null) {
       throw new Error("The file editor has no live authorized subscription.");
     }
+    const requestedOwnerGeneration = this.#ownerGeneration;
     const bufferGeneration = this.#snapshot.buffer_generation;
     const submittedText = this.#snapshot.working_text;
     this.#clearCheckpointTimer();
+    this.#saveOperationCount += 1;
     this.#publish({ save_state: "saving", last_error: null });
-    return this.#enqueueDurable(async () => {
-      const durableRecovery = this.#recoveryMetadata;
-      const cleanup = durableRecovery
-        && durableRecovery.buffer_generation <= bufferGeneration
-        ? {
-            recovery_id: durableRecovery.recovery_id,
-            expected_recovery_revision: durableRecovery.recovery_revision,
-          }
-        : null;
-      const request: SaveFileResourceTextRequestV1 = {
-        resource_id: owner.resource_id,
-        subscription_id: owner.subscription_id,
-        expected_revision: baseRevision,
-        buffer_base_hash: baseHash,
-        text: submittedText,
-        recovery_cleanup: cleanup,
-      };
-      let result: FileResourceSaveResultV1;
-      try {
-        result = await this.#client.saveText(request);
-      } catch (error) {
-        this.#publish({ save_state: "error", last_error: errorMessage(error) });
-        throw error;
-      }
-
-      if (result.status === "stale_conflict") {
-        this.#publish({
-          save_state: "idle",
-          stale: true,
-          disk_head_revision: result.revision,
-          disk_head_hash: result.content_hash,
-          last_error: null,
-        });
-        if (presentationId) {
-          this.#presentations.get(presentationId)?.callbacks.on_open_comparison?.();
+    let failure: string | null = null;
+    try {
+      return await this.#enqueueDurable(async () => {
+        const owner = this.#owner;
+        const baseRevision = this.#baseRevision;
+        const baseHash = this.#snapshot.buffer_base_hash;
+        if (!owner || baseRevision === null || baseHash === null) {
+          throw new Error("The file editor has no live authorized subscription.");
         }
-        return result;
-      }
+        if (this.#ownerGeneration !== requestedOwnerGeneration) {
+          throw new Error("The authorized file subscription changed before Save could start.");
+        }
+        if (this.#snapshot.saved_text === submittedText) {
+          return {
+            status: "unchanged",
+            revision: baseRevision,
+            content_hash: baseHash,
+          } satisfies FileResourceSaveResultV1;
+        }
 
-      this.#baseRevision = result.revision;
-      if (
-        cleanup
-        && this.#recoveryMetadata?.recovery_id === cleanup.recovery_id
-        && this.#recoveryMetadata.recovery_revision === cleanup.expected_recovery_revision
-      ) {
-        this.#recoveryMetadata = null;
-      }
-      const dirty = this.#snapshot.buffer_generation !== bufferGeneration
-        || this.#snapshot.working_text !== submittedText;
-      this.#publish({
-        base_revision: result.revision,
-        buffer_base_hash: result.content_hash,
-        disk_head_revision: result.revision,
-        disk_head_hash: result.content_hash,
-        saved_text: submittedText,
-        dirty,
-        stale: false,
-        save_state: "idle",
-        recovery: cleanup && this.#recoveryMetadata === null
-          ? Object.freeze({ status: "none" as const })
-          : this.#snapshot.recovery,
-        last_error: null,
+        const operationOwnerGeneration = this.#ownerGeneration;
+        const durableRecovery = this.#recoveryMetadata;
+        const cleanup = durableRecovery
+          && durableRecovery.buffer_generation <= bufferGeneration
+          ? {
+              recovery_id: durableRecovery.recovery_id,
+              expected_recovery_revision: durableRecovery.recovery_revision,
+            }
+          : null;
+        const request: SaveFileResourceTextRequestV1 = {
+          resource_id: owner.resource_id,
+          subscription_id: owner.subscription_id,
+          expected_revision: baseRevision,
+          buffer_base_hash: baseHash,
+          text: submittedText,
+          recovery_cleanup: cleanup,
+        };
+        const result = await this.#client.saveText(request);
+        const ownerStillCurrent = operationOwnerGeneration === this.#ownerGeneration
+          && this.#owner?.subscription_id === owner.subscription_id;
+
+        if (result.status === "stale_conflict") {
+          if (ownerStillCurrent) {
+            const stale = this.#snapshot.dirty
+              && result.content_hash !== this.#snapshot.buffer_base_hash;
+            this.#publish({
+              stale,
+              disk_head_revision: result.revision,
+              disk_head_hash: result.content_hash,
+              last_error: null,
+            });
+            if (stale && presentationId) {
+              this.#presentations.get(presentationId)?.callbacks.on_open_comparison?.();
+            }
+          }
+          return result;
+        }
+
+        let cleanupFailure: Error | null = null;
+        if (cleanup) {
+          try {
+            await this.#reconcileSavedRecovery(cleanup);
+          } catch (error) {
+            cleanupFailure = error instanceof Error ? error : new Error(errorMessage(error));
+          }
+        }
+
+        if (ownerStillCurrent) {
+          this.#baseRevision = result.revision;
+          const dirty = this.#snapshot.buffer_generation !== bufferGeneration
+            || this.#snapshot.working_text !== submittedText;
+          this.#publish({
+            base_revision: result.revision,
+            buffer_base_hash: result.content_hash,
+            disk_head_revision: result.revision,
+            disk_head_hash: result.content_hash,
+            saved_text: submittedText,
+            dirty,
+            stale: false,
+            recovery: cleanupFailure && cleanup
+              ? Object.freeze({
+                  status: "error" as const,
+                  recovery_id: cleanup.recovery_id,
+                  recovery_revision: cleanup.expected_recovery_revision,
+                  buffer_generation: this.#snapshot.buffer_generation,
+                  retryable: true as const,
+                  message: cleanupFailure.message,
+                })
+              : cleanup && this.#recoveryMetadata === null
+                ? Object.freeze({ status: "none" as const })
+                : this.#snapshot.recovery,
+            last_error: cleanupFailure?.message ?? null,
+          });
+        }
+        if (this.#snapshot.dirty) {
+          this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
+          void this.#ensureCheckpointLoop().catch(() => undefined);
+        }
+        if (cleanupFailure) throw cleanupFailure;
+        return result;
       });
-      if (dirty) {
-        this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
-        void this.#ensureCheckpointLoop().catch(() => undefined);
-      }
-      return result;
-    });
+    } catch (error) {
+      failure = errorMessage(error);
+      throw error;
+    } finally {
+      this.#saveOperationCount = Math.max(0, this.#saveOperationCount - 1);
+      this.#publish({
+        save_state: this.#saveOperationCount > 0
+          ? "saving"
+          : failure
+            ? "error"
+            : "idle",
+        last_error: failure ?? (this.#saveOperationCount > 0 ? this.#snapshot.last_error : null),
+      });
+    }
   }
 
   async flushRecovery(): Promise<void> {
@@ -443,21 +509,45 @@ export class FileEditorController {
     });
   }
 
-  canReleaseAfterPostcommit(expectedPresentationGeneration?: number): boolean {
+  canReleaseAfterPostcommit(expectedPresentationGeneration: number): boolean {
+    const recoveryIsReleasable = this.#snapshot.dirty
+      ? this.#snapshot.recovery.status === "durable"
+        && this.#snapshot.recovery.buffer_generation === this.#snapshot.buffer_generation
+      : this.#snapshot.recovery.status === "none";
     return this.#presentations.size === 0
-      && !this.#snapshot.dirty
+      && this.#pendingInitializationCount === 0
+      && this.#saveOperationCount === 0
       && this.#checkpointLoop === null
       && this.#durableOperationCount === 0
-      && this.#snapshot.recovery.status === "none"
-      && (
-        expectedPresentationGeneration === undefined
-        || expectedPresentationGeneration === this.#snapshot.presentation_generation
-      );
+      && recoveryIsReleasable
+      && expectedPresentationGeneration === this.#snapshot.presentation_generation;
   }
 
   #applyRecovery(recovered: FileRecoveryV1): void {
     if (recovered.resource_key !== this.#resourceKey) {
       throw new Error("The recovered buffer does not match this editor resource.");
+    }
+    if (
+      recovered.buffer === recovered.base
+      || recovered.buffer === this.#snapshot.saved_text
+    ) {
+      const bufferGeneration = this.#snapshot.buffer_generation;
+      this.#recoveryMetadata = {
+        recovery_id: recovered.recovery_id,
+        recovery_revision: recovered.recovery_revision,
+        buffer_generation: bufferGeneration,
+      };
+      this.#publish({
+        recovery: Object.freeze({
+          status: "durable",
+          recovery_id: recovered.recovery_id,
+          recovery_revision: recovered.recovery_revision,
+          buffer_generation: bufferGeneration,
+        }),
+        last_error: null,
+      });
+      void this.#retireRecoveryForCleanGeneration(bufferGeneration).catch(() => undefined);
+      return;
     }
     const bufferGeneration = this.#snapshot.buffer_generation + 1;
     this.#recoveryMetadata = {
@@ -484,7 +574,9 @@ export class FileEditorController {
       }),
       last_error: null,
     });
-    if (!this.#snapshot.dirty) {
+    if (this.#snapshot.dirty) {
+      this.#pinPresentations();
+    } else {
       void this.#retireRecoveryForCleanGeneration(bufferGeneration).catch(() => undefined);
     }
   }
@@ -547,9 +639,8 @@ export class FileEditorController {
   async #checkpointCurrentInsideQueue(): Promise<number | null> {
     if (!this.#snapshot.dirty) return null;
     const owner = this.#owner;
-    const baseRevision = this.#baseRevision;
     const baseHash = this.#snapshot.buffer_base_hash;
-    if (!owner || baseRevision === null || baseHash === null) {
+    if (!owner || this.#baseRevision === null || baseHash === null) {
       throw new Error("Dirty recovery requires a live authorized subscription.");
     }
     const bufferGeneration = this.#snapshot.buffer_generation;
@@ -559,9 +650,9 @@ export class FileEditorController {
       expected_recovery_revision: recovery?.recovery_revision ?? null,
       resource_id: owner.resource_id,
       subscription_id: owner.subscription_id,
-      base_revision: baseRevision,
       base_content_hash: baseHash,
       resource_key: this.#resourceKey,
+      base: this.#snapshot.saved_text,
       buffer: this.#snapshot.working_text,
     };
     this.#publish({
@@ -609,6 +700,38 @@ export class FileEditorController {
     return bufferGeneration;
   }
 
+  async #reconcileSavedRecovery(cleanup: {
+    recovery_id: string;
+    expected_recovery_revision: number;
+  }): Promise<void> {
+    const list = async () => this.#client.listRecoveries({
+      resource_key: this.#resourceKey,
+    });
+    const before = (await list()).find((candidate) => (
+      candidate.recovery_id === cleanup.recovery_id
+    ));
+    if (before) {
+      if (before.recovery_revision !== cleanup.expected_recovery_revision) {
+        throw new Error("Recovery advanced while Save cleanup was being verified.");
+      }
+      await this.#client.discardRecovery({
+        recovery_id: cleanup.recovery_id,
+        expected_recovery_revision: cleanup.expected_recovery_revision,
+        resource_key: this.#resourceKey,
+      });
+      const remains = (await list()).some((candidate) => (
+        candidate.recovery_id === cleanup.recovery_id
+      ));
+      if (remains) {
+        throw new Error("Saved recovery cleanup could not be verified.");
+      }
+    }
+    if (
+      this.#recoveryMetadata?.recovery_id === cleanup.recovery_id
+      && this.#recoveryMetadata.recovery_revision === cleanup.expected_recovery_revision
+    ) this.#recoveryMetadata = null;
+  }
+
   #retireRecoveryForCleanGeneration(bufferGeneration: number): Promise<void> {
     return this.#enqueueDurable(async () => {
       if (this.#snapshot.dirty || this.#snapshot.buffer_generation !== bufferGeneration) return;
@@ -651,11 +774,7 @@ export class FileEditorController {
       const run = () => {
         this.#durableBusy = true;
         void (async () => {
-          try {
-            resolve(await operation());
-          } catch (error) {
-            reject(error);
-          } finally {
+          const finalize = () => {
             this.#durableOperationCount = Math.max(0, this.#durableOperationCount - 1);
             const next = this.#durableQueue.shift();
             if (next) {
@@ -664,6 +783,14 @@ export class FileEditorController {
               this.#durableBusy = false;
               this.#publish({});
             }
+          };
+          try {
+            const result = await operation();
+            finalize();
+            resolve(result);
+          } catch (error) {
+            finalize();
+            reject(error);
           }
         })();
       };
@@ -691,6 +818,17 @@ export class FileEditorController {
 /** Owns exactly one editor controller per canonical Files resource key. */
 export class FileEditorControllerRegistry {
   readonly #sessions = new Map<string, FileEditorController>();
+  readonly #releaseWaiters = new Map<string, {
+    expectedPresentationGeneration: number;
+    unsubscribe: () => void;
+  }>();
+  readonly #authoritativeSynchronizations = new Map<string, {
+    key: string;
+    generation: number;
+    pending: boolean;
+    promise: Promise<FileEditorController>;
+  }>();
+  readonly #authoritativeGenerations = new Map<string, number>();
   readonly #client: FileEditorResourceClient;
   readonly #options: FileEditorControllerOptions;
 
@@ -708,13 +846,138 @@ export class FileEditorControllerRegistry {
     return session;
   }
 
+  getExisting(resourceKey: string): FileEditorController | undefined {
+    return this.#sessions.get(resourceKey);
+  }
+
+  getByPresentation(surfaceId: string): FileEditorController | undefined {
+    let match: FileEditorController | undefined;
+    for (const controller of this.#sessions.values()) {
+      if (!controller.getSnapshot().presentation_ids.includes(surfaceId)) continue;
+      if (match) return undefined;
+      match = controller;
+    }
+    return match;
+  }
+
+  synchronizeAuthoritative(
+    owner: FileResourceSnapshotV1,
+    readExactText: () => Promise<FileResourceTextV1>,
+  ): Promise<FileEditorController> {
+    const resourceKey = owner.resource_id;
+    const key = JSON.stringify([
+      owner.subscription_id,
+      owner.revision,
+      owner.descriptor.content_hash,
+    ]);
+    const current = this.#authoritativeSynchronizations.get(resourceKey);
+    if (current?.key === key) return current.promise;
+
+    const generation = (this.#authoritativeGenerations.get(resourceKey) ?? 0) + 1;
+    this.#authoritativeGenerations.set(resourceKey, generation);
+    const controller = this.forResource(resourceKey);
+    let synchronization: Promise<FileEditorController>;
+    synchronization = (async () => {
+      const resource = await readExactText();
+      if (
+        resource.resource_id !== owner.resource_id
+        || resource.revision !== owner.revision
+      ) {
+        throw new Error("The text read did not match the authoritative file snapshot.");
+      }
+      const latest = this.#authoritativeSynchronizations.get(resourceKey);
+      if (latest?.generation !== generation) return controller;
+      if (controller.getSnapshot().status === "uninitialized") {
+        await controller.initialize({
+          owner,
+          text: resource.text,
+          discover_recovery: true,
+        });
+      } else {
+        controller.applyAuthoritative(owner, resource.text);
+      }
+      return controller;
+    })().catch((error) => {
+      const latest = this.#authoritativeSynchronizations.get(resourceKey);
+      if (latest?.generation === generation) {
+        this.#authoritativeSynchronizations.delete(resourceKey);
+      }
+      throw error;
+    }).finally(() => {
+      const latest = this.#authoritativeSynchronizations.get(resourceKey);
+      if (latest?.generation === generation) latest.pending = false;
+      const session = this.#sessions.get(resourceKey);
+      if (session) {
+        this.releaseAfterPostcommit(
+          resourceKey,
+          session.getSnapshot().presentation_generation,
+        );
+      }
+    });
+    this.#authoritativeSynchronizations.set(resourceKey, {
+      key,
+      generation,
+      pending: true,
+      promise: synchronization,
+    });
+    return synchronization;
+  }
+
   releaseAfterPostcommit(
     resourceKey: string,
-    expectedPresentationGeneration?: number,
+    expectedPresentationGeneration: number,
   ): boolean {
     const session = this.#sessions.get(resourceKey);
-    if (!session?.canReleaseAfterPostcommit(expectedPresentationGeneration)) return false;
+    if (!session) return false;
+    if (this.#tryRelease(resourceKey, session, expectedPresentationGeneration)) return true;
+    const snapshot = session.getSnapshot();
+    if (
+      snapshot.presentation_ids.length === 0
+      && snapshot.presentation_generation === expectedPresentationGeneration
+    ) this.#watchPendingRelease(resourceKey, session, expectedPresentationGeneration);
+    return false;
+  }
+
+  #tryRelease(
+    resourceKey: string,
+    session: FileEditorController,
+    expectedPresentationGeneration: number,
+  ): boolean {
+    if (this.#authoritativeSynchronizations.get(resourceKey)?.pending) return false;
+    if (!session.canReleaseAfterPostcommit(expectedPresentationGeneration)) return false;
+    this.#releaseWaiters.get(resourceKey)?.unsubscribe();
+    this.#releaseWaiters.delete(resourceKey);
     this.#sessions.delete(resourceKey);
+    this.#authoritativeSynchronizations.delete(resourceKey);
+    this.#authoritativeGenerations.delete(resourceKey);
     return true;
+  }
+
+  #watchPendingRelease(
+    resourceKey: string,
+    session: FileEditorController,
+    expectedPresentationGeneration: number,
+  ): void {
+    const existing = this.#releaseWaiters.get(resourceKey);
+    if (existing?.expectedPresentationGeneration === expectedPresentationGeneration) return;
+    existing?.unsubscribe();
+    const unsubscribe = session.subscribe(() => {
+      if (this.#sessions.get(resourceKey) !== session) {
+        unsubscribe();
+        this.#releaseWaiters.delete(resourceKey);
+        return;
+      }
+      const snapshot = session.getSnapshot();
+      if (snapshot.presentation_generation !== expectedPresentationGeneration) {
+        unsubscribe();
+        this.#releaseWaiters.delete(resourceKey);
+        return;
+      }
+      this.#tryRelease(resourceKey, session, expectedPresentationGeneration);
+    });
+    this.#releaseWaiters.set(resourceKey, {
+      expectedPresentationGeneration,
+      unsubscribe,
+    });
   }
 }

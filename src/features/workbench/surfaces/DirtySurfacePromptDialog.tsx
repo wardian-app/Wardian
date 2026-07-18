@@ -108,7 +108,7 @@ export function useDirtySurfacePrompt(): DirtySurfacePromptController {
               }}
               onClick={() => settle("discard")}
             >
-              Discard
+              {active.request.discard_label ?? "Discard"}
             </button>
             <button
               type="button"

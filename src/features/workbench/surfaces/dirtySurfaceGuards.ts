@@ -14,6 +14,7 @@ export interface DirtySurfacePromptRequest {
   title: string;
   message: string;
   choices: readonly ["save", "discard", "cancel"];
+  discard_label?: "Discard" | "Don't Save";
 }
 
 /** UI boundary for a three-way dirty-resource decision. */

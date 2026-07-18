@@ -122,9 +122,9 @@ describe("FileResourceClient", () => {
       expected_recovery_revision: 1,
       resource_id: snapshot.resource_id,
       subscription_id: snapshot.subscription_id,
-      base_revision: snapshot.revision,
       base_content_hash: "hash-1",
       resource_key: snapshot.resource_id,
+      base: "base",
       buffer: "edited",
     } as const;
 

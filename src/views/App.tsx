@@ -74,6 +74,8 @@ import { LibrarySurface } from "../features/workbench/surfaces/LibrarySurface";
 import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurface";
 import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
 import { FilesSurface } from "../features/files/FilesSurface";
+import { FileEditorControllerRegistry } from "../features/files/fileEditorController";
+import { createFilesCloseAdapter } from "../features/files/filesCloseAdapter";
 import { fileResourceClient } from "../features/files/fileResourceClient";
 import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
 import {
@@ -261,9 +263,17 @@ function AppBody() {
   });
   const workbenchResetPending = workbenchPersistence.store.getState().reset_pending;
   const dirtySurfacePrompt = useDirtySurfacePrompt();
+  const filesEditorRegistry = useMemo(
+    () => new FileEditorControllerRegistry(fileResourceClient),
+    [],
+  );
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
-  }), [dirtySurfacePrompt.prompt]);
+    files_close_adapter: createFilesCloseAdapter(
+      filesEditorRegistry,
+      dirtySurfacePrompt.prompt,
+    ),
+  }), [dirtySurfacePrompt.prompt, filesEditorRegistry]);
   useEffect(() => {
     if (workbenchPersistence.status !== "ready") return;
     const commands = filesSurfaceMigrationCommands(
@@ -1148,6 +1158,7 @@ function AppBody() {
           state={filesState}
           lifecycle={{ visible: lifecycle?.visible !== false }}
           client={fileResourceClient}
+          editor_registry={filesEditorRegistry}
           legacy_presentation_intent={legacyPresentationIntent}
           on_canonical_resource={async (resourceKey) => {
             return await workbenchNavigation.canonicalize_resource(surface.surface_id, {
