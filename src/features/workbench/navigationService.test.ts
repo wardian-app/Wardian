@@ -8,9 +8,14 @@ import type {
 } from "../../types";
 import { useFilesPresentationStore } from "../files/filesPresentationStore";
 import { migrateFilesSurfaceStateV1 } from "../files/filesSurfaceState";
+import { useBuilderStore } from "../../store/useBuilderStore";
+import { useLibraryStore } from "../../store/useLibraryStore";
 import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "./navigationService";
-import { createSurfaceRegistry } from "./surfaceRegistry";
+import {
+  createSurfaceRegistry,
+  type WorkbenchSurfaceRegistry,
+} from "./surfaceRegistry";
 import { createWorkbenchStore } from "./useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
 
@@ -57,6 +62,31 @@ function deterministicIds(values: string[]) {
     index += 1;
     return value;
   };
+}
+
+function registerDecisionCloseAdapter(
+  registry: WorkbenchSurfaceRegistry,
+  type: string,
+  decide: (surface: WorkbenchSurfaceV1) => Promise<"allow" | "cancel"> | "allow" | "cancel",
+): void {
+  registry.register_close_adapter(type, {
+    observe: (surface) => ({
+      resource_id: `${type}:${surface.surface_id}`,
+      resource_generation: 1,
+      dirty: true,
+    }),
+    prepare: async ({ context, resource }) => {
+      const surface = context.snapshot.surfaces[resource.presentation_ids[0] ?? ""];
+      if (!surface || await decide(surface) !== "allow") {
+        return { ...resource, choice: "cancel" };
+      }
+      return {
+        ...resource,
+        choice: "discard",
+        discard: async () => undefined,
+      };
+    },
+  });
 }
 
 describe("workbench navigation service", () => {
@@ -400,10 +430,10 @@ describe("workbench navigation service", () => {
   it("resets known and unknown surface state only after an explicit guarded action", async () => {
     const registry = createSurfaceRegistry([definition("known", {
       close_policy: "confirm_if_dirty",
-      can_close: () => "allow",
       state_schema_version: 3,
       default_state: () => ({ label: "fresh" }),
     })]);
+    registerDecisionCloseAdapter(registry, "known", () => "allow");
     const known = makeSurface("known-1", {
       surface_type: "known",
       state_schema_version: 1,
@@ -449,9 +479,9 @@ describe("workbench navigation service", () => {
         open_policy: "focus_resource",
         close_policy: "confirm_if_dirty",
         resource_key: (request) => request.resource_key,
-        can_close: () => "allow",
         default_state: () => ({ label: "fresh" }),
       })]);
+      registerDecisionCloseAdapter(registry, "known-resource", () => "allow");
       const ordinary = makeSurface("ordinary-resource", {
         surface_type: "known-resource",
         resource_key: "resource:provisional",
@@ -490,9 +520,9 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([
       definition("dirty", {
         close_policy: "confirm_if_dirty",
-        can_close: guard,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "dirty", guard);
     const initial = makeSingleGroupDocument([
       makeSurface("surface-1", { surface_type: "dirty" }),
       makeSurface("surface-2", { surface_type: "dirty" }),
@@ -523,17 +553,76 @@ describe("workbench navigation service", () => {
     expect(guard).toHaveBeenCalled();
   });
 
-  it("evaluates reset guards in depth-first group and visual tab order before one commit", async () => {
-    const order: string[] = [];
+  it("supplies the complete intended closing set for every destructive route", async () => {
     const registry = createSurfaceRegistry([
       definition("guarded", {
         close_policy: "confirm_if_dirty",
-        can_close: async (entry): Promise<"allow"> => {
-          order.push(entry.surface_id);
-          return "allow";
-        },
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
       }),
     ]);
+    const observeCloseResources = vi.spyOn(registry, "observe_close_resources");
+    registry.register_close_adapter("guarded", {
+      observe: (surface) => ({
+        resource_id: `guarded:${surface.surface_id}`,
+        resource_generation: 1,
+        dirty: true,
+      }),
+      prepare: async ({ resource }) => ({
+        ...resource,
+        choice: "discard",
+        discard: async () => undefined,
+      }),
+    });
+    const initial = makeSingleGroupDocument([
+      makeSurface("surface-1", { surface_type: "guarded", resource_key: "resource:one" }),
+      makeSurface("surface-2", { surface_type: "guarded", resource_key: "resource:two" }),
+    ]);
+
+    const run = async (
+      action: (navigation: ReturnType<typeof createWorkbenchNavigationService>) => Promise<unknown>,
+    ) => {
+      const store = createWorkbenchStore({ initial_document: structuredClone(initial) });
+      const navigation = createWorkbenchNavigationService({ registry, store });
+      await expect(action(navigation)).resolves.toBe("allow");
+    };
+
+    await run((navigation) => navigation.canonicalize_resource("surface-1", {
+      surface_type: "guarded",
+      resource_key: "resource:canonical",
+    }));
+    await run((navigation) => navigation.rebind_resource("surface-1", {
+      surface_type: "guarded",
+      resource_key: "resource:replacement",
+      state: { label: "replacement" },
+    }));
+    await run((navigation) => navigation.reset_surface("surface-1"));
+    await run((navigation) => navigation.close("surface-1"));
+    await run((navigation) => navigation.close_group("group-1"));
+    await run((navigation) => navigation.reset_workbench());
+
+    const expected = [
+      ["surface-1"],
+      ["surface-1"],
+      ["surface-1"],
+      ["surface-1"],
+      ["surface-1", "surface-2"],
+      ["surface-1", "surface-2"],
+    ];
+    expect(observeCloseResources.mock.calls.map(([, closingIds]) => closingIds)).toEqual(
+      expected.flatMap((closingIds) => [closingIds, closingIds]),
+    );
+  });
+
+  it("evaluates reset guards in depth-first group and visual tab order before one commit", async () => {
+    const order: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("guarded", { close_policy: "confirm_if_dirty" }),
+    ]);
+    registerDecisionCloseAdapter(registry, "guarded", async (entry): Promise<"allow"> => {
+      order.push(entry.surface_id);
+      return "allow";
+    });
     const leftA = makeSurface("left-a", { surface_type: "guarded" });
     const leftB = makeSurface("left-b", { surface_type: "guarded" });
     const right = makeSurface("right-a", { surface_type: "guarded" });
@@ -580,9 +669,9 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([
       definition("guarded", {
         close_policy: "confirm_if_dirty",
-        can_close: () => guardDecision,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded", () => guardDecision);
     const entry = makeSurface("surface-1", { surface_type: "guarded" });
     const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
     const navigation = createWorkbenchNavigationService({
@@ -599,14 +688,225 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["surface-1"]).toBeDefined();
   });
 
+  it("makes rebind stale before effects when a duplicate opens during preparation", async () => {
+    let releaseChoice: (() => void) | undefined;
+    let notifyPreparing: (() => void) | undefined;
+    const preparing = new Promise<void>((resolve) => { notifyPreparing = resolve; });
+    const choice = new Promise<void>((resolve) => { releaseChoice = resolve; });
+    const discard = vi.fn();
+    const registry = createSurfaceRegistry([definition("guarded-resource", {
+      close_policy: "confirm_if_dirty",
+      open_policy: "focus_resource",
+      resource_key: (request) => request.resource_key,
+    })]);
+    registry.register_close_adapter("guarded-resource", {
+      observe: (surface) => ({
+        resource_id: `guarded:${surface.resource_key}`,
+        resource_generation: 1,
+        dirty: true,
+      }),
+      prepare: async ({ resource }) => {
+        notifyPreparing?.();
+        await choice;
+        return { ...resource, choice: "discard", discard };
+      },
+    });
+    const original = makeSurface("original", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:original",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([original]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["duplicate"]),
+    });
+
+    const rebind = navigation.rebind_resource("original", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:replacement",
+    });
+    await preparing;
+    expect(navigation.open({
+      surface_type: "guarded-resource",
+      resource_key: "resource:original",
+      duplicate: true,
+    })).toBe("duplicate");
+    releaseChoice?.();
+
+    await expect(rebind).resolves.toBe("cancel");
+    expect(discard).not.toHaveBeenCalled();
+    expect(store.getState().document.surfaces.original.resource_key)
+      .toBe("resource:original");
+    expect(store.getState().document.surfaces.duplicate.resource_key)
+      .toBe("resource:original");
+  });
+
+  it("closes one duplicate presentation without prompting or affecting its dirty resource", async () => {
+    const prepare = vi.fn();
+    const registry = createSurfaceRegistry([definition("guarded-resource", {
+      close_policy: "confirm_if_dirty",
+      open_policy: "focus_resource",
+      resource_key: (request) => request.resource_key,
+    })]);
+    registry.register_close_adapter("guarded-resource", {
+      observe: (surface) => ({
+        resource_id: `guarded:${surface.resource_key}`,
+        resource_generation: 3,
+        dirty: true,
+      }),
+      prepare,
+    });
+    const first = makeSurface("first", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:shared",
+    });
+    const duplicate = makeSurface("duplicate", {
+      surface_type: "guarded-resource",
+      resource_key: "resource:shared",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([first, duplicate]),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    await expect(navigation.close("first")).resolves.toBe("allow");
+
+    expect(prepare).not.toHaveBeenCalled();
+    expect(store.getState().document.surfaces.first).toBeUndefined();
+    expect(store.getState().document.surfaces.duplicate).toBeDefined();
+  });
+
+  it("orders mixed Files, Library, and Workflows close effects as saves, layout, discard", async () => {
+    const events: string[] = [];
+    const libraryDiscard = vi.fn(async () => {
+      events.push("discard:library");
+      return true;
+    });
+    useLibraryStore.setState({
+      _editorDirty: true,
+      _editorResources: {
+        library: {
+          dirty: true,
+          actions: { save: vi.fn().mockResolvedValue(true), discard: libraryDiscard },
+        },
+      },
+    });
+    useBuilderStore.setState({
+      dirty: true,
+      editRevision: 5,
+      save: vi.fn(async () => {
+        events.push("save:workflows");
+        return true;
+      }),
+    });
+    const registry = createCoreWorkbenchSurfaceRegistry({
+      dirty_surface_prompt: ({ surface_type }) => (
+        surface_type === "library" ? "discard" : "save"
+      ),
+      files_close_adapter: {
+        observe: (surface) => ({
+          resource_id: `files:${surface.resource_key}`,
+          resource_generation: 2,
+          dirty: true,
+        }),
+        prepare: async ({ resource }) => ({
+          ...resource,
+          choice: "save",
+          save: async () => {
+            events.push("save:files");
+            return true;
+          },
+        }),
+      },
+    });
+    const document = makeSingleGroupDocument([
+      makeSurface("files", {
+        surface_type: "files",
+        resource_key: "file:C:/work/report.md",
+        state: filesState(false),
+      }),
+      makeSurface("library", { surface_type: "library", state: {} }),
+      makeSurface("workflows", { surface_type: "workflows", state: {} }),
+    ]);
+    const store = createWorkbenchStore({ initial_document: document });
+    const unsubscribe = store.subscribe((state, previous) => {
+      if (state.document !== previous.document) events.push("layout");
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    await expect(navigation.close_group("group-1")).resolves.toBe("allow");
+    unsubscribe();
+
+    expect(events).toEqual([
+      "save:files",
+      "save:workflows",
+      "layout",
+      "discard:library",
+    ]);
+  });
+
+  it("cancels a mixed group after save failure without layout or partial discard", async () => {
+    const events: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("guarded", { close_policy: "confirm_if_dirty" }),
+    ]);
+    registry.register_close_adapter("guarded", {
+      observe: (surface) => ({
+        resource_id: `guarded:${surface.surface_id}`,
+        resource_generation: 1,
+        dirty: true,
+      }),
+      prepare: async ({ resource }) => {
+        if (resource.resource_id.endsWith("discard")) {
+          return {
+            ...resource,
+            choice: "discard",
+            discard: async () => { events.push("discard"); },
+          };
+        }
+        return {
+          ...resource,
+          choice: "save",
+          save: async () => {
+            events.push(`save:${resource.resource_id}`);
+            return !resource.resource_id.endsWith("save-b");
+          },
+        };
+      },
+    });
+    const initial = makeSingleGroupDocument([
+      makeSurface("save-a", { surface_type: "guarded" }),
+      makeSurface("save-b", { surface_type: "guarded" }),
+      makeSurface("discard", { surface_type: "guarded" }),
+    ]);
+    const store = createWorkbenchStore({ initial_document: initial });
+    const before = store.getState().document;
+    const unsubscribe = store.subscribe((state, previous) => {
+      if (state.document !== previous.document) events.push("layout");
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    await expect(navigation.close_group("group-1")).resolves.toBe("cancel");
+    unsubscribe();
+
+    expect(events).toEqual([
+      "save:guarded:save-a",
+      "save:guarded:save-b",
+    ]);
+    expect(store.getState().document).toBe(before);
+  });
+
   it("commits allowed closes only after the guard resolves", async () => {
     const canClose = vi.fn(async (): Promise<"allow"> => "allow");
     const registry = createSurfaceRegistry([
       definition("guarded", {
         close_policy: "confirm_if_dirty",
-        can_close: canClose,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded", canClose);
     const entry = makeSurface("surface-1", { surface_type: "guarded" });
     const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([entry]) });
     const navigation = createWorkbenchNavigationService({
@@ -665,9 +965,9 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([
       definition("guarded", {
         close_policy: "confirm_if_dirty",
-        can_close: canClose,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded", canClose);
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([
         makeSurface("surface-1", { surface_type: "guarded" }),
@@ -697,9 +997,9 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([
       definition("guarded", {
         close_policy: "confirm_if_dirty",
-        can_close: () => guard,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded", () => guard);
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([
         makeSurface("surface-1", { surface_type: "guarded" }),
@@ -905,14 +1205,20 @@ describe("workbench navigation service", () => {
     const guardStarted = new Promise<void>((resolve) => { notifyGuardStarted = resolve; });
     let releasePrompt: ((choice: "discard") => void) | undefined;
     const pendingPrompt = new Promise<"discard">((resolve) => { releasePrompt = resolve; });
-    const dirtyPrompt = vi.fn()
-      .mockImplementationOnce(() => {
-        notifyGuardStarted?.();
-        return pendingPrompt;
-      })
-      .mockReturnValue("discard");
+    const discard = vi.fn();
     const registry = createCoreWorkbenchSurfaceRegistry({
-      dirty_surface_prompt: dirtyPrompt,
+      files_close_adapter: {
+        observe: (surface) => ({
+          resource_id: `files:${surface.resource_key}`,
+          resource_generation: 1,
+          dirty: true,
+        }),
+        prepare: async ({ resource }) => {
+          notifyGuardStarted?.();
+          await pendingPrompt;
+          return { ...resource, choice: "discard", discard };
+        },
+      },
     });
     const provisional = makeSurface("provisional", {
       surface_type: "files",
@@ -948,12 +1254,9 @@ describe("workbench navigation service", () => {
       });
       releasePrompt?.("discard");
 
-      await expect(canonicalization).resolves.toBe("allow");
-      expect(store.getState().document.surfaces[provisional.surface_id]).toEqual({
-        ...pinned,
-        resource_key: "file:C:/real/report.md",
-      });
-      expect(dirtyPrompt).toHaveBeenCalledTimes(2);
+      await expect(canonicalization).resolves.toBe("cancel");
+      expect(store.getState().document.surfaces[provisional.surface_id]).toEqual(pinned);
+      expect(discard).not.toHaveBeenCalled();
     } finally {
       useFilesPresentationStore.getState().reset();
     }
@@ -1257,9 +1560,9 @@ describe("workbench navigation service", () => {
         open_policy: "focus_resource",
         resource_key: (request) => request.resource_key,
         close_policy: "confirm_if_dirty",
-        can_close: async () => guardDecision,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded-resource", async () => guardDecision);
     const ordinaryAlias = makeSurface("ordinary-alias", {
       surface_type: "guarded-resource",
       resource_key: "resource:alias-a",
@@ -1306,9 +1609,9 @@ describe("workbench navigation service", () => {
         open_policy: "focus_resource",
         resource_key: (request) => request.resource_key,
         close_policy: "confirm_if_dirty",
-        can_close: canClose,
       }),
     ]);
+    registerDecisionCloseAdapter(registry, "guarded-resource", canClose);
     const ordinaryAlias = makeSurface("ordinary-alias", {
       surface_type: "guarded-resource",
       resource_key: "resource:alias-a",

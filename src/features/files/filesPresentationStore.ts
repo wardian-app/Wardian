@@ -4,10 +4,8 @@ import type {
   FileContentDescriptorV1,
   FileRendererKind,
   SurfaceBadge,
-  SurfaceDefinition,
   WorkbenchSurfaceV1,
 } from "../../types";
-import type { DirtySurfacePrompt } from "../workbench/surfaces/dirtySurfaceGuards";
 import {
   decodeFileResourceKey,
   filePathIdentity,
@@ -225,31 +223,4 @@ export function filesPresentationBadges(
   if (entry.dirty) badges.push({ badge_id: "dirty", label: "Unsaved changes" });
   if (entry.attention) badges.push({ badge_id: "attention", label: "Attention requested" });
   return badges;
-}
-
-/** Bridges the current generic dirty prompt until durable Files drafts own close actions. */
-export function createFilesSurfaceCloseGuard(
-  prompt: DirtySurfacePrompt,
-): NonNullable<SurfaceDefinition["can_close"]> {
-  const pendingBySurface = new Map<string, Promise<"allow" | "cancel">>();
-  return (surface: WorkbenchSurfaceV1) => {
-    const entry = presentationEntry(surface.surface_id, surface.resource_key);
-    if (!entry?.dirty) return "allow";
-    const existing = pendingBySurface.get(surface.surface_id);
-    if (existing) return existing;
-    const pending = Promise.resolve(prompt({
-      surface_type: "files",
-      title: filesPresentationTitle(surface.surface_id, surface.resource_key),
-      message: "Keep or discard Files changes before closing?",
-      choices: ["save", "discard", "cancel"],
-    })).then((choice) => choice === "save" || choice === "discard" ? "allow" : "cancel")
-      .catch(() => "cancel" as const)
-      .finally(() => {
-        if (pendingBySurface.get(surface.surface_id) === pending) {
-          pendingBySurface.delete(surface.surface_id);
-        }
-      });
-    pendingBySurface.set(surface.surface_id, pending);
-    return pending;
-  };
 }

@@ -14,7 +14,7 @@ import {
   createCoreWorkbenchSurfaceRegistry,
 } from "./coreSurfaceRegistry";
 import type { DirtySurfacePrompt } from "./surfaces/dirtySurfaceGuards";
-import { makeSurface } from "./workbenchTestUtils";
+import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -201,7 +201,7 @@ describe("core workbench surface registry", () => {
     });
   });
 
-  it("prompts to close Files only when its presentation is dirty", async () => {
+  it("keeps the Task 1B Files close adapter clean until the editor controller is injected", () => {
     const prompt = vi.fn<DirtySurfacePrompt>(() => "cancel");
     const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
     const surface = makeSurface("files-1", {
@@ -217,7 +217,8 @@ describe("core workbench surface registry", () => {
       } satisfies FilesSurfaceStateV1,
     });
 
-    await expect(registry.can_close(surface)).resolves.toBe("allow");
+    const document = makeSingleGroupDocument([surface]);
+    expect(registry.observe_close_resources(document, [surface.surface_id])).toEqual([]);
     expect(prompt).not.toHaveBeenCalled();
 
     useFilesPresentationStore.getState().setPresentation("files-1", {
@@ -226,11 +227,8 @@ describe("core workbench surface registry", () => {
       dirty: true,
       attention: false,
     });
-    await expect(registry.can_close(surface)).resolves.toBe("cancel");
-    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
-      surface_type: "files",
-      title: "report.md",
-    }));
+    expect(registry.observe_close_resources(document, [surface.surface_id])).toEqual([]);
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("registers the exact migration policies and open commands", () => {
@@ -316,7 +314,17 @@ describe("core workbench surface registry", () => {
     expect(registry.presentation(library).badges).toEqual([
       { badge_id: "dirty", label: "Unsaved changes" },
     ]);
-    await expect(registry.can_close(library)).resolves.toBe("cancel");
+    const document = makeSingleGroupDocument([library]);
+    const [resource] = registry.observe_close_resources(document, [library.surface_id]) ?? [];
+    expect(resource).toBeDefined();
+    await expect(registry.prepare_close_resource({
+      context: {
+        snapshot: document,
+        transaction_version: 1,
+        closing_surface_ids: [library.surface_id],
+      },
+      resource: resource!,
+    })).resolves.toMatchObject({ choice: "cancel" });
     expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ surface_type: "library" }));
 
     const baseline = { schema: 2 as const, id: "wf", name: "Saved", nodes: [], edges: [] };

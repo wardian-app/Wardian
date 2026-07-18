@@ -8,6 +8,10 @@ import type {
 import type { WorkbenchCommand } from "./workbenchModel";
 import type { WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import type { WorkbenchStore } from "./useWorkbenchStore";
+import {
+  coordinateSurfaceClose,
+  type SurfaceCloseContext,
+} from "./closeTransactionCoordinator";
 
 export type WorkbenchIdKind = "surface" | "group" | "node";
 
@@ -47,7 +51,11 @@ export interface WorkbenchNavigationService {
   reset_workbench(): Promise<CloseDecision>;
 }
 
-type SurfaceGuardResult = "allow" | "cancel" | "stale";
+type CoordinatedCloseResult = {
+  decision: CloseDecision;
+  stale_before_effects: boolean;
+  stale_commit: boolean;
+};
 const MAX_CANONICALIZE_ATTEMPTS = 8;
 
 function defaultCreateId(kind: WorkbenchIdKind): string {
@@ -211,27 +219,51 @@ export function createWorkbenchNavigationService(
     return candidates;
   };
 
-  const guardSurfaces = async (
-    snapshot: ReturnType<WorkbenchStore["getState"]>["document"],
-    expectedTransactionVersion: number,
-    surfaceIds: readonly string[],
-  ): Promise<SurfaceGuardResult> => {
-    for (const surfaceId of surfaceIds) {
-      if (store.getState().transaction_version !== expectedTransactionVersion) return "stale";
-      const surface = snapshot.surfaces[surfaceId];
-      if (!surface) return "stale";
-      if (await registry.can_close(surface) === "cancel") return "cancel";
-      if (store.getState().transaction_version !== expectedTransactionVersion) return "stale";
+  const coordinateClose = async (
+    snapshotState: ReturnType<WorkbenchStore["getState"]>,
+    closingSurfaceIds: readonly string[],
+    commitLayout: (context: SurfaceCloseContext) => boolean | Promise<boolean>,
+  ): Promise<CoordinatedCloseResult> => {
+    const resources = registry.observe_close_resources(
+      snapshotState.document,
+      closingSurfaceIds,
+    );
+    if (resources === null) {
+      return { decision: "cancel", stale_before_effects: false, stale_commit: false };
     }
-    return "allow";
-  };
-
-  const closeResult = (
-    result: ReturnType<ReturnType<WorkbenchStore["getState"]>["compare_and_apply_commands"]>,
-  ): CloseDecision => {
-    if (result.accepted) return "allow";
-    if (result.stale) return "cancel";
-    throw commandFailure(result.errors);
+    let staleBeforeEffects = false;
+    let staleCommit = false;
+    const decision = await coordinateSurfaceClose({
+      context: {
+        snapshot: snapshotState.document,
+        transaction_version: snapshotState.transaction_version,
+        closing_surface_ids: closingSurfaceIds,
+      },
+      resources,
+      prepare_resource: (request) => registry.prepare_close_resource(request),
+      revalidate: (request) => {
+        const liveState = store.getState();
+        if (liveState.transaction_version !== request.context.transaction_version) {
+          staleBeforeEffects = true;
+          return false;
+        }
+        const valid = registry.revalidate_close_resources(liveState.document, request);
+        if (!valid) staleBeforeEffects = true;
+        return valid;
+      },
+      commit_layout: async (context) => {
+        const accepted = await commitLayout(context);
+        if (!accepted && store.getState().transaction_version !== context.transaction_version) {
+          staleCommit = true;
+        }
+        return accepted;
+      },
+    });
+    return {
+      decision,
+      stale_before_effects: staleBeforeEffects,
+      stale_commit: staleCommit,
+    };
   };
 
   return {
@@ -552,21 +584,18 @@ export function createWorkbenchNavigationService(
           commands = [{ type: "replace_surface", surface: replacement }];
         }
 
-        const guard = await guardSurfaces(
-          snapshot,
-          snapshotState.transaction_version,
-          guardedSurfaceIds,
-        );
-        if (guard === "cancel") return "cancel";
-        if (guard === "stale") continue;
         commands.push(...settledProvenanceCleanupCommands(snapshot, commands, surfaceId));
-        const result = store.getState().compare_and_apply_commands(
-          snapshotState.transaction_version,
-          commands,
+        const close = await coordinateClose(
+          snapshotState,
+          guardedSurfaceIds,
+          () => store.getState().compare_and_apply_commands(
+            snapshotState.transaction_version,
+            commands,
+          ).accepted,
         );
-        if (result.accepted) return "allow";
-        if (result.stale) continue;
-        throw commandFailure(result.errors);
+        if (close.decision === "allow") return "allow";
+        if (close.stale_commit && !close.stale_before_effects) continue;
+        return "cancel";
       }
       return "cancel";
     },
@@ -579,19 +608,20 @@ export function createWorkbenchNavigationService(
         throw new Error(`surface ${surfaceId} does not exist`);
       }
       const replacement = createSurface(request, surfaceId);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) !== "allow"
-      ) return "cancel";
       const commands: WorkbenchCommand[] = [{ type: "replace_surface", surface: replacement }];
       commands.push(...provenanceDetachCommands(
         snapshot,
         new Set([surfaceId]),
         new Set([surfaceId]),
       ));
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        commands,
-      ));
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     reset_surface: async (surfaceId) => {
@@ -599,10 +629,6 @@ export function createWorkbenchNavigationService(
       const snapshot = snapshotState.document;
       const surface = snapshot.surfaces[surfaceId];
       if (!surface) throw new Error(`surface ${surfaceId} does not exist`);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) !== "allow"
-      ) return "cancel";
-
       const definition = registry.get(surface.surface_type);
       const resetState = definition
         ? registry.serialize_state(surface.surface_type, registry.default_state(surface.surface_type))
@@ -623,10 +649,14 @@ export function createWorkbenchNavigationService(
         surface_id: surfaceId,
         ...resetState,
       });
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        commands,
-      ));
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     close: async (surfaceId) => {
@@ -635,9 +665,6 @@ export function createWorkbenchNavigationService(
       if (!(surfaceId in snapshot.surfaces)) {
         throw new Error(`surface ${surfaceId} does not exist`);
       }
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) !== "allow"
-      ) return "cancel";
       const surface = snapshot.surfaces[surfaceId];
       const commands: WorkbenchCommand[] = duplicateProvenance(surface)
         ? [{
@@ -651,10 +678,14 @@ export function createWorkbenchNavigationService(
         new Set([surfaceId]),
         new Set([surfaceId]),
       ));
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        commands,
-      ));
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     close_group: async (groupId) => {
@@ -662,10 +693,6 @@ export function createWorkbenchNavigationService(
       const snapshot = snapshotState.document;
       const group = snapshot.groups[groupId];
       if (!group) throw new Error(`group ${groupId} does not exist`);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, group.surface_ids)
-          !== "allow"
-      ) return "cancel";
       const affectedSurfaceIds = new Set(group.surface_ids);
       const commands: WorkbenchCommand[] = group.surface_ids.flatMap((surfaceId) => {
         const surface = snapshot.surfaces[surfaceId];
@@ -682,10 +709,14 @@ export function createWorkbenchNavigationService(
         affectedSurfaceIds,
         affectedSurfaceIds,
       ));
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        commands,
-      ));
+      return (await coordinateClose(
+        snapshotState,
+        group.surface_ids,
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     reset_workbench: async () => {
@@ -694,24 +725,15 @@ export function createWorkbenchNavigationService(
       const surfaceIds = groupIdsDepthFirst(snapshot.root).flatMap(
         (groupId) => snapshot.groups[groupId]?.surface_ids ?? [],
       );
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, surfaceIds) !== "allow"
-      ) return "cancel";
-      if (options.reset_document) {
-        if (store.getState().transaction_version !== snapshotState.transaction_version) {
-          return "cancel";
-        }
-        const decision = await options.reset_document(snapshotState.transaction_version)
-          ? "allow"
-          : "cancel";
-        return decision;
-      }
-      const result = store.getState().compare_and_reset_document(
-        snapshotState.transaction_version,
-      );
-      if (!result.accepted && result.stale) return "cancel";
-      if (!result.accepted) throw commandFailure(result.errors);
-      return "allow";
+      return (await coordinateClose(
+        snapshotState,
+        surfaceIds,
+        () => options.reset_document
+          ? options.reset_document(snapshotState.transaction_version)
+          : store.getState().compare_and_reset_document(
+              snapshotState.transaction_version,
+            ).accepted,
+      )).decision;
     },
   };
 }

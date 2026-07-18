@@ -615,7 +615,6 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
         readonly is_transient: (state: TState) => boolean;
         readonly pin: (state: TState) => TState;
     };
-    readonly can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
     readonly commands: readonly SurfaceCommandDefinition[];
     readonly badges?: (surface: WorkbenchSurfaceV1) => readonly SurfaceBadge[];
 };

@@ -1,5 +1,4 @@
 import type {
-  CloseDecision,
   OpenSurfaceRequest,
   SerializedSurfaceState,
   SurfaceDefinition,
@@ -14,6 +13,13 @@ import {
   createDefaultWorkbenchDocument,
   validateWorkbenchDocument,
 } from "./workbenchModel";
+import type {
+  SurfaceClosePreparation,
+  SurfaceClosePreparationRequest,
+  SurfaceCloseResource,
+  SurfaceCloseRevalidationRequest,
+  SurfaceCloseSnapshot,
+} from "./closeTransactionCoordinator";
 
 const MISSING_SURFACE_TYPE = "missing_surface";
 
@@ -23,8 +29,27 @@ export type ResolvedSurface = {
   missing_surface_type?: string;
 };
 
+type Awaitable<T> = T | Promise<T>;
+
+export interface SurfaceCloseResourceObservation {
+  readonly resource_id: string;
+  readonly resource_generation: string | number;
+  readonly dirty: boolean;
+}
+
+/** Resource-owned state/effects injected without coupling the registry to UI runtimes. */
+export interface SurfaceCloseResourceAdapter {
+  readonly observe: (
+    surface: WorkbenchSurfaceV1,
+  ) => SurfaceCloseResourceObservation | null;
+  readonly prepare: (
+    request: SurfaceClosePreparationRequest,
+  ) => Awaitable<SurfaceClosePreparation | null>;
+}
+
 export interface WorkbenchSurfaceRegistry {
   register<TState extends SurfaceState>(definition: SurfaceDefinition<TState>): void;
+  register_close_adapter(type: string, adapter: SurfaceCloseResourceAdapter): void;
   list(): readonly SurfaceDefinition[];
   get(type: string): SurfaceDefinition | undefined;
   require(type: string): SurfaceDefinition;
@@ -43,7 +68,17 @@ export interface WorkbenchSurfaceRegistry {
   sync_presentations(surfaces: readonly WorkbenchSurfaceV1[]): void;
   subscribe_presentation(listener: () => void): () => void;
   presentation_version(): number;
-  can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision>;
+  observe_close_resources(
+    document: SurfaceCloseSnapshot,
+    closing_surface_ids?: readonly string[],
+  ): readonly SurfaceCloseResource[] | null;
+  prepare_close_resource(
+    request: SurfaceClosePreparationRequest,
+  ): Promise<SurfaceClosePreparation | null>;
+  revalidate_close_resources(
+    document: SurfaceCloseSnapshot,
+    request: SurfaceCloseRevalidationRequest,
+  ): boolean;
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
@@ -58,6 +93,27 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validCloseGeneration(value: string | number): boolean {
+  return typeof value === "string"
+    ? value.length > 0
+    : Number.isFinite(value) && !Object.is(value, -0);
+}
+
+function sameStringMembership(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightIds = new Set(right);
+  return left.every((value) => rightIds.has(value));
+}
+
+function sameCloseResource(
+  left: SurfaceCloseResource,
+  right: SurfaceCloseResource,
+): boolean {
+  return left.resource_id === right.resource_id
+    && Object.is(left.resource_generation, right.resource_generation)
+    && sameStringMembership(left.presentation_ids, right.presentation_ids);
 }
 
 function invalidRestore(error: string): SurfaceRestoreResult {
@@ -242,6 +298,7 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
   private readonly rawDefinitionsByType = new Map<string, SurfaceDefinition>();
   private readonly publicDefinitionsByType = new Map<string, SurfaceDefinition>();
   private readonly registrationOrder: SurfaceDefinition[] = [];
+  private readonly closeAdaptersByType = new Map<string, SurfaceCloseResourceAdapter>();
   private readonly presentationListeners = new Set<() => void>();
   private readonly presentationSources = new Set<(listener: () => void) => () => void>();
   private readonly presentationSourceUnsubscribers = new Map<
@@ -271,6 +328,21 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
         this.attachPresentationSource(rawDefinition.presentation_subscribe);
       }
     }
+  }
+
+  register_close_adapter(type: string, adapter: SurfaceCloseResourceAdapter): void {
+    const definition = this.rawDefinitionsByType.get(type);
+    if (!definition) throw new Error(`surface type ${type} is not registered`);
+    if (definition.close_policy !== "confirm_if_dirty") {
+      throw new Error(`surface type ${type} does not use confirm_if_dirty`);
+    }
+    if (this.closeAdaptersByType.has(type)) {
+      throw new Error(`surface type ${type} already has a close adapter`);
+    }
+    if (typeof adapter.observe !== "function" || typeof adapter.prepare !== "function") {
+      throw new Error("close adapter must define observe and prepare functions");
+    }
+    this.closeAdaptersByType.set(type, Object.freeze({ ...adapter }));
   }
 
   list(): readonly SurfaceDefinition[] {
@@ -477,17 +549,120 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
     return this.presentationVersion;
   }
 
-  async can_close(surface: WorkbenchSurfaceV1): Promise<CloseDecision> {
-    const definition = this.rawDefinitionsByType.get(surface.surface_type);
-    if (!definition) return "allow";
-    if (definition.close_policy === "close_view") return "allow";
-    if (!definition.can_close) return "cancel";
-    try {
-      const snapshot = canonicalSurface(surface, definition.max_state_bytes);
-      return await definition.can_close(snapshot) === "allow" ? "allow" : "cancel";
-    } catch {
-      return "cancel";
+  observe_close_resources(
+    document: SurfaceCloseSnapshot,
+    closing_surface_ids: readonly string[] = Object.keys(document.surfaces),
+  ): readonly SurfaceCloseResource[] | null {
+    const closingIds = new Set(closing_surface_ids);
+    if (closingIds.size !== closing_surface_ids.length) return null;
+    if (closing_surface_ids.some((surfaceId) => !(surfaceId in document.surfaces))) return null;
+
+    type GroupedResource = {
+      resource_id: string;
+      resource_generation: string | number;
+      dirty: boolean;
+      presentation_ids: string[];
+      adapter: SurfaceCloseResourceAdapter;
+    };
+    const grouped = new Map<string, GroupedResource>();
+    const resourceIdByPresentation = new Map<string, string>();
+
+    for (const surface of Object.values(document.surfaces)) {
+      const definition = this.rawDefinitionsByType.get(surface.surface_type);
+      if (!definition || definition.close_policy === "close_view") continue;
+      const adapter = this.closeAdaptersByType.get(surface.surface_type);
+      if (!adapter) {
+        if (closingIds.has(surface.surface_id)) return null;
+        continue;
+      }
+
+      let observation: SurfaceCloseResourceObservation | null;
+      try {
+        const snapshot = canonicalSurface(surface, definition.max_state_bytes);
+        if (!this.restoreKnownSurface(definition, snapshot).ok) return null;
+        observation = adapter.observe(snapshot);
+      } catch {
+        return null;
+      }
+      if (observation === null) continue;
+      if (
+        typeof observation.resource_id !== "string"
+        || observation.resource_id.length === 0
+        || !validCloseGeneration(observation.resource_generation)
+        || typeof observation.dirty !== "boolean"
+      ) return null;
+
+      resourceIdByPresentation.set(surface.surface_id, observation.resource_id);
+      const existing = grouped.get(observation.resource_id);
+      if (existing) {
+        if (
+          existing.adapter !== adapter
+          || !Object.is(existing.resource_generation, observation.resource_generation)
+        ) return null;
+        existing.presentation_ids.push(surface.surface_id);
+        existing.dirty ||= observation.dirty;
+      } else {
+        grouped.set(observation.resource_id, {
+          ...observation,
+          presentation_ids: [surface.surface_id],
+          adapter,
+        });
+      }
     }
+
+    const ordered: SurfaceCloseResource[] = [];
+    const included = new Set<string>();
+    for (const surfaceId of closing_surface_ids) {
+      const resourceId = resourceIdByPresentation.get(surfaceId);
+      if (resourceId === undefined || included.has(resourceId)) continue;
+      const resource = grouped.get(resourceId);
+      if (!resource?.dirty) continue;
+      included.add(resourceId);
+      ordered.push(Object.freeze({
+        resource_id: resource.resource_id,
+        resource_generation: resource.resource_generation,
+        presentation_ids: Object.freeze([...resource.presentation_ids]),
+      }));
+    }
+    return Object.freeze(ordered);
+  }
+
+  async prepare_close_resource(
+    request: SurfaceClosePreparationRequest,
+  ): Promise<SurfaceClosePreparation | null> {
+    const presentationId = request.resource.presentation_ids[0];
+    if (presentationId === undefined) return null;
+    const surface = request.context.snapshot.surfaces[presentationId];
+    if (!surface) return null;
+    const adapter = this.closeAdaptersByType.get(surface.surface_type);
+    if (!adapter) return null;
+    try {
+      return await adapter.prepare(request);
+    } catch {
+      return null;
+    }
+  }
+
+  revalidate_close_resources(
+    document: SurfaceCloseSnapshot,
+    request: SurfaceCloseRevalidationRequest,
+  ): boolean {
+    const observed = this.observe_close_resources(
+      document,
+      request.context.closing_surface_ids,
+    );
+    if (observed === null) return false;
+    const closingIds = new Set(request.context.closing_surface_ids);
+    const finalClosing = observed.filter((resource) => (
+      resource.presentation_ids.every((presentationId) => closingIds.has(presentationId))
+    ));
+    if (finalClosing.length !== request.resources.length) return false;
+    const expectedById = new Map(request.resources.map((resource) => [resource.resource_id, resource]));
+    return expectedById.size === request.resources.length
+      && finalClosing.every((resource) => {
+        const expected = expectedById.get(resource.resource_id);
+        return expected !== undefined && sameCloseResource(resource, expected);
+      });
   }
 
   private requireRaw(type: string): SurfaceDefinition {
@@ -620,7 +795,6 @@ class SurfaceRegistry implements WorkbenchSurfaceRegistry {
         ? (request: OpenSurfaceRequest, candidates: readonly WorkbenchSurfaceV1[]) =>
             this.resolve_existing({ ...request, surface_type: type }, candidates)
         : undefined,
-      can_close: (surface: WorkbenchSurfaceV1) => this.can_close(surface),
       badges: definition.badges
         ? (surface: WorkbenchSurfaceV1) => this.presentation(surface).badges
         : undefined,

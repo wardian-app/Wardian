@@ -13,26 +13,30 @@ import type {
 import { useBuilderStore } from "../../store/useBuilderStore";
 import { useLibraryStore } from "../../store/useLibraryStore";
 import {
-  createFilesSurfaceCloseGuard,
   filesPresentationBadges,
   filesPresentationIcon,
   filesPresentationTitle,
   useFilesPresentationStore,
 } from "../files/filesPresentationStore";
+import { createCleanFilesCloseAdapter } from "../files/filesCloseAdapter";
 import { decodeFileResourceKey } from "../files/fileResourceKey";
 import {
   isFilesSurfaceStateV1,
   isFilesSurfaceStateV2,
   restoreFilesSurfaceState,
 } from "../files/filesSurfaceState";
-import { createSurfaceRegistry, type WorkbenchSurfaceRegistry } from "./surfaceRegistry";
+import {
+  createSurfaceRegistry,
+  type SurfaceCloseResourceAdapter,
+  type WorkbenchSurfaceRegistry,
+} from "./surfaceRegistry";
 import {
   CORE_VIEW_SURFACE_DEFINITIONS,
   CORE_VIEW_SURFACE_MAX_STATE_BYTES,
 } from "./surfaces/coreSurfaceMetadata";
 import {
-  createLibrarySurfaceCloseGuard,
-  createWorkflowsSurfaceCloseGuard,
+  createLibrarySurfaceCloseAdapter,
+  createWorkflowsSurfaceCloseAdapter,
   type DirtySurfacePrompt,
 } from "./surfaces/dirtySurfaceGuards";
 
@@ -75,7 +79,6 @@ type DefinitionOptions = {
   presentation_subscribe?: (listener: () => void) => () => void;
   presentation_sync?: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
   resource_key?: (request: OpenSurfaceRequest) => string | undefined;
-  can_close?: SurfaceDefinition["can_close"];
   commands?: SurfaceDefinition["commands"];
   badges?: SurfaceDefinition["badges"];
   serialize_state?: SurfaceDefinition["serialize_state"];
@@ -110,7 +113,6 @@ function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
       ? { ok: true, state: value }
       : { ok: false, error: `unsupported ${options.type} state version ${version}` }),
     ...(options.transient_state ? { transient_state: options.transient_state } : {}),
-    ...(options.can_close ? { can_close: options.can_close } : {}),
     commands: options.commands ?? [],
     ...(options.badges ? { badges: options.badges } : {}),
   };
@@ -126,6 +128,7 @@ function dirtySurfaceCommand(type: "library" | "workflows", title: string) {
 
 export type CoreWorkbenchSurfaceRegistryOptions = {
   dirty_surface_prompt?: DirtySurfacePrompt;
+  files_close_adapter?: SurfaceCloseResourceAdapter;
 };
 
 const failClosedDirtyPrompt: DirtySurfacePrompt = () => "cancel";
@@ -211,9 +214,7 @@ function restoreEmptySurfaceState(type: string, value: unknown, version: number)
   return { ok: true as const, state: {} };
 }
 
-function coreSurfaceDefinitions(
-  dirtySurfacePrompt: DirtySurfacePrompt,
-): readonly SurfaceDefinition[] {
+function coreSurfaceDefinitions(): readonly SurfaceDefinition[] {
   return [
     surfaceDefinition({
       type: "new-tab",
@@ -239,7 +240,6 @@ function coreSurfaceDefinitions(
       open_policy: "singleton",
       close_policy: "confirm_if_dirty",
       max_state_bytes: CORE_VIEW_SURFACE_MAX_STATE_BYTES,
-      can_close: createLibrarySurfaceCloseGuard(dirtySurfacePrompt),
       commands: [dirtySurfaceCommand("library", "Library")],
       badges: (surface) => useLibraryStore.getState().isEditorSurfaceDirty(surface.surface_id)
         ? [{ badge_id: "dirty", label: "Unsaved changes" }]
@@ -254,7 +254,6 @@ function coreSurfaceDefinitions(
       open_policy: "singleton",
       close_policy: "confirm_if_dirty",
       max_state_bytes: CORE_VIEW_SURFACE_MAX_STATE_BYTES,
-      can_close: createWorkflowsSurfaceCloseGuard(dirtySurfacePrompt),
       commands: [dirtySurfaceCommand("workflows", "Workflows")],
       badges: () => useBuilderStore.getState().dirty
         ? [{ badge_id: "dirty", label: "Unsaved changes" }]
@@ -300,7 +299,6 @@ function coreSurfaceDefinitions(
         surface.surface_id,
         surface.resource_key,
       ),
-      can_close: createFilesSurfaceCloseGuard(dirtySurfacePrompt),
       serialize_state: (state) => {
         const restored = restoreFilesSurfaceState(
           state,
@@ -328,7 +326,13 @@ function coreSurfaceDefinitions(
 export function createCoreWorkbenchSurfaceRegistry(
   options: CoreWorkbenchSurfaceRegistryOptions = {},
 ): WorkbenchSurfaceRegistry {
-  return createSurfaceRegistry(coreSurfaceDefinitions(
-    options.dirty_surface_prompt ?? failClosedDirtyPrompt,
-  ));
+  const prompt = options.dirty_surface_prompt ?? failClosedDirtyPrompt;
+  const registry = createSurfaceRegistry(coreSurfaceDefinitions());
+  registry.register_close_adapter("library", createLibrarySurfaceCloseAdapter(prompt));
+  registry.register_close_adapter("workflows", createWorkflowsSurfaceCloseAdapter(prompt));
+  registry.register_close_adapter(
+    "files",
+    options.files_close_adapter ?? createCleanFilesCloseAdapter(),
+  );
+  return registry;
 }

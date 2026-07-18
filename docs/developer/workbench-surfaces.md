@@ -24,7 +24,8 @@ DockviewLayoutAdapter <---------------+
 - `NavigationService` is the mutation boundary for opening, focusing, closing,
   closing groups, and resetting. Structural commands such as split, move,
   join, ratio, and active-tab changes use the store's validated command API.
-  Destructive navigation runs close guards before committing changes.
+  Destructive navigation uses one two-phase resource close transaction before
+  committing changes.
 - `DockviewLayoutAdapter` projects Wardian's document through Dockview's public
   API. Dockview is not a source of truth and its JSON is never persisted.
 - Surface instances own bounded presentation state only. They must reference
@@ -79,8 +80,13 @@ immutable records. A definition supplies:
 - `open_policy`, `render_policy`, `runtime_policy`, and `close_policy`;
 - `state_schema_version`, `max_state_bytes`, a default state, and strict
   serialize/restore functions;
-- optional resource-key resolution, existing-instance resolution, and an
-  asynchronous close guard.
+- optional resource-key and existing-instance resolution.
+
+`confirm_if_dirty` definitions register a separate resource adapter. The
+adapter reports canonical resource identity, monotonic generation, dirty state,
+and deferred Save/Discard work. Keeping this outside `SurfaceDefinition`
+prevents render components and presentation metadata from becoming close-time
+authorities.
 
 Registration rejects duplicate or reserved types, invalid policies, unsafe
 state versions, and state limits outside `1..65536` bytes. Serialized state must
@@ -126,9 +132,9 @@ field remain valid, while unknown record keys and cross-surface owner IDs are
 rejected.
 The frontend never resolves symlinks, junctions, or filesystem authority.
 Canonicalization re-resolves the current Workbench document after a stale
-compare-and-swap. A close guard cancellation remains a user veto, while a
-concurrent transaction is retried with fresh aliases so restored tabs converge
-without retaining a permanently provisional identity.
+layout compare-and-swap. A cancellation remains a user veto. A transaction or
+resource membership change while a dirty-resource choice is pending cancels
+before Save/Discard effects, rather than replaying a choice against new state.
 
 ### Render policies
 
@@ -150,11 +156,20 @@ policy; mount behavior alone must not become a lifecycle contract.
 `runtime_backed` means the surface displays a separately owned runtime; it does
 not give the surface authority to stop that runtime.
 
-`close_view` can close immediately. `confirm_if_dirty` uses `can_close` to
-return `allow` or `cancel`; Library and Workflows use dirty-state guards. Group
-close and workbench reset evaluate every affected guard in deterministic visual
-order, await required saves, and commit once. A cancel or failed save leaves the
-document and durable revision unchanged.
+`close_view` can close immediately. `confirm_if_dirty` participates in a batch
+resource transaction. Navigation captures an immutable document, transaction
+version, and complete closing-surface set; the registry groups exact
+presentations by canonical resource and prepares each final-closing dirty
+resource once. It collects every choice before effects, revalidates transaction,
+membership, identity, and generation, runs all requested Saves, commits layout
+once, then runs Discard/release cleanup. A cancel, stale preparation, or failed
+save performs no layout commit and no discard.
+
+Library resources remain presentation-keyed because their editor bridges are
+presentation-owned. Workflows uses one shared builder resource across every
+presentation. Files receives a narrow injected adapter; until the Files editor
+controller is added, the default adapter reports clean state and performs no
+Save or Discard work.
 
 Closing an Agent Session or every presentation of an agent never pauses,
 kills, clears, or removes the agent. Runtime lifecycle actions remain explicit

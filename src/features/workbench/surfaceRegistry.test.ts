@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { SurfaceDefinition, WorkbenchSurfaceV1 } from "../../types";
 import { createSurfaceRegistry } from "./surfaceRegistry";
+import { makeSingleGroupDocument } from "./workbenchTestUtils";
 
 type TestState = { label: string };
 
@@ -232,27 +233,48 @@ describe("surface registry", () => {
     expect(registry.require("dynamic-icon").icon).toBe("fallback-icon");
   });
 
-  it("awaits dirty close guards, fails closed, and keeps missing surfaces closeable", async () => {
-    const can_close = vi.fn<NonNullable<SurfaceDefinition<TestState>["can_close"]>>(
-      async (): Promise<"cancel"> => "cancel",
-    );
+  it("observes canonical dirty resources with exact presentation membership and generation", () => {
     const registry = createSurfaceRegistry([
-      definition("dirty", {
-        close_policy: "confirm_if_dirty",
-        can_close,
-      }),
-      definition("broken", {
-        close_policy: "confirm_if_dirty",
-        can_close: async () => {
-          throw new Error("save failed");
-        },
-      }),
+      definition("dirty", { close_policy: "confirm_if_dirty" }),
     ]);
+    let generation = 7;
+    registry.register_close_adapter("dirty", {
+      observe: (entry) => ({
+        resource_id: `dirty:${entry.resource_key}`,
+        resource_generation: generation,
+        dirty: true,
+      }),
+      prepare: async ({ resource }) => ({
+        ...resource,
+        choice: "discard",
+        discard: async () => undefined,
+      }),
+    });
+    const first = surface("first", "dirty", "resource:a");
+    const duplicate = surface("duplicate", "dirty", "resource:a");
+    const document = makeSingleGroupDocument([first, duplicate]);
 
-    await expect(registry.can_close(surface("dirty-1", "dirty"))).resolves.toBe("cancel");
-    expect(can_close).toHaveBeenCalledOnce();
-    await expect(registry.can_close(surface("broken-1", "broken"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("unknown-1", "unknown"))).resolves.toBe("allow");
+    expect(registry.observe_close_resources(document)).toEqual([{
+      resource_id: "dirty:resource:a",
+      resource_generation: 7,
+      presentation_ids: ["first", "duplicate"],
+    }]);
+    const revalidation = {
+      context: {
+        snapshot: document,
+        transaction_version: 1,
+        closing_surface_ids: ["first", "duplicate"],
+      },
+      resources: [{
+        resource_id: "dirty:resource:a",
+        resource_generation: 7,
+        presentation_ids: ["first", "duplicate"],
+      }],
+    };
+    expect(registry.revalidate_close_resources(document, revalidation)).toBe(true);
+
+    generation = 8;
+    expect(registry.revalidate_close_resources(document, revalidation)).toBe(false);
   });
 
   it("copies and freezes definitions, commands, and returned registration order", () => {
@@ -344,15 +366,6 @@ describe("surface registry", () => {
           }
           return [];
         },
-        close_policy: "confirm_if_dirty",
-        can_close: (entry) => {
-          try {
-            (entry.state as TestState).label = "mutated";
-          } catch {
-            mutationBlocked.push("close");
-          }
-          return "allow";
-        },
       }),
     ]);
     const request = { surface_type: "immutable", resource_key: "resource-1" };
@@ -366,7 +379,6 @@ describe("surface registry", () => {
     const resolved = registry.resolve_surface({ ...candidate, state });
     expect(resolved.restore_result).toEqual({ ok: true, state: { label: "original" } });
     registry.presentation({ ...candidate, state });
-    await expect(registry.can_close({ ...candidate, state })).resolves.toBe("allow");
 
     expect(request.resource_key).toBe("resource-1");
     expect(candidate.surface_id).toBe("surface-1");
@@ -387,42 +399,24 @@ describe("surface registry", () => {
       "request",
       "title",
       "badges",
-      "close",
     ]);
   });
 
-  it("enforces close_policy and validates guard results exactly", async () => {
-    const ignored = vi.fn(async (): Promise<"cancel"> => "cancel");
-    const registry = createSurfaceRegistry();
-    registry.register(definition("close-view", { close_policy: "close_view", can_close: ignored }));
-    registry.register(definition("missing-guard", { close_policy: "confirm_if_dirty" }));
-    registry.register(definition("allow", {
-      close_policy: "confirm_if_dirty",
-      can_close: async (): Promise<"allow"> => "allow",
-    }));
-    registry.register(definition("cancel", {
-      close_policy: "confirm_if_dirty",
-      can_close: async (): Promise<"cancel"> => "cancel",
-    }));
-    registry.register(definition("throws", {
-      close_policy: "confirm_if_dirty",
-      can_close: async () => { throw new Error("failed save"); },
-    }));
-    registry.register(definition("malformed", {
-      close_policy: "confirm_if_dirty",
-      can_close: (async () => "malformed") as unknown as NonNullable<
-        SurfaceDefinition<TestState>["can_close"]
-      >,
-    }));
+  it("allows close adapters only for registered confirm-if-dirty surfaces", () => {
+    const registry = createSurfaceRegistry([
+      definition("close-view"),
+      definition("dirty", { close_policy: "confirm_if_dirty" }),
+    ]);
+    const adapter = {
+      observe: () => ({ resource_id: "dirty:one", resource_generation: 1, dirty: false }),
+      prepare: async () => null,
+    };
 
-    await expect(registry.can_close(surface("one", "close-view"))).resolves.toBe("allow");
-    expect(ignored).not.toHaveBeenCalled();
-    await expect(registry.can_close(surface("two", "missing-guard"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("three", "allow"))).resolves.toBe("allow");
-    await expect(registry.can_close(surface("four", "cancel"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("five", "throws"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("six", "malformed"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("seven", "unknown"))).resolves.toBe("allow");
+    expect(() => registry.register_close_adapter("missing", adapter)).toThrow(/not registered/i);
+    expect(() => registry.register_close_adapter("close-view", adapter))
+      .toThrow(/confirm_if_dirty/i);
+    registry.register_close_adapter("dirty", adapter);
+    expect(() => registry.register_close_adapter("dirty", adapter)).toThrow(/already/i);
   });
 
   it("turns malformed or unserializable restore results into safe failures", () => {
@@ -499,7 +493,7 @@ describe("surface registry", () => {
       .toThrow(/invalid pinned state/i);
   });
 
-  it("exposes only validated safe callback wrappers from list/get/require", async () => {
+  it("exposes only validated safe callback wrappers from list/get/require", () => {
     const serialize = vi.fn((state: TestState) => state);
     const restore = vi.fn((value: unknown) => ({ ok: true as const, state: value as TestState }));
     const resource = vi.fn((request: { resource_key?: string }) => request.resource_key);
@@ -510,7 +504,6 @@ describe("surface registry", () => {
         serialize_state: serialize,
         restore_state: restore,
         resource_key: resource,
-        can_close: async (): Promise<"allow"> => "allow",
       }),
     ]);
     const exposed = registry.require("wrapped");
@@ -526,10 +519,6 @@ describe("surface registry", () => {
       surface_type: "wrapped",
       resource_key: "resource-1",
     })).toBe("resource-1");
-    await expect(exposed.can_close?.({
-      ...surface("surface-1", "wrapped"),
-      state: { label: "ok" },
-    })).resolves.toBe("allow");
   });
 
   it("rejects noncanonical/oversize persisted state before restore and validates policy enums", () => {

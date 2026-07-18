@@ -1,6 +1,10 @@
-import type { CloseDecision, SurfaceDefinition } from "../../../types";
 import { useBuilderStore } from "../../../store/useBuilderStore";
 import { useLibraryStore } from "../../../store/useLibraryStore";
+import type { SurfaceClosePreparationRequest } from "../closeTransactionCoordinator";
+import type {
+  SurfaceCloseResourceAdapter,
+  SurfaceCloseResourceObservation,
+} from "../surfaceRegistry";
 
 export type DirtySurfaceType = "library" | "workflows" | "files";
 export type DirtySurfaceChoice = "save" | "discard" | "cancel";
@@ -17,104 +21,125 @@ export type DirtySurfacePrompt = (
   request: DirtySurfacePromptRequest,
 ) => Promise<DirtySurfaceChoice> | DirtySurfaceChoice;
 
-export interface DirtySurfaceResource {
-  is_dirty: () => boolean;
-  save: () => Promise<boolean> | boolean;
-  discard: () => Promise<boolean> | boolean;
-}
-
-/**
- * Resolves a dirty resource without throwing into workbench navigation.
- *
- * Save/discard failures and malformed prompt results are deliberately treated
- * as cancellation so close-group and reset remain all-or-nothing operations.
- */
-export async function resolveDirtySurfaceClose(
-  resource: DirtySurfaceResource,
+function createChoiceCollector(
   prompt: DirtySurfacePrompt,
   request: Omit<DirtySurfacePromptRequest, "choices">,
-): Promise<CloseDecision> {
-  if (!resource.is_dirty()) return "allow";
-
-  let choice: DirtySurfaceChoice;
-  try {
-    choice = await prompt({
-      ...request,
-      choices: ["save", "discard", "cancel"],
-    });
-  } catch {
-    return "cancel";
-  }
-
-  if (choice === "cancel") return "cancel";
-  if (choice !== "save" && choice !== "discard") return "cancel";
-
-  try {
-    const resolved = choice === "save"
-      ? await resource.save()
-      : await resource.discard();
-    return resolved ? "allow" : "cancel";
-  } catch {
-    return "cancel";
-  }
-}
-
-function createSerializedDirtySurfaceGuard(
-  resource: DirtySurfaceResource,
-  prompt: DirtySurfacePrompt,
-  request: Omit<DirtySurfacePromptRequest, "choices">,
-): NonNullable<SurfaceDefinition["can_close"]> {
-  let pending: Promise<CloseDecision> | null = null;
-  return () => {
-    if (pending) return pending;
-    pending = resolveDirtySurfaceClose(resource, prompt, request)
-      .finally(() => { pending = null; });
+) {
+  const pendingByResource = new Map<string, Promise<DirtySurfaceChoice>>();
+  return (resourceId: string): Promise<DirtySurfaceChoice> => {
+    const existing = pendingByResource.get(resourceId);
+    if (existing) return existing;
+    const pending = Promise.resolve()
+      .then(() => prompt({ ...request, choices: ["save", "discard", "cancel"] }))
+      .then((choice) => (
+        choice === "save" || choice === "discard" || choice === "cancel"
+          ? choice
+          : "cancel"
+      ))
+      .catch(() => "cancel" as const)
+      .finally(() => {
+        if (pendingByResource.get(resourceId) === pending) {
+          pendingByResource.delete(resourceId);
+        }
+      });
+    pendingByResource.set(resourceId, pending);
     return pending;
   };
 }
 
-export function createLibrarySurfaceCloseGuard(
+function preparedChoice(
+  request: SurfaceClosePreparationRequest,
+  choice: DirtySurfaceChoice,
+  effects: {
+    save: () => Promise<boolean> | boolean;
+    discard: () => Promise<boolean> | boolean;
+  },
+) {
+  if (choice === "save") {
+    return { ...request.resource, choice, save: effects.save } as const;
+  }
+  if (choice === "discard") {
+    return {
+      ...request.resource,
+      choice,
+      discard: async () => {
+        try {
+          await effects.discard();
+        } catch {
+          // Post-commit cleanup cannot roll layout back. Resource adapters fail closed earlier.
+        }
+      },
+    } as const;
+  }
+  return { ...request.resource, choice: "cancel" as const };
+}
+
+export function createLibrarySurfaceCloseAdapter(
   prompt: DirtySurfacePrompt,
-): NonNullable<SurfaceDefinition["can_close"]> {
-  const pendingBySurface = new Map<string, Promise<CloseDecision>>();
-  return (surface) => {
-    const surfaceId = surface.surface_id;
-    const existing = pendingBySurface.get(surfaceId);
-    if (existing) return existing;
-    const pending = resolveDirtySurfaceClose(
-      {
-        is_dirty: () => useLibraryStore.getState().isEditorSurfaceDirty(surfaceId),
+): SurfaceCloseResourceAdapter {
+  const generations = new WeakMap<object, number>();
+  let nextGeneration = 1;
+  const generationFor = (resource: object | undefined): number => {
+    if (!resource) return 1;
+    const existing = generations.get(resource);
+    if (existing !== undefined) return existing;
+    nextGeneration += 1;
+    generations.set(resource, nextGeneration);
+    return nextGeneration;
+  };
+  const collectChoice = createChoiceCollector(prompt, {
+    surface_type: "library",
+    title: "Library",
+    message: "Save changes in Library before closing?",
+  });
+  return {
+    observe: (surface): SurfaceCloseResourceObservation => {
+      const resource = useLibraryStore.getState()._editorResources[surface.surface_id];
+      return {
+        resource_id: `library:${surface.surface_id}`,
+        resource_generation: generationFor(resource),
+        dirty: resource?.dirty ?? false,
+      };
+    },
+    prepare: async (request) => {
+      const surfaceId = request.resource.presentation_ids[0];
+      if (
+        surfaceId === undefined
+        || request.resource.resource_id !== `library:${surfaceId}`
+      ) return null;
+      const choice = await collectChoice(request.resource.resource_id);
+      return preparedChoice(request, choice, {
         save: () => useLibraryStore.getState().saveEditorDraft(surfaceId),
         discard: () => useLibraryStore.getState().discardEditorDraft(surfaceId),
-      },
-      prompt,
-      {
-        surface_type: "library",
-        title: "Library",
-        message: "Save changes in Library before closing?",
-      },
-    ).finally(() => {
-      if (pendingBySurface.get(surfaceId) === pending) pendingBySurface.delete(surfaceId);
-    });
-    pendingBySurface.set(surfaceId, pending);
-    return pending;
+      });
+    },
   };
 }
 
-export function createWorkflowsSurfaceCloseGuard(
+export function createWorkflowsSurfaceCloseAdapter(
   prompt: DirtySurfacePrompt,
-): NonNullable<SurfaceDefinition["can_close"]> {
-  return createSerializedDirtySurfaceGuard(
-    {
-      is_dirty: () => useBuilderStore.getState().dirty,
-      save: () => useBuilderStore.getState().save(),
-      discard: () => useBuilderStore.getState().discard(),
+): SurfaceCloseResourceAdapter {
+  const collectChoice = createChoiceCollector(prompt, {
+    surface_type: "workflows",
+    title: "Workflows",
+    message: "Save workflow changes before closing?",
+  });
+  return {
+    observe: (): SurfaceCloseResourceObservation => {
+      const state = useBuilderStore.getState();
+      return {
+        resource_id: "workflows:builder",
+        resource_generation: state.editRevision,
+        dirty: state.dirty,
+      };
     },
-    prompt,
-    {
-      surface_type: "workflows",
-      title: "Workflows",
-      message: "Save workflow changes before closing?",
+    prepare: async (request) => {
+      if (request.resource.resource_id !== "workflows:builder") return null;
+      const choice = await collectChoice(request.resource.resource_id);
+      return preparedChoice(request, choice, {
+        save: () => useBuilderStore.getState().save(),
+        discard: () => useBuilderStore.getState().discard(),
+      });
     },
-  );
+  };
 }
