@@ -1,15 +1,16 @@
 export const formatExplorerPathForDisplay = (path: string): string => {
+  let displayPath = path;
   if (/^\\\\\?\\UNC\\/i.test(path)) {
-    return `\\\\${path.slice(8)}`;
+    displayPath = `\\\\${path.slice(8)}`;
+  } else if (/^\\\\\?\\(?=[a-z]:[\\/])/i.test(path)) {
+    displayPath = path.slice(4);
+  } else if (/^\/\/\?\/UNC\//i.test(path)) {
+    displayPath = `\\\\${path.slice(8)}`;
+  } else if (/^\/\/\?\/(?=[a-z]:[\\/])/i.test(path)) {
+    displayPath = path.slice(4);
   }
-  if (/^\\\\\?\\(?=[a-z]:[\\/])/i.test(path)) {
-    return path.slice(4);
-  }
-  if (/^\/\/\?\/UNC\//i.test(path)) {
-    return `//${path.slice(8)}`;
-  }
-  if (/^\/\/\?\/(?=[a-z]:[\\/])/i.test(path)) {
-    return path.slice(4);
-  }
-  return path;
+
+  const windowsPath = /^[a-z]:[\\/]/i.test(displayPath)
+    || /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(displayPath);
+  return windowsPath ? displayPath.replace(/\//g, '\\') : displayPath;
 };

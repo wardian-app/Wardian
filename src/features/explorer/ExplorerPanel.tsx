@@ -12,6 +12,7 @@ import { createFileSurfaceState, fileResourceKey } from '../files/fileResourceKe
 import { openPermanentFileSurface } from '../files/fileSurfaceNavigation';
 import type { WorkbenchNavigationService } from '../workbench/navigationService';
 import { useAppShellWorkbenchNavigation } from '../../layout/AppShell';
+import { formatExplorerPathForDisplay } from '../../utils/displayPath';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
@@ -346,6 +347,7 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
 
   const showRootExternalAction = externalEditor !== 'system';
   const rootExternalLabel = `Open root in ${externalEditorLabel(externalEditor)}`;
+  const displayRootPath = rootPath === null ? null : formatExplorerPathForDisplay(rootPath);
 
   return (
     <div data-testid="explorer-panel" className="flex flex-col h-full w-full relative">
@@ -379,8 +381,8 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
       
       {rootPath && (
         <div className="py-1 mb-2 border-b border-wardian-border/30 w-full group">
-          <span className="block label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={rootPath}>
-            {rootPath}
+          <span className="block label-small text-[12px] font-mono text-muted-neutral group-hover:text-primary select-all truncate transition-colors" title={displayRootPath ?? undefined}>
+            {displayRootPath}
           </span>
         </div>
       )}

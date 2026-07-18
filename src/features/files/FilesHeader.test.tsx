@@ -76,6 +76,22 @@ describe("FilesHeader", () => {
     expect(screen.getByLabelText("Unsaved changes")).toHaveClass("files-breadcrumb-dirty");
   });
 
+  it("uses stable Windows separators without visual spaces around breadcrumb separators", () => {
+    const slashDescriptor = {
+      ...descriptor,
+      canonical_path: "//?/C:/work/deep/nested/report.md",
+    };
+    render(header({ descriptor: slashDescriptor }));
+
+    const breadcrumb = screen.getByRole("navigation", { name: "File location" });
+    expect(breadcrumb).toHaveAttribute("title", "C:\\work\\deep\\nested\\report.md");
+    expect(breadcrumb).toHaveTextContent("C:\\…\\nested\\report.md");
+
+    const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
+    expect(css).toMatch(/\.files-breadcrumb\s*\{[^}]*gap:\s*0/s);
+    expect(css).toMatch(/\.files-breadcrumb-part\s*\{[^}]*gap:\s*0/s);
+  });
+
   it("uses the exact Workbench overflow geometry and no legacy mode tabs", () => {
     const { container } = render(header());
     const trigger = screen.getByRole("button", { name: "File actions" });

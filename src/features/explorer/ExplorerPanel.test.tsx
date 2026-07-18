@@ -83,6 +83,22 @@ describe('ExplorerPanel', () => {
     expect(screen.getByRole('heading', { name: 'Explorer', level: 2 })).toHaveClass('text-sm');
   });
 
+  it('displays a stable Windows root path without changing its backend identity', async () => {
+    const rootPath = '//?/C:/Users/Test/Repo';
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return rootPath;
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    const displayedRoot = await screen.findByTitle('C:\\Users\\Test\\Repo');
+    expect(displayedRoot).toHaveTextContent('C:\\Users\\Test\\Repo');
+    expect(await screen.findByTestId('file-tree')).toHaveTextContent(rootPath);
+    expect(invoke).toHaveBeenCalledWith('git_status', { cwd: rootPath });
+  });
+
   it('opens the current explorer root in the local file system', async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'get_explorer_root') return 'C:\\Users\\test\\.wardian';

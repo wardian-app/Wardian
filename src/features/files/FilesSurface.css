@@ -31,7 +31,7 @@
   min-width: 44px;
   flex: 1 1 auto;
   align-items: center;
-  gap: 3px;
+  gap: 0;
   overflow: hidden;
   color: var(--color-wardian-text-muted-neutral);
   font-size: 12px;
@@ -42,7 +42,7 @@
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 3px;
+  gap: 0;
 }
 
 .files-breadcrumb-part:last-child {

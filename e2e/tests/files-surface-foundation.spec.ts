@@ -8,6 +8,7 @@ import {
   installWorkbenchIpcMock,
   makeWorkbenchDocument,
   makeWorkbenchSurface,
+  type WorkbenchIpcMockOptions,
   type WorkbenchIpcMockController,
 } from "../fixtures/workbenchIpcMock";
 
@@ -88,9 +89,13 @@ interface RecoveryCheckpoint {
   base_opaque_revision: string;
 }
 
-async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockController> {
+async function bootFilesWorkbench(
+  page: Page,
+  options: Pick<WorkbenchIpcMockOptions, "explorer_root" | "files"> = {},
+): Promise<WorkbenchIpcMockController> {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
   const document: WorkbenchDocumentV1 = makeWorkbenchDocument({ surfaces: [dashboard] });
+  const explorerRoot = options.explorer_root ?? ROOT;
   const settings: AppSettings = {
     theme: "light",
     auto_patch_gemini: false,
@@ -105,9 +110,9 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
     workbench_new_tab_action: "home",
   };
   const ipc = await installWorkbenchIpcMock(page, {
-    explorer_root: ROOT,
+    explorer_root: explorerRoot,
     save_target_path: ALPHA_COPY_PATH,
-    files: [
+    files: options.files ?? [
       { path: ALPHA_PATH, content: "# Alpha document\n\nFirst file." },
       { path: BETA_PATH, content: "# Beta document\n\nSecond file." },
       { path: MANY_CHANGES_PATH, content: MANY_CHANGES_BASE },
@@ -137,7 +142,7 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
       session_id: "agent-files",
       session_name: "Files Agent",
       agent_class: "Coder",
-      folder: ROOT,
+      folder: explorerRoot,
       provider: "mock",
       is_off: false,
     }],
@@ -234,6 +239,35 @@ test("routes Explorer files through transient, permanent, and side Workbench pre
     "e2e/screenshots/files-surface/2026-07-16T2305Z/explorer-files-tabs.png",
   );
   await page.screenshot({ path: screenshotPath, fullPage: true });
+});
+
+test("renders Windows Explorer and Files paths with stable compact separators", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const windowsRoot = "//?/C:/work/project";
+  const windowsFile = `${windowsRoot}/alpha.md`;
+  await bootFilesWorkbench(page, {
+    explorer_root: windowsRoot,
+    files: [{ path: windowsFile, content: "# Windows path\n\nStable display." }],
+  });
+
+  const explorerRoot = page.getByTestId("explorer-panel").locator("span[title]").first();
+  await expect(explorerRoot).toHaveAttribute("title", "C:\\work\\project");
+  await expect(explorerRoot).toHaveText("C:\\work\\project");
+
+  await page.getByRole("treeitem", { name: "alpha.md" }).dblclick();
+  const breadcrumb = page.getByRole("navigation", { name: "File location" });
+  await expect(breadcrumb).toHaveAttribute("title", "C:\\work\\project\\alpha.md");
+  await expect(breadcrumb).toHaveText("C:\\work\\project\\alpha.md");
+  await expect(page.getByRole("heading", { name: "Windows path" })).toBeVisible();
+
+  await page.screenshot({
+    path: path.resolve(
+      "e2e/screenshots/files-surface/2026-07-18/windows-path-chrome.png",
+    ),
+    fullPage: true,
+  });
 });
 
 test("switches Markdown source without reopening the resource and preserves it per tab", async ({
