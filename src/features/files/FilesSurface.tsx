@@ -95,6 +95,8 @@ type ActiveFilesSurfaceProps = Required<Pick<
     FileEditorSnapshot["recovery"],
     { status: "conflict" }
   > | null;
+  resolving_recovery_conflict: boolean;
+  restoring_access: boolean;
   on_retry_editor: () => void;
   on_resolve_recovery_conflict: (choice: "keep_current" | "use_recovered") => Promise<void>;
   recovery_only: RecoveryOnlyState;
@@ -117,7 +119,11 @@ type PresentationState = {
 
 type RecoveryOnlyState =
   | { status: "idle" | "loading" | "none" }
-  | { status: "ready"; recovery: FileRecoveryV1; discarding: boolean }
+  | {
+      status: "ready";
+      recovery: FileRecoveryV1;
+      operation: "idle" | "restoring" | "discarding";
+    }
   | { status: "error"; message: string };
 
 async function loadNewestRecovery(
@@ -310,9 +316,19 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               Unsaved content is read-only until Wardian verifies access to this exact file again.
             </p>
             <div className="files-resource-actions">
-              <button type="button" onClick={props.on_restore_access}>Restore access</button>
+              <button
+                type="button"
+                disabled={props.restoring_access}
+                onClick={props.on_restore_access}
+              >
+                Restore access
+              </button>
               {props.editor_snapshot?.dirty ? (
-                <button type="button" onClick={() => void props.on_discard_editor_recovery()}>
+                <button
+                  type="button"
+                  disabled={props.restoring_access}
+                  onClick={() => void props.on_discard_editor_recovery()}
+                >
                   Discard unsaved changes
                 </button>
               ) : null}
@@ -336,14 +352,20 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             <div className="files-resource-actions">
               <button
                 type="button"
-                disabled={!props.editor_recovery_conflict.current_durable}
+                disabled={
+                  !props.editor_recovery_conflict.current_durable
+                  || props.resolving_recovery_conflict
+                }
                 onClick={() => void props.on_resolve_recovery_conflict("keep_current")}
               >
                 Keep current edits
               </button>
               <button
                 type="button"
-                disabled={!props.editor_recovery_conflict.current_durable}
+                disabled={
+                  !props.editor_recovery_conflict.current_durable
+                  || props.resolving_recovery_conflict
+                }
                 onClick={() => void props.on_resolve_recovery_conflict("use_recovered")}
               >
                 Use recovered edits
@@ -377,10 +399,16 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               <pre aria-label="Recovered saved base">{props.recovery_only.recovery.base}</pre>
             </details>
             <div className="files-resource-actions">
-              <button type="button" onClick={props.on_restore_access}>Restore access</button>
               <button
                 type="button"
-                disabled={props.recovery_only.discarding}
+                disabled={props.recovery_only.operation !== "idle"}
+                onClick={props.on_restore_access}
+              >
+                Restore access
+              </button>
+              <button
+                type="button"
+                disabled={props.recovery_only.operation !== "idle"}
                 onClick={props.on_discard_recovery}
               >
                 Discard recovery
@@ -520,28 +548,58 @@ export function FilesSurface({
     agent_id: null,
     user_file_capability_id: null,
   }, client);
+  const recoveryOnlyContext = useRef({
+    resource_key: props.resource_key,
+    status: resource.status,
+    client,
+  });
+  recoveryOnlyContext.current = {
+    resource_key: props.resource_key,
+    status: resource.status,
+    client,
+  };
+  const recoveryOnlyOperationGeneration = useRef(0);
+  const recoveryOnlyActionPending = useRef(false);
+  const [restoringAccess, setRestoringAccess] = useState(false);
   useEffect(() => {
+    const generation = ++recoveryOnlyOperationGeneration.current;
+    const resourceKey = props.resource_key;
+    const operationClient = client;
+    const ownsOperation = () => {
+      const context = recoveryOnlyContext.current;
+      return recoveryOnlyOperationGeneration.current === generation
+        && context.resource_key === resourceKey
+        && context.status === "error"
+        && context.client === operationClient;
+    };
+    recoveryOnlyActionPending.current = false;
+    setRestoringAccess(false);
     if (resource.status !== "error") {
       setRecoveryOnlyState({ status: "idle" });
-      return;
+      return () => {
+        recoveryOnlyOperationGeneration.current += 1;
+        recoveryOnlyActionPending.current = false;
+      };
     }
-    let active = true;
     setRecoveryOnlyState({ status: "loading" });
     void loadNewestRecovery(client, props.resource_key).then((recovered) => {
-      if (!active) return;
+      if (!ownsOperation()) return;
       if (!recovered) {
         setRecoveryOnlyState({ status: "none" });
         return;
       }
-      setRecoveryOnlyState({ status: "ready", recovery: recovered, discarding: false });
+      setRecoveryOnlyState({ status: "ready", recovery: recovered, operation: "idle" });
     }).catch((error) => {
-      if (!active) return;
+      if (!ownsOperation()) return;
       setRecoveryOnlyState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
     });
-    return () => { active = false; };
+    return () => {
+      recoveryOnlyOperationGeneration.current += 1;
+      recoveryOnlyActionPending.current = false;
+    };
   }, [client, props.resource_key, recoveryOnlyRetryToken, resource.status]);
   const editorController = useMemo(() => {
     const snapshot = resource.snapshot;
@@ -551,6 +609,18 @@ export function FilesSurface({
       && definition.editor !== undefined;
     return editable ? props.editor_registry.forResource(snapshot.resource_id) : null;
   }, [props.editor_registry, registry, resource.snapshot]);
+  const recoveryConflictOperationGeneration = useRef(0);
+  const recoveryConflictOperationPending = useRef(false);
+  const [resolvingRecoveryConflict, setResolvingRecoveryConflict] = useState(false);
+  useEffect(() => {
+    recoveryConflictOperationGeneration.current += 1;
+    recoveryConflictOperationPending.current = false;
+    setResolvingRecoveryConflict(false);
+    return () => {
+      recoveryConflictOperationGeneration.current += 1;
+      recoveryConflictOperationPending.current = false;
+    };
+  }, [editorController]);
   const subscribeEditor = useCallback((listener: () => void) => (
     editorController?.subscribe(listener) ?? (() => undefined)
   ), [editorController]);
@@ -625,41 +695,107 @@ export function FilesSurface({
   }, [client, editorController, editorRetryToken, props.editor_registry, resource.snapshot]);
 
   const restoreAccess = useCallback(() => {
-    void resource.retry();
-  }, [resource]);
+    if (
+      recoveryOnlyActionPending.current
+      || restoringAccess
+      || recoveryOnlyState.status === "ready" && recoveryOnlyState.operation !== "idle"
+    ) return;
+    recoveryOnlyActionPending.current = true;
+    const generation = ++recoveryOnlyOperationGeneration.current;
+    const resourceKey = props.resource_key;
+    const operationClient = client;
+    const recovered = recoveryOnlyState.status === "ready"
+      ? recoveryOnlyState.recovery
+      : null;
+    setRestoringAccess(true);
+    if (recovered) {
+      setRecoveryOnlyState({ status: "ready", recovery: recovered, operation: "restoring" });
+    }
+    const finish = () => {
+      const context = recoveryOnlyContext.current;
+      if (
+        recoveryOnlyOperationGeneration.current !== generation
+        || context.resource_key !== resourceKey
+        || context.status !== "error"
+        || context.client !== operationClient
+      ) return;
+      recoveryOnlyActionPending.current = false;
+      setRestoringAccess(false);
+      if (recovered) {
+        setRecoveryOnlyState((current) => (
+          current.status === "ready" && current.recovery.recovery_id === recovered.recovery_id
+            ? { status: "ready", recovery: current.recovery, operation: "idle" }
+            : current
+        ));
+      }
+    };
+    void resource.retry().then(finish, finish);
+  }, [client, props.resource_key, recoveryOnlyState, resource, restoringAccess]);
   const resolveRecoveryConflict = useCallback(async (
     choice: "keep_current" | "use_recovered",
   ) => {
-    if (!editorController) return;
+    if (!editorController || recoveryConflictOperationPending.current) return;
+    const generation = ++recoveryConflictOperationGeneration.current;
+    recoveryConflictOperationPending.current = true;
+    setResolvingRecoveryConflict(true);
     try {
       await editorController.resolveRecoveryConflict(choice);
-      setEditorError(null);
+      if (recoveryConflictOperationGeneration.current === generation) {
+        setEditorError(null);
+      }
     } catch (error) {
-      setEditorError(`Recovery conflict resolution failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`);
+      if (recoveryConflictOperationGeneration.current === generation) {
+        setEditorError(`Recovery conflict resolution failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+      }
+    } finally {
+      if (recoveryConflictOperationGeneration.current === generation) {
+        recoveryConflictOperationPending.current = false;
+        setResolvingRecoveryConflict(false);
+      }
     }
   }, [editorController]);
   const discardRecovery = useCallback(() => {
-    if (recoveryOnlyState.status !== "ready" || recoveryOnlyState.discarding) return;
+    if (
+      recoveryOnlyActionPending.current
+      || restoringAccess
+      || recoveryOnlyState.status !== "ready"
+      || recoveryOnlyState.operation !== "idle"
+    ) return;
+    recoveryOnlyActionPending.current = true;
     const recovered = recoveryOnlyState.recovery;
-    setRecoveryOnlyState({ status: "ready", recovery: recovered, discarding: true });
+    const resourceKey = props.resource_key;
+    const operationClient = client;
+    const generation = ++recoveryOnlyOperationGeneration.current;
+    const ownsOperation = () => {
+      const context = recoveryOnlyContext.current;
+      return recoveryOnlyOperationGeneration.current === generation
+        && context.resource_key === resourceKey
+        && context.status === "error"
+        && context.client === operationClient;
+    };
+    setRecoveryOnlyState({ status: "ready", recovery: recovered, operation: "discarding" });
     void client.discardRecovery({
       recovery_id: recovered.recovery_id,
       expected_recovery_revision: recovered.recovery_revision,
-      resource_key: props.resource_key,
+      resource_key: resourceKey,
     }).then(async () => {
-      const next = await loadNewestRecovery(client, props.resource_key);
+      const next = await loadNewestRecovery(operationClient, resourceKey);
+      if (!ownsOperation()) return;
+      recoveryOnlyActionPending.current = false;
       setRecoveryOnlyState(next
-        ? { status: "ready", recovery: next, discarding: false }
+        ? { status: "ready", recovery: next, operation: "idle" }
         : { status: "none" });
     }).catch((error) => {
+      if (!ownsOperation()) return;
+      recoveryOnlyActionPending.current = false;
       setRecoveryOnlyState({
         status: "error",
         message: error instanceof Error ? error.message : String(error),
       });
     });
-  }, [client, props.resource_key, recoveryOnlyState]);
+  }, [client, props.resource_key, recoveryOnlyState, restoringAccess]);
   const discardEditorRecovery = useCallback(async () => {
     const snapshot = editorController?.getSnapshot();
     if (!editorController || !snapshot || snapshot.status !== "ready") return;
@@ -841,6 +977,8 @@ export function FilesSurface({
       editor_recovery_conflict={editorSnapshot?.recovery.status === "conflict"
         ? editorSnapshot.recovery
         : null}
+      resolving_recovery_conflict={resolvingRecoveryConflict}
+      restoring_access={restoringAccess}
       on_retry_editor={retryEditor}
       on_resolve_recovery_conflict={resolveRecoveryConflict}
       recovery_only={recoveryOnlyState}

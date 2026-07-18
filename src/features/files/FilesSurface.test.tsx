@@ -1346,6 +1346,7 @@ describe("FilesSurface", () => {
     });
     const pendingDiscovery = deferred<FileRecoverySummaryV1[]>();
     const pendingCheckpoint = deferred<FileRecoveryCheckpointV1>();
+    const pendingConflictDiscard = deferred<void>();
     const recoverySummaryValue: FileRecoverySummaryV1 = {
       schema: 1,
       recovery_id: "recovery-raced",
@@ -1375,6 +1376,8 @@ describe("FilesSurface", () => {
       buffer: "older recovered edit\n",
     });
     vi.spyOn(client, "checkpointRecovery").mockReturnValue(pendingCheckpoint.promise);
+    const discardRecovery = vi.spyOn(client, "discardRecovery")
+      .mockReturnValue(pendingConflictDiscard.promise);
     const editorRegistry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
     });
@@ -1417,8 +1420,16 @@ describe("FilesSurface", () => {
     await waitFor(() => expect(
       within(alert).getByRole("button", { name: "Use recovered edits" }),
     ).toBeEnabled());
-    fireEvent.click(within(alert).getByRole("button", { name: "Keep current edits" }));
+    const keepCurrent = within(alert).getByRole("button", { name: "Keep current edits" });
+    const useRecovered = within(alert).getByRole("button", { name: "Use recovered edits" });
+    fireEvent.click(keepCurrent);
+    fireEvent.click(keepCurrent);
+    expect(discardRecovery).toHaveBeenCalledOnce();
+    expect(keepCurrent).toBeDisabled();
+    expect(useRecovered).toBeDisabled();
+    pendingConflictDiscard.resolve(undefined);
     await waitFor(() => expect(screen.queryByText("Recovery conflict")).toBeNull());
+    expect(screen.queryByRole("button", { name: "Retry Editor" })).toBeNull();
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
     expect(controller.getSnapshot().recovery).toMatchObject({
       status: "durable",
@@ -1454,7 +1465,8 @@ describe("FilesSurface", () => {
   });
 
   it("opens scoped recovery read-only when live file authorization is unavailable", async () => {
-    const retry = vi.fn().mockResolvedValue(undefined);
+    const pendingRestore = deferred<void>();
+    const retry = vi.fn().mockReturnValue(pendingRestore.promise);
     useFileResourceMock.mockReturnValue({
       status: "error",
       snapshot: null,
@@ -1538,6 +1550,12 @@ describe("FilesSurface", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Restore access" }));
     await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Restore access" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard recovery" })).toBeDisabled();
+    pendingRestore.resolve(undefined);
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "Discard recovery" }),
+    ).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Discard recovery" }));
     await waitFor(() => expect(discardRecovery).toHaveBeenCalledWith({
       recovery_id: "recovery-read-only",
@@ -1558,6 +1576,94 @@ describe("FilesSurface", () => {
     await waitFor(() => expect(
       screen.queryByRole("heading", { name: "Recovered unsaved changes" }),
     ).toBeNull());
+  });
+
+  it("ignores a late recovery discard re-list after the surface retargets", async () => {
+    const resourceA = "file:C:/work/docs/a.md";
+    const resourceB = "file:C:/work/docs/b.md";
+    const summaryA: FileRecoverySummaryV1 = {
+      schema: 1,
+      recovery_id: "recovery-a",
+      resource_key: resourceA,
+      display_name: "a.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      base_content_hash: "hash-a",
+      base_opaque_revision: "opaque-a",
+      recovery_revision: 1,
+      created_at_ms: 10,
+      updated_at_ms: 20,
+    };
+    const summaryB: FileRecoverySummaryV1 = {
+      ...summaryA,
+      recovery_id: "recovery-b",
+      resource_key: resourceB,
+      display_name: "b.md",
+      base_content_hash: "hash-b",
+      base_opaque_revision: "opaque-b",
+      updated_at_ms: 30,
+    };
+    const recoveryA: FileRecoveryV1 = {
+      ...summaryA,
+      base: "saved A\n",
+      buffer: "unsaved A\n",
+    };
+    const recoveryB: FileRecoveryV1 = {
+      ...summaryB,
+      base: "saved B\n",
+      buffer: "unsaved B\n",
+    };
+    const pendingDiscard = deferred<void>();
+    const pendingARelist = deferred<FileRecoverySummaryV1[]>();
+    let resourceAListCount = 0;
+    useFileResourceMock.mockReturnValue({
+      status: "error",
+      snapshot: null,
+      error: new Error("Access was revoked"),
+      retry: vi.fn().mockResolvedValue(undefined),
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "listRecoveries").mockImplementation(async (request) => {
+      if (request.resource_key === resourceA) {
+        resourceAListCount += 1;
+        return resourceAListCount === 1 ? [summaryA] : pendingARelist.promise;
+      }
+      return [summaryB];
+    });
+    vi.spyOn(client, "getRecovery").mockImplementation(async (request) => (
+      request.recovery_id === recoveryA.recovery_id ? recoveryA : recoveryB
+    ));
+    const discardRecovery = vi.spyOn(client, "discardRecovery")
+      .mockReturnValue(pendingDiscard.promise);
+    const view = render(<FilesSurface {...props({
+      resource_key: resourceA,
+      client,
+      editor_registry: new FileEditorControllerRegistry(client),
+    })} />);
+    await waitFor(() => expect(screen.getByLabelText("Recovered buffer"))
+      .toHaveTextContent("unsaved A"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard recovery" }));
+    expect(discardRecovery).toHaveBeenCalledWith({
+      recovery_id: recoveryA.recovery_id,
+      expected_recovery_revision: 1,
+      resource_key: resourceA,
+    });
+    pendingDiscard.resolve(undefined);
+    await waitFor(() => expect(resourceAListCount).toBe(2));
+
+    view.rerender(<FilesSurface {...props({
+      resource_key: resourceB,
+      client,
+      editor_registry: new FileEditorControllerRegistry(client),
+    })} />);
+    await waitFor(() => expect(screen.getByLabelText("Recovered buffer"))
+      .toHaveTextContent("unsaved B"));
+    pendingARelist.resolve([summaryA]);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByLabelText("Recovered buffer")).toHaveTextContent("unsaved B");
+    expect(screen.getByLabelText("Recovered buffer")).not.toHaveTextContent("unsaved A");
   });
 
   it("shows unsupported metadata without attempting the renderer", async () => {
