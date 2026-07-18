@@ -193,6 +193,8 @@ export default function MonacoTextRenderer({
       `${change.kind} change ${nextIndex + 1} of ${changes.length}, line ${line}, against Saved file`,
     );
   }, [activeChangeIndex, changes]);
+  const navigateChangeRef = useRef(navigateChange);
+  navigateChangeRef.current = navigateChange;
 
   useEffect(() => {
     if (!lifecycle.visible || !controller || !surface_id) return;
@@ -224,6 +226,11 @@ export default function MonacoTextRenderer({
       editorRef.current = editor;
       annotations = installViewAnnotations(editor, controller, baselineRef.current, updateChanges);
       annotationsRef.current = annotations;
+      editor.addCommand(monaco.KeyCode.F7, () => navigateChangeRef.current(1));
+      editor.addCommand(
+        monaco.KeyMod.Shift | monaco.KeyCode.F7,
+        () => navigateChangeRef.current(-1),
+      );
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
         setSaveError(null);
         try {

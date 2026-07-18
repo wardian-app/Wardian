@@ -19,8 +19,8 @@ const removeZone = vi.fn();
 const layoutZone = vi.fn();
 
 vi.mock("monaco-editor", () => ({
-  KeyCode: { KeyS: 49 },
-  KeyMod: { CtrlCmd: 2048 },
+  KeyCode: { F7: 65, KeyS: 49 },
+  KeyMod: { CtrlCmd: 2048, Shift: 1024 },
   Uri: { from: uriFrom },
   editor: { create: createEditor, createModel, getModel, setModelLanguage, setTheme },
 }));
@@ -287,12 +287,13 @@ describe("MonacoTextRenderer", () => {
     expect(zone.domNode).toHaveTextContent("beta");
   });
 
-  it("navigates changes from keyboard-focusable controls and announces the baseline", async () => {
+  it("repeats and wraps keyboard change navigation after focus moves into Monaco", async () => {
     const user = userEvent.setup();
     const { controller, props } = await editorHarness("alpha\nbeta\ngamma");
     render(<MonacoTextRenderer {...props("files-a")} />);
     await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
     const editor = createEditor.mock.results[0]?.value as {
+      addCommand: ReturnType<typeof vi.fn>;
       focus: ReturnType<typeof vi.fn>;
       revealLineInCenter: ReturnType<typeof vi.fn>;
       setPosition: ReturnType<typeof vi.fn>;
@@ -308,10 +309,31 @@ describe("MonacoTextRenderer", () => {
     expect(screen.getByRole("status", { name: "Current file change" }))
       .toHaveTextContent(/modified change 1 of 2, line 2, against saved file/i);
 
-    await user.click(screen.getByRole("button", { name: "Previous Saved file change" }));
+    const nextCommand = editor.addCommand.mock.calls.find(([binding]) => binding === 65)?.[1];
+    const previousCommand = editor.addCommand.mock.calls.find(
+      ([binding]) => binding === (1024 | 65),
+    )?.[1];
+    expect(nextCommand).toBeTypeOf("function");
+    expect(previousCommand).toBeTypeOf("function");
+    if (!nextCommand || !previousCommand) throw new Error("Monaco change commands are unavailable");
+
+    act(() => nextCommand());
     expect(editor.revealLineInCenter).toHaveBeenLastCalledWith(4);
     expect(screen.getByRole("status", { name: "Current file change" }))
       .toHaveTextContent(/added change 2 of 2, line 4, against saved file/i);
+
+    act(() => nextCommand());
+    expect(editor.revealLineInCenter).toHaveBeenLastCalledWith(2);
+    expect(screen.getByRole("status", { name: "Current file change" }))
+      .toHaveTextContent(/modified change 1 of 2, line 2, against saved file/i);
+
+    act(() => previousCommand());
+    expect(editor.revealLineInCenter).toHaveBeenLastCalledWith(4);
+    expect(screen.getByRole("status", { name: "Current file change" }))
+      .toHaveTextContent(/added change 2 of 2, line 4, against saved file/i);
+    expect(editor.focus).toHaveBeenCalledTimes(4);
+    expect(createEditor).toHaveBeenCalledOnce();
+    expect(createModel).toHaveBeenCalledOnce();
   });
 
   it("routes Ctrl/Cmd+S through the active resource session", async () => {
@@ -323,8 +345,12 @@ describe("MonacoTextRenderer", () => {
       addCommand: ReturnType<typeof vi.fn>;
     };
     expect(editor.addCommand).toHaveBeenCalledWith(2048 | 49, expect.any(Function));
+    const saveCommand = editor.addCommand.mock.calls.find(
+      ([binding]) => binding === (2048 | 49),
+    )?.[1] as (() => Promise<void>) | undefined;
+    if (!saveCommand) throw new Error("Monaco save command is unavailable");
     await act(async () => {
-      await editor.addCommand.mock.calls[0]?.[1]();
+      await saveCommand();
     });
     expect(client.saveText).toHaveBeenCalledWith(expect.objectContaining({ text: "save me\n" }));
     expect(controller.getSnapshot().dirty).toBe(false);
@@ -344,7 +370,10 @@ describe("MonacoTextRenderer", () => {
     const editorDom = document.createElement("div");
     editorDom.dataset.testid = "monaco-editor-dom";
     host.appendChild(editorDom);
-    const saveCommand = editor.addCommand.mock.calls[0]?.[1] as () => Promise<void>;
+    const saveCommand = editor.addCommand.mock.calls.find(
+      ([binding]) => binding === (2048 | 49),
+    )?.[1] as (() => Promise<void>) | undefined;
+    if (!saveCommand) throw new Error("Monaco save command is unavailable");
     const unhandled = vi.fn();
     window.addEventListener("unhandledrejection", unhandled);
 
