@@ -200,6 +200,10 @@ describe("MonacoTextRenderer", () => {
     const editor = createEditor.mock.results[0]?.value as {
       addCommand: ReturnType<typeof vi.fn>;
     };
+    const host = view.getByTestId("monaco-text-renderer");
+    const editorDom = document.createElement("div");
+    editorDom.dataset.testid = "monaco-editor-dom";
+    host.appendChild(editorDom);
     const saveCommand = editor.addCommand.mock.calls[0]?.[1] as () => Promise<void>;
     const unhandled = vi.fn();
     window.addEventListener("unhandledrejection", unhandled);
@@ -209,7 +213,9 @@ describe("MonacoTextRenderer", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /save failed: write access revoked/i,
     );
-    expect(view.getByTestId("monaco-text-renderer")).toBeVisible();
+    expect(view.getByTestId("monaco-text-renderer")).toBe(host);
+    expect(host).toContainElement(editorDom);
+    expect(host.parentElement?.firstElementChild).toBe(host);
     expect(createModel).toHaveBeenCalledOnce();
     expect(createEditor).toHaveBeenCalledOnce();
     expect(controller.getSnapshot()).toMatchObject({
@@ -225,6 +231,8 @@ describe("MonacoTextRenderer", () => {
     });
     await expect(act(async () => saveCommand())).resolves.toBeUndefined();
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(view.getByTestId("monaco-text-renderer")).toBe(host);
+    expect(host).toContainElement(editorDom);
     expect(createModel).toHaveBeenCalledOnce();
     expect(createEditor).toHaveBeenCalledOnce();
     window.removeEventListener("unhandledrejection", unhandled);

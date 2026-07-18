@@ -248,10 +248,10 @@ export default function MonacoTextRenderer({
   }
   return (
     <div className="files-monaco-shell">
+      <div ref={hostRef} className="files-monaco-renderer" data-testid="monaco-text-renderer" />
       {saveError ? (
         <div className="files-monaco-save-error" role="alert">{saveError}</div>
       ) : null}
-      <div ref={hostRef} className="files-monaco-renderer" data-testid="monaco-text-renderer" />
     </div>
   );
 }
