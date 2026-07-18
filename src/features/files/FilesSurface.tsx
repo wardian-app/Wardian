@@ -96,9 +96,10 @@ type ActiveFilesSurfaceProps = Required<Pick<
     { status: "conflict" }
   > | null;
   on_retry_editor: () => void;
-  on_resolve_recovery_conflict: (choice: "keep_current" | "use_recovered") => void;
+  on_resolve_recovery_conflict: (choice: "keep_current" | "use_recovered") => Promise<void>;
   recovery_only: RecoveryOnlyState;
   on_restore_access: () => void;
+  on_discard_editor_recovery: () => Promise<void>;
   on_discard_recovery: () => void;
   on_retry_recovery: () => void;
   editor_controller: ReturnType<FileEditorControllerRegistry["forResource"]> | null;
@@ -134,7 +135,8 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     : props.presentation;
   const presentationToggleAvailable = Boolean(renderer?.rendered && renderer.editor);
   const editorReady = props.editor_snapshot?.status === "ready";
-  const editable = Boolean(renderer?.editor && props.editor_controller && editorReady);
+  const editorAvailable = Boolean(renderer?.editor && props.editor_controller && editorReady);
+  const authorizationUnavailable = props.editor_snapshot?.authorization.status === "unavailable";
   const editorInitializing = Boolean(
     activePresentation === "editor"
     &&
@@ -157,6 +159,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
       buffer_generation: editor.buffer_generation,
       text: editor.working_text,
       dirty: editor.dirty,
+      read_only: editor.authorization.status === "unavailable",
     });
   }, [props.editor_snapshot, resource.snapshot?.revision]);
   const stateV2 = "presentation" in props.state ? props.state : null;
@@ -256,8 +259,9 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         presentation={activePresentation}
         presentation_toggle_available={presentationToggleAvailable && !editorBlocked}
         dirty={props.editor_snapshot?.dirty ?? false}
-        save_available={editable && !editorBlocked}
-        save_as_available={editable && !editorBlocked}
+        save_available={editorAvailable && !editorBlocked}
+        save_disabled={authorizationUnavailable}
+        save_as_available={editorAvailable && !editorBlocked}
         saving={props.editor_snapshot?.save_state === "saving"}
         changes={savedFileDiff?.summary ?? null}
         comparison_open={savedComparisonOpen}
@@ -273,6 +277,26 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         {props.action_error ? (
           <div className="files-action-error" role="alert">{props.action_error}</div>
         ) : null}
+        {authorizationUnavailable ? (
+          <section
+            className="files-resource-state files-access-unavailable"
+            role="alert"
+            aria-label="File access unavailable"
+          >
+            <h2>File access unavailable</h2>
+            <p>
+              Unsaved content is read-only until Wardian verifies access to this exact file again.
+            </p>
+            <div className="files-resource-actions">
+              <button type="button" onClick={props.on_restore_access}>Restore access</button>
+              {props.editor_snapshot?.dirty ? (
+                <button type="button" onClick={() => void props.on_discard_editor_recovery()}>
+                  Discard unsaved changes
+                </button>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
         {props.editor_error ? (
           <section className="files-resource-state files-content-blocker" role="alert">
             <p>{props.editor_error}</p>
@@ -285,20 +309,20 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             <p>{props.editor_recovery_conflict.message}</p>
             <p>
               Current edits are checkpointed separately. Choose which version to continue
-              editing; neither recovery is deleted by this choice.
+              editing; the rejected recovery is discarded after the choice is durable.
             </p>
             <div className="files-resource-actions">
               <button
                 type="button"
                 disabled={!props.editor_recovery_conflict.current_durable}
-                onClick={() => props.on_resolve_recovery_conflict("keep_current")}
+                onClick={() => void props.on_resolve_recovery_conflict("keep_current")}
               >
                 Keep current edits
               </button>
               <button
                 type="button"
                 disabled={!props.editor_recovery_conflict.current_durable}
-                onClick={() => props.on_resolve_recovery_conflict("use_recovered")}
+                onClick={() => void props.on_resolve_recovery_conflict("use_recovered")}
               >
                 Use recovered edits
               </button>
@@ -597,12 +621,12 @@ export function FilesSurface({
   const restoreAccess = useCallback(() => {
     void resource.retry();
   }, [resource]);
-  const resolveRecoveryConflict = useCallback((
+  const resolveRecoveryConflict = useCallback(async (
     choice: "keep_current" | "use_recovered",
   ) => {
     if (!editorController) return;
     try {
-      editorController.resolveRecoveryConflict(choice);
+      await editorController.resolveRecoveryConflict(choice);
       setEditorError(null);
     } catch (error) {
       setEditorError(`Recovery conflict resolution failed: ${
@@ -627,6 +651,18 @@ export function FilesSurface({
       });
     });
   }, [client, props.resource_key, recoveryOnlyState]);
+  const discardEditorRecovery = useCallback(async () => {
+    const snapshot = editorController?.getSnapshot();
+    if (!editorController || !snapshot || snapshot.status !== "ready") return;
+    try {
+      await editorController.discard(snapshot.buffer_generation);
+      setActionError(null);
+    } catch (error) {
+      const message = `Discard failed: ${error instanceof Error ? error.message : String(error)}`;
+      setActionError(message);
+      throw error;
+    }
+  }, [editorController]);
 
   useEffect(() => {
     useFilesPresentationStore.getState().setPresentation(props.surface_id, {
@@ -800,6 +836,7 @@ export function FilesSurface({
       on_resolve_recovery_conflict={resolveRecoveryConflict}
       recovery_only={recoveryOnlyState}
       on_restore_access={restoreAccess}
+      on_discard_editor_recovery={discardEditorRecovery}
       on_discard_recovery={discardRecovery}
       on_retry_recovery={() => setRecoveryOnlyRetryToken((value) => value + 1)}
       editor_controller={editorController}

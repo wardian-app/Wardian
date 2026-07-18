@@ -92,6 +92,9 @@ export function FileComparisonLens({
   const subscribe = useCallback((listener: () => void) => controller.subscribe(listener), [controller]);
   const getSnapshot = useCallback(() => controller.getSnapshot(), [controller]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const authorizationUnavailable = snapshot.authorization.status === "unavailable";
+  const authorizationUnavailableRef = useRef(authorizationUnavailable);
+  authorizationUnavailableRef.current = authorizationUnavailable;
   const available = baseline.kind === "saved_file"
     && snapshot.status === "ready"
     && snapshot.resource_id !== null
@@ -145,7 +148,7 @@ export function FileComparisonLens({
         fontSize: 13,
         minimap: { enabled: false },
         originalEditable: false,
-        readOnly: false,
+        readOnly: authorizationUnavailableRef.current,
         renderSideBySide: resolveFilesComparisonLayout(
           layout_preference,
           contentWidth!,
@@ -222,6 +225,10 @@ export function FileComparisonLens({
     });
   }, [effectiveLayout]);
 
+  useEffect(() => {
+    diffEditorRef.current?.updateOptions({ readOnly: authorizationUnavailable });
+  }, [authorizationUnavailable]);
+
   const runReload = useCallback(async () => {
     setAction("reload");
     setActionError(null);
@@ -286,8 +293,8 @@ export function FileComparisonLens({
       {available && snapshot.stale ? (
         <div className="files-stale-actions" role="group" aria-label="Resolve external changes">
           <span>The saved file changed on disk.</span>
-          <button type="button" disabled={action !== null} onClick={() => void runMerge()}>Merge</button>
-          <button type="button" disabled={action !== null} onClick={() => void runReload()}>Reload from disk</button>
+          <button type="button" disabled={action !== null || authorizationUnavailable} onClick={() => void runMerge()}>Merge</button>
+          <button type="button" disabled={action !== null || authorizationUnavailable} onClick={() => void runReload()}>Reload from disk</button>
           <button type="button" disabled={action !== null} onClick={keepWorking}>Cancel</button>
         </div>
       ) : null}

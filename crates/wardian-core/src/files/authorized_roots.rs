@@ -232,6 +232,7 @@ impl AuthorizedPath {
             GuardedReplaceChecks {
                 after_stage: || {},
                 before_final_scan: || Ok(()),
+                before_result_scan: || {},
             },
         )
     }
@@ -267,21 +268,23 @@ impl AuthorizedPath {
             GuardedReplaceChecks {
                 after_stage: || {},
                 before_final_scan,
+                before_result_scan: || {},
             },
         )
     }
 
-    fn guarded_atomic_replace_text_inner<AfterStage, BeforeFinalScan>(
+    fn guarded_atomic_replace_text_inner<AfterStage, BeforeFinalScan, BeforeResultScan>(
         &self,
         expected_revision: &FileRevisionToken,
         expected_hash: &str,
         text: &str,
         limits: &FileResourceLimits,
-        checks: GuardedReplaceChecks<AfterStage, BeforeFinalScan>,
+        checks: GuardedReplaceChecks<AfterStage, BeforeFinalScan, BeforeResultScan>,
     ) -> Result<GuardedFileWrite, FileResourceErrorV1>
     where
         AfterStage: FnOnce(),
         BeforeFinalScan: FnOnce() -> Result<(), FileResourceErrorV1>,
+        BeforeResultScan: FnOnce(),
     {
         let submitted_size = u64::try_from(text.len()).map_err(|_| {
             FileResourceErrorV1::new(
@@ -310,9 +313,12 @@ impl AuthorizedPath {
         let submitted_hash = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
         if submitted_hash == token_hash {
             drop(file);
+            (checks.before_result_scan)();
             let snapshot = VerifiedFileSnapshot::from_authorized_path(self, limits)?;
+            let submitted_text_is_current = snapshot.descriptor().content_hash == submitted_hash;
             return Ok(GuardedFileWrite {
                 changed: false,
+                submitted_text_is_current,
                 previous_identity: self.identity,
                 authorized: self.clone(),
                 snapshot,
@@ -349,10 +355,13 @@ impl AuthorizedPath {
         }
         drop(file);
 
+        (checks.before_result_scan)();
         let authorized = self.reauthorize_same_target()?;
         let snapshot = VerifiedFileSnapshot::from_authorized_path(&authorized, limits)?;
+        let submitted_text_is_current = snapshot.descriptor().content_hash == submitted_hash;
         Ok(GuardedFileWrite {
             changed: true,
+            submitted_text_is_current,
             previous_identity: self.identity,
             authorized,
             snapshot,
@@ -379,6 +388,32 @@ impl AuthorizedPath {
             GuardedReplaceChecks {
                 after_stage,
                 before_final_scan: || Ok(()),
+                before_result_scan: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn guarded_atomic_replace_text_before_result_scan<BeforeResultScan>(
+        &self,
+        expected_revision: &FileRevisionToken,
+        expected_hash: &str,
+        text: &str,
+        limits: &FileResourceLimits,
+        before_result_scan: BeforeResultScan,
+    ) -> Result<GuardedFileWrite, FileResourceErrorV1>
+    where
+        BeforeResultScan: FnOnce(),
+    {
+        self.guarded_atomic_replace_text_inner(
+            expected_revision,
+            expected_hash,
+            text,
+            limits,
+            GuardedReplaceChecks {
+                after_stage: || {},
+                before_final_scan: || Ok(()),
+                before_result_scan,
             },
         )
     }
@@ -665,9 +700,10 @@ impl AuthorizedPath {
     }
 }
 
-struct GuardedReplaceChecks<AfterStage, BeforeFinalScan> {
+struct GuardedReplaceChecks<AfterStage, BeforeFinalScan, BeforeResultScan> {
     after_stage: AfterStage,
     before_final_scan: BeforeFinalScan,
+    before_result_scan: BeforeResultScan,
 }
 
 /// Result of a retained-handle guarded text save.
@@ -678,6 +714,7 @@ struct GuardedReplaceChecks<AfterStage, BeforeFinalScan> {
 #[derive(Debug, Clone)]
 pub struct GuardedFileWrite {
     changed: bool,
+    submitted_text_is_current: bool,
     previous_identity: FileIdentity,
     authorized: AuthorizedPath,
     snapshot: VerifiedFileSnapshot,
@@ -688,6 +725,18 @@ impl GuardedFileWrite {
     #[must_use]
     pub fn changed(&self) -> bool {
         self.changed
+    }
+
+    /// Returns whether the verified result snapshot still contains the exact
+    /// submitted text.
+    ///
+    /// Another process may write the same file identity after Wardian's final
+    /// optimistic check or atomic replacement but before the result scan. A
+    /// false value means the caller must publish the observed snapshot as a
+    /// stale conflict instead of marking the submitted editor generation clean.
+    #[must_use]
+    pub fn submitted_text_is_current(&self) -> bool {
+        self.submitted_text_is_current
     }
 
     /// Borrows the retained authorization for the current target identity.
@@ -1594,6 +1643,7 @@ mod tests {
             .expect("guarded replacement");
 
         assert!(write.changed());
+        assert!(write.submitted_text_is_current());
         #[cfg(unix)]
         assert!(fs::metadata(&path)
             .expect("replacement metadata")
@@ -1640,6 +1690,7 @@ mod tests {
             )
             .expect("unchanged save");
         assert!(!unchanged.changed());
+        assert!(unchanged.submitted_text_is_current());
         assert_eq!(unchanged.snapshot(), &snapshot);
 
         let mut tiny_limits = limits;
@@ -1659,6 +1710,79 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("unchanged bytes"),
             "stable text"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_detects_changed_and_unchanged_result_scan_races() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let changed_path = workspace.join("changed.txt");
+        let unchanged_path = workspace.join("unchanged.txt");
+        fs::write(&changed_path, "changed base").expect("changed fixture");
+        fs::write(&unchanged_path, "unchanged base").expect("unchanged fixture");
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+
+        let changed_authorized = service
+            .authorize_existing_file(&changed_path)
+            .expect("authorized changed file");
+        let changed_snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&changed_authorized, &limits)
+                .expect("changed snapshot");
+        let changed_write = changed_authorized
+            .guarded_atomic_replace_text_before_result_scan(
+                changed_snapshot.revision_token(),
+                &changed_snapshot.descriptor().content_hash,
+                "submitted replacement",
+                &limits,
+                || {
+                    fs::write(&changed_path, "external after replacement")
+                        .expect("post-replacement external write");
+                },
+            )
+            .expect("guarded replacement result");
+        assert!(changed_write.changed());
+        assert!(!changed_write.submitted_text_is_current());
+        assert_eq!(
+            changed_write
+                .authorized()
+                .read_verified_text(changed_write.snapshot().revision_token(), 64)
+                .expect("observed changed race bytes"),
+            "external after replacement"
+        );
+
+        let unchanged_authorized = service
+            .authorize_existing_file(&unchanged_path)
+            .expect("authorized unchanged file");
+        let unchanged_snapshot = super::super::VerifiedFileSnapshot::from_authorized_path(
+            &unchanged_authorized,
+            &limits,
+        )
+        .expect("unchanged snapshot");
+        let unchanged_write = unchanged_authorized
+            .guarded_atomic_replace_text_before_result_scan(
+                unchanged_snapshot.revision_token(),
+                &unchanged_snapshot.descriptor().content_hash,
+                "unchanged base",
+                &limits,
+                || {
+                    fs::write(&unchanged_path, "external after unchanged check")
+                        .expect("post-check external write");
+                },
+            )
+            .expect("unchanged save result");
+        assert!(!unchanged_write.changed());
+        assert!(!unchanged_write.submitted_text_is_current());
+        assert_eq!(
+            unchanged_write
+                .authorized()
+                .read_verified_text(unchanged_write.snapshot().revision_token(), 64)
+                .expect("observed unchanged race bytes"),
+            "external after unchanged check"
         );
     }
 

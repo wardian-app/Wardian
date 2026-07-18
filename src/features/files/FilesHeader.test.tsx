@@ -33,6 +33,7 @@ function header(overrides: Partial<ComponentProps<typeof FilesHeader>> = {}) {
       presentation_toggle_available
       dirty={false}
       save_available
+      save_disabled={false}
       save_as_available
       saving={false}
       resource_actions_available
@@ -169,6 +170,15 @@ describe("FilesHeader", () => {
     expect(screen.queryByRole("menuitem", { name: "Save As" })).toBeNull();
     expect(screen.getByRole("menuitem", { name: "Open With" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Reveal" })).toBeInTheDocument();
+  });
+
+  it("keeps Save visible but disabled when the editor temporarily loses authorization", async () => {
+    const user = userEvent.setup();
+    render(header({ save_disabled: true }));
+
+    await user.click(screen.getByRole("button", { name: "File actions" }));
+    expect(screen.getByRole("menuitem", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Save As" })).toBeEnabled();
   });
 
   it("contains asynchronous action failures after closing the menu", async () => {

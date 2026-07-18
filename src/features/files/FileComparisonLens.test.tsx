@@ -60,6 +60,29 @@ function fakeModel(text: string): FakeModel {
 
 const controllers: FileEditorController[] = [];
 
+function controllerOwner(revision = 4, contentHash = "hash-base") {
+  return {
+    resource_id: "file:C:/work/notes.md",
+    subscription_id: "subscription-1",
+    revision,
+    descriptor: {
+      schema: 1 as const,
+      canonical_path: "C:/work/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8" as const,
+      renderer_kind: "markdown" as const,
+      size_bytes: 12,
+      line_count: 2,
+      content_hash: contentHash,
+      modified_at_ms: 1,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+      unavailable_reason: null,
+    },
+  };
+}
+
 async function harness(baseline: FilesComparisonBaseline = { kind: "saved_file" }) {
   const client = {
     saveText: vi.fn(),
@@ -75,26 +98,7 @@ async function harness(baseline: FilesComparisonBaseline = { kind: "saved_file" 
   });
   controllers.push(controller);
   await controller.initialize({
-    owner: {
-      resource_id: "file:C:/work/notes.md",
-      subscription_id: "subscription-1",
-      revision: 4,
-      descriptor: {
-        schema: 1,
-        canonical_path: "C:/work/notes.md",
-        display_name: "notes.md",
-        extension: "md",
-        mime_type: "text/markdown",
-        encoding: "utf-8",
-        renderer_kind: "markdown",
-        size_bytes: 12,
-        line_count: 2,
-        content_hash: "hash-base",
-        modified_at_ms: 1,
-        capabilities: { preview: true, changes: true, draft: true, stream: false },
-        unavailable_reason: null,
-      },
-    },
+    owner: controllerOwner(),
     text: "saved\ntext\n",
     discover_recovery: false,
   });
@@ -112,7 +116,7 @@ async function harness(baseline: FilesComparisonBaseline = { kind: "saved_file" 
     on_keep_working_buffer: vi.fn(),
     on_merge: vi.fn().mockResolvedValue(undefined),
   };
-  return { controller, props };
+  return { client, controller, props };
 }
 
 describe("FileComparisonLens", () => {
@@ -262,6 +266,27 @@ describe("FileComparisonLens", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/save failed: write denied/i);
     expect(view.getByTestId("file-comparison-editor")).toBe(host);
     expect(host).toContainElement(editorDom);
+    expect(createDiffEditor).toHaveBeenCalledOnce();
+    expect(createModel).toHaveBeenCalledTimes(2);
+  });
+
+  it("makes the modified side read-only in place after authorization is revoked", async () => {
+    const { client, controller, props } = await harness();
+    render(<FileComparisonLens {...props} />);
+    await waitFor(() => expect(createDiffEditor).toHaveBeenCalledOnce());
+    const editor = createDiffEditor.mock.results[0]?.value as {
+      updateOptions: ReturnType<typeof vi.fn>;
+    };
+    controller.applyAuthoritative(controllerOwner(5, "hash-external"), "disk\ntext\n");
+    vi.mocked(client.saveText).mockRejectedValue({
+      code: "unauthorized_path",
+      message: "access revoked",
+    });
+
+    await expect(controller.save()).rejects.toMatchObject({ code: "unauthorized_path" });
+    await waitFor(() => expect(editor.updateOptions).toHaveBeenCalledWith({ readOnly: true }));
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reload from disk" })).toBeDisabled();
     expect(createDiffEditor).toHaveBeenCalledOnce();
     expect(createModel).toHaveBeenCalledTimes(2);
   });

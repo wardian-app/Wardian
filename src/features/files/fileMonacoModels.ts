@@ -100,6 +100,10 @@ export function acquireCanonicalFileModel(
   };
   const contentListener = model.onDidChangeContent(() => {
     if (lease.applying_controller_text) return;
+    if (controller.getSnapshot().authorization.status === "unavailable") {
+      updateCanonicalLease(lease);
+      return;
+    }
     controller.mutate(model.getValue());
   });
   lease.dispose_content_listener = () => contentListener.dispose();

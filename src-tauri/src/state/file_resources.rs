@@ -2170,7 +2170,11 @@ impl FileResourceRuntime {
                 "recovery resource key and webview scope must not be empty",
             ));
         }
-        let operation = {
+        // Creating recovery authority requires one exact live file capability.
+        // Updating an already-scoped recovery CAS does not: it can only replace
+        // the recovery blobs owned by the same resource key and app webview and
+        // never reads or writes the current file.
+        let operation = if recovery_id.is_none() {
             let entries = self.inner.entries.lock().await;
             let entry = entries
                 .get(resource_id)
@@ -2181,20 +2185,30 @@ impl FileResourceRuntime {
                     "subscription does not grant the requested resource",
                 ));
             }
-            entry.operation.clone()
+            Some(entry.operation.clone())
+        } else {
+            None
         };
-        let _operation = operation.lock().await;
-        let (_, _, descriptor, _) = self
-            .validated_save_authorization(resource_id, subscription_id)
-            .await?;
-        if file_resource_id(&descriptor.canonical_path) != resource_key
-            || resource_id != resource_key
-        {
-            return Err(error(
-                "unauthorized_resource",
-                "live subscription does not match the recovery resource key",
-            ));
-        }
+        let _operation = match operation.as_ref() {
+            Some(operation) => Some(operation.lock().await),
+            None => None,
+        };
+        let descriptor = if recovery_id.is_none() {
+            let (_, _, descriptor, _) = self
+                .validated_save_authorization(resource_id, subscription_id)
+                .await?;
+            if file_resource_id(&descriptor.canonical_path) != resource_key
+                || resource_id != resource_key
+            {
+                return Err(error(
+                    "unauthorized_resource",
+                    "live subscription does not match the recovery resource key",
+                ));
+            }
+            Some(descriptor)
+        } else {
+            None
+        };
         let recovery_root = self.recovery_root()?;
         let _recovery_io = self.inner.recovery_io.lock().await;
         let store_limits = self.recovery_store_limits();
@@ -2223,6 +2237,12 @@ impl FileResourceRuntime {
                         "a new recovery checkpoint has no prior revision",
                     ));
                 }
+                let descriptor = descriptor.ok_or_else(|| {
+                    error(
+                        "resource_not_found",
+                        "new recovery checkpoint lost its validated file resource",
+                    )
+                })?;
                 let recovery_id = Uuid::new_v4().to_string();
                 (
                     FileRecoveryManifestV1 {
@@ -2814,6 +2834,7 @@ impl FileResourceRuntime {
             }
             Err(failure) => return Err(failure),
         };
+        let submitted_text_is_current = write.submitted_text_is_current();
         let rebound_authorizations = prevalidated_authorizations
             .into_iter()
             .map(|(candidate_subscription_id, previous)| {
@@ -2854,8 +2875,10 @@ impl FileResourceRuntime {
                 })
                 .collect::<Vec<_>>();
             entry.revision_token = revision_token;
+            let descriptor_changed = entry.descriptor.content_hash != descriptor.content_hash
+                || entry.descriptor.unavailable_reason != descriptor.unavailable_reason;
             entry.descriptor = descriptor.clone();
-            let event = changed.then(|| {
+            let event = descriptor_changed.then(|| {
                 entry.revision = entry.revision.saturating_add(1);
                 FileResourceEventV1 {
                     schema: 1,
@@ -2884,7 +2907,12 @@ impl FileResourceRuntime {
         if let Some(event) = event {
             self.emit(event);
         }
-        Ok(if changed {
+        Ok(if !submitted_text_is_current {
+            FileResourceSaveResultV1::StaleConflict {
+                revision,
+                content_hash,
+            }
+        } else if changed {
             FileResourceSaveResultV1::Saved {
                 revision,
                 content_hash,
@@ -5698,10 +5726,47 @@ mod tests {
             .await
             .expect("stored bytes remain readable");
         assert_eq!(restored.buffer, "buffer");
+        let updated = runtime
+            .checkpoint_recovery(
+                Some(&checkpoint.recovery_id),
+                Some(checkpoint.recovery_revision),
+                "revoked-resource-does-not-authorize-recovery",
+                "revoked-subscription-does-not-authorize-recovery",
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "newer buffer after revocation",
+            )
+            .await
+            .expect("scoped recovery CAS update does not require current file authority");
+        assert_eq!(
+            runtime
+                .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+                .await
+                .expect("updated recovery remains readable")
+                .buffer,
+            "newer buffer after revocation"
+        );
+        let create = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "new recovery must still require live authority",
+            )
+            .await
+            .expect_err("first recovery checkpoint must retain live authority requirement");
+        assert_eq!(create.code(), "unauthorized_path");
         let merge = runtime
             .merge_recovery(
                 &checkpoint.recovery_id,
-                checkpoint.recovery_revision,
+                updated.recovery_revision,
                 &opened.resource_id,
                 "main",
                 &opened.resource_id,
@@ -5721,6 +5786,85 @@ mod tests {
             .await
             .expect_err("recovery must not revive revoked file authority");
         assert_eq!(save.code(), "unauthorized_path");
+        assert_eq!(fs::read_to_string(path).expect("disk bytes"), "base");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_existing_cas_survives_last_subscription_close() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            temp.path().join("recovery"),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "buffer",
+            )
+            .await
+            .expect("checkpoint");
+        runtime
+            .close(&opened.subscription_id)
+            .await
+            .expect("close last subscription");
+        assert_eq!(runtime.subscriber_count(&opened.resource_id).await, 0);
+
+        let updated = runtime
+            .checkpoint_recovery(
+                Some(&checkpoint.recovery_id),
+                Some(checkpoint.recovery_revision),
+                "closed-resource-does-not-authorize-recovery",
+                "closed-subscription-does-not-authorize-recovery",
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "newer buffer after close",
+            )
+            .await
+            .expect("scoped recovery CAS remains independent of a live subscription");
+        assert_eq!(updated.recovery_revision, checkpoint.recovery_revision + 1);
+        assert_eq!(
+            runtime
+                .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+                .await
+                .expect("updated recovery")
+                .buffer,
+            "newer buffer after close"
+        );
+
+        let create = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                &opened.descriptor.content_hash,
+                "base",
+                &opened.resource_id,
+                "main",
+                "new authority is forbidden",
+            )
+            .await
+            .expect_err("new recovery still requires an open resource");
+        assert_eq!(create.code(), "resource_not_found");
         assert_eq!(fs::read_to_string(path).expect("disk bytes"), "base");
     }
 

@@ -621,7 +621,7 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
       buffer: "ONE\ntwo\nthree\n",
     },
   }, "unauthorized_resource");
-  const cleanCheckpoint = await invokeTauri(driver, "checkpoint_file_recovery", {
+  let cleanCheckpoint = await invokeTauri(driver, "checkpoint_file_recovery", {
     request: {
       recovery_id: null,
       expected_recovery_revision: null,
@@ -647,6 +647,69 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
   });
   assert.equal(cleanCheckpoint.recovery_revision, 1);
   assert.equal(conflictCheckpoint.recovery_revision, 1);
+
+  await invokeTauri(driver, "update_agent_config", {
+    newConfig: {
+      ...restoredAgentConfig,
+      folder: fixtures.external,
+      include_directories: [],
+    },
+  });
+  cleanCheckpoint = await invokeTauri(driver, "checkpoint_file_recovery", {
+    request: {
+      recovery_id: cleanCheckpoint.recovery_id,
+      expected_recovery_revision: cleanCheckpoint.recovery_revision,
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryClean.subscription_id,
+      base_content_hash: recoveryClean.descriptor.content_hash,
+      base: "one\ntwo\nthree\n",
+      resource_key: recoveryClean.resource_id,
+      buffer: "ONE\ntwo\nthree\n",
+    },
+  });
+  assert.equal(cleanCheckpoint.recovery_revision, 2);
+  await expectFileError(driver, "checkpoint_file_recovery", {
+    request: {
+      recovery_id: null,
+      expected_recovery_revision: null,
+      resource_id: recoveryConflict.resource_id,
+      subscription_id: recoveryConflict.subscription_id,
+      base_content_hash: recoveryConflict.descriptor.content_hash,
+      base: "shared line\n",
+      resource_key: recoveryConflict.resource_id,
+      buffer: "new recovery must require live file authority\n",
+    },
+  }, "unauthorized_path");
+  await expectFileError(driver, "read_file_resource_text", {
+    request: {
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryClean.subscription_id,
+      revision: recoveryClean.revision,
+    },
+  }, "unauthorized_path");
+  await expectFileError(driver, "save_file_resource_text", {
+    request: {
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryClean.subscription_id,
+      expected_revision: recoveryClean.revision,
+      buffer_base_hash: recoveryClean.descriptor.content_hash,
+      text: "recovery must not authorize this write\n",
+      recovery_cleanup: null,
+    },
+  }, "unauthorized_path");
+  await expectFileError(driver, "merge_file_recovery", {
+    request: {
+      recovery_id: cleanCheckpoint.recovery_id,
+      expected_recovery_revision: cleanCheckpoint.recovery_revision,
+      resource_key: recoveryClean.resource_id,
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryClean.subscription_id,
+    },
+  }, "unauthorized_path");
+  assert.equal(fs.readFileSync(fixtures.recoveryCleanFile, "utf8"), "one\ntwo\nthree\n");
+  await invokeTauri(driver, "update_agent_config", {
+    newConfig: restoredAgentConfig,
+  });
 
   const acceptanceResources = [
     editable,

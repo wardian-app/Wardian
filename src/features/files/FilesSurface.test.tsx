@@ -86,7 +86,14 @@ const PreviewRenderer = lazy(async () => ({
 }));
 
 const SourceRenderer = lazy(async () => ({
-  default: () => <div data-testid="source-renderer">Source</div>,
+  default: ({ buffer_snapshot }: FileRendererProps) => (
+    <div
+      data-testid="source-renderer"
+      data-read-only={buffer_snapshot?.read_only ? "true" : "false"}
+    >
+      Source
+    </div>
+  ),
 }));
 
 const BaselineSourceRenderer = lazy(async () => ({
@@ -867,6 +874,85 @@ describe("FilesSurface", () => {
       { badge_id: "dirty", label: "Unsaved changes" },
       { badge_id: "attention", label: "Attention requested" },
     ]));
+  });
+
+  it("keeps a revoked dirty editor mounted read-only while Save As and access recovery remain available", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    const markdownSnapshot = {
+      ...snapshot(markdownDescriptor),
+      resource_id: "file:C:/work/docs/notes.md",
+    };
+    const retry = vi.fn().mockResolvedValue(undefined);
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: markdownSnapshot,
+      error: null,
+      retry,
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: markdownSnapshot.resource_id,
+      revision: markdownSnapshot.revision,
+      text: "base\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    vi.spyOn(client, "saveText").mockRejectedValue({
+      code: "unauthorized_path",
+      message: "access revoked",
+    });
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    render(<FilesSurface {...props({
+      resource_key: markdownSnapshot.resource_id,
+      state: {
+        resource_kind: "file",
+        transient_preview: false,
+        presentation: "editor",
+        comparison_open: false,
+        comparison_layout_preference: "auto",
+        comparison_baseline: null,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      },
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+    const controller = editorRegistry.forResource(markdownSnapshot.resource_id);
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+    act(() => { controller.mutate("unsaved\n"); });
+
+    await expect(controller.save()).rejects.toMatchObject({ code: "unauthorized_path" });
+    const unavailable = await screen.findByRole("alert", { name: "File access unavailable" });
+    expect(unavailable).toHaveTextContent(/unsaved content is read-only/i);
+    const host = screen.getByTestId("files-content-host-shell");
+    expect(host).not.toHaveAttribute("inert");
+    expect(screen.getByTestId("source-renderer")).toHaveAttribute("data-read-only", "true");
+    expect(filesPresentationBadges("files-1", markdownSnapshot.resource_id)).toEqual([
+      { badge_id: "dirty", label: "Unsaved changes" },
+      { badge_id: "attention", label: "Attention requested" },
+    ]);
+
+    await userEvent.click(screen.getByRole("button", { name: "File actions" }));
+    expect(screen.getByRole("menuitem", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Save As" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Restore access" }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it("opens comparison from a stale Save using the latest surface state callback", async () => {

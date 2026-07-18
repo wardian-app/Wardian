@@ -119,6 +119,7 @@ async function editorHarness(initialText = "const answer = 42;\n") {
       buffer_generation: controller.getSnapshot().buffer_generation,
       text: controller.getSnapshot().working_text,
       dirty: controller.getSnapshot().dirty,
+      read_only: controller.getSnapshot().authorization.status === "unavailable",
     }),
     editor_language: "typescript",
     comparison_baseline: comparisonBaseline,
@@ -147,6 +148,7 @@ describe("MonacoTextRenderer", () => {
       layout: vi.fn(),
       revealLineInCenter: vi.fn(),
       setPosition: vi.fn(),
+      updateOptions: vi.fn(),
     }));
   });
 
@@ -195,6 +197,33 @@ describe("MonacoTextRenderer", () => {
     act(() => { controller.mutate("changed from another pane\n"); });
     await waitFor(() => expect(model.getValue()).toBe("changed from another pane\n"));
     expect(controller.getSnapshot().buffer_generation).toBe(1);
+  });
+
+  it("switches the shared model read-only in place and rejects a raced model edit", async () => {
+    const { client, controller, props } = await editorHarness();
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    const editor = createEditor.mock.results[0]?.value as {
+      updateOptions: ReturnType<typeof vi.fn>;
+    };
+    const model = createModel.mock.results[0]?.value as FakeModel;
+    controller.mutate("dirty before revocation\n");
+    vi.mocked(client.saveText).mockRejectedValue({
+      code: "unauthorized_path",
+      message: "access revoked",
+    });
+
+    await expect(controller.save()).rejects.toMatchObject({ code: "unauthorized_path" });
+    view.rerender(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(editor.updateOptions).toHaveBeenCalledWith({ readOnly: true }));
+    expect(createEditor).toHaveBeenCalledOnce();
+    expect(createModel).toHaveBeenCalledOnce();
+
+    const generation = controller.getSnapshot().buffer_generation;
+    act(() => model.setValue("raced edit after revocation\n"));
+    await waitFor(() => expect(model.getValue()).toBe("dirty before revocation\n"));
+    expect(controller.getSnapshot().buffer_generation).toBe(generation);
+    expect(controller.getSnapshot().working_text).toBe("dirty before revocation\n");
   });
 
   it("updates saved-file decorations without replacing the canonical model", async () => {

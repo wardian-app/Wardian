@@ -144,6 +144,7 @@ export default function MonacoTextRenderer({
   lifecycle,
   surface_id,
   editor_controller,
+  buffer_snapshot,
   editor_language,
   comparison_baseline,
 }: FileRendererProps) {
@@ -165,6 +166,9 @@ export default function MonacoTextRenderer({
   const modelKey = snapshot.resource_id;
   const language = editor_language ?? "plaintext";
   const editorEligible = canEditText(snapshot.descriptor);
+  const readOnly = buffer_snapshot?.read_only ?? false;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   baselineRef.current = comparison_baseline;
   useEffect(() => {
@@ -217,7 +221,7 @@ export default function MonacoTextRenderer({
         fontSize: 13,
         minimap: { enabled: false },
         model,
-        readOnly: false,
+        readOnly: readOnlyRef.current,
         renderValidationDecorations: "off",
         scrollBeyondLastLine: false,
         theme: monacoTheme(),
@@ -274,6 +278,10 @@ export default function MonacoTextRenderer({
       if (model) releaseCanonicalFileModel(modelKey, model);
     };
   }, [controller, editorEligible, language, lifecycle.visible, modelKey, retryToken, surface_id, updateChanges]);
+
+  useEffect(() => {
+    editorRef.current?.updateOptions({ readOnly });
+  }, [readOnly]);
 
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">Text editor suspended.</div>;

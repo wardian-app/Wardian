@@ -93,6 +93,7 @@ function hostProps(rendererKind: FileContentDescriptorV1["renderer_kind"]) {
       buffer_generation: 1,
       text: "dirty working text",
       dirty: true,
+      read_only: false,
     }),
     on_open_file: vi.fn(),
     on_open_with: vi.fn(),

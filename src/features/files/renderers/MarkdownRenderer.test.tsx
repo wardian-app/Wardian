@@ -53,6 +53,7 @@ describe("MarkdownRenderer", () => {
         buffer_generation: 3,
         text: "# Unsaved heading",
         dirty: true,
+        read_only: false,
       })}
     />);
 

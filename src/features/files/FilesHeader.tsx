@@ -23,6 +23,7 @@ export type FilesHeaderProps = {
   presentation_toggle_available: boolean;
   dirty: boolean;
   save_available: boolean;
+  save_disabled?: boolean;
   save_as_available: boolean;
   saving: boolean;
   changes?: FileDiffSummary | null;
@@ -84,6 +85,7 @@ export function FilesHeader({
   presentation_toggle_available,
   dirty,
   save_available,
+  save_disabled = false,
   save_as_available,
   saving,
   changes = null,
@@ -117,14 +119,26 @@ export function FilesHeader({
   }, []);
   const menuActions = useMemo(() => {
     const actions: MenuAction[] = [];
-    if (save_available) actions.push({ label: "Save", disabled: saving, run: on_save });
+    if (save_available) {
+      actions.push({ label: "Save", disabled: saving || save_disabled, run: on_save });
+    }
     if (save_as_available) actions.push({ label: "Save As", disabled: saving, run: on_save_as });
     actions.push(
       { label: "Open With", run: () => on_open_with(actionPath) },
       { label: "Reveal", run: () => on_reveal(actionPath) },
     );
     return actions;
-  }, [actionPath, on_open_with, on_reveal, on_save, on_save_as, save_as_available, save_available, saving]);
+  }, [
+    actionPath,
+    on_open_with,
+    on_reveal,
+    on_save,
+    on_save_as,
+    save_as_available,
+    save_available,
+    save_disabled,
+    saving,
+  ]);
 
   useEffect(() => {
     if (!menuOpen) return;

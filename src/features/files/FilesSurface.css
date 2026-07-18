@@ -262,6 +262,28 @@
   margin: 0;
 }
 
+.files-resource-state.files-access-unavailable {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  right: 8px;
+  width: min(calc(100% - 16px), 480px);
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--color-wardian-warning);
+  border-radius: 6px;
+  background: color-mix(
+    in srgb,
+    var(--color-wardian-warning),
+    var(--color-wardian-bg) 94%
+  );
+  box-shadow: var(--shadow-wardian-accent);
+}
+
+.files-resource-state.files-access-unavailable p {
+  margin: 0 0 8px;
+}
+
 .files-resource-state h2 {
   margin: 0 0 6px;
   color: var(--color-wardian-text);

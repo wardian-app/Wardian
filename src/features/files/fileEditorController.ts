@@ -59,6 +59,14 @@ export type FileEditorRecoveryState =
 
 export type FileEditorRecoveryConflictChoice = "keep_current" | "use_recovered";
 
+export type FileEditorAuthorizationState =
+  | { readonly status: "available" }
+  | {
+      readonly status: "unavailable";
+      readonly code: "unauthorized_path" | "unauthorized_resource" | "resource_not_found";
+      readonly message: string;
+    };
+
 export type FileEditorSnapshot = {
   readonly resource_key: string;
   readonly status: "uninitialized" | "ready";
@@ -72,6 +80,7 @@ export type FileEditorSnapshot = {
   readonly working_text: string;
   readonly dirty: boolean;
   readonly stale: boolean;
+  readonly authorization: FileEditorAuthorizationState;
   readonly save_state: "idle" | "saving" | "error";
   readonly recovery: FileEditorRecoveryState;
   readonly recovery_discovery:
@@ -147,6 +156,30 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function errorCode(error: unknown): string | null {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return String(error.code);
+  }
+  return null;
+}
+
+function isAuthorizationUnavailable(error: unknown): boolean {
+  return [
+    "unauthorized_path",
+    "unauthorized_resource",
+    "resource_not_found",
+  ].includes(errorCode(error) ?? "");
+}
+
+function unavailableAuthorization(error: unknown): FileEditorAuthorizationState | null {
+  if (!isAuthorizationUnavailable(error)) return null;
+  return Object.freeze({
+    status: "unavailable" as const,
+    code: errorCode(error) as "unauthorized_path" | "unauthorized_resource" | "resource_not_found",
+    message: errorMessage(error),
+  });
+}
+
 function newestRecovery(
   recoveries: readonly FileRecoverySummaryV1[],
 ): FileRecoverySummaryV1 | undefined {
@@ -215,6 +248,7 @@ export class FileEditorController {
       working_text: "",
       dirty: false,
       stale: false,
+      authorization: Object.freeze({ status: "available" }),
       save_state: "idle",
       recovery: Object.freeze({ status: "none" }),
       recovery_discovery: "not_started",
@@ -434,6 +468,7 @@ export class FileEditorController {
         working_text: text,
         dirty: false,
         stale: false,
+        authorization: Object.freeze({ status: "available" }),
         save_state: "idle",
         last_error: null,
       });
@@ -447,6 +482,7 @@ export class FileEditorController {
       ...(matchesBufferBase ? { base_revision: owner.revision } : {}),
       disk_head_revision: owner.revision,
       disk_head_hash: diskHeadHash,
+      authorization: Object.freeze({ status: "available" }),
       stale: !matchesBufferBase,
     });
   }
@@ -454,6 +490,13 @@ export class FileEditorController {
   mutate(text: string): number {
     if (this.#snapshot.status !== "ready") {
       throw new Error("The file editor is not initialized.");
+    }
+    if (this.#snapshot.authorization.status === "unavailable") {
+      // Monaco may deliver one final model event while its read-only option is
+      // being applied. Re-publish the controller snapshot so the canonical
+      // model rolls back to the last accepted bytes.
+      this.#publish({});
+      return this.#snapshot.buffer_generation;
     }
     if (text === this.#snapshot.working_text) {
       if (
@@ -468,6 +511,33 @@ export class FileEditorController {
     }
     const bufferGeneration = this.#snapshot.buffer_generation + 1;
     const dirty = text !== this.#snapshot.saved_text;
+    const exactDiskHead = this.#exactDiskHead;
+    const returnedToSavedBehindDisk = !dirty
+      && !this.#recoveryConflict
+      && exactDiskHead !== null
+      && exactDiskHead.owner_generation === this.#ownerGeneration
+      && exactDiskHead.resource_id === this.#owner?.resource_id
+      && exactDiskHead.subscription_id === this.#owner?.subscription_id
+      && exactDiskHead.content_hash !== this.#snapshot.buffer_base_hash;
+    if (returnedToSavedBehindDisk) {
+      this.#baseRevision = exactDiskHead.revision;
+      this.#clearCheckpointTimer();
+      this.#publish({
+        base_revision: exactDiskHead.revision,
+        buffer_base_hash: exactDiskHead.content_hash,
+        disk_head_revision: exactDiskHead.revision,
+        disk_head_hash: exactDiskHead.content_hash,
+        saved_text: exactDiskHead.text,
+        working_text: exactDiskHead.text,
+        dirty: false,
+        stale: false,
+        buffer_generation: bufferGeneration,
+        save_state: this.#snapshot.save_state === "error" ? "idle" : this.#snapshot.save_state,
+        last_error: null,
+      });
+      void this.#retireRecoveryForCleanGeneration(bufferGeneration).catch(() => undefined);
+      return bufferGeneration;
+    }
     this.#publish({
       working_text: text,
       dirty,
@@ -514,11 +584,17 @@ export class FileEditorController {
    */
   async reloadFromDisk(): Promise<void> {
     const operation = this.#captureExactDiskHead("Reload from disk");
-    const exact = await this.#client.readText({
-      resource_id: operation.resource_id,
-      subscription_id: operation.subscription_id,
-      revision: operation.revision,
-    });
+    let exact: FileResourceTextV1;
+    try {
+      exact = await this.#client.readText({
+        resource_id: operation.resource_id,
+        subscription_id: operation.subscription_id,
+        revision: operation.revision,
+      });
+    } catch (error) {
+      this.#markAuthorizationUnavailable(error, operation.owner_generation);
+      throw error;
+    }
     if (
       exact.resource_id !== operation.resource_id
       || exact.revision !== operation.revision
@@ -587,13 +663,19 @@ export class FileEditorController {
         || this.#recoveryMetadata.recovery_revision !== recovery.recovery_revision
         || this.#recoveryMetadata.buffer_generation !== recovery.buffer_generation
       ) throw new Error("The recovery changed before Merge could start.");
-      const merged = await this.#client.mergeRecovery({
-        recovery_id: recovery.recovery_id,
-        expected_recovery_revision: recovery.recovery_revision,
-        resource_key: this.#resourceKey,
-        resource_id: operation.resource_id,
-        subscription_id: operation.subscription_id,
-      });
+      let merged: FileRecoveryMergeResultV1;
+      try {
+        merged = await this.#client.mergeRecovery({
+          recovery_id: recovery.recovery_id,
+          expected_recovery_revision: recovery.recovery_revision,
+          resource_key: this.#resourceKey,
+          resource_id: operation.resource_id,
+          subscription_id: operation.subscription_id,
+        });
+      } catch (error) {
+        this.#markAuthorizationUnavailable(error, operation.owner_generation);
+        throw error;
+      }
       this.#assertExactDiskHead(operation, "Merge");
       if (
         this.#recoveryMetadata?.recovery_id !== recovery.recovery_id
@@ -646,6 +728,9 @@ export class FileEditorController {
     if (!this.#owner || this.#baseRevision === null || this.#snapshot.buffer_base_hash === null) {
       throw new Error("The file editor has no live authorized subscription.");
     }
+    if (this.#snapshot.authorization.status === "unavailable") {
+      throw new Error("Restore file access before saving this buffer.");
+    }
     if (
       this.#snapshot.recovery_discovery === "not_started"
       || this.#snapshot.recovery_discovery === "discovering"
@@ -675,6 +760,7 @@ export class FileEditorController {
           throw new Error("The authorized file subscription changed before Save could start.");
         }
         if (this.#snapshot.saved_text === submittedText) {
+          await this.#retireRecoveryForCleanGenerationInsideQueue(bufferGeneration);
           return {
             status: "unchanged",
             revision: baseRevision,
@@ -769,6 +855,14 @@ export class FileEditorController {
       });
     } catch (error) {
       failure = errorMessage(error);
+      const authorization = unavailableAuthorization(error);
+      if (authorization && this.#ownerGeneration === requestedOwnerGeneration) {
+        this.#publish({ authorization });
+        if (this.#snapshot.dirty && this.#recoveryMetadata) {
+          this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
+          void this.#ensureCheckpointLoop().catch(() => undefined);
+        }
+      }
       throw error;
     } finally {
       this.#saveOperationCount = Math.max(0, this.#saveOperationCount - 1);
@@ -815,7 +909,7 @@ export class FileEditorController {
     await this.#retireRecoveryForCleanGeneration(this.#snapshot.buffer_generation);
   }
 
-  resolveRecoveryConflict(choice: FileEditorRecoveryConflictChoice): void {
+  async resolveRecoveryConflict(choice: FileEditorRecoveryConflictChoice): Promise<void> {
     const conflict = this.#recoveryConflict;
     if (!conflict || this.#snapshot.recovery.status !== "conflict") {
       throw new Error("The file editor has no recovery conflict to resolve.");
@@ -823,27 +917,62 @@ export class FileEditorController {
     if (!this.#hasDurableCurrentConflictBuffer()) {
       throw new Error("Current edits must be durable before resolving the recovery conflict.");
     }
-    if (choice === "keep_current") {
-      const current = this.#recoveryMetadata;
-      this.#recoveryConflict = null;
-      if (!this.#snapshot.dirty) this.#recoveryMetadata = null;
-      this.#publish({
-        recovery_discovery: "complete",
-        recovery: current && this.#snapshot.dirty
-          ? Object.freeze({
-              status: "durable" as const,
-              recovery_id: current.recovery_id,
-              recovery_revision: current.recovery_revision,
-              buffer_generation: current.buffer_generation,
-            })
-          : Object.freeze({ status: "none" as const }),
-        last_error: null,
-      });
-      return;
+    const current = this.#recoveryMetadata;
+    const bufferGeneration = this.#snapshot.buffer_generation;
+    const rejected = choice === "keep_current"
+      ? {
+          recovery_id: conflict.recovery_id,
+          expected_recovery_revision: conflict.recovery_revision,
+        }
+      : current
+        ? {
+            recovery_id: current.recovery_id,
+            expected_recovery_revision: current.recovery_revision,
+          }
+        : null;
+    if (!rejected) {
+      throw new Error("The rejected recovery is no longer available.");
     }
-    this.#recoveryConflict = null;
-    this.#applyChosenRecovery(conflict);
-    this.#publish({ recovery_discovery: "complete", last_error: null });
+    await this.#enqueueDurable(async () => {
+      if (
+        this.#recoveryConflict !== conflict
+        || this.#snapshot.buffer_generation !== bufferGeneration
+        || !this.#hasDurableCurrentConflictBuffer()
+      ) {
+        throw new Error("The recovery conflict changed before the choice could be committed.");
+      }
+      await this.#client.discardRecovery({
+        ...rejected,
+        resource_key: this.#resourceKey,
+      });
+      if (
+        this.#recoveryConflict !== conflict
+        || this.#snapshot.buffer_generation !== bufferGeneration
+      ) {
+        throw new Error("The recovery conflict changed while the choice was being committed.");
+      }
+      if (choice === "keep_current") {
+        this.#recoveryConflict = null;
+        if (!this.#snapshot.dirty) this.#recoveryMetadata = null;
+        this.#publish({
+          recovery_discovery: "complete",
+          recovery: current && this.#snapshot.dirty
+            ? Object.freeze({
+                status: "durable" as const,
+                recovery_id: current.recovery_id,
+                recovery_revision: current.recovery_revision,
+                buffer_generation: current.buffer_generation,
+              })
+            : Object.freeze({ status: "none" as const }),
+          last_error: null,
+        });
+        return;
+      }
+      this.#recoveryMetadata = null;
+      this.#recoveryConflict = null;
+      this.#applyChosenRecovery(conflict);
+      this.#publish({ recovery_discovery: "complete", last_error: null });
+    });
   }
 
   async discard(expectedBufferGeneration: number): Promise<boolean> {
@@ -1109,6 +1238,7 @@ export class FileEditorController {
       throw new Error("Recovery discovery must complete before checkpointing newer edits.");
     }
     const owner = this.#owner;
+    const ownerGeneration = this.#ownerGeneration;
     const baseHash = this.#snapshot.buffer_base_hash;
     if (!owner || this.#baseRevision === null || baseHash === null) {
       throw new Error("Dirty recovery requires a live authorized subscription.");
@@ -1160,7 +1290,13 @@ export class FileEditorController {
     try {
       committed = await this.#client.checkpointRecovery(request);
     } catch (error) {
+      if (this.#ownerGeneration !== ownerGeneration) {
+        this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
+        return null;
+      }
+      const authorization = unavailableAuthorization(error);
       this.#publish({
+        ...(authorization ? { authorization } : {}),
         recovery: this.#recoveryConflict
           ? this.#recoveryConflictState(false, errorMessage(error))
           : Object.freeze({
@@ -1254,17 +1390,44 @@ export class FileEditorController {
 
   #retireRecoveryForCleanGeneration(bufferGeneration: number): Promise<void> {
     if (this.#recoveryConflict) return Promise.resolve();
-    return this.#enqueueDurable(async () => {
-      if (this.#snapshot.dirty || this.#snapshot.buffer_generation !== bufferGeneration) return;
+    return this.#enqueueDurable(
+      () => this.#retireRecoveryForCleanGenerationInsideQueue(bufferGeneration),
+    );
+  }
+
+  async #retireRecoveryForCleanGenerationInsideQueue(bufferGeneration: number): Promise<void> {
+    if (this.#snapshot.dirty || this.#snapshot.buffer_generation !== bufferGeneration) return;
+    try {
+      await this.#reconcileAmbiguousRecovery();
+    } catch (error) {
+      const recovery = this.#recoveryMetadata;
+      this.#publish({
+        recovery: Object.freeze({
+          status: "error",
+          recovery_id: recovery?.recovery_id ?? null,
+          recovery_revision: recovery?.recovery_revision ?? null,
+          buffer_generation: bufferGeneration,
+          retryable: true,
+          message: errorMessage(error),
+        }),
+        last_error: errorMessage(error),
+      });
+      throw error;
+    }
+    const recovery = this.#recoveryMetadata;
+    if (recovery) {
       try {
-        await this.#reconcileAmbiguousRecovery();
+        await this.#client.discardRecovery({
+          recovery_id: recovery.recovery_id,
+          expected_recovery_revision: recovery.recovery_revision,
+          resource_key: this.#resourceKey,
+        });
       } catch (error) {
-        const recovery = this.#recoveryMetadata;
         this.#publish({
           recovery: Object.freeze({
             status: "error",
-            recovery_id: recovery?.recovery_id ?? null,
-            recovery_revision: recovery?.recovery_revision ?? null,
+            recovery_id: recovery.recovery_id,
+            recovery_revision: recovery.recovery_revision,
             buffer_generation: bufferGeneration,
             retryable: true,
             message: errorMessage(error),
@@ -1273,40 +1436,20 @@ export class FileEditorController {
         });
         throw error;
       }
-      const recovery = this.#recoveryMetadata;
-      if (recovery) {
-        try {
-          await this.#client.discardRecovery({
-            recovery_id: recovery.recovery_id,
-            expected_recovery_revision: recovery.recovery_revision,
-            resource_key: this.#resourceKey,
-          });
-        } catch (error) {
-          this.#publish({
-            recovery: Object.freeze({
-              status: "error",
-              recovery_id: recovery.recovery_id,
-              recovery_revision: recovery.recovery_revision,
-              buffer_generation: bufferGeneration,
-              retryable: true,
-              message: errorMessage(error),
-            }),
-            last_error: errorMessage(error),
-          });
-          throw error;
-        }
-        if (
-          this.#recoveryMetadata?.recovery_id === recovery.recovery_id
-          && this.#recoveryMetadata.recovery_revision === recovery.recovery_revision
-        ) this.#recoveryMetadata = null;
-      }
-      if (!this.#snapshot.dirty && this.#snapshot.buffer_generation === bufferGeneration) {
-        this.#publish({ recovery: Object.freeze({ status: "none" }), last_error: null });
-      }
-    });
+      if (
+        this.#recoveryMetadata?.recovery_id === recovery.recovery_id
+        && this.#recoveryMetadata.recovery_revision === recovery.recovery_revision
+      ) this.#recoveryMetadata = null;
+    }
+    if (!this.#snapshot.dirty && this.#snapshot.buffer_generation === bufferGeneration) {
+      this.#publish({ recovery: Object.freeze({ status: "none" }), last_error: null });
+    }
   }
 
   #captureExactDiskHead(action: string): ExactDiskOperation {
+    if (this.#snapshot.authorization.status === "unavailable") {
+      throw new Error(`Restore file access before ${action.toLowerCase()}.`);
+    }
     if (!this.#snapshot.dirty || !this.#snapshot.stale) {
       throw new Error(`${action} requires a stale dirty buffer.`);
     }
@@ -1355,6 +1498,13 @@ export class FileEditorController {
       || this.#snapshot.disk_head_revision !== operation.revision
       || this.#snapshot.disk_head_hash !== operation.content_hash
     ) throw new Error(`${action} was cancelled because the editor or disk head changed.`);
+  }
+
+  #markAuthorizationUnavailable(error: unknown, ownerGeneration: number): void {
+    const authorization = unavailableAuthorization(error);
+    if (authorization && this.#ownerGeneration === ownerGeneration) {
+      this.#publish({ authorization });
+    }
   }
 
   #enqueueDurable<T>(operation: () => Promise<T>): Promise<T> {

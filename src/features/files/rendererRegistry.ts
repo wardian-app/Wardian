@@ -14,6 +14,7 @@ export type FileEditorBufferSnapshot = Readonly<{
   buffer_generation: number;
   text: string;
   dirty: boolean;
+  read_only: boolean;
 }>;
 
 export type FileRendererProps = {
