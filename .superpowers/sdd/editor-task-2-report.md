@@ -112,3 +112,69 @@ in turn and proves both can read the replacement identities.
   canonical target, preserving each subscription's requested path and root;
   runtime installs those rebound handles together while the resource operation
   lock is held. No known Task 2 security concern remains.
+
+## Security review fix wave (2026-07-18)
+
+The independent Task 2 review found four commit-boundary gaps. All four were
+fixed as one security wave:
+
+1. After sibling staging and flush, core now invokes the backend commit check,
+   rescans the expected size and hash through the same locked retained handle,
+   and only then performs the final pathname/root/identity check and replace.
+   The deterministic barrier test mutates the original in place after staging;
+   it receives `stale_revision` and the newer bytes survive.
+2. Existing-resource subscription admission now acquires `entry.operation`,
+   reauthorizes after the lock, and retries across entry-incarnation changes.
+   A concurrent open launched after save candidate capture blocks until commit,
+   then reads and saves the replacement; the original subscription reads the
+   next replacement.
+3. `save_file_resource_text` no longer resolves or passes a command-layer
+   `AgentConfig` snapshot. Runtime resolves all live claims from its
+   backend-owned resolver initially and again through the core's final commit
+   callback. Deterministic revocation after initial validation rejects the save,
+   preserves original bytes, and emits no revision event.
+4. Save As acquires an owned ordinary-capability table reservation before it
+   consumes the target grant or commits bytes. The guard holds capacity stable
+   through commit and makes publication infallible. Saturated-table tests prove
+   both missing and existing destinations remain unchanged on
+   `grant_limit_reached`; the missing-target test also proves the target grant
+   was not consumed.
+
+Focused fix evidence:
+
+```text
+CARGO_BUILD_JOBS=1 cargo test -p wardian-core guarded_atomic_text_replace -- --test-threads=1
+5 passed; 0 failed
+
+CARGO_BUILD_JOBS=1 cargo test -p Wardian file_resources_save_ -- --test-threads=1
+12 passed; 0 failed
+```
+
+The final scan is the optimistic-concurrency boundary. Cross-process filesystem
+APIs do not supply an atomic compare-and-replace on file content, so an external
+writer beginning after that scan can still race replacement; the spec now
+states that limitation instead of claiming exclusion beyond the last scan.
+
+Final security-wave gates:
+
+```text
+CARGO_BUILD_JOBS=1 cargo check --workspace
+Exit code 0
+
+CARGO_BUILD_JOBS=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
+Exit code 0
+
+CARGO_BUILD_JOBS=1 cargo test --workspace
+Wardian library: 1203 passed; 0 failed
+All remaining unit, integration, and doc tests passed
+Exit code 0
+```
+
+Security-wave self-review confirmed that existing-entry admission and save use
+the same operation-lock order; commit validation compares exact subscriber
+membership and re-resolves every current claim; staged-write rejection removes
+the sibling without publishing a revision; and Save As holds the ordinary grant
+table reservation from before target-grant consumption until infallible
+publication. No new secret, environment, frontend, artifact-retargeting, or
+private-token surface was introduced. The pre-existing unstaged
+`package-lock.json` modification remains outside the task.

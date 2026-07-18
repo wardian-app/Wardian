@@ -200,9 +200,6 @@ pub async fn save_file_resource_text(
     request: SaveFileResourceTextRequestV1,
     state: tauri::State<'_, AppState>,
 ) -> Result<FileResourceSaveResultV1, FileResourceErrorV1> {
-    let config =
-        current_subscription_agent_config(&state, &request.resource_id, &request.subscription_id)
-            .await?;
     state
         .file_resources
         .save_text(
@@ -211,7 +208,6 @@ pub async fn save_file_resource_text(
             request.expected_revision,
             &request.buffer_base_hash,
             &request.text,
-            config.as_ref(),
         )
         .await
 }

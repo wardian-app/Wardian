@@ -224,6 +224,65 @@ impl AuthorizedPath {
         text: &str,
         limits: &FileResourceLimits,
     ) -> Result<GuardedFileWrite, FileResourceErrorV1> {
+        self.guarded_atomic_replace_text_inner(
+            expected_revision,
+            expected_hash,
+            text,
+            limits,
+            GuardedReplaceChecks {
+                after_stage: || {},
+                before_final_scan: || Ok(()),
+            },
+        )
+    }
+
+    /// Performs a guarded atomic text save with a final backend authority
+    /// check immediately before the retained-capability rescan and binding
+    /// verification.
+    ///
+    /// The callback must validate current backend-owned authority without
+    /// treating paths, hashes, or frontend revisions as authority. If it
+    /// rejects, the staged file is removed and the target is not replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::guarded_atomic_replace_text`], plus
+    /// any error returned by `before_final_scan`.
+    pub fn guarded_atomic_replace_text_with_commit_check<BeforeFinalScan>(
+        &self,
+        expected_revision: &FileRevisionToken,
+        expected_hash: &str,
+        text: &str,
+        limits: &FileResourceLimits,
+        before_final_scan: BeforeFinalScan,
+    ) -> Result<GuardedFileWrite, FileResourceErrorV1>
+    where
+        BeforeFinalScan: FnOnce() -> Result<(), FileResourceErrorV1>,
+    {
+        self.guarded_atomic_replace_text_inner(
+            expected_revision,
+            expected_hash,
+            text,
+            limits,
+            GuardedReplaceChecks {
+                after_stage: || {},
+                before_final_scan,
+            },
+        )
+    }
+
+    fn guarded_atomic_replace_text_inner<AfterStage, BeforeFinalScan>(
+        &self,
+        expected_revision: &FileRevisionToken,
+        expected_hash: &str,
+        text: &str,
+        limits: &FileResourceLimits,
+        checks: GuardedReplaceChecks<AfterStage, BeforeFinalScan>,
+    ) -> Result<GuardedFileWrite, FileResourceErrorV1>
+    where
+        AfterStage: FnOnce(),
+        BeforeFinalScan: FnOnce() -> Result<(), FileResourceErrorV1>,
+    {
         let submitted_size = u64::try_from(text.len()).map_err(|_| {
             FileResourceErrorV1::new(
                 "file_too_large",
@@ -265,6 +324,17 @@ impl AuthorizedPath {
             .map_err(|error| unavailable("authorized file metadata", error))?
             .permissions();
         let staged = stage_text_sibling(&self.verified_canonical_path, text, permissions)?;
+        (checks.after_stage)();
+        if let Err(failure) = (checks.before_final_scan)() {
+            let _ = fs::remove_file(&staged);
+            return Err(failure);
+        }
+        if let Err(failure) =
+            self.scan_verified_revision_locked(expected_revision, &mut file, |_, _| Ok(()))
+        {
+            let _ = fs::remove_file(&staged);
+            return Err(failure);
+        }
         if let Err(failure) = self.verify_current_binding(&file) {
             let _ = fs::remove_file(&staged);
             return Err(failure);
@@ -287,6 +357,30 @@ impl AuthorizedPath {
             authorized,
             snapshot,
         })
+    }
+
+    #[cfg(test)]
+    fn guarded_atomic_replace_text_after_stage<AfterStage>(
+        &self,
+        expected_revision: &FileRevisionToken,
+        expected_hash: &str,
+        text: &str,
+        limits: &FileResourceLimits,
+        after_stage: AfterStage,
+    ) -> Result<GuardedFileWrite, FileResourceErrorV1>
+    where
+        AfterStage: FnOnce(),
+    {
+        self.guarded_atomic_replace_text_inner(
+            expected_revision,
+            expected_hash,
+            text,
+            limits,
+            GuardedReplaceChecks {
+                after_stage,
+                before_final_scan: || Ok(()),
+            },
+        )
     }
 
     /// Reads validated UTF-8 text from the retained authorized file handle for
@@ -569,6 +663,11 @@ impl AuthorizedPath {
             self.identity,
         )
     }
+}
+
+struct GuardedReplaceChecks<AfterStage, BeforeFinalScan> {
+    after_stage: AfterStage,
+    before_final_scan: BeforeFinalScan,
 }
 
 /// Result of a retained-handle guarded text save.
@@ -1401,6 +1500,60 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("newer bytes survive"),
             "newer revision"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_rejects_same_identity_mutation_after_staging() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+                .expect("verified snapshot");
+        let revision_token = snapshot.revision_token().clone();
+        let expected_hash = snapshot.descriptor().content_hash.clone();
+        let worker_authorized = authorized.clone();
+        let worker_limits = limits.clone();
+        let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            worker_authorized.guarded_atomic_replace_text_after_stage(
+                &revision_token,
+                &expected_hash,
+                "submitted replacement",
+                &worker_limits,
+                || {
+                    staged_tx.send(()).expect("report staged file");
+                    resume_rx.recv().expect("resume replacement");
+                },
+            )
+        });
+        staged_rx.recv().expect("staging barrier");
+        fs::write(&path, "newer same identity bytes").expect("same-identity external write");
+        resume_tx.send(()).expect("release replacement");
+
+        assert_eq!(
+            worker
+                .join()
+                .expect("replacement worker")
+                .expect_err("post-stage mutation must reject replacement")
+                .code(),
+            "stale_revision"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("newer bytes survive"),
+            "newer same identity bytes"
         );
     }
 
