@@ -122,6 +122,11 @@ type RecoveryMetadata = {
   needs_reconciliation: boolean;
 };
 
+type RecoveryCas = {
+  recovery_id: string;
+  expected_recovery_revision: number;
+};
+
 type PresentationEntry = {
   generation: number;
   callbacks: FileEditorPresentationCallbacks;
@@ -511,15 +516,11 @@ export class FileEditorController {
     }
     const bufferGeneration = this.#snapshot.buffer_generation + 1;
     const dirty = text !== this.#snapshot.saved_text;
-    const exactDiskHead = this.#exactDiskHead;
-    const returnedToSavedBehindDisk = !dirty
+    const exactDiskHead = !dirty
       && !this.#recoveryConflict
-      && exactDiskHead !== null
-      && exactDiskHead.owner_generation === this.#ownerGeneration
-      && exactDiskHead.resource_id === this.#owner?.resource_id
-      && exactDiskHead.subscription_id === this.#owner?.subscription_id
-      && exactDiskHead.content_hash !== this.#snapshot.buffer_base_hash;
-    if (returnedToSavedBehindDisk) {
+      ? this.#newerExactDiskHead()
+      : null;
+    if (exactDiskHead) {
       this.#baseRevision = exactDiskHead.revision;
       this.#clearCheckpointTimer();
       this.#publish({
@@ -919,18 +920,21 @@ export class FileEditorController {
     }
     const current = this.#recoveryMetadata;
     const bufferGeneration = this.#snapshot.buffer_generation;
-    const rejected = choice === "keep_current"
-      ? {
+    const discardTargets: RecoveryCas[] = choice === "keep_current"
+      ? [{
           recovery_id: conflict.recovery_id,
           expected_recovery_revision: conflict.recovery_revision,
-        }
+        }, ...(!this.#snapshot.dirty && current ? [{
+          recovery_id: current.recovery_id,
+          expected_recovery_revision: current.recovery_revision,
+        }] : [])]
       : current
-        ? {
+        ? [{
             recovery_id: current.recovery_id,
             expected_recovery_revision: current.recovery_revision,
-          }
-        : null;
-    if (!rejected) {
+          }]
+        : [];
+    if (!discardTargets.length) {
       throw new Error("The rejected recovery is no longer available.");
     }
     await this.#enqueueDurable(async () => {
@@ -941,10 +945,7 @@ export class FileEditorController {
       ) {
         throw new Error("The recovery conflict changed before the choice could be committed.");
       }
-      await this.#client.discardRecovery({
-        ...rejected,
-        resource_key: this.#resourceKey,
-      });
+      await this.#discardRecoveryTargets(discardTargets);
       if (
         this.#recoveryConflict !== conflict
         || this.#snapshot.buffer_generation !== bufferGeneration
@@ -981,36 +982,51 @@ export class FileEditorController {
     return this.#enqueueDurable(async () => {
       if (expectedBufferGeneration !== this.#snapshot.buffer_generation) return false;
       const recovery = this.#recoveryMetadata;
-      if (recovery) {
-        const request: DiscardFileRecoveryRequestV1 = {
+      const conflict = this.#recoveryConflict;
+      await this.#discardRecoveryTargets([
+        ...(recovery ? [{
           recovery_id: recovery.recovery_id,
           expected_recovery_revision: recovery.recovery_revision,
-          resource_key: this.#resourceKey,
-        };
-        await this.#client.discardRecovery(request);
-        if (
-          this.#recoveryMetadata?.recovery_id === recovery.recovery_id
-          && this.#recoveryMetadata.recovery_revision === recovery.recovery_revision
-        ) this.#recoveryMetadata = null;
-      }
-      if (this.#recoveryConflict) {
-        this.#recoveryConflict = null;
-        this.#recoveryMetadata = null;
-      }
+        }] : []),
+        ...(conflict ? [{
+          recovery_id: conflict.recovery_id,
+          expected_recovery_revision: conflict.recovery_revision,
+        }] : []),
+      ]);
+      this.#recoveryMetadata = null;
+      this.#recoveryConflict = null;
       if (expectedBufferGeneration !== this.#snapshot.buffer_generation) {
         this.#publish({ recovery: Object.freeze({ status: "none" }) });
         this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
         void this.#ensureCheckpointLoop().catch(() => undefined);
         return false;
       }
-      this.#publish({
-        working_text: this.#snapshot.saved_text,
-        dirty: false,
-        stale: false,
-        recovery_discovery: "complete",
-        recovery: Object.freeze({ status: "none" }),
-        last_error: null,
-      });
+      const exactDiskHead = this.#newerExactDiskHead();
+      if (exactDiskHead) {
+        this.#baseRevision = exactDiskHead.revision;
+        this.#publish({
+          base_revision: exactDiskHead.revision,
+          buffer_base_hash: exactDiskHead.content_hash,
+          disk_head_revision: exactDiskHead.revision,
+          disk_head_hash: exactDiskHead.content_hash,
+          saved_text: exactDiskHead.text,
+          working_text: exactDiskHead.text,
+          dirty: false,
+          stale: false,
+          recovery_discovery: "complete",
+          recovery: Object.freeze({ status: "none" }),
+          last_error: null,
+        });
+      } else {
+        this.#publish({
+          working_text: this.#snapshot.saved_text,
+          dirty: false,
+          stale: false,
+          recovery_discovery: "complete",
+          recovery: Object.freeze({ status: "none" }),
+          last_error: null,
+        });
+      }
       return true;
     });
   }
@@ -1315,6 +1331,10 @@ export class FileEditorController {
       throw new Error("The recovery checkpoint does not match this editor resource.");
     }
     if (checkpointConflict && this.#recoveryConflict !== checkpointConflict) return null;
+    const authorization = this.#ownerGeneration === ownerGeneration
+      && committed.file_authorization_error
+      ? unavailableAuthorization(committed.file_authorization_error)
+      : null;
     this.#recoveryMetadata = {
       recovery_id: committed.recovery_id,
       recovery_revision: committed.recovery_revision,
@@ -1322,6 +1342,7 @@ export class FileEditorController {
       needs_reconciliation: false,
     };
     this.#publish({
+      ...(authorization ? { authorization } : {}),
       recovery: this.#recoveryConflict
         ? this.#recoveryConflictState(
             bufferGeneration === this.#snapshot.buffer_generation,
@@ -1335,7 +1356,7 @@ export class FileEditorController {
           }),
       last_error: this.#recoveryConflict
         ? "Recovered changes conflict with newer in-memory edits. Both versions were preserved."
-        : null,
+        : authorization?.status === "unavailable" ? authorization.message : null,
     });
     return bufferGeneration;
   }
@@ -1386,6 +1407,46 @@ export class FileEditorController {
       throw new Error("Recovery advanced while its previous outcome was being reconciled.");
     }
     if (this.#recoveryMetadata === recovery) recovery.needs_reconciliation = false;
+  }
+
+  #newerExactDiskHead(): ExactDiskHead | null {
+    const exact = this.#exactDiskHead;
+    const owner = this.#owner;
+    if (
+      !exact
+      || !owner
+      || exact.owner_generation !== this.#ownerGeneration
+      || exact.resource_id !== owner.resource_id
+      || exact.subscription_id !== owner.subscription_id
+      || exact.revision !== this.#snapshot.disk_head_revision
+      || exact.content_hash !== this.#snapshot.disk_head_hash
+      || exact.content_hash === this.#snapshot.buffer_base_hash
+    ) return null;
+    return exact;
+  }
+
+  async #discardRecoveryTargets(targets: readonly RecoveryCas[]): Promise<void> {
+    const exactById = new Map<string, RecoveryCas>();
+    for (const target of targets) {
+      const previous = exactById.get(target.recovery_id);
+      if (
+        !previous
+        || target.expected_recovery_revision > previous.expected_recovery_revision
+      ) exactById.set(target.recovery_id, target);
+    }
+    for (const target of exactById.values()) {
+      const request: DiscardFileRecoveryRequestV1 = {
+        ...target,
+        resource_key: this.#resourceKey,
+      };
+      try {
+        await this.#client.discardRecovery(request);
+      } catch (error) {
+        // Exact deletion is idempotent. A missing record already satisfies the
+        // requested postcondition; stale CAS and scope failures still fail closed.
+        if (errorCode(error) !== "recovery_not_found") throw error;
+      }
+    }
   }
 
   #retireRecoveryForCleanGeneration(bufferGeneration: number): Promise<void> {

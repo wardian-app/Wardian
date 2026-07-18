@@ -86,6 +86,9 @@ pub struct FileRecoveryCheckpointV1 {
     pub recovery_revision: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// Advisory current-file authorization failure observed after the recovery
+    /// bytes committed. This never gates or rolls back recovery durability.
+    pub file_authorization_error: Option<FileResourceErrorV1>,
 }
 
 /// Body-free metadata used to discover durable editor recovery records after
@@ -2293,7 +2296,31 @@ impl FileResourceRuntime {
             fail_before_manifest,
             store_limits.orphan_grace_period,
         )?;
-        Ok(recovery_checkpoint_metadata(&committed))
+        drop(_recovery_io);
+        // Recovery authority and file authority are deliberately independent.
+        // Probe the latter only after the CAS is durable so root revocation or
+        // subscription closure makes the editor read-only without losing the
+        // latest recovery generation.
+        let file_authorization_error = match self
+            .validated_save_authorization(resource_id, subscription_id)
+            .await
+        {
+            Ok((_, _, descriptor, _))
+                if resource_id == resource_key
+                    && file_resource_id(&descriptor.canonical_path) == resource_key =>
+            {
+                None
+            }
+            Ok(_) => Some(error(
+                "unauthorized_resource",
+                "live subscription does not match the recovery resource key",
+            )),
+            Err(error) => Some(error),
+        };
+        Ok(recovery_checkpoint_metadata(
+            &committed,
+            file_authorization_error,
+        ))
     }
 
     /// Discovers body-free recovery metadata for one exact stable resource key
@@ -4169,7 +4196,10 @@ fn validate_recovery_record_dir(
     Ok(record_dir)
 }
 
-fn recovery_checkpoint_metadata(manifest: &FileRecoveryManifestV1) -> FileRecoveryCheckpointV1 {
+fn recovery_checkpoint_metadata(
+    manifest: &FileRecoveryManifestV1,
+    file_authorization_error: Option<FileResourceErrorV1>,
+) -> FileRecoveryCheckpointV1 {
     FileRecoveryCheckpointV1 {
         schema: 1,
         recovery_id: manifest.recovery_id.clone(),
@@ -4179,6 +4209,7 @@ fn recovery_checkpoint_metadata(manifest: &FileRecoveryManifestV1) -> FileRecove
         recovery_revision: manifest.recovery_revision,
         created_at_ms: manifest.created_at_ms,
         updated_at_ms: manifest.updated_at_ms,
+        file_authorization_error,
     }
 }
 
@@ -5730,8 +5761,8 @@ mod tests {
             .checkpoint_recovery(
                 Some(&checkpoint.recovery_id),
                 Some(checkpoint.recovery_revision),
-                "revoked-resource-does-not-authorize-recovery",
-                "revoked-subscription-does-not-authorize-recovery",
+                &opened.resource_id,
+                &opened.subscription_id,
                 &opened.descriptor.content_hash,
                 "base",
                 &opened.resource_id,
@@ -5740,6 +5771,13 @@ mod tests {
             )
             .await
             .expect("scoped recovery CAS update does not require current file authority");
+        assert_eq!(
+            updated
+                .file_authorization_error
+                .as_ref()
+                .map(FileResourceErrorV1::code),
+            Some("unauthorized_path")
+        );
         assert_eq!(
             runtime
                 .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
@@ -5841,6 +5879,13 @@ mod tests {
             .await
             .expect("scoped recovery CAS remains independent of a live subscription");
         assert_eq!(updated.recovery_revision, checkpoint.recovery_revision + 1);
+        assert_eq!(
+            updated
+                .file_authorization_error
+                .as_ref()
+                .map(FileResourceErrorV1::code),
+            Some("resource_not_found")
+        );
         assert_eq!(
             runtime
                 .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")

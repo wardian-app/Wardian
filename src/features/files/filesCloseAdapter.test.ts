@@ -101,6 +101,7 @@ function fakeClient(): FileEditorResourceClient {
       recovery_revision: 3,
       created_at_ms: 1,
       updated_at_ms: 3,
+      file_authorization_error: null,
     } satisfies FileRecoveryCheckpointV1),
     listRecoveries: vi.fn().mockResolvedValue([recoverySummary]),
     getRecovery: vi.fn().mockResolvedValue(recovery),

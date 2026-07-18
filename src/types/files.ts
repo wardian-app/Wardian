@@ -194,9 +194,13 @@ export type FileRecoveryCheckpointV1 = {
   recovery_revision: number;
   created_at_ms: number;
   updated_at_ms: number;
+  file_authorization_error: FileResourceErrorV1 | null;
 };
 
-export type FileRecoverySummaryV1 = FileRecoveryCheckpointV1 & {
+export type FileRecoverySummaryV1 = Omit<
+  FileRecoveryCheckpointV1,
+  "file_authorization_error"
+> & {
   display_name: string;
   extension: string | null;
   mime_type: string;

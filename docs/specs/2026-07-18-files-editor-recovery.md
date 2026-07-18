@@ -28,27 +28,37 @@ manifest after a crash and would duplicate stored bytes.
 
 ## Authority boundaries
 
-Creating or updating a checkpoint requires the exact live file subscription
-for the same canonical `resource_key`. Every request carries the exact retained
-editor base, its `base_content_hash`, and the buffer. The backend bounds both
-texts and requires the submitted base's SHA-256 digest to match the declared
-hash before storing it. Creation reauthorizes the exact current subscription
-and resource key but does not reread the base through the retained handle or
-require the current disk revision/hash to match it. Therefore an external disk
-change before the first debounced checkpoint still produces durable recovery
-with the exact old editor base.
+Creating a checkpoint requires the exact live file subscription for the same
+canonical `resource_key`. Every request carries the exact retained editor base,
+its `base_content_hash`, and the buffer. The backend bounds both texts and
+requires the submitted base's SHA-256 digest to match the declared hash before
+storing it. Creation reauthorizes the exact current subscription and resource
+key but does not reread the base through the retained handle or require the
+current disk revision/hash to match it. Therefore an external disk change
+before the first debounced checkpoint still produces durable recovery with the
+exact old editor base.
 
 Updates use the exact recovery compare-and-swap revision so an older debounce
-completion cannot overwrite a newer generation. The submitted hash-verified
-base may replace the stored base after guarded Save or accepted rebase; when its
-hash changes, the backend rotates the opaque base revision. Both immutable
-blobs are written before the manifest publishes the new base/hash and buffer
-together. The recovery checkpoint IPC has no `base_revision`: process-local
-file revisions guard filesystem Save, while durable recovery content identity
-is the exact submitted base plus its verified hash. Every update still
-reauthorizes the recovery ID, exact resource/WebView scope, recovery CAS
-generation, and current live subscription. None of these recovery checks grant
-filesystem write authority or relax guarded Save.
+completion cannot overwrite a newer generation. The recovery ID, exact
+resource/WebView scope, and recovery CAS generation are sufficient to replace
+only that already-authorized recovery record; an update does not require the
+original live file subscription to remain open. This separation lets Wardian
+durably advance the latest dirty generation after root revocation or a last
+subscription close without granting any current-file read or write authority.
+After the recovery manifest commits, the backend probes the submitted file
+subscription and returns any authorization failure as advisory checkpoint
+metadata. The frontend immediately becomes read-only for a still-current owner,
+while retaining the successfully committed recovery. An advisory from an old
+subscription incarnation is ignored after a replacement owner is installed.
+
+The submitted hash-verified base may replace the stored base after guarded Save
+or accepted rebase; when its hash changes, the backend rotates the opaque base
+revision. Both immutable blobs are written before the manifest publishes the
+new base/hash and buffer together. The recovery checkpoint IPC has no
+`base_revision`: process-local file revisions guard filesystem Save, while
+durable recovery content identity is the exact submitted base plus its verified
+hash. None of these recovery checks grant filesystem write authority or relax
+guarded Save.
 
 After restart, `list_file_recoveries` discovers body-free recovery metadata for
 the exact stable resource key and calling WebView, newest first. Discovery
@@ -111,6 +121,13 @@ generation under the calling WebView and resource scope. Another view's dirty
 recovery is never scanned or deleted. Cleanup races and I/O failures leave the
 recovery for later handling and do not turn an already committed file save
 into a reported failure.
+
+Explicit discard and clean conflict resolution delete every recovery generation
+owned by that editor state with exact ID/revision compare-and-swap requests. A
+partially completed multi-record deletion is retryable: an already-missing exact
+record is idempotent success, while a revision or scope mismatch still fails
+closed. Recovery-only views re-list after each discard and reveal the next-newest
+record instead of reporting an empty state while older recovery remains.
 
 ## Verification
 

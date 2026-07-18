@@ -245,18 +245,20 @@ and does not change a committed save into an error.
 
 ### `checkpoint_file_recovery`
 
-Creates or updates a durable dirty editor buffer through an exact live file
-subscription. Create uses `null` for both recovery fields. Update supplies the
-returned ID and exact current recovery revision. Every request supplies the
-exact retained editor `base`; the backend bounds it and `buffer` as complete
-UTF-8 text models and requires the base's SHA-256 digest to equal
-`base_content_hash`. Creation reauthorizes the exact current subscription and
-resource key but does not require the disk head to equal the editor base, so an
-external change before the first debounced checkpoint cannot make the dirty
-buffer non-durable. An exact update CAS may replace the stored base/hash after
-a guarded Save or accepted rebase; base and buffer become visible together in
-one manifest-last recovery generation. Recovery has no `base_revision` field
-because process-local file revisions do not identify durable recovery content.
+Creates or updates a durable dirty editor buffer. Create uses `null` for both
+recovery fields and reauthorizes the exact current file subscription and
+resource key. Update supplies the returned ID and exact current recovery
+revision; that already-scoped recovery CAS remains writable after root
+revocation or subscription closure, but grants no current-file access. Every
+request supplies the exact retained editor `base`; the backend bounds it and
+`buffer` as complete UTF-8 text models and requires the base's SHA-256 digest
+to equal `base_content_hash`. Creation does not require the disk head to equal
+the editor base, so an external change before the first debounced checkpoint
+cannot make the dirty buffer non-durable. An exact update CAS may replace the
+stored base/hash after a guarded Save or accepted rebase; base and buffer become
+visible together in one manifest-last recovery generation. Recovery has no
+`base_revision` field because process-local file revisions do not identify
+durable recovery content.
 
 ```json
 {
@@ -273,9 +275,13 @@ because process-local file revisions do not identify durable recovery content.
 }
 ```
 
-The backend derives WebView scope from the Tauri caller. The returned metadata
-contains `recovery_id`, `recovery_revision`, base hash/opaque revision, and
-timestamps; the private retained file revision never crosses IPC.
+The backend derives WebView scope from the Tauri caller. After committing the
+recovery, it probes whether the submitted live subscription still authorizes
+the same resource. The returned metadata contains `recovery_id`,
+`recovery_revision`, base hash/opaque revision, timestamps, and a nullable
+`file_authorization_error`. That error is advisory: it makes the current editor
+owner read-only without rolling back the committed recovery. The private
+retained file revision never crosses IPC.
 
 ### `list_file_recoveries`
 

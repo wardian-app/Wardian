@@ -665,7 +665,7 @@ export async function installWorkbenchIpcMock(
             recoveries.set(recovery_id, recovery);
             const { base: _base, buffer: _buffer, display_name: _displayName,
               extension: _extension, mime_type: _mimeType, ...checkpoint } = recovery;
-            return checkpoint;
+            return { ...checkpoint, file_authorization_error: null };
           }
           if (command === "discard_file_recovery") {
             const request = args?.request as {

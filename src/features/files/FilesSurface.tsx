@@ -120,6 +120,28 @@ type RecoveryOnlyState =
   | { status: "ready"; recovery: FileRecoveryV1; discarding: boolean }
   | { status: "error"; message: string };
 
+async function loadNewestRecovery(
+  client: FileResourceClient,
+  resourceKey: string,
+): Promise<FileRecoveryV1 | null> {
+  const recoveries = await client.listRecoveries({ resource_key: resourceKey });
+  const newest = [...recoveries].sort((left, right) => (
+    right.updated_at_ms - left.updated_at_ms
+    || right.recovery_revision - left.recovery_revision
+    || right.recovery_id.localeCompare(left.recovery_id)
+  ))[0];
+  if (!newest) return null;
+  const recovered = await client.getRecovery({
+    recovery_id: newest.recovery_id,
+    resource_key: resourceKey,
+  });
+  if (
+    recovered.resource_key !== resourceKey
+    || recovered.recovery_id !== newest.recovery_id
+  ) throw new Error("The recovered buffer did not match this Files surface.");
+  return recovered;
+}
+
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const requestedNormalization = useRef<string | null>(null);
   const resource = props.resource;
@@ -505,27 +527,11 @@ export function FilesSurface({
     }
     let active = true;
     setRecoveryOnlyState({ status: "loading" });
-    void client.listRecoveries({ resource_key: props.resource_key }).then(async (recoveries) => {
+    void loadNewestRecovery(client, props.resource_key).then((recovered) => {
       if (!active) return;
-      const newest = [...recoveries].sort((left, right) => (
-        right.updated_at_ms - left.updated_at_ms
-        || right.recovery_revision - left.recovery_revision
-        || right.recovery_id.localeCompare(left.recovery_id)
-      ))[0];
-      if (!newest) {
+      if (!recovered) {
         setRecoveryOnlyState({ status: "none" });
         return;
-      }
-      const recovered = await client.getRecovery({
-        recovery_id: newest.recovery_id,
-        resource_key: props.resource_key,
-      });
-      if (!active) return;
-      if (
-        recovered.resource_key !== props.resource_key
-        || recovered.recovery_id !== newest.recovery_id
-      ) {
-        throw new Error("The recovered buffer did not match this Files surface.");
       }
       setRecoveryOnlyState({ status: "ready", recovery: recovered, discarding: false });
     }).catch((error) => {
@@ -642,8 +648,11 @@ export function FilesSurface({
       recovery_id: recovered.recovery_id,
       expected_recovery_revision: recovered.recovery_revision,
       resource_key: props.resource_key,
-    }).then(() => {
-      setRecoveryOnlyState({ status: "none" });
+    }).then(async () => {
+      const next = await loadNewestRecovery(client, props.resource_key);
+      setRecoveryOnlyState(next
+        ? { status: "ready", recovery: next, discarding: false }
+        : { status: "none" });
     }).catch((error) => {
       setRecoveryOnlyState({
         status: "error",

@@ -668,6 +668,7 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
     },
   });
   assert.equal(cleanCheckpoint.recovery_revision, 2);
+  assert.equal(cleanCheckpoint.file_authorization_error?.code, "unauthorized_path");
   await expectFileError(driver, "checkpoint_file_recovery", {
     request: {
       recovery_id: null,

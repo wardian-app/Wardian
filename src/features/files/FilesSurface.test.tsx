@@ -1412,6 +1412,7 @@ describe("FilesSurface", () => {
       recovery_revision: 1,
       created_at_ms: 30,
       updated_at_ms: 30,
+      file_authorization_error: null,
     });
     await waitFor(() => expect(
       within(alert).getByRole("button", { name: "Use recovered edits" }),
@@ -1479,11 +1480,32 @@ describe("FilesSurface", () => {
       base: "saved recovery base\n",
       buffer: "unsaved recovered buffer\n",
     };
+    const olderSummary: FileRecoverySummaryV1 = {
+      ...recoverySummaryValue,
+      recovery_id: "recovery-older",
+      recovery_revision: 3,
+      updated_at_ms: 15,
+    };
+    const olderRecovery: FileRecoveryV1 = {
+      ...olderSummary,
+      base: "older saved recovery base\n",
+      buffer: "older unsaved recovered buffer\n",
+    };
+    const persisted = new Map<string, FileRecoveryV1>([
+      [recovered.recovery_id, recovered],
+      [olderRecovery.recovery_id, olderRecovery],
+    ]);
     const client = new FileResourceClient();
     const listRecoveries = vi.spyOn(client, "listRecoveries")
-      .mockResolvedValue([recoverySummaryValue]);
-    const getRecovery = vi.spyOn(client, "getRecovery").mockResolvedValue(recovered);
-    const discardRecovery = vi.spyOn(client, "discardRecovery").mockResolvedValue(undefined);
+      .mockImplementation(async () => [...persisted.values()]);
+    const getRecovery = vi.spyOn(client, "getRecovery").mockImplementation(async (request) => {
+      const value = persisted.get(request.recovery_id);
+      if (!value) throw new Error("missing recovery");
+      return value;
+    });
+    const discardRecovery = vi.spyOn(client, "discardRecovery").mockImplementation(
+      async (request) => { persisted.delete(request.recovery_id); },
+    );
     const readText = vi.spyOn(client, "readText");
     const saveText = vi.spyOn(client, "saveText");
     render(<FilesSurface {...props({
@@ -1520,6 +1542,17 @@ describe("FilesSurface", () => {
     await waitFor(() => expect(discardRecovery).toHaveBeenCalledWith({
       recovery_id: "recovery-read-only",
       expected_recovery_revision: 7,
+      resource_key: resourceKey,
+    }));
+    await waitFor(() => expect(screen.getByLabelText("Recovered buffer")).toHaveTextContent(
+      "older unsaved recovered buffer",
+    ));
+    expect(screen.getByRole("heading", { name: "Recovered unsaved changes" }))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Discard recovery" }));
+    await waitFor(() => expect(discardRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-older",
+      expected_recovery_revision: 3,
       resource_key: resourceKey,
     }));
     await waitFor(() => expect(

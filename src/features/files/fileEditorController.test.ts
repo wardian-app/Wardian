@@ -84,6 +84,7 @@ function checkpoint(
     recovery_revision,
     created_at_ms: 10,
     updated_at_ms: 20 + recovery_revision,
+    file_authorization_error: null,
     ...overrides,
   };
 }
@@ -577,16 +578,32 @@ describe("FileEditorController", () => {
 
   it("does not implicitly delete either recovery when conflict edits return to the saved text", async () => {
     const client = fakeClient();
+    const older = recoverySummary({ recovery_id: "recovery-older" });
+    const current = recoverySummary({
+      recovery_id: "recovery-current",
+      recovery_revision: 1,
+      updated_at_ms: 30,
+    });
+    const persisted = new Map([[older.recovery_id, older]]);
     vi.mocked(client.listRecoveries)
       .mockRejectedValueOnce(new Error("recovery list unavailable"))
-      .mockResolvedValueOnce([recoverySummary({ recovery_id: "recovery-older" })]);
+      .mockImplementation(async () => [...persisted.values()]);
     vi.mocked(client.getRecovery).mockResolvedValue(recovery({
       recovery_id: "recovery-older",
       buffer: "older recovered edit\n",
     }));
-    vi.mocked(client.checkpointRecovery).mockResolvedValue(checkpoint(1, {
-      recovery_id: "recovery-current",
-    }));
+    vi.mocked(client.checkpointRecovery).mockImplementation(async () => {
+      persisted.set(current.recovery_id, current);
+      return checkpoint(1, { recovery_id: current.recovery_id });
+    });
+    vi.mocked(client.discardRecovery).mockImplementation(async (request) => {
+      const stored = persisted.get(request.recovery_id);
+      if (!stored) throw { code: "recovery_not_found", message: "missing recovery" };
+      if (stored.recovery_revision !== request.expected_recovery_revision) {
+        throw { code: "recovery_conflict", message: "stale recovery revision" };
+      }
+      persisted.delete(request.recovery_id);
+    });
     const registry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
     });
@@ -631,6 +648,92 @@ describe("FileEditorController", () => {
       recovery_id: "recovery-older",
       expected_recovery_revision: 2,
       resource_key: owner.resource_id,
+    });
+    expect(client.discardRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-current",
+      expected_recovery_revision: 1,
+      resource_key: owner.resource_id,
+    });
+    expect([...persisted.keys()]).toEqual([]);
+    const restarted = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+    await restarted.initialize({ owner, text: "base\n", discover_recovery: true });
+    expect(restarted.getSnapshot()).toMatchObject({
+      working_text: "base\n",
+      dirty: false,
+      recovery: { status: "none" },
+    });
+  });
+
+  it("discards both sides of a recovery conflict without resurrecting either after restart", async () => {
+    const client = fakeClient();
+    const older = recoverySummary({ recovery_id: "recovery-older" });
+    const current = recoverySummary({
+      recovery_id: "recovery-current",
+      recovery_revision: 1,
+      updated_at_ms: 30,
+    });
+    const persisted = new Map([[older.recovery_id, older]]);
+    vi.mocked(client.listRecoveries)
+      .mockRejectedValueOnce(new Error("recovery list unavailable"))
+      .mockImplementation(async () => [...persisted.values()]);
+    vi.mocked(client.getRecovery).mockResolvedValue(recovery({
+      recovery_id: older.recovery_id,
+      buffer: "older recovered edit\n",
+    }));
+    vi.mocked(client.checkpointRecovery).mockImplementation(async () => {
+      persisted.set(current.recovery_id, current);
+      return checkpoint(1, { recovery_id: current.recovery_id });
+    });
+    vi.mocked(client.discardRecovery).mockImplementation(async (request) => {
+      const stored = persisted.get(request.recovery_id);
+      if (!stored) throw { code: "recovery_not_found", message: "missing recovery" };
+      if (stored.recovery_revision !== request.expected_recovery_revision) {
+        throw { code: "recovery_conflict", message: "stale recovery revision" };
+      }
+      persisted.delete(request.recovery_id);
+    });
+    const registry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const controller = registry.forResource(owner.resource_id);
+    const read = vi.fn().mockResolvedValue({
+      schema: 1 as const,
+      resource_id: owner.resource_id,
+      revision: owner.revision,
+      text: "base\n",
+    });
+    await expect(registry.synchronizeAuthoritative(owner, read))
+      .rejects.toThrow("recovery list unavailable");
+    controller.mutate("newer exact current edit\n");
+    await controller.retryRecovery();
+
+    const generation = controller.getSnapshot().buffer_generation;
+    await expect(controller.discard(generation)).resolves.toBe(true);
+
+    expect(client.discardRecovery).toHaveBeenCalledWith({
+      recovery_id: current.recovery_id,
+      expected_recovery_revision: 1,
+      resource_key: owner.resource_id,
+    });
+    expect(client.discardRecovery).toHaveBeenCalledWith({
+      recovery_id: older.recovery_id,
+      expected_recovery_revision: 2,
+      resource_key: owner.resource_id,
+    });
+    expect([...persisted.keys()]).toEqual([]);
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "base\n",
+      dirty: false,
+      recovery_discovery: "complete",
+      recovery: { status: "none" },
+    });
+
+    const restarted = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+    await restarted.initialize({ owner, text: "base\n", discover_recovery: true });
+    expect(restarted.getSnapshot()).toMatchObject({
+      working_text: "base\n",
+      dirty: false,
+      recovery: { status: "none" },
     });
   });
 
@@ -710,6 +813,34 @@ describe("FileEditorController", () => {
       working_text: "external disk text\n",
       dirty: false,
       stale: false,
+    });
+  });
+
+  it("adopts the exact newer disk head when stale edits are explicitly discarded", async () => {
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockResolvedValue([]);
+    const controller = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local edit\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 5,
+      descriptor: { ...descriptor, content_hash: "hash-external" },
+    }, "external disk text\n");
+    const generation = controller.getSnapshot().buffer_generation;
+
+    await expect(controller.discard(generation)).resolves.toBe(true);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      base_revision: 5,
+      buffer_base_hash: "hash-external",
+      disk_head_revision: 5,
+      disk_head_hash: "hash-external",
+      saved_text: "external disk text\n",
+      working_text: "external disk text\n",
+      dirty: false,
+      stale: false,
+      recovery: { status: "none" },
     });
   });
 
@@ -1621,6 +1752,81 @@ describe("FileEditorController", () => {
       working_text: "latest revoked edit\n",
       dirty: true,
       authorization: { status: "available" },
+    });
+  });
+
+  it("becomes read-only from a successful recovery checkpoint authorization advisory", async () => {
+    const client = fakeClient();
+    vi.mocked(client.checkpointRecovery).mockResolvedValue(checkpoint(3, {
+      file_authorization_error: {
+        schema: 1,
+        code: "unauthorized_path",
+        message: "the agent root no longer authorizes this file",
+      },
+    }));
+    const controller = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    }).forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: true });
+    controller.mutate("latest edit after revocation\n");
+
+    await controller.flushRecovery();
+
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "latest edit after revocation\n",
+      dirty: true,
+      authorization: {
+        status: "unavailable",
+        code: "unauthorized_path",
+      },
+      recovery: {
+        status: "durable",
+        recovery_id: "recovery-1",
+        recovery_revision: 3,
+      },
+    });
+    expect(client.saveText).not.toHaveBeenCalled();
+    const generation = controller.getSnapshot().buffer_generation;
+    expect(controller.mutate("must remain read-only\n")).toBe(generation);
+    expect(controller.getSnapshot().working_text).toBe("latest edit after revocation\n");
+  });
+
+  it("does not apply an old subscription checkpoint advisory to a replacement owner", async () => {
+    const pendingCheckpoint = deferred<FileRecoveryCheckpointV1>();
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockResolvedValue([]);
+    vi.mocked(client.checkpointRecovery).mockReturnValue(pendingCheckpoint.promise);
+    const controller = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    }).forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("durable through owner replacement\n");
+    const flushing = controller.flushRecovery();
+    await vi.waitFor(() => expect(client.checkpointRecovery).toHaveBeenCalledOnce());
+
+    controller.applyAuthoritative({
+      ...owner,
+      subscription_id: "subscription-restored",
+      revision: 5,
+    }, "base\n");
+    pendingCheckpoint.resolve(checkpoint(1, {
+      file_authorization_error: {
+        schema: 1,
+        code: "resource_not_found",
+        message: "the old subscription closed",
+      },
+    }));
+    await flushing;
+
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "durable through owner replacement\n",
+      dirty: true,
+      authorization: { status: "available" },
+      recovery: {
+        status: "durable",
+        recovery_id: "recovery-1",
+        recovery_revision: 1,
+      },
     });
   });
 
