@@ -14,8 +14,9 @@ pub use agent_watch::AgentWatchState;
 pub use app_state::{AppState, ExplorerWatchRegistration, LibraryWatchRegistration};
 pub use conversation_archive::ConversationArchiveState;
 pub use file_resources::{
-    FileResourceEventV1, FileResourceRangeRead, FileResourceRuntime, FileResourceSnapshotV1,
-    FileResourceTextV1, FileResourceTicketV1, UserFileGrantV1, FILE_RESOURCE_REVISION_EVENT,
+    FileResourceEventV1, FileResourceRangeRead, FileResourceRuntime, FileResourceSaveAsResultV1,
+    FileResourceSaveResultV1, FileResourceSnapshotV1, FileResourceTextV1, FileResourceTicketV1,
+    SaveTargetGrantV1, UserFileGrantV1, FILE_RESOURCE_REVISION_EVENT,
 };
 pub use interactions::InteractionState;
 pub use mailbox::{

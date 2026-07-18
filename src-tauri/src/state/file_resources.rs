@@ -3,12 +3,15 @@
 use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt as _};
 use tauri::{Emitter as _, Manager as _};
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
@@ -22,6 +25,8 @@ pub const FILE_RESOURCE_REVISION_EVENT: &str = "file-resource://revision";
 const DEFAULT_STABILITY_DELAY: Duration = Duration::from_millis(150);
 const DEFAULT_TICKET_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_USER_FILE_GRANTS: usize = 128;
+const DEFAULT_MAX_SAVE_TARGET_GRANTS: usize = 32;
+const DEFAULT_SAVE_TARGET_TTL: Duration = Duration::from_secs(60);
 const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_TICKET_SNAPSHOT_RESERVATION_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -50,6 +55,47 @@ pub struct FileResourceTextV1 {
     pub resource_id: String,
     pub revision: u64,
     pub text: String,
+}
+
+/// Tagged optimistic-save result returned to the frontend without exposing the
+/// backend-private retained-handle revision token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FileResourceSaveResultV1 {
+    /// The submitted text replaced the target and advanced the revision.
+    Saved { revision: u64, content_hash: String },
+    /// The submitted text was byte-identical to the current target.
+    Unchanged { revision: u64, content_hash: String },
+    /// The editor base no longer matches the currently authorized target.
+    StaleConflict { revision: u64, content_hash: String },
+}
+
+/// Short-lived one-shot authority returned by the native Save As picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SaveTargetGrantV1 {
+    /// Response schema version.
+    pub schema: u8,
+    /// Opaque backend-owned grant identifier.
+    pub save_target_grant_id: String,
+    /// Selected path for display only; it is not filesystem authority.
+    pub selected_path: String,
+}
+
+/// Ordinary exact-file capability created by a successful Save As operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileResourceSaveAsResultV1 {
+    /// Response schema version.
+    pub schema: u8,
+    /// Opaque exact-file capability identifier for later opening.
+    pub capability_id: String,
+    /// Verified canonical path of the saved ordinary file.
+    pub canonical_path: String,
+    /// Stable `file:` resource identifier derived from the canonical path.
+    pub resource_id: String,
+    /// Hash of the durably written content.
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +137,7 @@ struct FileResourceRuntimeInner {
     entries: Mutex<HashMap<String, FileResourceEntry>>,
     subscription_resources: Mutex<HashMap<String, String>>,
     user_file_grants: Mutex<HashMap<String, UserFileGrant>>,
+    save_target_grants: Mutex<HashMap<String, SaveTargetGrant>>,
     read_tickets: Mutex<HashMap<String, FileReadTicket>>,
     renderer_leases: Mutex<HashMap<RendererLeaseKey, RendererLease>>,
     ticket_publication: Mutex<()>,
@@ -98,6 +145,8 @@ struct FileResourceRuntimeInner {
     stability_delay: Duration,
     ticket_ttl: Duration,
     max_user_file_grants: usize,
+    max_save_target_grants: usize,
+    save_target_ttl: Duration,
     ticket_snapshot_usage: Arc<AtomicU64>,
     max_ticket_snapshot_bytes: u64,
     events: broadcast::Sender<FileResourceEventV1>,
@@ -147,6 +196,7 @@ struct FileResourceEntry {
     incarnation_id: Uuid,
     subscribers: HashMap<String, FileSubscriptionAccess>,
     debounce_generation: u64,
+    operation: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -269,6 +319,31 @@ struct UserFileGrant {
     active_subscriptions: usize,
 }
 
+struct SaveTargetGrant {
+    selected_path: PathBuf,
+    requested_parent: PathBuf,
+    canonical_parent: PathBuf,
+    basename: OsString,
+    parent: File,
+    parent_identity: FilesystemIdentity,
+    binding: SaveTargetBinding,
+    expires_at: Instant,
+}
+
+enum SaveTargetBinding {
+    Missing,
+    Existing {
+        authorized: AuthorizedPath,
+        snapshot: Box<VerifiedFileSnapshot>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilesystemIdentity {
+    volume: u64,
+    file: u64,
+}
+
 #[derive(Clone)]
 struct FileReadTicket {
     issuance_id: Uuid,
@@ -380,6 +455,7 @@ impl FileResourceRuntime {
                 entries: Mutex::new(HashMap::new()),
                 subscription_resources: Mutex::new(HashMap::new()),
                 user_file_grants: Mutex::new(HashMap::new()),
+                save_target_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
                 ticket_publication: Mutex::new(()),
@@ -387,6 +463,8 @@ impl FileResourceRuntime {
                 stability_delay,
                 ticket_ttl,
                 max_user_file_grants: DEFAULT_MAX_USER_FILE_GRANTS,
+                max_save_target_grants: DEFAULT_MAX_SAVE_TARGET_GRANTS,
+                save_target_ttl: DEFAULT_SAVE_TARGET_TTL,
                 ticket_snapshot_usage: Arc::new(AtomicU64::new(0)),
                 max_ticket_snapshot_bytes: MAX_TICKET_SNAPSHOT_BYTES,
                 events,
@@ -421,6 +499,7 @@ impl FileResourceRuntime {
                 entries: Mutex::new(HashMap::new()),
                 subscription_resources: Mutex::new(HashMap::new()),
                 user_file_grants: Mutex::new(HashMap::new()),
+                save_target_grants: Mutex::new(HashMap::new()),
                 read_tickets: Mutex::new(HashMap::new()),
                 renderer_leases: Mutex::new(HashMap::new()),
                 ticket_publication: Mutex::new(()),
@@ -428,6 +507,8 @@ impl FileResourceRuntime {
                 stability_delay,
                 ticket_ttl,
                 max_user_file_grants,
+                max_save_target_grants: DEFAULT_MAX_SAVE_TARGET_GRANTS,
+                save_target_ttl: DEFAULT_SAVE_TARGET_TTL,
                 ticket_snapshot_usage: Arc::new(AtomicU64::new(0)),
                 max_ticket_snapshot_bytes,
                 events,
@@ -520,6 +601,198 @@ impl FileResourceRuntime {
             schema: 1,
             capability_id,
             canonical_path,
+        })
+    }
+
+    /// Mints a short-lived, one-shot capability for exactly one native-dialog
+    /// save target.
+    ///
+    /// The backend retains the verified parent directory identity and exact
+    /// basename. Existing targets additionally retain their ordinary-file
+    /// identity and private revision token; absent targets must remain absent
+    /// until the atomic create commits.
+    pub async fn record_save_target(
+        &self,
+        selected_path: &Path,
+    ) -> Result<SaveTargetGrantV1, FileResourceErrorV1> {
+        let selected_path = absolute_path(selected_path)?;
+        let requested_parent = selected_path.parent().ok_or_else(|| {
+            error(
+                "unauthorized_save_target",
+                "selected save target has no parent directory",
+            )
+        })?;
+        let basename = selected_path.file_name().ok_or_else(|| {
+            error(
+                "unauthorized_save_target",
+                "selected save target has no exact basename",
+            )
+        })?;
+        if basename.is_empty() || basename == "." || basename == ".." {
+            return Err(error(
+                "unauthorized_save_target",
+                "selected save target basename is invalid",
+            ));
+        }
+        let canonical_parent = std::fs::canonicalize(requested_parent).map_err(|cause| {
+            error(
+                "unavailable_path",
+                format!("cannot resolve selected save directory: {cause}"),
+            )
+        })?;
+        let parent = open_directory(&canonical_parent).map_err(|cause| {
+            error(
+                "unavailable_path",
+                format!("cannot retain selected save directory: {cause}"),
+            )
+        })?;
+        let parent_identity = FilesystemIdentity::from_file(&parent).map_err(|cause| {
+            error(
+                "unavailable_path",
+                format!("cannot identify selected save directory: {cause}"),
+            )
+        })?;
+        let selected_path = canonical_parent.join(basename);
+        let binding = match std::fs::symlink_metadata(&selected_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(error(
+                    "unauthorized_save_target",
+                    "selected save target must be an ordinary file",
+                ));
+            }
+            Ok(_) => {
+                let authorized = authorize_user_file_path(&selected_path)?;
+                let snapshot =
+                    verified_snapshot(authorized.clone(), self.inner.limits.clone()).await?;
+                SaveTargetBinding::Existing {
+                    authorized,
+                    snapshot: Box::new(snapshot),
+                }
+            }
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+                SaveTargetBinding::Missing
+            }
+            Err(cause) => {
+                return Err(error(
+                    "unavailable_path",
+                    format!("cannot inspect selected save target: {cause}"),
+                ));
+            }
+        };
+        let selected_path_text = selected_path.to_str().ok_or_else(|| {
+            error(
+                "unavailable_path",
+                "selected save target cannot be represented losslessly as UTF-8",
+            )
+        })?;
+        let save_target_grant_id = Uuid::new_v4().to_string();
+        let now = Instant::now();
+        let mut grants = self.inner.save_target_grants.lock().await;
+        grants.retain(|_, grant| grant.expires_at > now);
+        if grants.len() >= self.inner.max_save_target_grants {
+            return Err(error(
+                "grant_limit_reached",
+                "too many native save target grants are awaiting use",
+            ));
+        }
+        grants.insert(
+            save_target_grant_id.clone(),
+            SaveTargetGrant {
+                selected_path: selected_path.clone(),
+                requested_parent: requested_parent.to_path_buf(),
+                canonical_parent,
+                basename: basename.to_os_string(),
+                parent,
+                parent_identity,
+                binding,
+                expires_at: now + self.inner.save_target_ttl,
+            },
+        );
+        Ok(SaveTargetGrantV1 {
+            schema: 1,
+            save_target_grant_id,
+            selected_path: selected_path_text.to_string(),
+        })
+    }
+
+    /// Atomically writes UTF-8 text through a one-shot exact-target grant and
+    /// returns a new ordinary-file capability without touching any open source
+    /// resource or artifact identity.
+    pub async fn save_file_resource_as_text(
+        &self,
+        save_target_grant_id: &str,
+        text: &str,
+    ) -> Result<FileResourceSaveAsResultV1, FileResourceErrorV1> {
+        let mut grant = self
+            .inner
+            .save_target_grants
+            .lock()
+            .await
+            .remove(save_target_grant_id)
+            .ok_or_else(|| {
+                error(
+                    "unauthorized_save_target",
+                    "save target grant is unavailable or already consumed",
+                )
+            })?;
+        if grant.expires_at <= Instant::now() {
+            return Err(error(
+                "unauthorized_save_target",
+                "save target grant has expired",
+            ));
+        }
+        validate_submitted_text(text, &self.inner.limits)?;
+        verify_save_target_parent(&grant)?;
+
+        let binding = std::mem::replace(&mut grant.binding, SaveTargetBinding::Missing);
+        let (authorized, snapshot) = match binding {
+            SaveTargetBinding::Existing {
+                authorized,
+                snapshot,
+            } => {
+                let expected_hash = snapshot.descriptor().content_hash.clone();
+                let revision_token = snapshot.revision_token().clone();
+                let limits = self.inner.limits.clone();
+                let submitted = text.to_string();
+                let write = tauri::async_runtime::spawn_blocking(move || {
+                    authorized.guarded_atomic_replace_text(
+                        &revision_token,
+                        &expected_hash,
+                        &submitted,
+                        &limits,
+                    )
+                })
+                .await
+                .map_err(join_error)??;
+                let (_, authorized, snapshot) = write.into_parts();
+                (authorized, snapshot)
+            }
+            SaveTargetBinding::Missing => {
+                let selected_path = grant.selected_path.clone();
+                let submitted = text.to_string();
+                let limits = self.inner.limits.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    atomic_create_text_exact(&grant, &submitted)?;
+                    let authorized = authorize_user_file_path(&selected_path)?;
+                    let snapshot =
+                        VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)?;
+                    Ok::<_, FileResourceErrorV1>((authorized, snapshot))
+                })
+                .await
+                .map_err(join_error)??
+            }
+        };
+        let canonical_path = snapshot.descriptor().canonical_path.clone();
+        let content_hash = snapshot.descriptor().content_hash.clone();
+        let capability_id = self
+            .upsert_user_file_grant(canonical_path.clone(), authorized)
+            .await?;
+        Ok(FileResourceSaveAsResultV1 {
+            schema: 1,
+            capability_id,
+            resource_id: file_resource_id(&canonical_path),
+            canonical_path,
+            content_hash,
         })
     }
 
@@ -820,6 +1093,7 @@ impl FileResourceRuntime {
                         incarnation_id,
                         subscribers,
                         debounce_generation: 0,
+                        operation: Arc::new(Mutex::new(())),
                     },
                 );
                 (
@@ -922,6 +1196,17 @@ impl FileResourceRuntime {
     }
 
     async fn refresh_if_stable(&self, resource_id: &str, incarnation_id: Uuid, generation: u64) {
+        let operation = {
+            let entries = self.inner.entries.lock().await;
+            let Some(entry) = entries.get(resource_id) else {
+                return;
+            };
+            if entry.incarnation_id != incarnation_id || entry.debounce_generation != generation {
+                return;
+            }
+            entry.operation.clone()
+        };
+        let _operation = operation.lock().await;
         let candidates = {
             let entries = self.inner.entries.lock().await;
             let Some(entry) = entries.get(resource_id) else {
@@ -1220,10 +1505,37 @@ impl FileResourceRuntime {
             .subscription_resources
             .lock()
             .await
-            .remove(subscription_id);
+            .get(subscription_id)
+            .cloned();
         let Some(resource_id) = resource_id else {
             return Ok(());
         };
+        let operation = self
+            .inner
+            .entries
+            .lock()
+            .await
+            .get(&resource_id)
+            .map(|entry| entry.operation.clone());
+        let _operation = match operation {
+            Some(operation) => Some(operation.lock_owned().await),
+            None => None,
+        };
+        let removed_mapping = {
+            let mut subscriptions = self.inner.subscription_resources.lock().await;
+            if subscriptions
+                .get(subscription_id)
+                .is_some_and(|current| current == &resource_id)
+            {
+                subscriptions.remove(subscription_id);
+                true
+            } else {
+                false
+            }
+        };
+        if !removed_mapping {
+            return Ok(());
+        }
         let (removed_access, remaining_incarnation_id) = {
             let mut entries = self.inner.entries.lock().await;
             let removed_access = entries
@@ -1323,17 +1635,37 @@ impl FileResourceRuntime {
         current_agent_config: Option<&AgentConfig>,
     ) -> Result<(AuthorizedPath, FileContentDescriptorV1, FileRevisionToken), FileResourceErrorV1>
     {
-        let (access, expected, revision_token) = {
+        let (current_revision, authorized, expected, revision_token) = self
+            .validated_authorized_current(resource_id, subscription_id, current_agent_config)
+            .await?;
+        if current_revision != revision {
+            return Err(error(
+                "stale_revision",
+                "requested revision is no longer current",
+            ));
+        }
+        Ok((authorized, expected, revision_token))
+    }
+
+    async fn validated_authorized_current(
+        &self,
+        resource_id: &str,
+        subscription_id: &str,
+        current_agent_config: Option<&AgentConfig>,
+    ) -> Result<
+        (
+            u64,
+            AuthorizedPath,
+            FileContentDescriptorV1,
+            FileRevisionToken,
+        ),
+        FileResourceErrorV1,
+    > {
+        let (revision, access, expected, revision_token) = {
             let entries = self.inner.entries.lock().await;
             let entry = entries
                 .get(resource_id)
                 .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
-            if entry.revision != revision {
-                return Err(error(
-                    "stale_revision",
-                    "requested revision is no longer current",
-                ));
-            }
             let access = entry
                 .subscribers
                 .get(subscription_id)
@@ -1345,6 +1677,7 @@ impl FileResourceRuntime {
                     )
                 })?;
             (
+                entry.revision,
                 access,
                 entry.descriptor.clone(),
                 entry.revision_token.clone(),
@@ -1409,7 +1742,247 @@ impl FileResourceRuntime {
                 format!("file resource is unavailable at revision {revision}"),
             ));
         }
-        Ok((authorized, expected, revision_token))
+        Ok((revision, authorized, expected, revision_token))
+    }
+
+    /// Saves UTF-8 text through one exact live subscription and its private
+    /// retained-handle revision capability.
+    ///
+    /// Save, watcher refresh, and close operations share the resource's
+    /// operation mutex. Optimistic mismatches are returned as metadata-only
+    /// `stale_conflict` values after current authorization is revalidated.
+    pub async fn save_text(
+        &self,
+        resource_id: &str,
+        subscription_id: &str,
+        expected_revision: u64,
+        buffer_base_hash: &str,
+        text: &str,
+        current_agent_config: Option<&AgentConfig>,
+    ) -> Result<FileResourceSaveResultV1, FileResourceErrorV1> {
+        let operation = {
+            let entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            if !entry.subscribers.contains_key(subscription_id) {
+                return Err(error(
+                    "unauthorized_resource",
+                    "subscription does not grant the requested resource",
+                ));
+            }
+            entry.operation.clone()
+        };
+        let _operation = operation.lock().await;
+        let (current_revision, authorized, descriptor, revision_token) = self
+            .validated_authorized_current(resource_id, subscription_id, current_agent_config)
+            .await?;
+        if !matches!(
+            descriptor.renderer_kind,
+            FileRendererKind::Text | FileRendererKind::Markdown
+        ) || descriptor.encoding.as_deref() != Some("utf-8")
+            || !descriptor.capabilities.draft
+        {
+            return Err(error(
+                "unsupported_content",
+                "file resource is not an editable UTF-8 text model",
+            ));
+        }
+        if expected_revision != current_revision
+            || buffer_base_hash != descriptor.content_hash.as_str()
+        {
+            return Ok(FileResourceSaveResultV1::StaleConflict {
+                revision: current_revision,
+                content_hash: descriptor.content_hash,
+            });
+        }
+
+        let candidates = {
+            let entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            entry
+                .subscribers
+                .iter()
+                .map(|(candidate_subscription_id, access)| FileRefreshCandidate {
+                    subscription_id: candidate_subscription_id.clone(),
+                    access: access.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut prevalidated_authorizations = HashMap::with_capacity(candidates.len());
+        for candidate in candidates {
+            let candidate_authorized = if candidate.subscription_id == subscription_id {
+                authorized.clone()
+            } else {
+                self.validate_refresh_candidate(&candidate.access).await?
+            };
+            prevalidated_authorizations.insert(candidate.subscription_id, candidate_authorized);
+        }
+
+        let limits = self.inner.limits.clone();
+        let expected_hash = buffer_base_hash.to_string();
+        let submitted = text.to_string();
+        let authorized_for_refresh = authorized.clone();
+        let write = tauri::async_runtime::spawn_blocking(move || {
+            authorized.guarded_atomic_replace_text(
+                &revision_token,
+                &expected_hash,
+                &submitted,
+                &limits,
+            )
+        })
+        .await
+        .map_err(join_error)?;
+        let write = match write {
+            Ok(write) => write,
+            Err(failure) if failure.code() == "stale_revision" => {
+                let (authorized, snapshot) = self
+                    .refresh_from_authorization(authorized_for_refresh)
+                    .await?;
+                let (descriptor, revision_token) = snapshot.into_parts();
+                let (revision, content_hash, event, user_grant_update) = {
+                    let mut entries = self.inner.entries.lock().await;
+                    let entry = entries
+                        .get_mut(resource_id)
+                        .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+                    let access = entry.subscribers.get_mut(subscription_id).ok_or_else(|| {
+                        error(
+                            "unauthorized_resource",
+                            "subscription does not grant the requested resource",
+                        )
+                    })?;
+                    access.authorized = authorized.clone();
+                    let user_grant_update = match &access.claim {
+                        FileAccessClaim::User { capability_id } => {
+                            Some((capability_id.clone(), authorized))
+                        }
+                        FileAccessClaim::Agent { .. } => None,
+                    };
+                    entry.revision_token = revision_token;
+                    let changed = entry.descriptor.content_hash != descriptor.content_hash
+                        || entry.descriptor.unavailable_reason != descriptor.unavailable_reason;
+                    entry.descriptor = descriptor.clone();
+                    let event = changed.then(|| {
+                        entry.revision = entry.revision.saturating_add(1);
+                        FileResourceEventV1 {
+                            schema: 1,
+                            resource_id: resource_id.to_string(),
+                            revision: entry.revision,
+                            descriptor: descriptor.clone(),
+                        }
+                    });
+                    (
+                        entry.revision,
+                        descriptor.content_hash,
+                        event,
+                        user_grant_update,
+                    )
+                };
+                if let Some((capability_id, authorized)) = user_grant_update {
+                    if let Some(grant) = self
+                        .inner
+                        .user_file_grants
+                        .lock()
+                        .await
+                        .get_mut(&capability_id)
+                    {
+                        grant.authorized = authorized;
+                        grant.last_used_at = Instant::now();
+                    }
+                }
+                if let Some(event) = event {
+                    self.emit(event);
+                }
+                return Ok(FileResourceSaveResultV1::StaleConflict {
+                    revision,
+                    content_hash,
+                });
+            }
+            Err(failure) => return Err(failure),
+        };
+        let rebound_authorizations = prevalidated_authorizations
+            .into_iter()
+            .map(|(candidate_subscription_id, previous)| {
+                write
+                    .rebind_authorization(&previous)
+                    .map(|authorized| (candidate_subscription_id, authorized))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        let (changed, _authorized, snapshot) = write.into_parts();
+        let (descriptor, revision_token) = snapshot.into_parts();
+        let (revision, content_hash, event, user_grant_updates) = {
+            let mut entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get_mut(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            for (candidate_subscription_id, authorized) in &rebound_authorizations {
+                let access = entry
+                    .subscribers
+                    .get_mut(candidate_subscription_id)
+                    .ok_or_else(|| {
+                        error(
+                            "unauthorized_resource",
+                            "live subscription changed during guarded save",
+                        )
+                    })?;
+                access.authorized = authorized.clone();
+            }
+            let user_grant_updates = rebound_authorizations
+                .iter()
+                .filter_map(|(candidate_subscription_id, authorized)| {
+                    let access = entry.subscribers.get(candidate_subscription_id)?;
+                    match &access.claim {
+                        FileAccessClaim::User { capability_id } => {
+                            Some((capability_id.clone(), authorized.clone()))
+                        }
+                        FileAccessClaim::Agent { .. } => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            entry.revision_token = revision_token;
+            entry.descriptor = descriptor.clone();
+            let event = changed.then(|| {
+                entry.revision = entry.revision.saturating_add(1);
+                FileResourceEventV1 {
+                    schema: 1,
+                    resource_id: resource_id.to_string(),
+                    revision: entry.revision,
+                    descriptor: descriptor.clone(),
+                }
+            });
+            (
+                entry.revision,
+                descriptor.content_hash,
+                event,
+                user_grant_updates,
+            )
+        };
+        if !user_grant_updates.is_empty() {
+            let now = Instant::now();
+            let mut grants = self.inner.user_file_grants.lock().await;
+            for (capability_id, authorized) in user_grant_updates {
+                if let Some(grant) = grants.get_mut(&capability_id) {
+                    grant.authorized = authorized;
+                    grant.last_used_at = now;
+                }
+            }
+        }
+        if let Some(event) = event {
+            self.emit(event);
+        }
+        Ok(if changed {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            }
+        } else {
+            FileResourceSaveResultV1::Unchanged {
+                revision,
+                content_hash,
+            }
+        })
     }
 
     pub async fn read_text(
@@ -1967,15 +2540,29 @@ impl FileResourceRuntime {
     }
 
     pub async fn close_all(&self) {
+        let operations = self
+            .inner
+            .entries
+            .lock()
+            .await
+            .values()
+            .map(|entry| entry.operation.clone())
+            .collect::<Vec<_>>();
+        let mut operation_guards = Vec::with_capacity(operations.len());
+        for operation in operations {
+            operation_guards.push(operation.lock_owned().await);
+        }
         self.inner.entries.lock().await.clear();
         self.inner.subscription_resources.lock().await.clear();
         self.inner.user_file_grants.lock().await.clear();
+        self.inner.save_target_grants.lock().await.clear();
         self.inner.read_tickets.lock().await.clear();
         self.inner.renderer_leases.lock().await.clear();
         match self.inner.app_handle.write() {
             Ok(mut current) => *current = None,
             Err(poisoned) => *poisoned.into_inner() = None,
         }
+        drop(operation_guards);
     }
 
     #[must_use]
@@ -2120,6 +2707,291 @@ fn authorize_user_file_path(path: &Path) -> Result<AuthorizedPath, FileResourceE
     AuthorizedRootService::from_agent_config(&config)?.authorize_existing_file(path)
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf, FileResourceErrorV1> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|cause| {
+            error(
+                "unavailable_path",
+                format!("cannot resolve current directory: {cause}"),
+            )
+        })
+}
+
+fn validate_submitted_text(
+    text: &str,
+    limits: &FileResourceLimits,
+) -> Result<(), FileResourceErrorV1> {
+    let size_bytes = u64::try_from(text.len()).map_err(|_| {
+        error(
+            "file_too_large",
+            "submitted text cannot fit in the supported file size",
+        )
+    })?;
+    let mut line_count = 1_u64;
+    let mut previous_was_cr = false;
+    for character in text.chars() {
+        if previous_was_cr {
+            previous_was_cr = false;
+            if character == '\n' {
+                continue;
+            }
+        }
+        match character {
+            '\r' => {
+                line_count = line_count.saturating_add(1);
+                previous_was_cr = true;
+            }
+            '\n' => line_count = line_count.saturating_add(1),
+            _ => {}
+        }
+    }
+    if !limits.allows_monaco(size_bytes, line_count) {
+        return Err(error(
+            "file_too_large",
+            "submitted text exceeds the complete model limits",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_save_target_parent(grant: &SaveTargetGrant) -> Result<(), FileResourceErrorV1> {
+    let retained_identity = FilesystemIdentity::from_file(&grant.parent).map_err(|cause| {
+        error(
+            "unauthorized_save_target",
+            format!("selected save directory handle is unavailable: {cause}"),
+        )
+    })?;
+    if retained_identity != grant.parent_identity {
+        return Err(error(
+            "unauthorized_save_target",
+            "selected save directory changed identity",
+        ));
+    }
+    let current_canonical = std::fs::canonicalize(&grant.requested_parent).map_err(|_| {
+        error(
+            "unauthorized_save_target",
+            "selected save directory binding is unavailable",
+        )
+    })?;
+    if current_canonical != grant.canonical_parent
+        || grant.selected_path != grant.canonical_parent.join(&grant.basename)
+    {
+        return Err(error(
+            "unauthorized_save_target",
+            "selected save directory or exact basename changed binding",
+        ));
+    }
+    let current = open_directory(&current_canonical).map_err(|_| {
+        error(
+            "unauthorized_save_target",
+            "selected save directory cannot be reopened",
+        )
+    })?;
+    if FilesystemIdentity::from_file(&current).map_err(|_| {
+        error(
+            "unauthorized_save_target",
+            "selected save directory identity cannot be verified",
+        )
+    })? != grant.parent_identity
+    {
+        return Err(error(
+            "unauthorized_save_target",
+            "selected save directory changed identity",
+        ));
+    }
+    Ok(())
+}
+
+fn atomic_create_text_exact(
+    grant: &SaveTargetGrant,
+    text: &str,
+) -> Result<(), FileResourceErrorV1> {
+    verify_save_target_parent(grant)?;
+    match std::fs::symlink_metadata(&grant.selected_path) {
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(error(
+                "unauthorized_save_target",
+                "selected save target binding changed before use",
+            ));
+        }
+        Err(cause) => {
+            return Err(error(
+                "unauthorized_save_target",
+                format!("cannot verify selected save target binding: {cause}"),
+            ));
+        }
+    }
+    let staged = grant.canonical_parent.join(format!(
+        ".{}.{}.wardian-save-as.tmp",
+        grant.basename.to_string_lossy(),
+        Uuid::new_v4().simple()
+    ));
+    let stage_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staged)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(cause) = stage_result {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error(
+            "unavailable_path",
+            format!("cannot stage exact save target: {cause}"),
+        ));
+    }
+
+    if let Err(failure) = verify_save_target_parent(grant) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(failure);
+    }
+    if let Err(cause) = commit_staged_new_exact(&staged, &grant.selected_path) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error(
+            "unauthorized_save_target",
+            format!("selected save target binding changed before commit: {cause}"),
+        ));
+    }
+    #[cfg(not(windows))]
+    grant.parent.sync_all().map_err(|cause| {
+        error(
+            "unavailable_path",
+            format!("cannot flush selected save directory: {cause}"),
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn commit_staged_new_exact(staged: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(staged, target)?;
+    std::fs::remove_file(staged)
+}
+
+#[cfg(windows)]
+fn commit_staged_new_exact(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let staged = wide_null(staged.as_os_str());
+    let target = wide_null(target.as_os_str());
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    let moved = unsafe { MoveFileExW(staged.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+}
+
+#[cfg(unix)]
+impl FilesystemIdentity {
+    fn from_file(file: &File) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file.metadata()?;
+        Ok(Self {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+        })
+    }
+}
+
+#[cfg(windows)]
+impl FilesystemIdentity {
+    fn from_file(file: &File) -> std::io::Result<Self> {
+        use std::ffi::c_void;
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle as _;
+
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct FileTime {
+            dwLowDateTime: u32,
+            dwHighDateTime: u32,
+        }
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct ByHandleFileInformation {
+            dwFileAttributes: u32,
+            ftCreationTime: FileTime,
+            ftLastAccessTime: FileTime,
+            ftLastWriteTime: FileTime,
+            dwVolumeSerialNumber: u32,
+            nFileSizeHigh: u32,
+            nFileSizeLow: u32,
+            nNumberOfLinks: u32,
+            nFileIndexHigh: u32,
+            nFileIndexLow: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileInformationByHandle(
+                file: *mut c_void,
+                information: *mut ByHandleFileInformation,
+            ) -> i32;
+        }
+
+        let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+        let succeeded =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let information = unsafe { information.assume_init() };
+        Ok(Self {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            file: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+impl FilesystemIdentity {
+    fn from_file(file: &File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            volume: 0,
+            file: metadata.len(),
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
 fn now_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2161,6 +3033,425 @@ mod tests {
 
     fn test_runtime() -> FileResourceRuntime {
         FileResourceRuntime::with_timing(Duration::from_millis(150), Duration::from_secs(60))
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_text_is_guarded_and_emits_one_logical_revision() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("draft.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let base_hash = opened.descriptor.content_hash.clone();
+        let mut events = runtime.subscribe_events();
+
+        let saved = runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &base_hash,
+                "revision two",
+                Some(&config),
+            )
+            .await
+            .expect("save");
+        let (saved_revision, saved_hash) = match saved {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            other => panic!("expected saved result, got {other:?}"),
+        };
+        assert_eq!(saved_revision, opened.revision + 1);
+        assert_ne!(saved_hash, base_hash);
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("save event timeout")
+            .expect("save event");
+        assert_eq!(event.revision, saved_revision);
+        assert_eq!(event.descriptor.content_hash, saved_hash);
+
+        let stale = runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &base_hash,
+                "stale overwrite",
+                Some(&config),
+            )
+            .await
+            .expect("stale conflict result");
+        assert_eq!(
+            stale,
+            FileResourceSaveResultV1::StaleConflict {
+                revision: saved_revision,
+                content_hash: saved_hash,
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("saved bytes"),
+            "revision two"
+        );
+        assert!(timeout(Duration::from_millis(400), events.recv())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_text_rebinds_every_live_subscription() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("shared-draft.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let first = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("first open");
+        let second = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("second open");
+
+        let first_save = runtime
+            .save_text(
+                &first.resource_id,
+                &first.subscription_id,
+                first.revision,
+                &first.descriptor.content_hash,
+                "revision two",
+                Some(&config),
+            )
+            .await
+            .expect("first subscription save");
+        let (second_revision, second_hash) = match first_save {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            unexpected => panic!("expected saved result, got {unexpected:?}"),
+        };
+        assert_eq!(
+            runtime
+                .read_text(
+                    &second.resource_id,
+                    &second.subscription_id,
+                    second_revision,
+                    Some(&config),
+                )
+                .await
+                .expect("second subscription reads rebound identity")
+                .text,
+            "revision two"
+        );
+
+        let second_save = runtime
+            .save_text(
+                &second.resource_id,
+                &second.subscription_id,
+                second_revision,
+                &second_hash,
+                "revision three",
+                Some(&config),
+            )
+            .await
+            .expect("second subscription saves rebound identity");
+        let third_revision = match second_save {
+            FileResourceSaveResultV1::Saved { revision, .. } => revision,
+            unexpected => panic!("expected saved result, got {unexpected:?}"),
+        };
+        assert_eq!(
+            runtime
+                .read_text(
+                    &first.resource_id,
+                    &first.subscription_id,
+                    third_revision,
+                    Some(&config),
+                )
+                .await
+                .expect("first subscription reads second rebound identity")
+                .text,
+            "revision three"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_as_consumes_one_exact_target_grant() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let selected = temp.path().join("selected.txt");
+        let sibling = temp.path().join("sibling.txt");
+        let runtime = test_runtime();
+        let grant = runtime
+            .record_save_target(&selected)
+            .await
+            .expect("save target grant");
+
+        let saved = runtime
+            .save_file_resource_as_text(&grant.save_target_grant_id, "saved text")
+            .await
+            .expect("save as");
+
+        assert_eq!(saved.canonical_path, grant.selected_path);
+        assert_eq!(saved.resource_id, file_resource_id(&grant.selected_path));
+        assert_eq!(
+            fs::read_to_string(&selected).expect("selected bytes"),
+            "saved text"
+        );
+        assert!(
+            !sibling.exists(),
+            "exact grant must not create a sibling name"
+        );
+        assert_eq!(
+            runtime
+                .save_file_resource_as_text(&grant.save_target_grant_id, "second use")
+                .await
+                .expect_err("save target grant must be one-shot")
+                .code(),
+            "unauthorized_save_target"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_text_reports_unchanged_and_refreshes_external_stale_conflict() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("draft.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let base_hash = opened.descriptor.content_hash.clone();
+        let mut events = runtime.subscribe_events();
+
+        assert_eq!(
+            runtime
+                .save_text(
+                    &opened.resource_id,
+                    &opened.subscription_id,
+                    opened.revision,
+                    &base_hash,
+                    "revision one",
+                    Some(&config),
+                )
+                .await
+                .expect("unchanged save"),
+            FileResourceSaveResultV1::Unchanged {
+                revision: opened.revision,
+                content_hash: base_hash.clone(),
+            }
+        );
+        assert!(timeout(Duration::from_millis(250), events.recv())
+            .await
+            .is_err());
+
+        fs::write(&path, "external revision").expect("external mutation");
+        let conflict = runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &base_hash,
+                "must not overwrite",
+                Some(&config),
+            )
+            .await
+            .expect("tagged stale conflict");
+        let (revision, content_hash) = match conflict {
+            FileResourceSaveResultV1::StaleConflict {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            other => panic!("expected stale conflict, got {other:?}"),
+        };
+        assert_eq!(revision, opened.revision + 1);
+        assert_ne!(content_hash, base_hash);
+        assert_eq!(
+            fs::read_to_string(&path).expect("external bytes"),
+            "external revision"
+        );
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("refresh event timeout")
+            .expect("refresh event");
+        assert_eq!(event.revision, revision);
+        assert_eq!(event.descriptor.content_hash, content_hash);
+        assert!(timeout(Duration::from_millis(400), events.recv())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_text_rejects_revoked_roots_and_changed_identity() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let authorized_root = temp.path().join("authorized");
+        let revoked_root = temp.path().join("revoked");
+        fs::create_dir_all(&authorized_root).expect("authorized root");
+        fs::create_dir_all(&revoked_root).expect("revoked root");
+        let path = authorized_root.join("draft.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let config = agent_config("agent-a", &authorized_root);
+        let runtime = test_runtime();
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        let revoked = agent_config("agent-a", &revoked_root);
+        assert_eq!(
+            runtime
+                .save_text(
+                    &opened.resource_id,
+                    &opened.subscription_id,
+                    opened.revision,
+                    &opened.descriptor.content_hash,
+                    "must not save",
+                    Some(&revoked),
+                )
+                .await
+                .expect_err("revoked root must fail")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("original bytes"),
+            "revision one"
+        );
+
+        let replacement = authorized_root.join("replacement.txt");
+        fs::write(&replacement, "replacement identity").expect("replacement fixture");
+        replace_path_identity(&replacement, &path);
+        assert_eq!(
+            runtime
+                .save_text(
+                    &opened.resource_id,
+                    &opened.subscription_id,
+                    opened.revision,
+                    &opened.descriptor.content_hash,
+                    "must not overwrite replacement",
+                    Some(&config),
+                )
+                .await
+                .expect_err("changed identity must fail")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("replacement bytes"),
+            "replacement identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_as_fails_closed_when_target_or_parent_binding_changes() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let runtime = test_runtime();
+
+        let missing = temp.path().join("missing.txt");
+        let missing_grant = runtime
+            .record_save_target(&missing)
+            .await
+            .expect("missing target grant");
+        fs::write(&missing, "attacker bytes").expect("target race");
+        assert_eq!(
+            runtime
+                .save_file_resource_as_text(&missing_grant.save_target_grant_id, "submitted")
+                .await
+                .expect_err("new target binding must fail")
+                .code(),
+            "unauthorized_save_target"
+        );
+        assert_eq!(
+            fs::read_to_string(&missing).expect("attacker bytes"),
+            "attacker bytes"
+        );
+
+        let existing = temp.path().join("existing.txt");
+        fs::write(&existing, "original").expect("existing fixture");
+        let existing_grant = runtime
+            .record_save_target(&existing)
+            .await
+            .expect("existing target grant");
+        let replacement = temp.path().join("existing-replacement.txt");
+        fs::write(&replacement, "replacement identity").expect("replacement fixture");
+        replace_path_identity(&replacement, &existing);
+        assert_eq!(
+            runtime
+                .save_file_resource_as_text(&existing_grant.save_target_grant_id, "submitted")
+                .await
+                .expect_err("existing target identity change must fail")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            fs::read_to_string(&existing).expect("replacement bytes"),
+            "replacement identity"
+        );
+
+        let approved_parent = temp.path().join("approved-parent");
+        let other_parent = temp.path().join("other-parent");
+        fs::create_dir_all(&approved_parent).expect("approved parent");
+        fs::create_dir_all(&other_parent).expect("other parent");
+        let alias_parent = temp.path().join("selected-parent");
+        create_directory_link(&approved_parent, &alias_parent);
+        let alias_target = alias_parent.join("copy.txt");
+        let parent_grant = runtime
+            .record_save_target(&alias_target)
+            .await
+            .expect("parent-bound grant");
+        remove_directory_link(&alias_parent);
+        create_directory_link(&other_parent, &alias_parent);
+        assert_eq!(
+            runtime
+                .save_file_resource_as_text(&parent_grant.save_target_grant_id, "submitted")
+                .await
+                .expect_err("retargeted parent must fail")
+                .code(),
+            "unauthorized_save_target"
+        );
+        assert!(!approved_parent.join("copy.txt").exists());
+        assert!(!other_parent.join("copy.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn file_resources_save_as_never_retargets_the_open_source_resource() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let source = temp.path().join("source.txt");
+        let copy = temp.path().join("copy.txt");
+        fs::write(&source, "source bytes").expect("source fixture");
+        fs::write(&copy, "old copy bytes").expect("existing copy fixture");
+        let config = agent_config("agent-a", temp.path());
+        let runtime = test_runtime();
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &source, None)
+            .await
+            .expect("open source");
+        let grant = runtime.record_save_target(&copy).await.expect("copy grant");
+
+        let saved = runtime
+            .save_file_resource_as_text(&grant.save_target_grant_id, "copy bytes")
+            .await
+            .expect("save copy");
+
+        assert_ne!(saved.resource_id, opened.resource_id);
+        let source_snapshot = runtime
+            .snapshot(&opened.resource_id)
+            .await
+            .expect("source remains open");
+        assert_eq!(source_snapshot.resource_id, opened.resource_id);
+        assert_eq!(source_snapshot.subscription_id, opened.subscription_id);
+        assert_eq!(
+            fs::read_to_string(&source).expect("source bytes"),
+            "source bytes"
+        );
+        assert_eq!(fs::read_to_string(&copy).expect("copy bytes"), "copy bytes");
     }
 
     #[tokio::test]
@@ -3828,7 +5119,6 @@ mod tests {
             )
             .await
             .expect("ticket");
-
         runtime
             .close_renderer_lease(
                 &snapshot.resource_id,
@@ -4130,12 +5420,18 @@ mod tests {
             )
             .await
             .expect("ticket");
+        let save_target = temp.path().join("cleanup-copy.txt");
+        runtime
+            .record_save_target(&save_target)
+            .await
+            .expect("save target grant");
 
         runtime.close_all().await;
 
         assert_eq!(runtime.watcher_count().await, 0);
         assert_eq!(runtime.ticket_count().await, 0);
         assert_eq!(runtime.user_grant_count().await, 0);
+        assert!(runtime.inner.save_target_grants.lock().await.is_empty());
         assert!(runtime.inner.renderer_leases.lock().await.is_empty());
     }
 

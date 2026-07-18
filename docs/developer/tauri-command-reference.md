@@ -202,6 +202,85 @@ still current.
 }
 ```
 
+### `save_file_resource_text`
+
+Saves complete UTF-8 text through the exact live subscription. The revision and
+hash are optimistic-concurrency inputs; the backend-private retained-handle
+revision token remains the write authority and is never serialized.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "expected_revision": 1,
+    "buffer_base_hash": "sha256:<content-hash>",
+    "text": "# Updated project\n"
+  }
+}
+```
+
+The tagged response is `saved`, `unchanged`, or `stale_conflict`:
+
+```json
+{
+  "status": "saved",
+  "revision": 2,
+  "content_hash": "sha256:<updated-content-hash>"
+}
+```
+
+A stale conflict returns current metadata only after revalidating the
+subscription. It does not return current file bytes.
+
+### `pick_file_resource_save_target`
+
+Opens the native save dialog and returns a short-lived one-shot capability for
+the exact selected parent identity and basename. Canceling returns `null`.
+
+```json
+{
+  "request": {
+    "title": "Save As",
+    "default_name": "README-copy.md"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "save_target_grant_id": "save-target-uuid",
+  "selected_path": "<absolute-workspace-path>/README-copy.md"
+}
+```
+
+### `save_file_resource_as_text`
+
+Consumes an exact native save-target grant and atomically creates or replaces
+only that ordinary-file target. The command has no source-resource or artifact
+field, so opening the returned file and closing the source are a separate
+frontend transaction.
+
+```json
+{
+  "request": {
+    "save_target_grant_id": "save-target-uuid",
+    "text": "# Saved copy\n"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "capability_id": "user-file-capability-uuid",
+  "canonical_path": "<absolute-workspace-path>/README-copy.md",
+  "resource_id": "file:<canonical-path>",
+  "content_hash": "sha256:<saved-content-hash>"
+}
+```
+
 ### `issue_file_resource_ticket`
 
 Mints a short-lived image/PDF stream ticket bound to the resource,

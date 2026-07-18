@@ -1,7 +1,9 @@
-use super::FileResourceErrorV1;
+use super::{FileResourceErrorV1, FileResourceLimits, VerifiedFileSnapshot};
+#[cfg(not(windows))]
+use crate::atomic_file::replace_staged_atomic_durable;
 use crate::models::AgentConfig;
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 use std::path::Component;
+#[cfg(windows)]
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
 /// Canonical filesystem roots that an agent was explicitly granted access to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,8 +92,8 @@ impl AuthorizedRootService {
             .find(|root| component_contains(root, &canonical_path))
             .cloned()
             .ok_or_else(|| unauthorized(requested))?;
-        let file =
-            File::open(&canonical_path).map_err(|error| unavailable("requested file", error))?;
+        let file = open_authorized_file(&canonical_path)
+            .map_err(|error| unavailable("requested file", error))?;
         let metadata = file
             .metadata()
             .map_err(|error| unavailable("requested file", error))?;
@@ -164,8 +168,8 @@ impl AuthorizedPath {
             return Err(unauthorized(&self.requested_path));
         }
 
-        let file =
-            File::open(&canonical_path).map_err(|error| unavailable("replacement file", error))?;
+        let file = open_authorized_file(&canonical_path)
+            .map_err(|error| unavailable("replacement file", error))?;
         let metadata = file
             .metadata()
             .map_err(|error| unavailable("replacement file", error))?;
@@ -195,6 +199,93 @@ impl AuthorizedPath {
             verified_root: self.verified_root.clone(),
             identity,
             file: Arc::new(Mutex::new(file)),
+        })
+    }
+
+    /// Replaces validated UTF-8 text through the retained authorized handle.
+    ///
+    /// The expected revision token and base hash must describe the same exact
+    /// retained-handle bytes. The original pathname binding is verified before
+    /// staging and again immediately before the atomic same-target replacement.
+    /// Successful replacements return a newly authorized retained handle and
+    /// opaque revision token; byte-identical text is reported as unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `stale_revision` when either optimistic-concurrency value is no
+    /// longer current, `unauthorized_path` when the retained handle or pathname
+    /// binding changed, `file_too_large` when the submitted model exceeds the
+    /// centralized text limits, and `unavailable_path` for staging, flushing,
+    /// replacement, or reauthorization failures.
+    pub fn guarded_atomic_replace_text(
+        &self,
+        expected_revision: &FileRevisionToken,
+        expected_hash: &str,
+        text: &str,
+        limits: &FileResourceLimits,
+    ) -> Result<GuardedFileWrite, FileResourceErrorV1> {
+        let submitted_size = u64::try_from(text.len()).map_err(|_| {
+            FileResourceErrorV1::new(
+                "file_too_large",
+                "submitted text cannot fit in the supported file size",
+            )
+        })?;
+        let submitted_lines = editor_line_count(text);
+        if !limits.allows_monaco(submitted_size, submitted_lines) {
+            return Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "submitted text exceeds the complete model limits",
+            ));
+        }
+
+        let token_hash = expected_revision.exact_hash_for(self)?;
+        if expected_hash != token_hash {
+            return Err(FileResourceErrorV1::new(
+                "stale_revision",
+                "buffer base hash does not match the retained file revision",
+            ));
+        }
+
+        let mut file = self.lock_verified_file()?;
+        self.scan_verified_revision_locked(expected_revision, &mut file, |_, _| Ok(()))?;
+        let submitted_hash = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+        if submitted_hash == token_hash {
+            drop(file);
+            let snapshot = VerifiedFileSnapshot::from_authorized_path(self, limits)?;
+            return Ok(GuardedFileWrite {
+                changed: false,
+                previous_identity: self.identity,
+                authorized: self.clone(),
+                snapshot,
+            });
+        }
+
+        let permissions = file
+            .metadata()
+            .map_err(|error| unavailable("authorized file metadata", error))?
+            .permissions();
+        let staged = stage_text_sibling(&self.verified_canonical_path, text, permissions)?;
+        if let Err(failure) = self.verify_current_binding(&file) {
+            let _ = fs::remove_file(&staged);
+            return Err(failure);
+        }
+        if let Err(cause) = prepare_retained_handle_for_replace(&mut file) {
+            let _ = fs::remove_file(&staged);
+            return Err(unavailable("atomic replacement handle", cause));
+        }
+        if let Err(cause) = replace_staged_authorized(&staged, &self.verified_canonical_path) {
+            let _ = fs::remove_file(&staged);
+            return Err(unavailable("atomic replacement", cause));
+        }
+        drop(file);
+
+        let authorized = self.reauthorize_same_target()?;
+        let snapshot = VerifiedFileSnapshot::from_authorized_path(&authorized, limits)?;
+        Ok(GuardedFileWrite {
+            changed: true,
+            previous_identity: self.identity,
+            authorized,
+            snapshot,
         })
     }
 
@@ -350,25 +441,19 @@ impl AuthorizedPath {
     fn scan_verified_revision(
         &self,
         revision: &FileRevisionToken,
+        consume: impl FnMut(u64, &[u8]) -> Result<(), FileResourceErrorV1>,
+    ) -> Result<u64, FileResourceErrorV1> {
+        let mut file = self.lock_verified_file()?;
+        self.scan_verified_revision_locked(revision, &mut file, consume)
+    }
+
+    fn scan_verified_revision_locked(
+        &self,
+        revision: &FileRevisionToken,
+        file: &mut File,
         mut consume: impl FnMut(u64, &[u8]) -> Result<(), FileResourceErrorV1>,
     ) -> Result<u64, FileResourceErrorV1> {
-        if revision.identity != self.identity
-            || revision.canonical_path != self.verified_canonical_path
-        {
-            return Err(FileResourceErrorV1::new(
-                "unauthorized_path",
-                "file revision token belongs to another authorized file",
-            ));
-        }
-        let expected_hash = match &revision.fingerprint {
-            FileRevisionFingerprint::ExactSha256(hash) => hash,
-            FileRevisionFingerprint::BoundedSha256(_) => {
-                return Err(FileResourceErrorV1::new(
-                    "file_too_large",
-                    "bounded metadata revisions cannot authorize content reads",
-                ));
-            }
-        };
+        let expected_hash = revision.exact_hash_for(self)?;
         let expected_size_bytes = revision.size_bytes;
         let maximum_size_bytes = revision.maximum_size_bytes;
         if expected_size_bytes > maximum_size_bytes {
@@ -378,7 +463,6 @@ impl AuthorizedPath {
             ));
         }
 
-        let mut file = self.lock_verified_file()?;
         let metadata = file.metadata().map_err(|error| {
             FileResourceErrorV1::new(
                 "unavailable_path",
@@ -430,7 +514,7 @@ impl AuthorizedPath {
             offset = next_offset;
         }
 
-        self.verify_current_binding(&file)?;
+        self.verify_current_binding(file)?;
         if offset != expected_size_bytes {
             return Err(FileResourceErrorV1::new(
                 "stale_revision",
@@ -438,7 +522,7 @@ impl AuthorizedPath {
             ));
         }
         let actual_hash = format!("sha256:{:x}", hasher.finalize());
-        if actual_hash != expected_hash.as_str() {
+        if actual_hash != expected_hash {
             return Err(FileResourceErrorV1::new(
                 "stale_revision",
                 "file content no longer matches the expected revision",
@@ -484,6 +568,81 @@ impl AuthorizedPath {
             &self.verified_root,
             self.identity,
         )
+    }
+}
+
+/// Result of a retained-handle guarded text save.
+///
+/// This type is deliberately not serializable: it carries the backend-private
+/// retained handle and opaque revision capability needed to update runtime
+/// state after an atomic replacement.
+#[derive(Debug, Clone)]
+pub struct GuardedFileWrite {
+    changed: bool,
+    previous_identity: FileIdentity,
+    authorized: AuthorizedPath,
+    snapshot: VerifiedFileSnapshot,
+}
+
+impl GuardedFileWrite {
+    /// Returns whether the save replaced the target bytes.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Borrows the retained authorization for the current target identity.
+    #[must_use]
+    pub fn authorized(&self) -> &AuthorizedPath {
+        &self.authorized
+    }
+
+    /// Borrows the verified current descriptor and opaque revision token.
+    #[must_use]
+    pub fn snapshot(&self) -> &VerifiedFileSnapshot {
+        &self.snapshot
+    }
+
+    /// Rebinds another prevalidated authorization for the replaced identity
+    /// while preserving that authorization's requested path and root.
+    ///
+    /// This is intended for multiple live subscriptions to one resource. The
+    /// previous authorization must have named the exact canonical target and
+    /// file identity guarded by this write.
+    ///
+    /// # Errors
+    ///
+    /// Returns `unauthorized_path` if `previous` did not authorize the exact
+    /// pre-write target identity.
+    pub fn rebind_authorization(
+        &self,
+        previous: &AuthorizedPath,
+    ) -> Result<AuthorizedPath, FileResourceErrorV1> {
+        if previous.identity != self.previous_identity
+            || previous.verified_canonical_path != self.authorized.verified_canonical_path
+            || !component_contains(
+                &previous.verified_root,
+                &self.authorized.verified_canonical_path,
+            )
+        {
+            return Err(unauthorized(&previous.requested_path));
+        }
+        Ok(AuthorizedPath {
+            canonical_path: self.authorized.canonical_path.clone(),
+            root: previous.root.clone(),
+            requested_path: previous.requested_path.clone(),
+            verified_canonical_path: previous.verified_canonical_path.clone(),
+            verified_root: previous.verified_root.clone(),
+            identity: self.authorized.identity,
+            file: self.authorized.file.clone(),
+        })
+    }
+
+    /// Separates the change marker, retained authorization, and verified
+    /// snapshot for installation into backend runtime state.
+    #[must_use]
+    pub fn into_parts(self) -> (bool, AuthorizedPath, VerifiedFileSnapshot) {
+        (self.changed, self.authorized, self.snapshot)
     }
 }
 
@@ -540,6 +699,146 @@ impl FileRevisionToken {
             maximum_size_bytes,
         }
     }
+
+    fn exact_hash_for<'a>(
+        &'a self,
+        authorized: &AuthorizedPath,
+    ) -> Result<&'a str, FileResourceErrorV1> {
+        if self.identity != authorized.identity
+            || self.canonical_path != authorized.verified_canonical_path
+        {
+            return Err(FileResourceErrorV1::new(
+                "unauthorized_path",
+                "file revision token belongs to another authorized file",
+            ));
+        }
+        match &self.fingerprint {
+            FileRevisionFingerprint::ExactSha256(hash) => Ok(hash),
+            FileRevisionFingerprint::BoundedSha256(_) => Err(FileResourceErrorV1::new(
+                "file_too_large",
+                "bounded metadata revisions cannot authorize content reads",
+            )),
+        }
+    }
+}
+
+fn editor_line_count(text: &str) -> u64 {
+    let mut lines = 1_u64;
+    let mut previous_was_cr = false;
+    for character in text.chars() {
+        if previous_was_cr {
+            previous_was_cr = false;
+            if character == '\n' {
+                continue;
+            }
+        }
+        match character {
+            '\r' => {
+                lines = lines.saturating_add(1);
+                previous_was_cr = true;
+            }
+            '\n' => lines = lines.saturating_add(1),
+            _ => {}
+        }
+    }
+    lines
+}
+
+fn stage_text_sibling(
+    target: &Path,
+    text: &str,
+    permissions: fs::Permissions,
+) -> Result<PathBuf, FileResourceErrorV1> {
+    let parent = target.parent().ok_or_else(|| {
+        FileResourceErrorV1::new(
+            "unavailable_path",
+            "authorized file does not have a staging directory",
+        )
+    })?;
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "wardian".into());
+    let staged = parent.join(format!(
+        ".{name}.{}.wardian-save.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staged)?;
+        file.write_all(text.as_bytes())?;
+        file.set_permissions(permissions)?;
+        file.sync_all()
+    })();
+    if let Err(cause) = result {
+        let _ = fs::remove_file(&staged);
+        return Err(unavailable("staged text save", cause));
+    }
+    Ok(staged)
+}
+
+#[cfg(not(windows))]
+fn prepare_retained_handle_for_replace(_file: &mut MutexGuard<'_, File>) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prepare_retained_handle_for_replace(file: &mut MutexGuard<'_, File>) -> io::Result<()> {
+    // Windows rejects replacing a pathname while this process retains the
+    // destination handle. Keep the authorization mutex locked across the
+    // transition, but release the OS handle only after the final binding check.
+    // The old `AuthorizedPath` deliberately becomes unusable; successful saves
+    // return a freshly authorized handle for the replacement identity.
+    let placeholder = OpenOptions::new().read(true).open("NUL")?;
+    let retained = std::mem::replace(&mut **file, placeholder);
+    drop(retained);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_staged_authorized(from: &Path, to: &Path) -> io::Result<()> {
+    replace_staged_atomic_durable(from, to)
+}
+
+#[cfg(windows)]
+fn replace_staged_authorized(from: &Path, to: &Path) -> io::Result<()> {
+    let from = wide_null(from.as_os_str());
+    let to = wide_null(to.as_os_str());
+    let replaced = unsafe {
+        ReplaceFileW(
+            to.as_ptr(),
+            from.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn ReplaceFileW(
+        replaced_file_name: *const u16,
+        replacement_file_name: *const u16,
+        backup_file_name: *const u16,
+        replace_flags: u32,
+        exclude: *mut std::ffi::c_void,
+        reserved: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 #[cfg(unix)]
@@ -645,7 +944,7 @@ fn verify_binding(
         return Err(unauthorized(requested_path));
     }
     let current_file =
-        File::open(&current_canonical_path).map_err(|_| unauthorized(requested_path))?;
+        open_authorized_file(&current_canonical_path).map_err(|_| unauthorized(requested_path))?;
     let current_metadata = current_file
         .metadata()
         .map_err(|_| unauthorized(requested_path))?;
@@ -678,6 +977,24 @@ fn unavailable(label: &str, error: std::io::Error) -> FileResourceErrorV1 {
         "unavailable_path",
         format!("cannot resolve {label}: {error}"),
     )
+}
+
+#[cfg(not(windows))]
+fn open_authorized_file(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn open_authorized_file(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
 }
 
 fn component_contains(root: &Path, candidate: &Path) -> bool {
@@ -1030,6 +1347,209 @@ mod tests {
                 .read_verified_text(snapshot.revision_token(), 12)
                 .expect("replacement text"),
             "revision two"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_rejects_stale_revision_and_base_hash_without_writing() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+                .expect("verified snapshot");
+
+        assert_eq!(
+            authorized
+                .guarded_atomic_replace_text(
+                    snapshot.revision_token(),
+                    "sha256:wrong-buffer-base",
+                    "revision two",
+                    &limits,
+                )
+                .expect_err("stale buffer base must fail")
+                .code(),
+            "stale_revision"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("unchanged bytes"),
+            "revision one"
+        );
+
+        fs::write(&path, "newer revision").expect("external mutation");
+        assert_eq!(
+            authorized
+                .guarded_atomic_replace_text(
+                    snapshot.revision_token(),
+                    &snapshot.descriptor().content_hash,
+                    "stale overwrite",
+                    &limits,
+                )
+                .expect_err("stale retained revision must fail")
+                .code(),
+            "stale_revision"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("newer bytes survive"),
+            "newer revision"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_returns_reauthorized_revision_and_preserves_permissions() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&path, permissions).expect("readonly fixture");
+        }
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let _other_live_subscription = service
+            .authorize_existing_file(&path)
+            .expect("second retained authorization");
+        let snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+                .expect("verified snapshot");
+
+        let write = authorized
+            .guarded_atomic_replace_text(
+                snapshot.revision_token(),
+                &snapshot.descriptor().content_hash,
+                "revision two",
+                &limits,
+            )
+            .expect("guarded replacement");
+
+        assert!(write.changed());
+        #[cfg(unix)]
+        assert!(fs::metadata(&path)
+            .expect("replacement metadata")
+            .permissions()
+            .readonly());
+        assert_eq!(write.snapshot().descriptor().content_hash.len(), 71);
+        assert_ne!(
+            write.snapshot().descriptor().content_hash,
+            snapshot.descriptor().content_hash
+        );
+        assert_eq!(
+            write
+                .authorized()
+                .read_verified_text(write.snapshot().revision_token(), 12)
+                .expect("new retained revision"),
+            "revision two"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_reports_unchanged_and_limit_failure_without_partial_bytes() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let path = workspace.join("payload.txt");
+        fs::write(&path, "stable text").expect("fixture");
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&path)
+            .expect("authorized file");
+        let snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+                .expect("verified snapshot");
+
+        let unchanged = authorized
+            .guarded_atomic_replace_text(
+                snapshot.revision_token(),
+                &snapshot.descriptor().content_hash,
+                "stable text",
+                &limits,
+            )
+            .expect("unchanged save");
+        assert!(!unchanged.changed());
+        assert_eq!(unchanged.snapshot(), &snapshot);
+
+        let mut tiny_limits = limits;
+        tiny_limits.monaco_max_size_bytes = 3;
+        assert_eq!(
+            authorized
+                .guarded_atomic_replace_text(
+                    snapshot.revision_token(),
+                    &snapshot.descriptor().content_hash,
+                    "partial bytes must never appear",
+                    &tiny_limits,
+                )
+                .expect_err("oversized save must fail before replacement")
+                .code(),
+            "file_too_large"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("unchanged bytes"),
+            "stable text"
+        );
+    }
+
+    #[test]
+    fn guarded_atomic_text_replace_rejects_retargeted_requested_path() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        let approved = workspace.join("approved");
+        let other = workspace.join("other");
+        fs::create_dir_all(&approved).expect("approved directory");
+        fs::create_dir_all(&other).expect("other directory");
+        fs::write(approved.join("payload.txt"), "approved").expect("approved fixture");
+        fs::write(other.join("payload.txt"), "other").expect("other fixture");
+        let link = workspace.join("current");
+        create_directory_link(&approved, &link);
+        let requested = link.join("payload.txt");
+        let limits = super::super::FileResourceLimits::default();
+        let service =
+            AuthorizedRootService::from_agent_config(&config_with_roots(&workspace, &[], &[]))
+                .expect("valid root");
+        let authorized = service
+            .authorize_existing_file(&requested)
+            .expect("authorized linked file");
+        let snapshot =
+            super::super::VerifiedFileSnapshot::from_authorized_path(&authorized, &limits)
+                .expect("verified snapshot");
+
+        remove_directory_link(&link);
+        create_directory_link(&other, &link);
+        assert_eq!(
+            authorized
+                .guarded_atomic_replace_text(
+                    snapshot.revision_token(),
+                    &snapshot.descriptor().content_hash,
+                    "must not redirect",
+                    &limits,
+                )
+                .expect_err("retargeted alias must fail")
+                .code(),
+            "unauthorized_path"
+        );
+        assert_eq!(
+            fs::read_to_string(other.join("payload.txt")).expect("other target"),
+            "other"
         );
     }
 

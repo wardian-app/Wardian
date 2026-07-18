@@ -1,6 +1,7 @@
 use crate::state::{
-    AppState, FileResourceRuntime, FileResourceSnapshotV1, FileResourceTextV1,
-    FileResourceTicketV1, UserFileGrantV1,
+    AppState, FileResourceRuntime, FileResourceSaveAsResultV1, FileResourceSaveResultV1,
+    FileResourceSnapshotV1, FileResourceTextV1, FileResourceTicketV1, SaveTargetGrantV1,
+    UserFileGrantV1,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -33,6 +34,16 @@ pub struct ReadFileResourceTextRequestV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct SaveFileResourceTextRequestV1 {
+    pub resource_id: String,
+    pub subscription_id: String,
+    pub expected_revision: u64,
+    pub buffer_base_hash: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct IssueFileResourceTicketRequestV1 {
     pub resource_id: String,
     pub subscription_id: String,
@@ -52,6 +63,20 @@ pub struct CloseFileRendererLeaseRequestV1 {
 #[serde(rename_all = "snake_case")]
 pub struct PickFileResourceRequestV1 {
     pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PickFileResourceSaveTargetRequestV1 {
+    pub title: Option<String>,
+    pub default_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SaveFileResourceAsTextRequestV1 {
+    pub save_target_grant_id: String,
+    pub text: String,
 }
 
 #[tauri::command]
@@ -171,6 +196,27 @@ pub async fn read_file_resource_text(
 }
 
 #[tauri::command]
+pub async fn save_file_resource_text(
+    request: SaveFileResourceTextRequestV1,
+    state: tauri::State<'_, AppState>,
+) -> Result<FileResourceSaveResultV1, FileResourceErrorV1> {
+    let config =
+        current_subscription_agent_config(&state, &request.resource_id, &request.subscription_id)
+            .await?;
+    state
+        .file_resources
+        .save_text(
+            &request.resource_id,
+            &request.subscription_id,
+            request.expected_revision,
+            &request.buffer_base_hash,
+            &request.text,
+            config.as_ref(),
+        )
+        .await
+}
+
+#[tauri::command]
 pub async fn issue_file_resource_ticket(
     request: IssueFileResourceTicketRequestV1,
     state: tauri::State<'_, AppState>,
@@ -238,6 +284,53 @@ pub async fn pick_file_resource(
     record_picked_file(&state.file_resources, &selected)
         .await
         .map(Some)
+}
+
+#[tauri::command]
+pub async fn pick_file_resource_save_target(
+    request: PickFileResourceSaveTargetRequestV1,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Option<SaveTargetGrantV1>, FileResourceErrorV1> {
+    let mut picker = app.dialog().file();
+    if let Some(title) = request.title {
+        picker = picker.set_title(title);
+    }
+    if let Some(default_name) = request.default_name {
+        picker = picker.set_file_name(default_name);
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    picker.save_file(move |selected| {
+        let _ = sender.send(selected);
+    });
+    let selected = receiver
+        .await
+        .map_err(|_| resource_error("picker_unavailable", "native save dialog did not respond"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected.into_path().map_err(|cause| {
+        resource_error(
+            "unavailable_path",
+            format!("selected save target is not a local filesystem path: {cause}"),
+        )
+    })?;
+    state
+        .file_resources
+        .record_save_target(&selected)
+        .await
+        .map(Some)
+}
+
+#[tauri::command]
+pub async fn save_file_resource_as_text(
+    request: SaveFileResourceAsTextRequestV1,
+    state: tauri::State<'_, AppState>,
+) -> Result<FileResourceSaveAsResultV1, FileResourceErrorV1> {
+    state
+        .file_resources
+        .save_file_resource_as_text(&request.save_target_grant_id, &request.text)
+        .await
 }
 
 pub(crate) async fn record_picked_file(
@@ -489,6 +582,31 @@ mod tests {
         .expect("read request");
         assert_eq!(read.revision, 7);
 
+        let save: SaveFileResourceTextRequestV1 = serde_json::from_value(json!({
+            "resource_id": "file:/workspace/report.md",
+            "subscription_id": "subscription-a",
+            "expected_revision": 7,
+            "buffer_base_hash": "sha256:base",
+            "text": "updated"
+        }))
+        .expect("save request");
+        assert_eq!(save.expected_revision, 7);
+        assert_eq!(save.buffer_base_hash, "sha256:base");
+
+        let pick_save_target: PickFileResourceSaveTargetRequestV1 = serde_json::from_value(json!({
+            "title": "Save As",
+            "default_name": "report.md"
+        }))
+        .expect("save target request");
+        assert_eq!(pick_save_target.default_name.as_deref(), Some("report.md"));
+
+        let save_as: SaveFileResourceAsTextRequestV1 = serde_json::from_value(json!({
+            "save_target_grant_id": "grant-a",
+            "text": "saved copy"
+        }))
+        .expect("save as request");
+        assert_eq!(save_as.save_target_grant_id, "grant-a");
+
         let issue: IssueFileResourceTicketRequestV1 = serde_json::from_value(json!({
             "resource_id": "file:/workspace/figure.pdf",
             "subscription_id": "subscription-b",
@@ -505,6 +623,35 @@ mod tests {
         }))
         .expect("close renderer lease request");
         assert_eq!(close_lease.subscription_id, "subscription-b");
+    }
+
+    #[test]
+    fn file_resources_save_results_are_tagged_without_private_revision_tokens() {
+        let values = [
+            serde_json::to_value(FileResourceSaveResultV1::Saved {
+                revision: 2,
+                content_hash: "sha256:saved".to_string(),
+            })
+            .expect("saved result"),
+            serde_json::to_value(FileResourceSaveResultV1::Unchanged {
+                revision: 2,
+                content_hash: "sha256:saved".to_string(),
+            })
+            .expect("unchanged result"),
+            serde_json::to_value(FileResourceSaveResultV1::StaleConflict {
+                revision: 3,
+                content_hash: "sha256:current".to_string(),
+            })
+            .expect("conflict result"),
+        ];
+
+        assert_eq!(values[0]["status"], "saved");
+        assert_eq!(values[1]["status"], "unchanged");
+        assert_eq!(values[2]["status"], "stale_conflict");
+        for value in values {
+            assert!(value.get("revision_token").is_none());
+            assert!(value.get("file_revision_token").is_none());
+        }
     }
 
     #[tokio::test]

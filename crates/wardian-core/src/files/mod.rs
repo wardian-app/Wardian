@@ -6,7 +6,9 @@
 mod authorized_roots;
 mod descriptor;
 
-pub use authorized_roots::{AuthorizedPath, AuthorizedRootService, FileRevisionToken};
+pub use authorized_roots::{
+    AuthorizedPath, AuthorizedRootService, FileRevisionToken, GuardedFileWrite,
+};
 pub use descriptor::{
     FileContentDescriptorV1, FileRendererKind, FileResourceCapabilitiesV1, FileResourceErrorV1,
     FileResourceLimits, VerifiedFileSnapshot,
