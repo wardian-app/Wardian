@@ -3,7 +3,11 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { FileContentDescriptorV1, FileResourceSnapshotV1 } from "../../types";
+import type {
+  FileContentDescriptorV1,
+  FileResourceSnapshotV1,
+  FilesSurfaceStateV2,
+} from "../../types";
 import { FileResourceClient } from "./fileResourceClient";
 import { FilesSurface } from "./FilesSurface";
 import {
@@ -207,6 +211,81 @@ describe("FilesSurface", () => {
       presentation: "editor",
       transient_preview: true,
     })));
+  });
+
+  it("commits the legacy renderer default once when stale props still request migration", async () => {
+    const textDescriptor = descriptor({
+      canonical_path: "C:/work/docs/report.txt",
+      display_name: "report.txt",
+      extension: "txt",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+      renderer_kind: "text",
+      capabilities: { preview: true, changes: true, draft: true, stream: true },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(textDescriptor),
+      error: null,
+      retry: vi.fn(),
+    });
+    const textRegistry = new RendererRegistry([
+      definition("text", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const legacyRestoredState: FilesSurfaceStateV2 = {
+      resource_kind: "file",
+      transient_preview: true,
+      presentation: "rendered",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const onStateChange = vi.fn();
+    const staleProps = props({
+      resource_key: "file:C:/work/docs/report.txt",
+      registry: textRegistry,
+      state: legacyRestoredState,
+      legacy_presentation_intent: "renderer_default",
+      on_state_change: onStateChange,
+    });
+    const view = render(<FilesSurface {...staleProps} />);
+
+    await waitFor(() => expect(onStateChange).toHaveBeenCalledOnce());
+    expect(onStateChange).toHaveBeenCalledWith({
+      ...legacyRestoredState,
+      presentation: "editor",
+    });
+
+    view.rerender(<FilesSurface {...staleProps} state={{ ...legacyRestoredState }} />);
+    await waitFor(() => expect(onStateChange).toHaveBeenCalledOnce());
+  });
+
+  it("preserves a historical comparison while baseline availability is unknown", async () => {
+    const onStateChange = vi.fn();
+    render(<FilesSurface {...props({
+      state: {
+        resource_kind: "file",
+        transient_preview: true,
+        presentation: "rendered",
+        comparison_open: true,
+        comparison_layout_preference: "auto",
+        comparison_baseline: {
+          kind: "prompt_checkpoint",
+          checkpoint_id: "checkpoint-1",
+        },
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: "checkpoint-1",
+      },
+      on_state_change: onStateChange,
+    })} />);
+
+    expect(await screen.findByTestId("preview-renderer")).toBeInTheDocument();
+    expect(onStateChange).not.toHaveBeenCalled();
   });
 
   it("switches Markdown between rendered and source presentations", async () => {

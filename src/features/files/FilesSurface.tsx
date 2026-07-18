@@ -7,7 +7,10 @@ import { FilePreview } from "./FilePreview";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
 import { decodeFileResourceKey } from "./fileResourceKey";
 import { FilesModeBar } from "./FilesModeBar";
-import { normalizeFilesSurfaceState } from "./filesSurfaceState";
+import {
+  type FilesLegacyPresentationIntent,
+  normalizeFilesSurfaceState,
+} from "./filesSurfaceState";
 import { useFilesPresentationStore } from "./filesPresentationStore";
 import {
   defaultRendererRegistry,
@@ -31,6 +34,7 @@ export type FilesSurfaceProps = {
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
   on_state_change?: (state: FilesSurfaceStateV2) => Promise<void> | void;
+  legacy_presentation_intent?: FilesLegacyPresentationIntent;
 };
 
 function pathFromResourceKey(resourceKey: string) {
@@ -65,6 +69,7 @@ type ActiveFilesSurfaceProps = Required<Pick<
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
   on_state_change: (state: FilesSurfaceStateV2) => Promise<void> | void;
+  legacy_presentation_intent?: FilesLegacyPresentationIntent;
   action_error: string | null;
   preview_presentation: FilePreviewPresentation;
   on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
@@ -77,6 +82,7 @@ type PreviewPresentationState = {
 
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const notifiedCanonicalSnapshot = useRef<string | null>(null);
+  const requestedNormalization = useRef<string | null>(null);
   const canonicalCallback = useRef(props.on_canonical_resource);
   const canonicalRetryCount = useRef(0);
   const [canonicalRetryToken, setCanonicalRetryToken] = useState(0);
@@ -93,17 +99,44 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     if (!("presentation" in props.state) || !resource.snapshot) return;
     const renderer = props.registry.resolve(resource.snapshot.descriptor);
     const textEditor = renderer.renderer_id === "text";
+    const baselineAvailability = props.state.comparison_baseline === null
+      ? "unavailable"
+      : props.state.comparison_baseline.kind === "saved_file"
+        ? renderer.capabilities.changes === "line" ? "available" : "unavailable"
+        : "unknown";
     const normalized = normalizeFilesSurfaceState(props.state, {
       default_presentation: textEditor ? "editor" : "rendered",
-      rendered: !textEditor,
+      rendered: !textEditor || renderer.source !== undefined,
       editor: textEditor || renderer.source !== undefined,
-      baseline_available: props.state.comparison_baseline?.kind === "saved_file"
-        && renderer.capabilities.changes === "line",
+      baseline_availability: baselineAvailability,
+    }, {
+      presentation_intent: props.legacy_presentation_intent,
     });
-    if (JSON.stringify(normalized) !== JSON.stringify(props.state)) {
-      void props.on_state_change(normalized);
+    const stateSnapshot = JSON.stringify(props.state);
+    const normalizedSnapshot = JSON.stringify(normalized);
+    if (props.legacy_presentation_intent === undefined && normalizedSnapshot === stateSnapshot) {
+      requestedNormalization.current = null;
+      return;
     }
-  }, [props.on_state_change, props.registry, props.state, resource.snapshot]);
+    const requestSnapshot = JSON.stringify({
+      surface_id: props.surface_id,
+      resource_key: props.resource_key,
+      state: stateSnapshot,
+      normalized: normalizedSnapshot,
+      legacy_presentation_intent: props.legacy_presentation_intent ?? null,
+    });
+    if (requestedNormalization.current === requestSnapshot) return;
+    requestedNormalization.current = requestSnapshot;
+    void props.on_state_change(normalized);
+  }, [
+    props.legacy_presentation_intent,
+    props.on_state_change,
+    props.registry,
+    props.resource_key,
+    props.state,
+    props.surface_id,
+    resource.snapshot,
+  ]);
 
   useEffect(() => {
     canonicalCallback.current = props.on_canonical_resource;

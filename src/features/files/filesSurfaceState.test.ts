@@ -100,16 +100,57 @@ describe("Files surface state V2", () => {
   it("normalizes presentation and unavailable baselines after discovery", () => {
     expect(normalizeFilesSurfaceState(
       { ...v2(), presentation: "rendered" },
-      { default_presentation: "editor", rendered: false, editor: true, baseline_available: true },
+      {
+        default_presentation: "editor",
+        rendered: false,
+        editor: true,
+        baseline_availability: "available",
+      },
     )).toMatchObject({ presentation: "editor" });
     expect(normalizeFilesSurfaceState(
       { ...v2(), presentation: "editor" },
-      { default_presentation: "rendered", rendered: true, editor: false, baseline_available: true },
+      {
+        default_presentation: "rendered",
+        rendered: true,
+        editor: false,
+        baseline_availability: "available",
+      },
     )).toMatchObject({ presentation: "rendered" });
     expect(normalizeFilesSurfaceState(
       { ...v2(), comparison_open: true },
-      { default_presentation: "editor", rendered: false, editor: true, baseline_available: false },
+      {
+        default_presentation: "editor",
+        rendered: false,
+        editor: true,
+        baseline_availability: "unavailable",
+      },
     )).toMatchObject({ comparison_open: false, comparison_baseline: null });
+    expect(normalizeFilesSurfaceState(
+      {
+        ...v2(),
+        comparison_open: true,
+        comparison_baseline: { kind: "prompt_checkpoint", checkpoint_id: "checkpoint-1" },
+      },
+      {
+        default_presentation: "rendered",
+        rendered: true,
+        editor: true,
+        baseline_availability: "unknown",
+      },
+    )).toMatchObject({
+      comparison_open: true,
+      comparison_baseline: { kind: "prompt_checkpoint", checkpoint_id: "checkpoint-1" },
+    });
+    expect(normalizeFilesSurfaceState(
+      { ...v2(), presentation: "rendered" },
+      {
+        default_presentation: "editor",
+        rendered: true,
+        editor: true,
+        baseline_availability: "available",
+      },
+      { presentation_intent: "renderer_default" },
+    )).toMatchObject({ presentation: "editor" });
   });
 
   it("preserves layout preference while degrading the effective comparison layout", () => {
@@ -145,6 +186,17 @@ describe("Files surface state V2", () => {
       state_schema_version: 2,
       state: migrateFilesSurfaceStateV1(v1("draft")),
     };
+    expect(filesSurfaceMigrationCommands(document)).toEqual([]);
+  });
+
+  it("keeps renderer-default and historical-baseline migrations provisional", () => {
+    const document = makeSingleGroupDocument([
+      makeSurface("preview", { surface_type: "files", state: v1("preview") }),
+      makeSurface("changes", {
+        surface_type: "files",
+        state: { ...v1("changes"), optional_checkpoint_id: "checkpoint-1" },
+      }),
+    ]);
     expect(filesSurfaceMigrationCommands(document)).toEqual([]);
   });
 });

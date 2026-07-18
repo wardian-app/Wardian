@@ -32,8 +32,10 @@ export type FilesPresentationCapabilities = {
   default_presentation: "rendered" | "editor";
   rendered: boolean;
   editor: boolean;
-  baseline_available: boolean;
+  baseline_availability: "available" | "unavailable" | "unknown";
 };
+
+export type FilesLegacyPresentationIntent = "renderer_default";
 
 export type FilesComparisonContentKind = "text" | "binary";
 export type FilesEffectiveComparisonLayout =
@@ -155,6 +157,10 @@ export function filesSurfaceMigrationCommands(
   const commands: WorkbenchCommand[] = [];
   for (const surface of Object.values(document.surfaces)) {
     if (surface.surface_type !== "files" || surface.state_schema_version !== 1) continue;
+    if (!isFilesSurfaceStateV1(surface.state)) continue;
+    if (surface.state.mode === "preview" || (
+      surface.state.mode === "changes" && legacyBaseline(surface.state) !== null
+    )) continue;
     const restored = restoreFilesSurfaceState(surface.state, 1);
     if (!restored.ok) continue;
     commands.push({
@@ -171,19 +177,23 @@ export function filesSurfaceMigrationCommands(
 export function normalizeFilesSurfaceState(
   state: FilesSurfaceStateV2,
   capabilities: FilesPresentationCapabilities,
+  options: { presentation_intent?: FilesLegacyPresentationIntent } = {},
 ): FilesSurfaceStateV2 {
-  let presentation = state.presentation;
+  let presentation = options.presentation_intent === "renderer_default"
+    ? capabilities.default_presentation
+    : state.presentation;
   if (presentation === "editor" && !capabilities.editor) {
     presentation = capabilities.rendered ? "rendered" : capabilities.default_presentation;
   } else if (presentation === "rendered" && !capabilities.rendered) {
     presentation = capabilities.editor ? "editor" : capabilities.default_presentation;
   }
-  const baselineAvailable = state.comparison_baseline !== null && capabilities.baseline_available;
+  const baselineUnavailable = state.comparison_baseline !== null
+    && capabilities.baseline_availability === "unavailable";
   return {
     ...state,
     presentation,
-    comparison_open: state.comparison_open && baselineAvailable,
-    comparison_baseline: baselineAvailable ? state.comparison_baseline : null,
+    comparison_open: baselineUnavailable ? false : state.comparison_open,
+    comparison_baseline: baselineUnavailable ? null : state.comparison_baseline,
   };
 }
 

@@ -76,7 +76,10 @@ import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfa
 import { FilesSurface } from "../features/files/FilesSurface";
 import { fileResourceClient } from "../features/files/fileResourceClient";
 import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
-import { filesSurfaceMigrationCommands } from "../features/files/filesSurfaceState";
+import {
+  filesSurfaceMigrationCommands,
+  isFilesSurfaceStateV1,
+} from "../features/files/filesSurfaceState";
 import type { FilesSurfaceStateV2 } from "../types";
 
 declare global {
@@ -1131,30 +1134,52 @@ function AppBody() {
 
     const visibility = lifecycle?.visible === false ? "hidden" : "visible";
     if (surface.surface_type === "files") {
+      const filesState = restoredSurface.state as FilesSurfaceStateV2;
+      const filesStateSnapshot = JSON.stringify(filesState);
+      const legacyPresentationIntent = surface.state_schema_version === 1
+        && isFilesSurfaceStateV1(surface.state)
+        && surface.state.mode === "preview"
+        ? "renderer_default"
+        : undefined;
       return (
         <FilesSurface
           surface_id={surface.surface_id}
           resource_key={surface.resource_key ?? ""}
-          state={restoredSurface.state as FilesSurfaceStateV2}
+          state={filesState}
           lifecycle={{ visible: lifecycle?.visible !== false }}
           client={fileResourceClient}
+          legacy_presentation_intent={legacyPresentationIntent}
           on_canonical_resource={async (resourceKey) => {
             return await workbenchNavigation.canonicalize_resource(surface.surface_id, {
               surface_type: "files",
               resource_key: resourceKey,
-              state: restoredSurface.state as FilesSurfaceStateV2,
+              state: filesState,
             });
           }}
           on_open_file={(path) => {
             openPermanentFileSurface(workbenchNavigation, path);
           }}
           on_state_change={(state) => {
-            workbenchPersistence.store.getState().apply_commands([{
+            const store = workbenchPersistence.store.getState();
+            const currentSurface = store.document.surfaces[surface.surface_id];
+            if (
+              currentSurface === undefined
+              || (
+                legacyPresentationIntent !== undefined
+                && currentSurface.state_schema_version !== 1
+              )
+            ) return;
+            const currentRestore = workbenchRegistry.resolve_surface(currentSurface).restore_result;
+            if (!currentRestore.ok || JSON.stringify(currentRestore.state) !== filesStateSnapshot) return;
+            const result = store.apply_commands([{
               type: "update_surface_state",
               surface_id: surface.surface_id,
               state_schema_version: 2,
               state,
             }]);
+            if (result.accepted && legacyPresentationIntent !== undefined) {
+              void workbenchPersistence.flush();
+            }
           }}
         />
       );
