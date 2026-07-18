@@ -129,6 +129,22 @@ describe("FilesHeader", () => {
       .toHaveAttribute("aria-pressed", "true");
   });
 
+  it("fits and abbreviates multi-digit change counts without fixed-width overflow", () => {
+    render(header({
+      changes: {
+        regions: 123,
+        added_lines: 80,
+        modified_lines: 30,
+        deleted_lines: 13,
+      },
+    }));
+    const control = screen.getByRole("button", { name: /123 change regions/i });
+    expect(control).toHaveTextContent("99+");
+
+    const css = readFileSync(resolve(process.cwd(), "src/features/files/FilesSurface.css"), "utf8");
+    expect(css).toMatch(/\.files-diff-toggle\s*\{[^}]*width:\s*auto[^}]*min-width:\s*28px[^}]*height:\s*26px/s);
+  });
+
   it("exposes Save and Save As only when supported and preserves keyboard menu behavior", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

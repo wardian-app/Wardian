@@ -22,6 +22,7 @@ import {
 import {
   RendererRegistry,
   type FileRendererDefinition,
+  type FileRendererProps,
 } from "./rendererRegistry";
 
 const useFileResourceMock = vi.hoisted(() => vi.fn());
@@ -86,6 +87,15 @@ const PreviewRenderer = lazy(async () => ({
 
 const SourceRenderer = lazy(async () => ({
   default: () => <div data-testid="source-renderer">Source</div>,
+}));
+
+const BaselineSourceRenderer = lazy(async () => ({
+  default: ({ comparison_baseline }: FileRendererProps) => (
+    <div
+      data-testid="baseline-source-renderer"
+      data-baseline={comparison_baseline?.kind ?? "none"}
+    />
+  ),
 }));
 
 const UnsupportedPreview = lazy(() => import("./UnsupportedRenderer"));
@@ -1035,6 +1045,100 @@ describe("FilesSurface", () => {
       ...openState,
       comparison_open: false,
     });
+  });
+
+  it("keeps implicit saved-file annotations local to panes without an explicit historical baseline", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    const markdownSnapshot = {
+      ...snapshot(markdownDescriptor),
+      resource_id: "file:C:/work/docs/notes.md",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: markdownSnapshot,
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: markdownSnapshot.resource_id,
+      revision: markdownSnapshot.revision,
+      text: "base\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, BaselineSourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const ordinaryState: FilesSurfaceStateV2 = {
+      resource_kind: "file",
+      transient_preview: false,
+      presentation: "editor",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const historicalState: FilesSurfaceStateV2 = {
+      ...ordinaryState,
+      comparison_baseline: {
+        kind: "prompt_checkpoint",
+        checkpoint_id: "checkpoint-1",
+      },
+    };
+    const view = render(
+      <>
+        <FilesSurface {...props({
+          surface_id: "files-ordinary",
+          resource_key: markdownSnapshot.resource_id,
+          state: ordinaryState,
+          client,
+          editor_registry: editorRegistry,
+          registry: markdownRegistry,
+          on_state_change: vi.fn(),
+        })} />
+        <FilesSurface {...props({
+          surface_id: "files-historical",
+          resource_key: markdownSnapshot.resource_id,
+          state: historicalState,
+          client,
+          editor_registry: editorRegistry,
+          registry: markdownRegistry,
+          on_state_change: vi.fn(),
+        })} />
+      </>,
+    );
+    const controller = editorRegistry.forResource(markdownSnapshot.resource_id);
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+
+    act(() => controller.mutate("local edit\n"));
+
+    const surfaces = view.getAllByTestId("files-surface");
+    await waitFor(() => {
+      expect(within(surfaces[0]).getByTestId("baseline-source-renderer"))
+        .toHaveAttribute("data-baseline", "saved_file");
+      expect(within(surfaces[1]).getByTestId("baseline-source-renderer"))
+        .toHaveAttribute("data-baseline", "none");
+    });
+    expect(within(surfaces[0]).getByRole("button", { name: /open comparison/i }))
+      .toBeInTheDocument();
+    expect(within(surfaces[1]).queryByRole("button", { name: /open comparison/i }))
+      .not.toBeInTheDocument();
   });
 
   it("detaches and releases a clean controller only after React unmount", async () => {

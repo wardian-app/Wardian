@@ -1,6 +1,10 @@
 import { lazy, type ComponentType, type LazyExoticComponent } from "react";
 
-import type { FileContentDescriptorV1, FileResourceSnapshotV1 } from "../../types";
+import type {
+  FileContentDescriptorV1,
+  FileResourceSnapshotV1,
+  FilesComparisonBaseline,
+} from "../../types";
 import type { FileEditorController } from "./fileEditorController";
 import type { FileResourceClient } from "./fileResourceClient";
 
@@ -20,6 +24,8 @@ export type FileRendererProps = {
   editor_controller?: FileEditorController | null;
   buffer_snapshot?: FileEditorBufferSnapshot | null;
   editor_language?: string | null;
+  /** Presentation-local comparison context; never inferred by a shared model. */
+  comparison_baseline?: FilesComparisonBaseline | null;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;

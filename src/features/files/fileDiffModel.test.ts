@@ -22,6 +22,7 @@ describe("buildFileDiffModel", () => {
       original_end_line: null,
       modified_start_line: 2,
       modified_end_line: 2,
+      modified_after_line: null,
     }]);
   });
 
@@ -32,6 +33,7 @@ describe("buildFileDiffModel", () => {
       original_end_line: 2,
       modified_start_line: 2,
       modified_end_line: 2,
+      modified_after_line: null,
     }]);
   });
 
@@ -42,6 +44,47 @@ describe("buildFileDiffModel", () => {
       original_end_line: 2,
       modified_start_line: 2,
       modified_end_line: 2,
+      modified_after_line: 1,
+    }]);
+  });
+
+  it("keeps suffix deletions after the surviving final line", () => {
+    expect(buildFileDiffModel("alpha\nbeta", "alpha").changes).toEqual([{
+      kind: "deleted",
+      original_start_line: 2,
+      original_end_line: 2,
+      modified_start_line: 1,
+      modified_end_line: 1,
+      modified_after_line: 1,
+    }]);
+  });
+
+  it("anchors an all-file deletion before the editor's empty first line", () => {
+    expect(buildFileDiffModel("alpha\nbeta", "").changes).toEqual([{
+      kind: "deleted",
+      original_start_line: 1,
+      original_end_line: 2,
+      modified_start_line: 1,
+      modified_end_line: 1,
+      modified_after_line: 0,
+    }]);
+  });
+
+  it("places deleted suffix lines after a replacement that survives", () => {
+    expect(buildFileDiffModel("alpha\nbeta\ngamma", "alpha\nBETA").changes).toEqual([{
+      kind: "modified",
+      original_start_line: 2,
+      original_end_line: 2,
+      modified_start_line: 2,
+      modified_end_line: 2,
+      modified_after_line: null,
+    }, {
+      kind: "deleted",
+      original_start_line: 3,
+      original_end_line: 3,
+      modified_start_line: 2,
+      modified_end_line: 2,
+      modified_after_line: 2,
     }]);
   });
 

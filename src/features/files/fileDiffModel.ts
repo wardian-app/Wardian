@@ -9,6 +9,8 @@ export type FileLineChange = Readonly<{
   original_end_line: number | null;
   modified_start_line: number;
   modified_end_line: number;
+  /** Zero-based boundary after which deleted source lines belong. */
+  modified_after_line: number | null;
 }>;
 
 export type FileDiffSummary = Readonly<{
@@ -37,6 +39,7 @@ const controllerDiffs = new WeakMap<FileEditorController, {
 }>();
 
 function lines(text: string): string[] {
+  if (text === "") return [];
   return text.split(/\r\n|\r|\n/);
 }
 
@@ -285,6 +288,7 @@ function changeBlocks(operations: readonly LineOperation[], modifiedLineCount: n
         original_end_line: originalStart + replaced - 1,
         modified_start_line: modifiedStart,
         modified_end_line: modifiedStart + replaced - 1,
+        modified_after_line: null,
       }));
     }
     if (inserted > replaced) {
@@ -294,16 +298,19 @@ function changeBlocks(operations: readonly LineOperation[], modifiedLineCount: n
         original_end_line: null,
         modified_start_line: modifiedStart + replaced,
         modified_end_line: modifiedStart + inserted - 1,
+        modified_after_line: null,
       }));
     }
     if (deleted > replaced) {
-      const anchor = Math.max(1, Math.min(modifiedLineCount, modifiedStart + replaced));
+      const boundary = Math.max(0, Math.min(modifiedLineCount, modifiedStart + replaced - 1));
+      const anchor = Math.max(1, Math.min(Math.max(1, modifiedLineCount), boundary + 1));
       changes.push(Object.freeze({
         kind: "deleted",
         original_start_line: originalStart + replaced,
         original_end_line: originalStart + deleted - 1,
         modified_start_line: anchor,
         modified_end_line: anchor,
+        modified_after_line: boundary,
       }));
     }
   }

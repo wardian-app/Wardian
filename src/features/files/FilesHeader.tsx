@@ -182,6 +182,7 @@ export function FilesHeader({
       changes.deleted_lines
     } deleted against Saved file`
     : "";
+  const visibleChangeCount = changes && changes.regions > 99 ? "99+" : changes?.regions;
 
   return (
     <header className="files-header">
@@ -227,7 +228,7 @@ export function FilesHeader({
             onClick={on_comparison_toggle}
           >
             <FileDiff size={15} strokeWidth={1.75} aria-hidden="true" />
-            <span className="files-diff-count" aria-hidden="true">{changes.regions}</span>
+            <span className="files-diff-count" aria-hidden="true">{visibleChangeCount}</span>
           </button>
         ) : null}
         {resource_actions_available ? (

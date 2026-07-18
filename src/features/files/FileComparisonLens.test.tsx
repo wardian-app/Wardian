@@ -171,7 +171,10 @@ describe("FileComparisonLens", () => {
       checkpoint_id: "checkpoint-1",
     });
     render(<FileComparisonLens {...props} />);
+    expect(screen.getByText("Since last prompt")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Comparison baseline unavailable");
+    expect(screen.queryByLabelText("Changes summary")).toBeNull();
+    expect(screen.queryByText("Saved file")).toBeNull();
     expect(createDiffEditor).not.toHaveBeenCalled();
   });
 

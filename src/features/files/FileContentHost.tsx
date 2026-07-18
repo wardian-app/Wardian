@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 
-import type { FileResourceSnapshotV1 } from "../../types";
+import type { FileResourceSnapshotV1, FilesComparisonBaseline } from "../../types";
 import type { FileEditorController } from "./fileEditorController";
 import type { FileResourceClient } from "./fileResourceClient";
 import type {
@@ -76,6 +76,7 @@ type PresentationLayerProps = {
   editor_controller: FileEditorController | null;
   buffer_snapshot: FileEditorBufferSnapshot | null;
   editor_language: string | null;
+  comparison_baseline: FilesComparisonBaseline | null;
   on_reset: () => void;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
@@ -94,6 +95,7 @@ function PresentationLayer({
   editor_controller,
   buffer_snapshot,
   editor_language,
+  comparison_baseline,
   on_reset,
   on_open_file,
   on_open_with,
@@ -124,6 +126,7 @@ function PresentationLayer({
             editor_controller={editor_controller}
             buffer_snapshot={buffer_snapshot}
             editor_language={editor_language}
+            comparison_baseline={comparison_baseline}
             on_open_file={on_open_file}
             on_open_with={on_open_with}
             on_reveal={on_reveal}
@@ -143,6 +146,7 @@ export type FileContentHostProps = {
   surface_id: string;
   editor_controller: FileEditorController | null;
   buffer_snapshot: FileEditorBufferSnapshot | null;
+  comparison_baseline?: FilesComparisonBaseline | null;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -158,6 +162,7 @@ export function FileContentHost({
   surface_id,
   editor_controller,
   buffer_snapshot,
+  comparison_baseline = null,
   on_open_file,
   on_open_with,
   on_reveal,
@@ -191,6 +196,7 @@ export function FileContentHost({
           editor_controller={editor_controller}
           buffer_snapshot={buffer_snapshot}
           editor_language={editorLanguage}
+          comparison_baseline={comparison_baseline}
           on_reset={() => reset("rendered")}
           on_open_file={on_open_file}
           on_open_with={on_open_with}
@@ -210,6 +216,7 @@ export function FileContentHost({
           editor_controller={editor_controller}
           buffer_snapshot={buffer_snapshot}
           editor_language={editorLanguage}
+          comparison_baseline={comparison_baseline}
           on_reset={() => reset("editor")}
           on_open_file={on_open_file}
           on_open_with={on_open_with}

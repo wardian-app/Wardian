@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CloseDecision,
   FileRecoveryV1,
+  FilesComparisonBaseline,
   FilesSurfaceState,
   FilesSurfaceStateV2,
 } from "../../types";
@@ -159,8 +160,22 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     });
   }, [props.editor_snapshot, resource.snapshot?.revision]);
   const stateV2 = "presentation" in props.state ? props.state : null;
+  const inlineComparisonBaseline = useMemo<FilesComparisonBaseline | null>(() => {
+    if (!stateV2) return null;
+    if (stateV2.comparison_baseline?.kind === "saved_file") {
+      return stateV2.comparison_baseline;
+    }
+    // Historical baselines require their own provider. Never substitute saved bytes.
+    if (stateV2.comparison_baseline !== null) return null;
+    if (
+      stateV2.resource_kind === "file"
+      && props.editor_snapshot?.status === "ready"
+      && props.editor_snapshot.dirty
+    ) return { kind: "saved_file" };
+    return null;
+  }, [props.editor_snapshot?.dirty, props.editor_snapshot?.status, stateV2]);
   const savedFileDiff = useMemo(() => (
-    stateV2 && props.editor_snapshot?.status === "ready"
+    inlineComparisonBaseline?.kind === "saved_file" && props.editor_snapshot?.status === "ready"
       ? fileDiffForController(props.editor_controller!)
       : null
   ), [
@@ -169,7 +184,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     props.editor_snapshot?.buffer_base_hash,
     props.editor_snapshot?.buffer_generation,
     props.editor_snapshot?.status,
-    stateV2,
+    inlineComparisonBaseline,
   ]);
   const comparisonOpen = Boolean(stateV2?.comparison_open && stateV2.comparison_baseline);
   const savedComparisonOpen = Boolean(
@@ -371,6 +386,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               surface_id={props.surface_id}
               editor_controller={props.editor_controller}
               buffer_snapshot={bufferSnapshot}
+              comparison_baseline={inlineComparisonBaseline}
               on_open_file={props.on_open_file}
               on_open_with={props.on_open_with}
               on_reveal={props.on_reveal}

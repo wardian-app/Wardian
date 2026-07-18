@@ -59,6 +59,15 @@ function summaryLabel(summary: ReturnType<typeof buildFileDiffModel>["summary"])
   return parts.join(", ");
 }
 
+function baselineLabel(baseline: FilesComparisonBaseline): string {
+  switch (baseline.kind) {
+    case "saved_file": return "Saved file";
+    case "prompt_checkpoint": return "Since last prompt";
+    case "presented_version": return "Presented version";
+    case "previous_presented_version": return "Previous presented version";
+  }
+}
+
 /** Full source comparison that preserves the underlying file presentation. */
 export function FileComparisonLens({
   controller,
@@ -83,17 +92,17 @@ export function FileComparisonLens({
   const subscribe = useCallback((listener: () => void) => controller.subscribe(listener), [controller]);
   const getSnapshot = useCallback(() => controller.getSnapshot(), [controller]);
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const diff = useMemo(
-    () => fileDiffForController(controller),
-    [controller, snapshot.base_revision, snapshot.buffer_base_hash, snapshot.buffer_generation],
-  );
-  const effectiveLayout = contentWidth === null
-    ? null
-    : resolveFilesComparisonLayout(layout_preference, contentWidth, "text");
   const available = baseline.kind === "saved_file"
     && snapshot.status === "ready"
     && snapshot.resource_id !== null
     && snapshot.buffer_base_hash !== null;
+  const diff = useMemo(
+    () => available ? fileDiffForController(controller) : null,
+    [available, controller, snapshot.base_revision, snapshot.buffer_base_hash, snapshot.buffer_generation],
+  );
+  const effectiveLayout = contentWidth === null
+    ? null
+    : resolveFilesComparisonLayout(layout_preference, contentWidth, "text");
   const measured = contentWidth !== null;
 
   useEffect(() => {
@@ -246,11 +255,13 @@ export function FileComparisonLens({
   return (
     <section className="files-comparison-lens" aria-label="File comparison">
       <header className="files-comparison-toolbar">
-        <span className="files-comparison-baseline">Saved file</span>
-        <span className="files-comparison-summary" aria-label="Changes summary">
-          {summaryLabel(diff.summary)}
-        </span>
-        <label className="files-comparison-layout">
+        <span className="files-comparison-baseline">{baselineLabel(baseline)}</span>
+        {diff ? (
+          <span className="files-comparison-summary" aria-label="Changes summary">
+            {summaryLabel(diff.summary)}
+          </span>
+        ) : null}
+        {available ? <label className="files-comparison-layout">
           <span className="files-visually-hidden">Comparison layout</span>
           <select
             aria-label="Comparison layout"
@@ -266,12 +277,12 @@ export function FileComparisonLens({
             <option value="side_by_side">Side by side</option>
             <option value="unified">Unified</option>
           </select>
-        </label>
+        </label> : null}
         <button type="button" className="files-comparison-close" aria-label="Close comparison" onClick={on_close}>
           <X size={16} strokeWidth={1.75} aria-hidden="true" />
         </button>
       </header>
-      {snapshot.stale ? (
+      {available && snapshot.stale ? (
         <div className="files-stale-actions" role="group" aria-label="Resolve external changes">
           <span>The saved file changed on disk.</span>
           <button type="button" disabled={action !== null} onClick={() => void runMerge()}>Merge</button>

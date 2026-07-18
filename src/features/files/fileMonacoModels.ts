@@ -1,7 +1,6 @@
 import type * as Monaco from "monaco-editor";
 
 import type { FileEditorController } from "./fileEditorController";
-import { fileDiffDecorations, fileDiffForController } from "./fileDiffModel";
 
 export type MonacoApi = typeof Monaco;
 
@@ -10,7 +9,6 @@ type CanonicalModelLease = {
   references: number;
   controller: FileEditorController;
   applying_controller_text: boolean;
-  decoration_ids: string[];
   dispose_content_listener: () => void;
   dispose_controller_listener: () => void;
   dispose_controller_lifetime: () => void;
@@ -56,10 +54,6 @@ function updateCanonicalLease(lease: CanonicalModelLease): void {
       lease.applying_controller_text = false;
     }
   }
-  lease.decoration_ids = lease.model.deltaDecorations(
-    lease.decoration_ids,
-    fileDiffDecorations(fileDiffForController(lease.controller)),
-  );
 }
 
 function disposeCanonicalLease(key: string, lease: CanonicalModelLease): void {
@@ -68,7 +62,6 @@ function disposeCanonicalLease(key: string, lease: CanonicalModelLease): void {
   lease.dispose_content_listener();
   lease.dispose_controller_listener();
   lease.dispose_controller_lifetime();
-  lease.model.deltaDecorations(lease.decoration_ids, []);
   lease.model.dispose();
 }
 
@@ -101,7 +94,6 @@ export function acquireCanonicalFileModel(
     references: 1,
     controller,
     applying_controller_text: false,
-    decoration_ids: [],
     dispose_content_listener: () => undefined,
     dispose_controller_listener: () => undefined,
     dispose_controller_lifetime: () => undefined,

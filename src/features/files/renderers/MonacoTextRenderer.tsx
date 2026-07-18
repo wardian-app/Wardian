@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import type * as Monaco from "monaco-editor";
 
 import {
@@ -6,7 +7,11 @@ import {
   loadFileMonaco,
   releaseCanonicalFileModel,
 } from "../fileMonacoModels";
-import { fileDiffForController } from "../fileDiffModel";
+import {
+  fileDiffDecorations,
+  fileDiffForController,
+  type FileLineChange,
+} from "../fileDiffModel";
 import type { FileRendererProps } from "../rendererRegistry";
 const MONACO_MAX_SIZE_BYTES = 16 * 1024 * 1024;
 const MONACO_MAX_LINE_COUNT = 200_000;
@@ -35,24 +40,43 @@ function monacoTheme() {
   return document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "vs";
 }
 
-function installDeletedLineZones(
+type ViewAnnotations = {
+  setBaseline: (baseline: FileRendererProps["comparison_baseline"]) => void;
+  dispose: () => void;
+};
+
+/** Owns annotations for one editor presentation while its writable model stays shared. */
+function installViewAnnotations(
   editor: Monaco.editor.IStandaloneCodeEditor,
   controller: NonNullable<FileRendererProps["editor_controller"]>,
-): () => void {
+  initialBaseline: FileRendererProps["comparison_baseline"],
+  onChanges: (changes: readonly FileLineChange[]) => void,
+): ViewAnnotations {
   let zoneIds: string[] = [];
+  let decorationIds: string[] = [];
   let signature = "";
   let disposed = false;
+  let baseline = initialBaseline ?? null;
   const rebuild = () => {
     if (disposed) return;
     const snapshot = controller.getSnapshot();
-    const nextSignature = `${snapshot.buffer_base_hash ?? ""}:${
+    const baselineKey = baseline?.kind ?? "none";
+    const nextSignature = `${baselineKey}:${snapshot.buffer_base_hash ?? ""}:${
       snapshot.base_revision ?? ""
     }:${snapshot.buffer_generation}`;
     if (nextSignature === signature) return;
     signature = nextSignature;
     const savedLines = snapshot.saved_text.split(/\r\n|\r|\n/);
-    const deletions = fileDiffForController(controller)
-      .changes.filter((change) => change.kind === "deleted");
+    const diff = baseline?.kind === "saved_file"
+      ? fileDiffForController(controller)
+      : null;
+    const changes = diff?.changes ?? [];
+    decorationIds = editor.deltaDecorations(
+      decorationIds,
+      diff ? fileDiffDecorations(diff) : [],
+    );
+    onChanges(changes);
+    const deletions = changes.filter((change) => change.kind === "deleted");
     editor.changeViewZones((accessor) => {
       for (const zoneId of zoneIds) accessor.removeZone(zoneId);
       zoneIds = deletions.map((change) => {
@@ -75,7 +99,7 @@ function installDeletedLineZones(
         domNode.append(toggle, body);
         const expandedHeight = Math.max(2, Math.min(9, deletedLines.length + 1));
         const zone: Monaco.editor.IViewZone = {
-          afterLineNumber: Math.max(0, change.modified_start_line - 1),
+          afterLineNumber: change.modified_after_line ?? 0,
           heightInLines: expandedHeight,
           domNode,
         };
@@ -97,13 +121,21 @@ function installDeletedLineZones(
   };
   rebuild();
   const unsubscribe = controller.subscribe(rebuild);
-  return () => {
-    disposed = true;
-    unsubscribe();
-    editor.changeViewZones((accessor) => {
-      for (const zoneId of zoneIds) accessor.removeZone(zoneId);
-      zoneIds = [];
-    });
+  return {
+    setBaseline(nextBaseline) {
+      baseline = nextBaseline ?? null;
+      signature = "";
+      rebuild();
+    },
+    dispose() {
+      disposed = true;
+      unsubscribe();
+      decorationIds = editor.deltaDecorations(decorationIds, []);
+      editor.changeViewZones((accessor) => {
+        for (const zoneId of zoneIds) accessor.removeZone(zoneId);
+        zoneIds = [];
+      });
+    },
   };
 }
 
@@ -113,10 +145,17 @@ export default function MonacoTextRenderer({
   surface_id,
   editor_controller,
   editor_language,
+  comparison_baseline,
 }: FileRendererProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const annotationsRef = useRef<ViewAnnotations | null>(null);
+  const baselineRef = useRef(comparison_baseline);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [changes, setChanges] = useState<readonly FileLineChange[]>([]);
+  const [activeChangeIndex, setActiveChangeIndex] = useState(-1);
+  const [changeAnnouncement, setChangeAnnouncement] = useState("");
   const [retryToken, setRetryToken] = useState(0);
   const retry = useCallback(() => {
     setLoadError(null);
@@ -127,6 +166,34 @@ export default function MonacoTextRenderer({
   const language = editor_language ?? "plaintext";
   const editorEligible = canEditText(snapshot.descriptor);
 
+  baselineRef.current = comparison_baseline;
+  useEffect(() => {
+    annotationsRef.current?.setBaseline(comparison_baseline);
+  }, [comparison_baseline]);
+
+  const updateChanges = useCallback((nextChanges: readonly FileLineChange[]) => {
+    setChanges(nextChanges);
+    setActiveChangeIndex(-1);
+    setChangeAnnouncement("");
+  }, []);
+
+  const navigateChange = useCallback((direction: -1 | 1) => {
+    if (changes.length === 0) return;
+    const nextIndex = activeChangeIndex < 0
+      ? direction > 0 ? 0 : changes.length - 1
+      : (activeChangeIndex + direction + changes.length) % changes.length;
+    const change = changes[nextIndex]!;
+    const line = Math.max(1, change.modified_start_line);
+    const editor = editorRef.current;
+    editor?.revealLineInCenter(line);
+    editor?.setPosition({ lineNumber: line, column: 1 });
+    editor?.focus();
+    setActiveChangeIndex(nextIndex);
+    setChangeAnnouncement(
+      `${change.kind} change ${nextIndex + 1} of ${changes.length}, line ${line}, against Saved file`,
+    );
+  }, [activeChangeIndex, changes]);
+
   useEffect(() => {
     if (!lifecycle.visible || !controller || !surface_id) return;
     if (!editorEligible) return;
@@ -135,7 +202,7 @@ export default function MonacoTextRenderer({
     let model: Monaco.editor.ITextModel | null = null;
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
-    let disposeDeletedLineZones: (() => void) | null = null;
+    let annotations: ViewAnnotations | null = null;
     setLoadError(null);
 
     void loadFileMonaco().then((monaco) => {
@@ -154,7 +221,9 @@ export default function MonacoTextRenderer({
         theme: monacoTheme(),
         wordWrap: "off",
       });
-      disposeDeletedLineZones = installDeletedLineZones(editor, controller);
+      editorRef.current = editor;
+      annotations = installViewAnnotations(editor, controller, baselineRef.current, updateChanges);
+      annotationsRef.current = annotations;
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
         setSaveError(null);
         try {
@@ -191,11 +260,13 @@ export default function MonacoTextRenderer({
       cancelled = true;
       observer?.disconnect();
       themeObserver?.disconnect();
-      disposeDeletedLineZones?.();
+      annotations?.dispose();
+      if (annotationsRef.current === annotations) annotationsRef.current = null;
       editor?.dispose();
+      if (editorRef.current === editor) editorRef.current = null;
       if (model) releaseCanonicalFileModel(modelKey, model);
     };
-  }, [controller, editorEligible, language, lifecycle.visible, modelKey, retryToken, surface_id]);
+  }, [controller, editorEligible, language, lifecycle.visible, modelKey, retryToken, surface_id, updateChanges]);
 
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">Text editor suspended.</div>;
@@ -219,6 +290,29 @@ export default function MonacoTextRenderer({
   return (
     <div className="files-monaco-shell">
       <div ref={hostRef} className="files-monaco-renderer" data-testid="monaco-text-renderer" />
+      {changes.length > 0 ? (
+        <div className="files-monaco-change-navigation" role="group" aria-label="Saved file changes">
+          <button
+            type="button"
+            aria-label="Previous Saved file change"
+            title="Previous Saved file change"
+            onClick={() => navigateChange(-1)}
+          >
+            <ChevronUp size={14} aria-hidden="true" />
+          </button>
+          <span role="status" aria-label="Current file change" aria-live="polite">
+            {changeAnnouncement}
+          </span>
+          <button
+            type="button"
+            aria-label="Next Saved file change"
+            title="Next Saved file change"
+            onClick={() => navigateChange(1)}
+          >
+            <ChevronDown size={14} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
       {saveError ? (
         <div className="files-monaco-save-error" role="alert">{saveError}</div>
       ) : null}

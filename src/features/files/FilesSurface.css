@@ -94,6 +94,9 @@
 
 .files-diff-toggle {
   position: relative;
+  width: auto;
+  min-width: 28px;
+  height: 26px;
   grid-template-columns: auto auto;
   gap: 2px;
   padding: 0 3px;
@@ -295,6 +298,46 @@
 
 .files-monaco-shell {
   position: relative;
+}
+
+.files-monaco-change-navigation {
+  position: absolute;
+  z-index: 1;
+  top: 7px;
+  right: 15px;
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 4px;
+  background: var(--color-wardian-card);
+  box-shadow: var(--shadow-wardian-accent);
+  color: var(--color-wardian-text-muted-neutral);
+}
+
+.files-monaco-change-navigation button {
+  display: grid;
+  width: 24px;
+  height: 22px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.files-monaco-change-navigation button:hover,
+.files-monaco-change-navigation button:focus-visible {
+  background: var(--color-wardian-card-bg-muted);
+  color: var(--color-wardian-text);
+}
+
+.files-monaco-change-navigation [role="status"] {
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .files-monaco-save-error {
