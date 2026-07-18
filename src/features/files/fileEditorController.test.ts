@@ -10,6 +10,7 @@ import {
   FileEditorControllerRegistry,
   type FileEditorResourceClient,
 } from "./fileEditorController";
+import { fileDiffForController } from "./fileDiffModel";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -95,11 +96,25 @@ function fakeClient(): FileEditorResourceClient {
       revision: 5,
       content_hash: "hash-saved",
     }),
+    readText: vi.fn().mockImplementation(async (request) => ({
+      schema: 1,
+      resource_id: request.resource_id,
+      revision: request.revision,
+      text: "disk\n",
+    })),
     checkpointRecovery: vi.fn().mockResolvedValue(checkpoint(1)),
     listRecoveries: vi.fn().mockImplementation(async () => [...recoveries]),
     getRecovery: vi.fn().mockResolvedValue(recovery()),
     discardRecovery: vi.fn().mockImplementation(async (request) => {
       recoveries = recoveries.filter((candidate) => candidate.recovery_id !== request.recovery_id);
+    }),
+    mergeRecovery: vi.fn().mockResolvedValue({
+      status: "clean",
+      recovery_revision: 1,
+      current_revision: 6,
+      current_content_hash: "hash-disk",
+      disk_changed: true,
+      merged_text: "merged local edit\n",
     }),
   };
 }
@@ -1454,6 +1469,222 @@ describe("FileEditorController", () => {
       disk_head_revision: 6,
     });
     expect(openComparison).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a stale working buffer as a pure no-op", async () => {
+    const controller = new FileEditorControllerRegistry(fakeClient())
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+    const before = controller.getSnapshot();
+
+    controller.keepWorkingBuffer();
+
+    expect(controller.getSnapshot()).toBe(before);
+  });
+
+  it("shares one diff result per saved-base and buffer generation", async () => {
+    const controller = new FileEditorControllerRegistry(fakeClient())
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    const clean = fileDiffForController(controller);
+    expect(fileDiffForController(controller)).toBe(clean);
+
+    controller.mutate("local\n");
+    const dirty = fileDiffForController(controller);
+    expect(dirty).not.toBe(clean);
+    expect(fileDiffForController(controller)).toBe(dirty);
+  });
+
+  it("reloads only an exact authorized disk head and retires recovery before adopting it", async () => {
+    const client = fakeClient();
+    const controller = new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 })
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    await controller.flushRecovery();
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+
+    await controller.reloadFromDisk();
+
+    expect(client.readText).toHaveBeenCalledWith({
+      resource_id: owner.resource_id,
+      subscription_id: owner.subscription_id,
+      revision: 6,
+    });
+    expect(client.discardRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-1",
+      expected_recovery_revision: 1,
+      resource_key: owner.resource_id,
+    });
+    expect(client.saveText).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      base_revision: 6,
+      buffer_base_hash: "hash-disk",
+      saved_text: "disk\n",
+      working_text: "disk\n",
+      dirty: false,
+      stale: false,
+      recovery: { status: "none" },
+    });
+  });
+
+  it("fails a disk reload closed when the working generation changes during the exact read", async () => {
+    const pendingRead = deferred<{
+      schema: 1;
+      resource_id: string;
+      revision: number;
+      text: string;
+    }>();
+    const client = fakeClient();
+    vi.mocked(client.readText).mockReturnValue(pendingRead.promise);
+    const controller = new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 })
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+    const reloading = controller.reloadFromDisk();
+    controller.mutate("newer local\n");
+    pendingRead.resolve({
+      schema: 1,
+      resource_id: owner.resource_id,
+      revision: 6,
+      text: "disk\n",
+    });
+
+    await expect(reloading).rejects.toThrow(/editor or disk head changed/i);
+    expect(client.discardRecovery).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "newer local\n",
+      dirty: true,
+      stale: true,
+    });
+  });
+
+  it("rebases a clean three-way merge locally and checkpoints it without writing", async () => {
+    const client = fakeClient();
+    const controller = new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 })
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+
+    await expect(controller.mergeStaleBuffer()).resolves.toMatchObject({ status: "clean" });
+
+    expect(client.mergeRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-1",
+      expected_recovery_revision: 1,
+      resource_key: owner.resource_id,
+      resource_id: owner.resource_id,
+      subscription_id: owner.subscription_id,
+    });
+    expect(client.saveText).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      base_revision: 6,
+      buffer_base_hash: "hash-disk",
+      saved_text: "disk\n",
+      working_text: "merged local edit\n",
+      dirty: true,
+      stale: false,
+    });
+    expect(client.checkpointRecovery).toHaveBeenLastCalledWith(expect.objectContaining({
+      base_content_hash: "hash-disk",
+      base: "disk\n",
+      buffer: "merged local edit\n",
+    }));
+  });
+
+  it("preserves the exact buffer and base when a merge conflicts", async () => {
+    const client = fakeClient();
+    vi.mocked(client.mergeRecovery).mockResolvedValue({
+      status: "conflicted",
+      recovery_revision: 1,
+      current_revision: 6,
+      current_content_hash: "hash-disk",
+      disk_changed: true,
+      merged_text: "<<<<<<< ours\nlocal\n=======\ndisk\n>>>>>>> theirs\n",
+    });
+    const controller = new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 })
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+    const before = controller.getSnapshot();
+
+    await expect(controller.mergeStaleBuffer()).resolves.toMatchObject({ status: "conflicted" });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      saved_text: before.saved_text,
+      working_text: before.working_text,
+      buffer_base_hash: before.buffer_base_hash,
+      dirty: true,
+      stale: true,
+    });
+    expect(controller.getSnapshot().last_error).toMatch(/overlapping changes/i);
+    expect(client.saveText).not.toHaveBeenCalled();
+  });
+
+  it("rejects a clean merge result if the working generation changes in flight", async () => {
+    const pendingMerge = deferred<{
+      status: "clean";
+      recovery_revision: number;
+      current_revision: number;
+      current_content_hash: string;
+      disk_changed: boolean;
+      merged_text: string;
+    }>();
+    const client = fakeClient();
+    vi.mocked(client.mergeRecovery).mockReturnValue(pendingMerge.promise);
+    const controller = new FileEditorControllerRegistry(client, { checkpoint_debounce_ms: 60_000 })
+      .forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: false });
+    controller.mutate("local\n");
+    controller.applyAuthoritative({
+      ...owner,
+      revision: 6,
+      descriptor: { ...descriptor, content_hash: "hash-disk" },
+    }, "disk\n");
+    const merging = controller.mergeStaleBuffer();
+    await vi.waitFor(() => expect(client.mergeRecovery).toHaveBeenCalledOnce());
+    controller.mutate("newer local\n");
+    pendingMerge.resolve({
+      status: "clean",
+      recovery_revision: 1,
+      current_revision: 6,
+      current_content_hash: "hash-disk",
+      disk_changed: true,
+      merged_text: "merged local edit\n",
+    });
+
+    await expect(merging).rejects.toThrow(/editor or disk head changed/i);
+    expect(controller.getSnapshot()).toMatchObject({
+      saved_text: "base\n",
+      working_text: "newer local\n",
+      dirty: true,
+      stale: true,
+    });
+    expect(client.saveText).not.toHaveBeenCalled();
   });
 
   it("serializes recovery checkpoints so an older completion cannot win over the final mutation", async () => {

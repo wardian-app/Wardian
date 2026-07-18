@@ -94,6 +94,41 @@ describe("FilesHeader", () => {
     expect(css).toMatch(/\.files-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/s);
   });
 
+  it("shows one compact saved-file changes control with an accessible summary", async () => {
+    const user = userEvent.setup();
+    const onComparisonToggle = vi.fn();
+    const view = render(header({
+      changes: {
+        regions: 3,
+        added_lines: 2,
+        modified_lines: 1,
+        deleted_lines: 4,
+      },
+      comparison_open: false,
+      on_comparison_toggle: onComparisonToggle,
+    }));
+    const open = screen.getByRole("button", {
+      name: /open comparison: 3 change regions, 2 added, 1 modified, 4 deleted against saved file/i,
+    });
+    expect(open).toHaveAttribute("aria-pressed", "false");
+    expect(open.querySelector("svg.lucide-file-diff")).not.toBeNull();
+    expect(open).toHaveTextContent("3");
+    await user.click(open);
+    expect(onComparisonToggle).toHaveBeenCalledOnce();
+
+    view.rerender(header({
+      changes: {
+        regions: 3,
+        added_lines: 2,
+        modified_lines: 1,
+        deleted_lines: 4,
+      },
+      comparison_open: true,
+    }));
+    expect(screen.getByRole("button", { name: /close comparison/i }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
   it("exposes Save and Save As only when supported and preserves keyboard menu behavior", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

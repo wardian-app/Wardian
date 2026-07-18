@@ -91,6 +91,7 @@ function fakeClient(): FileEditorResourceClient {
       revision: 5,
       content_hash: "hash-saved",
     }),
+    readText: vi.fn(),
     checkpointRecovery: vi.fn().mockResolvedValue({
       schema: 1,
       recovery_id: "recovery-1",
@@ -104,6 +105,7 @@ function fakeClient(): FileEditorResourceClient {
     listRecoveries: vi.fn().mockResolvedValue([recoverySummary]),
     getRecovery: vi.fn().mockResolvedValue(recovery),
     discardRecovery: vi.fn().mockResolvedValue(undefined),
+    mergeRecovery: vi.fn(),
   };
 }
 

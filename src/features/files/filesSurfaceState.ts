@@ -208,6 +208,7 @@ export function resolveFilesComparisonLayout(
     return preference === "auto" && contentWidth >= 720 ? "side_by_side" : "stacked";
   }
   if (preference === "side_by_side" && contentWidth >= 560) return "side_by_side";
+  if (preference === "side_by_side") return "unified";
   if (preference === "unified") return "unified";
   return contentWidth >= 720 ? "side_by_side" : "unified";
 }

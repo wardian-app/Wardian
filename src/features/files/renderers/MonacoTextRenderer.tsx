@@ -1,120 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type * as Monaco from "monaco-editor";
 
-import type { FileEditorController } from "../fileEditorController";
+import {
+  acquireCanonicalFileModel,
+  loadFileMonaco,
+  releaseCanonicalFileModel,
+} from "../fileMonacoModels";
+import { fileDiffForController } from "../fileDiffModel";
 import type { FileRendererProps } from "../rendererRegistry";
-
-type MonacoApi = typeof Monaco;
-type ModelLease = {
-  model: Monaco.editor.ITextModel;
-  references: number;
-  controller: FileEditorController;
-  applying_controller_text: boolean;
-  dispose_content_listener: () => void;
-  dispose_controller_listener: () => void;
-  dispose_controller_lifetime: () => void;
-};
-
-const models = new Map<string, ModelLease>();
-let monacoPromise: Promise<MonacoApi> | null = null;
 const MONACO_MAX_SIZE_BYTES = 16 * 1024 * 1024;
 const MONACO_MAX_LINE_COUNT = 200_000;
-
-function loadMonaco(): Promise<MonacoApi> {
-  if (!monacoPromise) {
-    monacoPromise = Promise.all([
-      import("monaco-editor"),
-      import("monaco-editor/esm/vs/editor/editor.worker.js?worker"),
-    ]).then(([monaco, workerModule]) => {
-      const WorkerConstructor = workerModule.default;
-      globalThis.MonacoEnvironment = {
-        ...globalThis.MonacoEnvironment,
-        getWorker: () => new WorkerConstructor(),
-      };
-      return monaco;
-    }).catch((error) => {
-      monacoPromise = null;
-      throw error;
-    });
-  }
-  return monacoPromise;
-}
-
-function disposeLease(key: string, lease: ModelLease): void {
-  if (models.get(key) !== lease) return;
-  models.delete(key);
-  lease.dispose_content_listener();
-  lease.dispose_controller_listener();
-  lease.dispose_controller_lifetime();
-  lease.model.dispose();
-}
-
-function acquireModel(
-  monaco: MonacoApi,
-  key: string,
-  controller: FileEditorController,
-  language: string,
-): Monaco.editor.ITextModel {
-  const existing = models.get(key);
-  if (existing) {
-    if (existing.controller !== controller) {
-      throw new Error("The canonical Monaco model belongs to another editor session.");
-    }
-    existing.references += 1;
-    monaco.editor.setModelLanguage(existing.model, language);
-    return existing.model;
-  }
-  const uri = monaco.Uri.from({
-    scheme: "wardian-file",
-    path: `/${encodeURIComponent(key)}`,
-  });
-  const current = controller.getSnapshot();
-  const model = monaco.editor.getModel(uri)
-    ?? monaco.editor.createModel(current.working_text, language, uri);
-  const lease: ModelLease = {
-    model,
-    references: 1,
-    controller,
-    applying_controller_text: false,
-    dispose_content_listener: () => undefined,
-    dispose_controller_listener: () => undefined,
-    dispose_controller_lifetime: () => undefined,
-  };
-  const contentListener = model.onDidChangeContent(() => {
-    if (lease.applying_controller_text) return;
-    controller.mutate(model.getValue());
-  });
-  lease.dispose_content_listener = () => contentListener.dispose();
-  lease.dispose_controller_listener = controller.subscribe(() => {
-    const text = controller.getSnapshot().working_text;
-    if (model.getValue() === text) return;
-    lease.applying_controller_text = true;
-    try {
-      model.setValue(text);
-    } finally {
-      lease.applying_controller_text = false;
-    }
-  });
-  lease.dispose_controller_lifetime = controller.onDispose(() => disposeLease(key, lease));
-  models.set(key, lease);
-  if (model.getValue() !== current.working_text) {
-    lease.applying_controller_text = true;
-    try {
-      model.setValue(current.working_text);
-    } finally {
-      lease.applying_controller_text = false;
-    }
-  }
-  return model;
-}
-
-function releaseModel(key: string, model: Monaco.editor.ITextModel): void {
-  const lease = models.get(key);
-  if (!lease || lease.model !== model) return;
-  lease.references = Math.max(0, lease.references - 1);
-  // The controller registry owns model lifetime so hidden/re-rendered panes
-  // keep undo history. The controller's exact release disposes the lease.
-}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -138,6 +33,78 @@ function canEditText(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
 
 function monacoTheme() {
   return document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "vs";
+}
+
+function installDeletedLineZones(
+  editor: Monaco.editor.IStandaloneCodeEditor,
+  controller: NonNullable<FileRendererProps["editor_controller"]>,
+): () => void {
+  let zoneIds: string[] = [];
+  let signature = "";
+  let disposed = false;
+  const rebuild = () => {
+    if (disposed) return;
+    const snapshot = controller.getSnapshot();
+    const nextSignature = `${snapshot.buffer_base_hash ?? ""}:${
+      snapshot.base_revision ?? ""
+    }:${snapshot.buffer_generation}`;
+    if (nextSignature === signature) return;
+    signature = nextSignature;
+    const savedLines = snapshot.saved_text.split(/\r\n|\r|\n/);
+    const deletions = fileDiffForController(controller)
+      .changes.filter((change) => change.kind === "deleted");
+    editor.changeViewZones((accessor) => {
+      for (const zoneId of zoneIds) accessor.removeZone(zoneId);
+      zoneIds = deletions.map((change) => {
+        const deletedLines = savedLines.slice(
+          (change.original_start_line ?? 1) - 1,
+          change.original_end_line ?? change.original_start_line ?? 1,
+        );
+        const domNode = document.createElement("div");
+        domNode.className = "files-diff-deleted-zone";
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "files-diff-deleted-toggle";
+        toggle.setAttribute("aria-expanded", "true");
+        const lineLabel = `${deletedLines.length} deleted ${deletedLines.length === 1 ? "line" : "lines"}`;
+        toggle.textContent = lineLabel;
+        toggle.setAttribute("aria-label", `Collapse ${lineLabel} since Saved file`);
+        const body = document.createElement("pre");
+        body.className = "files-diff-deleted-content";
+        body.textContent = deletedLines.join("\n");
+        domNode.append(toggle, body);
+        const expandedHeight = Math.max(2, Math.min(9, deletedLines.length + 1));
+        const zone: Monaco.editor.IViewZone = {
+          afterLineNumber: Math.max(0, change.modified_start_line - 1),
+          heightInLines: expandedHeight,
+          domNode,
+        };
+        const zoneId = accessor.addZone(zone);
+        toggle.addEventListener("click", () => {
+          const expanded = toggle.getAttribute("aria-expanded") === "true";
+          toggle.setAttribute("aria-expanded", expanded ? "false" : "true");
+          toggle.setAttribute(
+            "aria-label",
+            `${expanded ? "Expand" : "Collapse"} ${lineLabel} since Saved file`,
+          );
+          body.hidden = expanded;
+          zone.heightInLines = expanded ? 1 : expandedHeight;
+          editor.changeViewZones((layoutAccessor) => layoutAccessor.layoutZone(zoneId));
+        });
+        return zoneId;
+      });
+    });
+  };
+  rebuild();
+  const unsubscribe = controller.subscribe(rebuild);
+  return () => {
+    disposed = true;
+    unsubscribe();
+    editor.changeViewZones((accessor) => {
+      for (const zoneId of zoneIds) accessor.removeZone(zoneId);
+      zoneIds = [];
+    });
+  };
 }
 
 export default function MonacoTextRenderer({
@@ -168,13 +135,14 @@ export default function MonacoTextRenderer({
     let model: Monaco.editor.ITextModel | null = null;
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
+    let disposeDeletedLineZones: (() => void) | null = null;
     setLoadError(null);
 
-    void loadMonaco().then((monaco) => {
+    void loadFileMonaco().then((monaco) => {
       if (cancelled) return;
       const host = hostRef.current;
       if (!host) return;
-      model = acquireModel(monaco, modelKey, controller, language);
+      model = acquireCanonicalFileModel(monaco, modelKey, controller, language);
       editor = monaco.editor.create(host, {
         automaticLayout: false,
         fontSize: 13,
@@ -186,6 +154,7 @@ export default function MonacoTextRenderer({
         theme: monacoTheme(),
         wordWrap: "off",
       });
+      disposeDeletedLineZones = installDeletedLineZones(editor, controller);
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
         setSaveError(null);
         try {
@@ -222,8 +191,9 @@ export default function MonacoTextRenderer({
       cancelled = true;
       observer?.disconnect();
       themeObserver?.disconnect();
+      disposeDeletedLineZones?.();
       editor?.dispose();
-      if (model) releaseModel(modelKey, model);
+      if (model) releaseCanonicalFileModel(modelKey, model);
     };
   }, [controller, editorEligible, language, lifecycle.visible, modelKey, retryToken, surface_id]);
 

@@ -2,6 +2,7 @@ import type {
   CheckpointFileRecoveryRequestV1,
   DiscardFileRecoveryRequestV1,
   FileRecoveryCheckpointV1,
+  FileRecoveryMergeResultV1,
   FileRecoverySummaryV1,
   FileRecoveryV1,
   FileResourceSaveResultV1,
@@ -15,10 +16,12 @@ import type { FileResourceClient } from "./fileResourceClient";
 export type FileEditorResourceClient = Pick<
   FileResourceClient,
   | "saveText"
+  | "readText"
   | "checkpointRecovery"
   | "listRecoveries"
   | "getRecovery"
   | "discardRecovery"
+  | "mergeRecovery"
 >;
 
 export type FileEditorRecoveryState =
@@ -121,6 +124,19 @@ type PresentationOwnerCandidate = {
   order: number;
 };
 
+type ExactDiskHead = {
+  owner_generation: number;
+  resource_id: string;
+  subscription_id: string;
+  revision: number;
+  content_hash: string;
+  text: string;
+};
+
+type ExactDiskOperation = ExactDiskHead & {
+  buffer_generation: number;
+};
+
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 750;
 
 function errorMessage(error: unknown): string {
@@ -160,6 +176,7 @@ export class FileEditorController {
   #ownerPresentationId: string | null = null;
   #ownerCandidateOrder = 0;
   #ownerGeneration = 0;
+  #exactDiskHead: ExactDiskHead | null = null;
   #baseRevision: number | null = null;
   #initializationGeneration = 0;
   #pendingInitializationCount = 0;
@@ -395,6 +412,14 @@ export class FileEditorController {
     }
     this.#owner = owner;
     const diskHeadHash = owner.descriptor.content_hash;
+    this.#exactDiskHead = {
+      owner_generation: this.#ownerGeneration,
+      resource_id: owner.resource_id,
+      subscription_id: owner.subscription_id,
+      revision: owner.revision,
+      content_hash: diskHeadHash,
+      text,
+    };
     if (this.#snapshot.status === "uninitialized" || !this.#snapshot.dirty) {
       this.#baseRevision = owner.revision;
       this.#publish({
@@ -476,6 +501,145 @@ export class FileEditorController {
       }
     }
     return bufferGeneration;
+  }
+
+  /** Keeps the stale working buffer byte-for-byte; closing comparison is surface state only. */
+  keepWorkingBuffer(): void {
+    // Intentionally no publication: this choice must be a pure no-op.
+  }
+
+  /**
+   * Reloads the exact currently authorized disk head and retires recovery before
+   * adopting it. Every owner/buffer/recovery generation is revalidated after IO.
+   */
+  async reloadFromDisk(): Promise<void> {
+    const operation = this.#captureExactDiskHead("Reload from disk");
+    const exact = await this.#client.readText({
+      resource_id: operation.resource_id,
+      subscription_id: operation.subscription_id,
+      revision: operation.revision,
+    });
+    if (
+      exact.resource_id !== operation.resource_id
+      || exact.revision !== operation.revision
+    ) throw new Error("Reload from disk returned a different file revision.");
+
+    await this.#enqueueDurable(async () => {
+      this.#assertExactDiskHead(operation, "Reload from disk");
+      const recovery = this.#recoveryMetadata;
+      if (recovery) {
+        await this.#client.discardRecovery({
+          recovery_id: recovery.recovery_id,
+          expected_recovery_revision: recovery.recovery_revision,
+          resource_key: this.#resourceKey,
+        });
+        if (
+          this.#recoveryMetadata?.recovery_id === recovery.recovery_id
+          && this.#recoveryMetadata.recovery_revision === recovery.recovery_revision
+        ) this.#recoveryMetadata = null;
+      }
+      try {
+        this.#assertExactDiskHead(operation, "Reload from disk");
+      } catch (error) {
+        if (recovery && this.#recoveryMetadata === null && this.#snapshot.dirty) {
+          this.#publish({ recovery: Object.freeze({ status: "none" }) });
+          this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
+          void this.#ensureCheckpointLoop().catch(() => undefined);
+        }
+        throw error;
+      }
+      this.#baseRevision = operation.revision;
+      this.#recoveryConflict = null;
+      this.#clearCheckpointTimer();
+      this.#publish({
+        base_revision: operation.revision,
+        buffer_base_hash: operation.content_hash,
+        disk_head_revision: operation.revision,
+        disk_head_hash: operation.content_hash,
+        saved_text: exact.text,
+        working_text: exact.text,
+        dirty: false,
+        stale: false,
+        buffer_generation: this.#snapshot.buffer_generation + 1,
+        recovery: Object.freeze({ status: "none" }),
+        recovery_discovery: "complete",
+        last_error: null,
+      });
+    });
+  }
+
+  /**
+   * Rebases the exact durable working generation onto the exact authorized disk
+   * head. A clean merge updates only the local editor base/buffer; Save remains
+   * the sole filesystem write path.
+   */
+  async mergeStaleBuffer(): Promise<FileRecoveryMergeResultV1> {
+    await this.flushRecovery();
+    const operation = this.#captureExactDiskHead("Merge");
+    const recovery = this.#recoveryMetadata;
+    if (!recovery || recovery.buffer_generation !== operation.buffer_generation) {
+      throw new Error("Merge requires an exact durable recovery of the current buffer.");
+    }
+    const result = await this.#enqueueDurable(async () => {
+      this.#assertExactDiskHead(operation, "Merge");
+      if (
+        this.#recoveryMetadata?.recovery_id !== recovery.recovery_id
+        || this.#recoveryMetadata.recovery_revision !== recovery.recovery_revision
+        || this.#recoveryMetadata.buffer_generation !== recovery.buffer_generation
+      ) throw new Error("The recovery changed before Merge could start.");
+      const merged = await this.#client.mergeRecovery({
+        recovery_id: recovery.recovery_id,
+        expected_recovery_revision: recovery.recovery_revision,
+        resource_key: this.#resourceKey,
+        resource_id: operation.resource_id,
+        subscription_id: operation.subscription_id,
+      });
+      this.#assertExactDiskHead(operation, "Merge");
+      if (
+        this.#recoveryMetadata?.recovery_id !== recovery.recovery_id
+        || this.#recoveryMetadata.recovery_revision !== recovery.recovery_revision
+        || this.#recoveryMetadata.buffer_generation !== recovery.buffer_generation
+      ) throw new Error("The recovery changed while Merge was in flight.");
+      if (merged.recovery_revision !== recovery.recovery_revision) {
+        throw new Error("Merge returned a different recovery generation.");
+      }
+      if (
+        merged.current_revision !== operation.revision
+        || merged.current_content_hash !== operation.content_hash
+      ) throw new Error("The disk head changed while Merge was in flight.");
+      if (merged.status === "conflicted") {
+        this.#publish({
+          last_error: "Merge has overlapping changes. The working buffer was preserved.",
+        });
+        return merged;
+      }
+
+      const nextGeneration = this.#snapshot.buffer_generation + 1;
+      const dirty = merged.merged_text !== operation.text;
+      this.#baseRevision = merged.current_revision;
+      this.#publish({
+        base_revision: merged.current_revision,
+        buffer_base_hash: merged.current_content_hash,
+        disk_head_revision: merged.current_revision,
+        disk_head_hash: merged.current_content_hash,
+        saved_text: operation.text,
+        working_text: merged.merged_text,
+        dirty,
+        stale: false,
+        buffer_generation: nextGeneration,
+        last_error: null,
+      });
+      if (dirty) {
+        this.#checkpointRequestedGeneration = nextGeneration;
+      } else {
+        void this.#retireRecoveryForCleanGeneration(nextGeneration).catch(() => undefined);
+      }
+      return merged;
+    });
+    if (result.status === "clean" && this.#snapshot.dirty) {
+      await this.#ensureCheckpointLoop();
+    }
+    return result;
   }
 
   async save(presentationId?: string): Promise<FileResourceSaveResultV1> {
@@ -1140,6 +1304,57 @@ export class FileEditorController {
         this.#publish({ recovery: Object.freeze({ status: "none" }), last_error: null });
       }
     });
+  }
+
+  #captureExactDiskHead(action: string): ExactDiskOperation {
+    if (!this.#snapshot.dirty || !this.#snapshot.stale) {
+      throw new Error(`${action} requires a stale dirty buffer.`);
+    }
+    if (this.#snapshot.recovery_discovery !== "complete" || this.#recoveryConflict) {
+      throw new Error(`${action} requires recovery discovery to be complete.`);
+    }
+    const owner = this.#owner;
+    const diskHead = this.#exactDiskHead;
+    if (
+      !owner
+      || !diskHead
+      || diskHead.owner_generation !== this.#ownerGeneration
+      || diskHead.resource_id !== owner.resource_id
+      || diskHead.subscription_id !== owner.subscription_id
+      || diskHead.revision !== owner.revision
+      || diskHead.content_hash !== owner.descriptor.content_hash
+      || diskHead.revision !== this.#snapshot.disk_head_revision
+      || diskHead.content_hash !== this.#snapshot.disk_head_hash
+    ) {
+      throw new Error(`${action} is waiting for the exact authorized disk head.`);
+    }
+    return Object.freeze({
+      ...diskHead,
+      buffer_generation: this.#snapshot.buffer_generation,
+    });
+  }
+
+  #assertExactDiskHead(operation: ExactDiskOperation, action: string): void {
+    const owner = this.#owner;
+    const diskHead = this.#exactDiskHead;
+    if (
+      this.#snapshot.buffer_generation !== operation.buffer_generation
+      || !this.#snapshot.dirty
+      || !this.#snapshot.stale
+      || this.#ownerGeneration !== operation.owner_generation
+      || !owner
+      || owner.resource_id !== operation.resource_id
+      || owner.subscription_id !== operation.subscription_id
+      || owner.revision !== operation.revision
+      || owner.descriptor.content_hash !== operation.content_hash
+      || !diskHead
+      || diskHead.owner_generation !== operation.owner_generation
+      || diskHead.revision !== operation.revision
+      || diskHead.content_hash !== operation.content_hash
+      || diskHead.text !== operation.text
+      || this.#snapshot.disk_head_revision !== operation.revision
+      || this.#snapshot.disk_head_hash !== operation.content_hash
+    ) throw new Error(`${action} was cancelled because the editor or disk head changed.`);
   }
 
   #enqueueDurable<T>(operation: () => Promise<T>): Promise<T> {

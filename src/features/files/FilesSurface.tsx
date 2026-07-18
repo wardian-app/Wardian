@@ -16,6 +16,7 @@ import type {
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FileContentHost } from "./FileContentHost";
+import { FileComparisonLens } from "./FileComparisonLens";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
 import {
   type FileEditorSnapshot,
@@ -23,6 +24,7 @@ import {
 } from "./fileEditorController";
 import { decodeFileResourceKey } from "./fileResourceKey";
 import { FilesHeader } from "./FilesHeader";
+import { fileDiffForController } from "./fileDiffModel";
 import {
   type FilesLegacyPresentationIntent,
   normalizeFilesSurfaceState,
@@ -156,6 +158,38 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
       dirty: editor.dirty,
     });
   }, [props.editor_snapshot, resource.snapshot?.revision]);
+  const stateV2 = "presentation" in props.state ? props.state : null;
+  const savedFileDiff = useMemo(() => (
+    stateV2 && props.editor_snapshot?.status === "ready"
+      ? fileDiffForController(props.editor_controller!)
+      : null
+  ), [
+    props.editor_controller,
+    props.editor_snapshot?.base_revision,
+    props.editor_snapshot?.buffer_base_hash,
+    props.editor_snapshot?.buffer_generation,
+    props.editor_snapshot?.status,
+    stateV2,
+  ]);
+  const comparisonOpen = Boolean(stateV2?.comparison_open && stateV2.comparison_baseline);
+  const savedComparisonOpen = Boolean(
+    stateV2?.comparison_open && stateV2.comparison_baseline?.kind === "saved_file",
+  );
+  const updateComparisonState = useCallback((patch: Partial<FilesSurfaceStateV2>) => {
+    if (!stateV2) return;
+    void props.on_state_change({ ...stateV2, ...patch });
+  }, [props.on_state_change, stateV2]);
+  const toggleSavedComparison = useCallback(() => {
+    if (!stateV2) return;
+    if (savedComparisonOpen) {
+      updateComparisonState({ comparison_open: false });
+      return;
+    }
+    updateComparisonState({
+      comparison_open: true,
+      comparison_baseline: { kind: "saved_file" },
+    });
+  }, [savedComparisonOpen, stateV2, updateComparisonState]);
 
   useEffect(() => {
     if (!("presentation" in props.state) || !resource.snapshot) return;
@@ -210,8 +244,11 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         save_available={editable && !editorBlocked}
         save_as_available={editable && !editorBlocked}
         saving={props.editor_snapshot?.save_state === "saving"}
+        changes={savedFileDiff?.summary ?? null}
+        comparison_open={savedComparisonOpen}
         resource_actions_available={props.recovery_only.status !== "ready"}
         on_presentation_change={props.on_presentation_change}
+        on_comparison_toggle={toggleSavedComparison}
         on_save={props.on_save}
         on_save_as={props.on_save_as}
         on_open_with={props.on_open_with}
@@ -321,8 +358,9 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
             className="files-content-host-shell"
             data-testid="files-content-host-shell"
             data-blocked={editorBlocked ? "true" : "false"}
-            aria-hidden={editorBlocked ? true : undefined}
-            inert={editorBlocked ? true : undefined}
+            data-comparison-open={comparisonOpen ? "true" : "false"}
+            aria-hidden={editorBlocked || comparisonOpen ? true : undefined}
+            inert={editorBlocked || comparisonOpen ? true : undefined}
           >
             <FileContentHost
               snapshot={resource.snapshot}
@@ -338,6 +376,39 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               on_reveal={props.on_reveal}
             />
           </div>
+        ) : null}
+        {comparisonOpen && stateV2?.comparison_baseline ? (
+          props.editor_controller && renderer?.capabilities.changes === "line" ? (
+            <FileComparisonLens
+              controller={props.editor_controller}
+              surface_id={props.surface_id}
+              baseline={stateV2.comparison_baseline}
+              layout_preference={stateV2.comparison_layout_preference}
+              language={renderer.editor_language?.(resource.snapshot!.descriptor) ?? "plaintext"}
+              lifecycle={props.lifecycle}
+              on_close={() => updateComparisonState({ comparison_open: false })}
+              on_layout_preference_change={(preference) => updateComparisonState({
+                comparison_layout_preference: preference,
+              })}
+              on_reload_from_disk={() => props.editor_controller!.reloadFromDisk()}
+              on_keep_working_buffer={() => props.editor_controller!.keepWorkingBuffer()}
+              on_merge={() => props.editor_controller!.mergeStaleBuffer()}
+            />
+          ) : (
+            <section className="files-comparison-lens" aria-label="File comparison">
+              <div className="files-resource-state" role="status">
+                Comparison baseline unavailable. This renderer does not have a registered
+                comparison provider.
+              </div>
+              <button
+                type="button"
+                className="files-comparison-unavailable-close"
+                onClick={() => updateComparisonState({ comparison_open: false })}
+              >
+                Close comparison
+              </button>
+            </section>
+          )
         ) : null}
       </main>
     </section>
@@ -469,7 +540,14 @@ export function FilesSurface({
     const resourceKey = editorController.getSnapshot().resource_key;
     const membership = editorController.attachPresentation(props.surface_id, {
       on_pin: () => updateControllerPresentation({ transient_preview: false }),
-      on_open_comparison: () => updateControllerPresentation({ comparison_open: true }),
+      on_open_comparison: () => {
+        const current = stateCallback.current.state;
+        if (!("presentation" in current)) return;
+        updateControllerPresentation({
+          comparison_open: true,
+          comparison_baseline: { kind: "saved_file" },
+        });
+      },
     });
     return () => {
       membership.detach();

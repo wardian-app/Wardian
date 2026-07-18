@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
+import type * as Monaco from "monaco-editor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
@@ -12,6 +13,9 @@ const setTheme = vi.fn();
 const setModelLanguage = vi.fn();
 const getModel = vi.fn();
 const uriFrom = vi.fn((parts: { path: string }) => ({ path: parts.path }));
+const addZone = vi.fn();
+const removeZone = vi.fn();
+const layoutZone = vi.fn();
 
 vi.mock("monaco-editor", () => ({
   KeyCode: { KeyS: 49 },
@@ -31,6 +35,7 @@ type FakeModel = {
   getValue: () => string;
   setValue: (value: string) => void;
   onDidChangeContent: (listener: () => void) => { dispose: () => void };
+  deltaDecorations: ReturnType<typeof vi.fn>;
 };
 
 const controllers: FileEditorController[] = [];
@@ -50,6 +55,9 @@ function fakeModel(text: string, uri: { path: string }): FakeModel {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };
     },
+    deltaDecorations: vi.fn().mockImplementation((_previous, decorations: unknown[]) => (
+      decorations.map((_, index) => `decoration-${index}`)
+    )),
   };
   return model;
 }
@@ -118,10 +126,13 @@ async function editorHarness() {
 describe("MonacoTextRenderer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    let zoneIndex = 0;
+    addZone.mockImplementation(() => `zone-${zoneIndex += 1}`);
     getModel.mockReturnValue(null);
     createModel.mockImplementation((text, _language, uri) => fakeModel(text, uri));
     createEditor.mockImplementation(() => ({
       addCommand: vi.fn(),
+      changeViewZones: vi.fn((callback) => callback({ addZone, removeZone, layoutZone })),
       dispose: vi.fn(),
       layout: vi.fn(),
     }));
@@ -172,6 +183,54 @@ describe("MonacoTextRenderer", () => {
     act(() => { controller.mutate("changed from another pane\n"); });
     await waitFor(() => expect(model.getValue()).toBe("changed from another pane\n"));
     expect(controller.getSnapshot().buffer_generation).toBe(1);
+  });
+
+  it("updates saved-file decorations without replacing the canonical model", async () => {
+    const { controller, props } = await editorHarness();
+    render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    const model = createModel.mock.results[0]?.value as FakeModel;
+    const before = model.deltaDecorations.mock.calls.length;
+
+    act(() => { controller.mutate("const answer = 43;\n"); });
+    await waitFor(() => expect(model.deltaDecorations.mock.calls.length).toBeGreaterThan(before));
+    expect(model.deltaDecorations).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.arrayContaining([expect.objectContaining({
+        options: expect.objectContaining({
+          className: "files-diff-modified-line",
+          glyphMarginClassName: "files-diff-modified-glyph",
+        }),
+      })]),
+    );
+    expect(createModel).toHaveBeenCalledOnce();
+    expect(createEditor).toHaveBeenCalledOnce();
+  });
+
+  it("adds collapsible deleted-line zones and removes them with the editor view", async () => {
+    const { controller, props } = await editorHarness();
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+
+    act(() => { controller.mutate(""); });
+    await waitFor(() => expect(addZone).toHaveBeenCalled());
+    const zone = addZone.mock.calls[addZone.mock.calls.length - 1]?.[0] as Monaco.editor.IViewZone;
+    const toggle = zone.domNode.querySelector("button");
+    const content = zone.domNode.querySelector("pre");
+    expect(zone.afterLineNumber).toBe(0);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAccessibleName(/collapse 1 deleted line/i);
+    expect(content).toHaveTextContent("const answer = 42;");
+
+    act(() => { toggle?.click(); });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(content).toHaveAttribute("hidden");
+    expect(zone.heightInLines).toBe(1);
+    expect(layoutZone).toHaveBeenCalledWith(expect.stringMatching(/^zone-/));
+
+    view.unmount();
+    expect(removeZone).toHaveBeenCalledWith(expect.stringMatching(/^zone-/));
+    expect(createModel).toHaveBeenCalledOnce();
   });
 
   it("routes Ctrl/Cmd+S through the active resource session", async () => {
@@ -256,7 +315,12 @@ describe("MonacoTextRenderer", () => {
       unobserve() {}
       disconnect() { disconnect(); }
     });
-    const editor = { addCommand: vi.fn(), dispose: vi.fn(), layout: vi.fn() };
+    const editor = {
+      addCommand: vi.fn(),
+      changeViewZones: vi.fn((callback) => callback({ addZone, removeZone, layoutZone })),
+      dispose: vi.fn(),
+      layout: vi.fn(),
+    };
     createEditor.mockReturnValue(editor);
     const { props } = await editorHarness();
     const view = render(<MonacoTextRenderer {...props("files-a")} />);

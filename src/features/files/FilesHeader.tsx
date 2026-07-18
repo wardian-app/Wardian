@@ -8,12 +8,13 @@ import {
   type FocusEvent,
   type KeyboardEvent,
 } from "react";
-import { BookOpen, Ellipsis, Pencil } from "lucide-react";
+import { BookOpen, Ellipsis, FileDiff, Pencil } from "lucide-react";
 
 import type { FileContentDescriptorV1 } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
 import { decodeFileResourceKey, isWindowsAbsoluteFilePath } from "./fileResourceKey";
 import type { FileContentPresentation } from "./rendererRegistry";
+import type { FileDiffSummary } from "./fileDiffModel";
 
 export type FilesHeaderProps = {
   resource_key: string;
@@ -24,8 +25,11 @@ export type FilesHeaderProps = {
   save_available: boolean;
   save_as_available: boolean;
   saving: boolean;
+  changes?: FileDiffSummary | null;
+  comparison_open?: boolean;
   resource_actions_available?: boolean;
   on_presentation_change: (presentation: FileContentPresentation) => void;
+  on_comparison_toggle?: () => void;
   on_save: () => Promise<void> | void;
   on_save_as: () => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
@@ -82,8 +86,11 @@ export function FilesHeader({
   save_available,
   save_as_available,
   saving,
+  changes = null,
+  comparison_open = false,
   resource_actions_available = true,
   on_presentation_change,
+  on_comparison_toggle = () => undefined,
   on_save,
   on_save_as,
   on_open_with,
@@ -168,6 +175,13 @@ export function FilesHeader({
   const editorActive = presentation === "editor";
   const presentationAction = editorActive ? "View rendered" : "Edit source";
   const PresentationIcon = editorActive ? Pencil : BookOpen;
+  const changesLabel = changes
+    ? `${comparison_open ? "Close" : "Open"} comparison: ${changes.regions} change ${
+      changes.regions === 1 ? "region" : "regions"
+    }, ${changes.added_lines} added, ${changes.modified_lines} modified, ${
+      changes.deleted_lines
+    } deleted against Saved file`
+    : "";
 
   return (
     <header className="files-header">
@@ -201,6 +215,19 @@ export function FilesHeader({
             onClick={() => on_presentation_change(editorActive ? "rendered" : "editor")}
           >
             <PresentationIcon size={15} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+        ) : null}
+        {changes && changes.regions > 0 ? (
+          <button
+            type="button"
+            className="files-diff-toggle"
+            aria-label={changesLabel}
+            aria-pressed={comparison_open}
+            title={changesLabel}
+            onClick={on_comparison_toggle}
+          >
+            <FileDiff size={15} strokeWidth={1.75} aria-hidden="true" />
+            <span className="files-diff-count" aria-hidden="true">{changes.regions}</span>
           </button>
         ) : null}
         {resource_actions_available ? (

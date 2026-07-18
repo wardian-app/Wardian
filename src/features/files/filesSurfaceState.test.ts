@@ -160,6 +160,14 @@ describe("Files surface state V2", () => {
       .toBe("side_by_side");
     expect(resolveFilesComparisonLayout("side_by_side", 500, "text"))
       .toBe("unified");
+    expect(resolveFilesComparisonLayout("auto", 720, "text"))
+      .toBe("side_by_side");
+    expect(resolveFilesComparisonLayout("auto", 719, "text"))
+      .toBe("unified");
+    expect(resolveFilesComparisonLayout("auto", 559, "text"))
+      .toBe("unified");
+    expect(resolveFilesComparisonLayout("unified", 420, "text"))
+      .toBe("unified");
     expect(resolveFilesComparisonLayout("auto", 650, "binary"))
       .toBe("stacked");
     expect(v2().comparison_layout_preference).toBe("auto");

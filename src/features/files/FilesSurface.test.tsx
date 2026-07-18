@@ -30,6 +30,14 @@ vi.mock("./useFileResource", () => ({
   useFileResource: useFileResourceMock,
 }));
 
+vi.mock("./FileComparisonLens", () => ({
+  FileComparisonLens: ({ on_close }: { on_close: () => void }) => (
+    <section aria-label="File comparison">
+      <button type="button" onClick={on_close}>Close comparison</button>
+    </section>
+  ),
+}));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -916,7 +924,15 @@ describe("FilesSurface", () => {
     const controller = editorRegistry.forResource("file:C:/work/docs/notes.md");
     await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
 
-    const latestState = { ...initialState, review_drawer_open: true };
+    const latestState: FilesSurfaceStateV2 = {
+      ...initialState,
+      review_drawer_open: true,
+      comparison_baseline: {
+        kind: "prompt_checkpoint",
+        checkpoint_id: "checkpoint-1",
+      },
+      optional_checkpoint_id: "checkpoint-1",
+    };
     view.rerender(<FilesSurface
       {...sharedProps}
       state={latestState}
@@ -928,10 +944,97 @@ describe("FilesSurface", () => {
     expect(latestStateChange).toHaveBeenCalledWith({
       ...latestState,
       comparison_open: true,
+      comparison_baseline: { kind: "saved_file" },
     });
     expect(initialStateChange).not.toHaveBeenCalledWith(expect.objectContaining({
       comparison_open: true,
     }));
+  });
+
+  it("opens and closes saved-file comparison without changing presentation or unmounting content", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    const markdownSnapshot = {
+      ...snapshot(markdownDescriptor),
+      resource_id: "file:C:/work/docs/notes.md",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: markdownSnapshot,
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: markdownSnapshot.resource_id,
+      revision: markdownSnapshot.revision,
+      text: "base\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const markdownRegistry = new RendererRegistry([
+      definition("markdown", PreviewRenderer, SourceRenderer),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const state: FilesSurfaceStateV2 = {
+      resource_kind: "file",
+      transient_preview: false,
+      presentation: "rendered",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const onStateChange = vi.fn();
+    const shared = props({
+      resource_key: markdownSnapshot.resource_id,
+      state,
+      client,
+      editor_registry: editorRegistry,
+      registry: markdownRegistry,
+      on_state_change: onStateChange,
+    });
+    const view = render(<FilesSurface {...shared} />);
+    const controller = editorRegistry.forResource(markdownSnapshot.resource_id);
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+    act(() => controller.mutate("local edit\n"));
+
+    fireEvent.click(await screen.findByRole("button", { name: /open comparison/i }));
+    expect(onStateChange).toHaveBeenCalledWith({
+      ...state,
+      comparison_open: true,
+      comparison_baseline: { kind: "saved_file" },
+    });
+
+    const openState: FilesSurfaceStateV2 = {
+      ...state,
+      comparison_open: true,
+      comparison_baseline: { kind: "saved_file" },
+    };
+    view.rerender(<FilesSurface {...shared} state={openState} />);
+    expect(await screen.findByRole("region", { name: "File comparison" })).toBeInTheDocument();
+    const contentHost = screen.getByTestId("files-content-host-shell");
+    expect(contentHost).toHaveAttribute("inert", "");
+    expect(contentHost).toHaveAttribute("data-comparison-open", "true");
+    expect(screen.getByTestId("preview-renderer")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close comparison" }));
+    expect(onStateChange).toHaveBeenLastCalledWith({
+      ...openState,
+      comparison_open: false,
+    });
   });
 
   it("detaches and releases a clean controller only after React unmount", async () => {
