@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod artifacts;
 pub mod chat;
 pub mod class;
 pub mod conversation;
@@ -19,6 +20,7 @@ pub mod workbench;
 pub mod workflow;
 
 pub use agent::*;
+pub use artifacts::*;
 pub use chat::*;
 pub use class::*;
 pub use conversation::*;

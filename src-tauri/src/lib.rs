@@ -521,6 +521,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::artifacts::ack_artifact_presentation,
             commands::workbench::get_workbench_boot_config,
             commands::workbench::load_workbench_state,
             commands::workbench::save_workbench_state,

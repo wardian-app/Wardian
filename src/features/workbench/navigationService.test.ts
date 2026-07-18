@@ -117,6 +117,42 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["surface-fixed"].state).toEqual({ label: "hello" });
   });
 
+  it("opens and refreshes background resources without stealing focus", () => {
+    const registry = createSurfaceRegistry([
+      definition("notes", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const active = makeSurface("surface-active", { surface_type: "notes" });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([active]),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["surface-background"]),
+    });
+
+    expect(navigation.open_background({
+      surface_type: "notes",
+      resource_key: "artifact:one",
+      state: { label: "version-1" },
+    })).toBe("surface-background");
+    expect(store.getState().document.groups["group-1"].active_surface_id)
+      .toBe("surface-active");
+
+    expect(navigation.open_background({
+      surface_type: "notes",
+      resource_key: "artifact:one",
+      state: { label: "version-2" },
+    })).toBe("surface-background");
+    expect(store.getState().document.groups["group-1"].active_surface_id)
+      .toBe("surface-active");
+    expect(store.getState().document.surfaces["surface-background"].state)
+      .toEqual({ label: "version-2" });
+  });
+
   it("keeps singletons unique while explicit resource duplicates create presentations", () => {
     const registry = createSurfaceRegistry();
     registry.register(definition("singleton", { open_policy: "singleton" }));

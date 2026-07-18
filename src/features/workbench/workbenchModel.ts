@@ -14,7 +14,13 @@ export const MAX_WORKBENCH_TREE_DEPTH = 64;
 export const MAX_RECENTLY_CLOSED_SURFACES = 20;
 
 export type WorkbenchCommand =
-  | { type: "open_surface"; surface: WorkbenchSurfaceV1; group_id?: string; index?: number }
+  | {
+      type: "open_surface";
+      surface: WorkbenchSurfaceV1;
+      group_id?: string;
+      index?: number;
+      activate?: boolean;
+    }
   | { type: "focus_surface"; surface_id: string }
   | { type: "close_surface"; surface_id: string }
   | { type: "discard_surface"; surface_id: string; provisional_identity?: boolean }
@@ -986,6 +992,7 @@ export function applyWorkbenchCommand(
       }
       const surfaceIds = [...group.surface_ids];
       surfaceIds.splice(index, 0, command.surface.surface_id);
+      const activate = command.activate !== false;
       return acceptedCandidate(document, {
         ...document,
         groups: {
@@ -993,14 +1000,14 @@ export function applyWorkbenchCommand(
           [groupId]: {
             ...group,
             surface_ids: surfaceIds,
-            active_surface_id: command.surface.surface_id,
+            active_surface_id: activate ? command.surface.surface_id : group.active_surface_id,
           },
         },
         surfaces: {
           ...document.surfaces,
           [command.surface.surface_id]: command.surface,
         },
-        active_group_id: groupId,
+        active_group_id: activate ? groupId : document.active_group_id,
       });
     }
 

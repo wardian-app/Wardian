@@ -85,3 +85,19 @@ export function createFileSurfaceState(transient_preview: boolean): FilesSurface
     optional_checkpoint_id: null,
   };
 }
+
+/** The permanent Files state for one immutable artifact version. */
+export function createArtifactSurfaceState(version_id: string): FilesSurfaceStateV2 {
+  if (version_id.trim().length === 0) throw new Error("artifact version ID must be non-empty");
+  return {
+    resource_kind: "artifact",
+    transient_preview: false,
+    presentation: "rendered",
+    comparison_open: false,
+    comparison_layout_preference: "auto",
+    comparison_baseline: null,
+    review_drawer_open: false,
+    selected_version_id: version_id,
+    optional_checkpoint_id: null,
+  };
+}

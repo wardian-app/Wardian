@@ -417,6 +417,22 @@ describe("workbench model", () => {
     expect(focused.saved_at).toBe(original.saved_at);
   });
 
+  it("opens background surfaces without changing pane or document focus", () => {
+    const original = makeSingleGroupDocument([makeSurface("surface-active")]);
+    const opened = acceptedDocument(applyWorkbenchCommand(original, {
+      type: "open_surface",
+      surface: makeSurface("surface-background"),
+      activate: false,
+    }));
+
+    expect(opened.groups["group-1"].surface_ids).toEqual([
+      "surface-active",
+      "surface-background",
+    ]);
+    expect(opened.groups["group-1"].active_surface_id).toBe("surface-active");
+    expect(opened.active_group_id).toBe(original.active_group_id);
+  });
+
   it("rejects invalid open/focus commands with the exact original object", () => {
     const document = makeSingleGroupDocument([makeSurface("surface-1")]);
     const duplicate = applyWorkbenchCommand(document, {

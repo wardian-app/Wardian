@@ -78,6 +78,7 @@ import { FileEditorControllerRegistry } from "../features/files/fileEditorContro
 import { createFilesCloseAdapter } from "../features/files/filesCloseAdapter";
 import { fileResourceClient } from "../features/files/fileResourceClient";
 import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
+import { useArtifactEvents } from "../features/files/useArtifactEvents";
 import {
   filesSurfaceMigrationCommands,
   isFilesSurfaceStateV1,
@@ -301,6 +302,7 @@ function AppBody() {
     }),
     [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
   );
+  useArtifactEvents(workbenchNavigation, workbenchPersistence.status === "ready");
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);

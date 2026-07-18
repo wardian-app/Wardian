@@ -29,6 +29,8 @@ export type WorkbenchNavigationOptions = {
 
 export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
+  /** Opens or refreshes a resource without changing the active surface or pane. */
+  open_background(request: OpenSurfaceRequest): string;
   /** Opens one replaceable preview in the target group without disturbing other groups. */
   open_transient(request: OpenSurfaceRequest): string;
   /** Converts a replaceable preview into a permanent surface in place. */
@@ -287,6 +289,34 @@ export function createWorkbenchNavigationService(
       apply([{
         type: "open_surface",
         surface,
+        ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
+      }]);
+      return surfaceId;
+    },
+
+    open_background: (request) => {
+      const definition = registry.require(request.surface_type);
+      const state = store.getState();
+      const existingId = registry.resolve_existing(
+        definition.open_policy === "singleton"
+          ? { ...request, duplicate: false }
+          : request,
+        orderedSurfaces(state),
+      );
+      if (existingId) {
+        if (request.state !== undefined) {
+          const replacement = createSurface(request, existingId);
+          apply([{ type: "replace_surface", surface: replacement }]);
+        }
+        return existingId;
+      }
+
+      const surfaceId = createId("surface");
+      const surface = createSurface(request, surfaceId);
+      apply([{
+        type: "open_surface",
+        surface,
+        activate: false,
         ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
       }]);
       return surfaceId;
