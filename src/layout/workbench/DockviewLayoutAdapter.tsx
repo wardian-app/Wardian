@@ -35,7 +35,7 @@ import type {
   DeepReadonly,
   ReadonlyWorkbenchDocumentV1,
 } from "../../features/workbench/useWorkbenchStore";
-import type { WorkbenchNodeV1, WorkbenchSurfaceV1 } from "../../types";
+import type { SurfaceBadge, WorkbenchNodeV1, WorkbenchSurfaceV1 } from "../../types";
 import {
   WorkbenchGroupHeader,
   WorkbenchNewSurfaceAction,
@@ -67,6 +67,10 @@ export type WorkbenchSurfaceIcon = (
   surface: DeepReadonly<WorkbenchSurfaceV1>,
 ) => string;
 
+export type WorkbenchSurfaceBadges = (
+  surface: DeepReadonly<WorkbenchSurfaceV1>,
+) => readonly SurfaceBadge[];
+
 export type DockviewLayoutAdapterProps = {
   document: ReadonlyWorkbenchDocumentV1;
   safe_mode?: boolean;
@@ -74,6 +78,7 @@ export type DockviewLayoutAdapterProps = {
   render_surface?: WorkbenchSurfaceRenderer;
   surface_title?: WorkbenchSurfaceTitle;
   surface_icon?: WorkbenchSurfaceIcon;
+  surface_badges?: WorkbenchSurfaceBadges;
   renderer_policy?: WorkbenchPanelRendererPolicy;
   on_command?: (command: WorkbenchCommand) => boolean;
   on_open_surface?: (groupId: string) => void;
@@ -109,6 +114,7 @@ type AdapterRuntime = Pick<
   render_surface?: WorkbenchSurfaceRenderer;
   surface_title?: WorkbenchSurfaceTitle;
   surface_icon?: WorkbenchSurfaceIcon;
+  surface_badges?: WorkbenchSurfaceBadges;
   zoomed_group_id: string | null;
   on_close_surface: (surfaceId: string) => void;
   on_pointer_drag_start: (identity: WorkbenchPointerDragIdentity) => void;
@@ -622,6 +628,7 @@ function DockviewSurfaceTab({ params, api }: IDockviewPanelHeaderProps<Workbench
       surface={params.surface}
       title={runtime.surface_title?.(params.surface) ?? params.title}
       icon={runtime.surface_icon?.(params.surface) ?? params.surface.surface_type}
+      badges={runtime.surface_badges?.(params.surface) ?? []}
       group_id={groupId}
       pane_targets={workbenchPaneTargets(runtime.document.root, groupId)}
       on_close={() => runtime.on_close_surface(params.surface.surface_id)}
@@ -905,6 +912,7 @@ function SafeWorkbenchLayout({
   render_surface,
   surface_title,
   surface_icon,
+  surface_badges,
   on_command,
   on_open_surface,
   on_toggle_zoom,
@@ -959,6 +967,7 @@ function SafeWorkbenchLayout({
                   surface={surface}
                   title={surface_title?.(surface) ?? surfaceTitle(surface)}
                   icon={surface_icon?.(surface) ?? surface.surface_type}
+                  badges={surface_badges?.(surface) ?? []}
                   group_id={group.group_id}
                   pane_targets={workbenchPaneTargets(document.root, group.group_id)}
                   on_close={() => on_close_surface?.(surface.surface_id)}
@@ -1035,6 +1044,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     render_surface,
     surface_title,
     surface_icon,
+    surface_badges,
     renderer_policy = defaultRendererPolicy,
     on_command,
   } = props;
@@ -1140,6 +1150,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     render_surface,
     surface_title,
     surface_icon,
+    surface_badges,
     on_open_surface: props.on_open_surface,
     on_toggle_zoom: props.on_toggle_zoom,
     on_split_group: props.on_split_group,
@@ -1180,6 +1191,7 @@ export function DockviewLayoutAdapter(props: DockviewLayoutAdapterProps) {
     props.render_home,
     requestSurfaceClose,
     surface_icon,
+    surface_badges,
     surface_title,
     zoomed_group_id,
   ]);

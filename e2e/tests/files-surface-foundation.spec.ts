@@ -13,6 +13,7 @@ import {
 const ROOT = "/workspace/project";
 const ALPHA_PATH = `${ROOT}/alpha.md`;
 const BETA_PATH = `${ROOT}/beta.md`;
+const ALPHA_COPY_PATH = `${ROOT}/alpha-copy.md`;
 const WIDE_PDF_PATH = `${ROOT}/wide.pdf`;
 const IMAGE_PATH = `${ROOT}/figure.png`;
 
@@ -66,6 +67,7 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
   };
   const ipc = await installWorkbenchIpcMock(page, {
     explorer_root: ROOT,
+    save_target_path: ALPHA_COPY_PATH,
     files: [
       { path: ALPHA_PATH, content: "# Alpha document\n\nFirst file." },
       { path: BETA_PATH, content: "# Beta document\n\nSecond file." },
@@ -192,10 +194,10 @@ test("switches Markdown source without reopening the resource and preserves it p
   expect(firstAlphaRead?.resource_id).toBe(`file:${ALPHA_PATH}`);
   expect(JSON.stringify(alphaTextReads)).not.toContain("mock-file:");
 
-  const viewSource = page.getByRole("button", { name: "View source" });
-  await expect(viewSource.locator("svg.lucide-book-open")).toBeVisible();
-  await expect(viewSource).toHaveAttribute("aria-pressed", "false");
-  await viewSource.click();
+  const editSource = page.getByRole("button", { name: "Edit source" });
+  await expect(editSource.locator("svg.lucide-book-open")).toBeVisible();
+  await expect(editSource).toHaveAttribute("aria-pressed", "false");
+  await editSource.click();
   await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
   await expect(page.getByRole("button", { name: "View rendered" }))
     .toHaveAttribute("aria-pressed", "true");
@@ -230,8 +232,8 @@ test("switches Markdown source without reopening the resource and preserves it p
 
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Alpha document" })).toBeVisible();
-  const keyboardViewSource = surface.getByRole("button", { name: "View source" });
-  await expect(keyboardViewSource).toBeFocused();
+  const keyboardEditSource = surface.getByRole("button", { name: "Edit source" });
+  await expect(keyboardEditSource).toBeFocused();
   await page.keyboard.press("Space");
   await expect(page.getByTestId("monaco-text-renderer")).toBeVisible();
   await expect(surface.getByRole("button", { name: "View rendered" })).toBeFocused();
@@ -239,7 +241,83 @@ test("switches Markdown source without reopening the resource and preserves it p
 
   await page.screenshot({
     path: path.resolve(
-      "e2e/screenshots/files-source-toggle/2026-07-17/markdown-source-toggle.png",
+      "e2e/screenshots/files-editor/2026-07-18/markdown-editor-toggle.png",
+    ),
+    fullPage: true,
+  });
+});
+
+test("edits and saves in place, then Save As opens an ordinary file without retargeting", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const ipc = await bootFilesWorkbench(page);
+  await page.getByRole("treeitem", { name: "alpha.md" }).dblclick();
+  await page.getByRole("button", { name: "Edit source" }).click();
+
+  const activeSurface = page.locator('[data-testid="files-surface"]:not([data-suspended="true"])');
+  const editorInput = activeSurface.locator(".monaco-editor .native-edit-context");
+  const editorLines = activeSurface.locator(".monaco-editor .view-lines");
+  await editorLines.click({ position: { x: 120, y: 8 } });
+  await expect(editorInput).toBeFocused();
+  const savedText = "# Alpha edited\n\nSaved from Monaco.";
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.type("# Alpha edited");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Saved from Monaco.");
+
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
+  await expect(activeSurface.getByLabel("Unsaved changes")).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+S");
+  await expect.poll(async () => (await ipc.calls("save_file_resource_text")).length).toBe(1);
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toHaveCount(0);
+  const saveRequest = (await ipc.calls("save_file_resource_text"))[0]?.args?.request as {
+    expected_revision?: number;
+    buffer_base_hash?: string;
+    text?: string;
+  } | undefined;
+  expect(saveRequest).toMatchObject({
+    expected_revision: 1,
+    buffer_base_hash: "mock-hash-1",
+    text: savedText,
+  });
+
+  const copiedText = "# Alpha copy\n\nUnsaved source retained.";
+  await editorLines.click({ position: { x: 120, y: 8 } });
+  await expect(editorInput).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.type("# Alpha copy");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Unsaved source retained.");
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
+
+  await activeSurface.getByRole("button", { name: "File actions" }).click();
+  await page.getByRole("menuitem", { name: "Save As" }).click();
+  await expect(filesTab(page, ALPHA_COPY_PATH)).toBeVisible();
+  await expect(filesTab(page, ALPHA_PATH)).toHaveCount(1);
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
+  const saveAsRequest = (await ipc.calls("save_file_resource_as_text"))[0]?.args?.request as {
+    save_target_grant_id?: string;
+    text?: string;
+  } | undefined;
+  expect(saveAsRequest).toEqual({
+    save_target_grant_id: "mock-save-target-1",
+    text: copiedText,
+  });
+  const copyOpen = (await ipc.calls("open_file_resource")).find((call) => (
+    (call.args?.request as { path?: string } | undefined)?.path === ALPHA_COPY_PATH
+  ));
+  expect(copyOpen).toBeTruthy();
+
+  await filesTab(page, ALPHA_PATH).click();
+  await expect(activeSurface.locator(".monaco-editor .view-lines")).toBeVisible();
+  await expect(activeSurface.getByLabel("Unsaved changes")).toBeVisible();
+
+  await page.screenshot({
+    path: path.resolve(
+      "e2e/screenshots/files-editor/2026-07-18/conventional-files-editor.png",
     ),
     fullPage: true,
   });
@@ -309,7 +387,6 @@ test("keeps Files chrome and image controls reachable in 100px and 300px panes",
 
   const surface = page.getByTestId("files-surface");
   const breadcrumb = page.getByRole("navigation", { name: "File location" });
-  const modeTabs = page.getByRole("tablist", { name: "File mode" });
   const actions = page.getByRole("button", { name: "File actions" });
   const imageToolbar = page.getByRole("toolbar", { name: "Image controls" });
   await expect(page.getByRole("img", { name: "figure.png" })).toBeVisible();
@@ -346,15 +423,9 @@ test("keeps Files chrome and image controls reachable in 100px and 300px panes",
     expect(chromeGeometry.actions_left).toBeGreaterThanOrEqual(chromeGeometry.surface_left - 0.5);
     expect(chromeGeometry.actions_right).toBeLessThanOrEqual(chromeGeometry.surface_right + 0.5);
 
-    for (const mode of ["Preview", "Changes", "Draft"]) {
-      const tab = page.getByRole("tab", { name: mode });
-      await tab.focus();
-      await expect(tab).toBeFocused();
-      const [tabBox, tabsBox] = await Promise.all([tab.boundingBox(), modeTabs.boundingBox()]);
-      expect(tabBox).not.toBeNull();
-      expect(tabsBox).not.toBeNull();
-      expect(tabBox!.x).toBeGreaterThanOrEqual(tabsBox!.x - 0.5);
-      expect(tabBox!.x + tabBox!.width).toBeLessThanOrEqual(tabsBox!.x + tabsBox!.width + 0.5);
+    await expect(page.getByRole("tablist", { name: "File mode" })).toHaveCount(0);
+    for (const legacyMode of ["Preview", "Changes", "Draft"]) {
+      await expect(page.getByRole("tab", { name: legacyMode })).toHaveCount(0);
     }
 
     await actions.click();

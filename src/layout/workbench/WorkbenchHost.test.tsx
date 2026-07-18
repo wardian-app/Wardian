@@ -93,6 +93,7 @@ describe("WorkbenchHost", () => {
   it("reacts to generic presentation invalidation and releases its subscription", async () => {
     let title = "Before descriptor";
     let icon = "graph";
+    let dirty = false;
     const listeners = new Set<() => void>();
     const registry = createCoreWorkbenchSurfaceRegistry();
     registry.register({
@@ -100,6 +101,7 @@ describe("WorkbenchHost", () => {
       icon: "dashboard",
       title: () => title,
       presentation_icon: () => icon,
+      badges: () => dirty ? [{ badge_id: "dirty", label: "Unsaved changes" }] : [],
       presentation_subscribe: (listener) => {
         listeners.add(listener);
         return () => { listeners.delete(listener); };
@@ -128,15 +130,19 @@ describe("WorkbenchHost", () => {
     );
     const before = await screen.findByRole("tab", { name: "Before descriptor" });
     expect(before.querySelector('[data-surface-icon="graph"]')).toBeInTheDocument();
+    expect(before.querySelector('[data-surface-badge="dirty"]')).toBeNull();
     expect(listeners).toHaveLength(1);
 
     act(() => {
       title = "After descriptor";
       icon = "queue";
+      dirty = true;
       for (const listener of listeners) listener();
     });
     const after = await screen.findByRole("tab", { name: "After descriptor" });
     expect(after.querySelector('[data-surface-icon="queue"]')).toBeInTheDocument();
+    expect(after.querySelector('[data-surface-badge="dirty"]'))
+      .toHaveAttribute("title", "Unsaved changes");
 
     view.unmount();
     expect(listeners).toHaveLength(0);

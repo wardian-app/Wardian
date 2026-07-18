@@ -45,7 +45,7 @@ Surfaces respond to the size of their own pane. In compact splits, toolbars wrap
 
 When a move or close removes the last tab from a non-final pane, Wardian collapses that pane automatically and expands its sibling into the released space. The final pane is never removed; if its last tab closes, it remains in place and shows the Home surface chooser.
 
-## Files Previews
+## Files
 
 Explorer file opens use normal Workbench tabs. A single click opens one
 transient Files preview in the current pane; selecting another file replaces
@@ -53,15 +53,24 @@ that preview. Double-click, `Enter`, the Explorer **Open** action, or opening to
 the side makes the tab permanent. A permanent tab participates in ordinary
 close history and restore. A transient preview does not.
 
-Rendered Markdown can switch to a read-only source presentation and back inside
-the same Files tab. This presentation choice neither opens another tab nor
-starts another file subscription. It is not a **Changes** or **Draft**
-lifecycle: **Changes** would compare resource versions, while **Draft** would
-introduce editable working state. Both remain unavailable in this foundation.
+Rendered Markdown can switch to an editable source presentation and back inside
+the same Files tab. The compact control shows the current presentation: Book
+while rendered and Pencil while editing. Its label describes the action,
+**Edit source** or **View rendered**. Source-only text opens directly in Monaco.
+This choice neither opens another tab nor starts another file subscription.
 
-The foundation previews validated text and Markdown, images, and PDFs. It does
-not yet provide Draft, Changes, comments, approval, artifact versions, or live
-HTML/SVG. Unsupported and oversized resources stay local to their tab and offer
+Edits stay in an unsaved buffer until you press `Ctrl+S` on Windows/Linux,
+`Cmd+S` on macOS, or choose **Save** from **File actions**. A dot beside the
+breadcrumb and in the Workbench tab marks unsaved edits. **Save As** writes the
+current buffer to the exact destination selected by the native picker and opens
+that copy in a new ordinary file tab; it does not retarget the original tab or
+an artifact relationship.
+
+The foundation renders Markdown, images, and PDFs and edits validated text.
+HTML and SVG are available as inert source only; Wardian never injects them into
+the application DOM. Line-level comparison, comments, approval, artifact
+versions, and isolated live HTML/SVG remain later capabilities rather than
+Preview/Changes/Draft modes. Unsupported and oversized resources stay local to their tab and offer
 metadata, Retry, **Open With**, or Reveal rather than failing the Workbench.
 Ordinary saves and atomic editor saves refresh through the same stable revision
 stream. If a file is temporarily unreadable or keeps changing during a scan,

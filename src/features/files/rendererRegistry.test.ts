@@ -49,6 +49,22 @@ function descriptor(
   };
 }
 
+function htmlDescriptor(): FileContentDescriptorV1 {
+  return descriptor({
+    renderer_kind: "text",
+    mime_type: "text/html",
+    encoding: "utf-8",
+  });
+}
+
+function svgDescriptor(): FileContentDescriptorV1 {
+  return descriptor({
+    renderer_kind: "text",
+    mime_type: "image/svg+xml",
+    encoding: "utf-8",
+  });
+}
+
 describe("RendererRegistry", () => {
   it("uses the backend renderer kind before a misleading extension", () => {
     const registry = new RendererRegistry([
@@ -78,17 +94,32 @@ describe("RendererRegistry", () => {
     })).renderer_id).toBe("unsupported");
   });
 
-  it("keeps active HTML and SVG unavailable without invoking a content renderer", () => {
-    expect(defaultRendererRegistry.resolve(descriptor({
+  it("routes active HTML and SVG to the inert source editor only", () => {
+    const html = defaultRendererRegistry.resolve(descriptor({
       renderer_kind: "text",
       mime_type: "text/html",
       encoding: "utf-8",
-    })).renderer_id).toBe("unsupported");
-    expect(defaultRendererRegistry.resolve(descriptor({
+    }));
+    const svg = defaultRendererRegistry.resolve(descriptor({
       renderer_kind: "text",
       mime_type: "image/svg+xml",
       encoding: "utf-8",
-    })).renderer_id).toBe("unsupported");
+    }));
+
+    expect(html).toMatchObject({
+      renderer_id: "text",
+      default_presentation: "editor",
+    });
+    expect(svg).toMatchObject({
+      renderer_id: "text",
+      default_presentation: "editor",
+    });
+    expect(html.rendered).toBeUndefined();
+    expect(svg.rendered).toBeUndefined();
+    expect(html.editor).toBeDefined();
+    expect(svg.editor).toBeDefined();
+    expect(html.editor_language?.(htmlDescriptor())).toBe("html");
+    expect(svg.editor_language?.(svgDescriptor())).toBe("xml");
   });
 
   it("uses validated MIME fallback in the real production registry", () => {
@@ -116,7 +147,7 @@ describe("RendererRegistry", () => {
     })).renderer_id).toBe("unsupported");
   });
 
-  it("contributes Monaco source presentation only for Markdown", () => {
+  it("advertises conventional rendered/editor presentations", () => {
     const markdown = defaultRendererRegistry.resolve(descriptor({
       renderer_kind: "markdown",
       mime_type: "text/markdown",
@@ -129,10 +160,15 @@ describe("RendererRegistry", () => {
     }));
     const pdf = defaultRendererRegistry.resolve(descriptor());
 
-    expect(markdown.source).toBeDefined();
-    expect(markdown.source?.create_renderer).toBeTypeOf("function");
-    expect(text.source).toBeUndefined();
-    expect(pdf.source).toBeUndefined();
+    expect(markdown).toMatchObject({ default_presentation: "rendered" });
+    expect(markdown.rendered?.create_renderer).toBeTypeOf("function");
+    expect(markdown.editor?.create_renderer).toBeTypeOf("function");
+    expect(text).toMatchObject({ default_presentation: "editor" });
+    expect(text.rendered).toBeUndefined();
+    expect(text.editor?.create_renderer).toBeTypeOf("function");
+    expect(pdf).toMatchObject({ default_presentation: "rendered" });
+    expect(pdf.rendered?.create_renderer).toBeTypeOf("function");
+    expect(pdf.editor).toBeUndefined();
   });
 
   it("rejects source presentations without a retry factory", () => {

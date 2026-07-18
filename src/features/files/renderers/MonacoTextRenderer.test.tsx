@@ -1,24 +1,58 @@
 import { act, render, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileResourceSnapshotV1 } from "../../../types";
+import { FileEditorController } from "../fileEditorController";
 import type { FileResourceClient } from "../fileResourceClient";
 import MonacoTextRenderer from "./MonacoTextRenderer";
 
 const createModel = vi.fn();
 const createEditor = vi.fn();
 const setTheme = vi.fn();
+const setModelLanguage = vi.fn();
 const getModel = vi.fn();
 const uriFrom = vi.fn((parts: { path: string }) => ({ path: parts.path }));
 
 vi.mock("monaco-editor", () => ({
+  KeyCode: { KeyS: 49 },
+  KeyMod: { CtrlCmd: 2048 },
   Uri: { from: uriFrom },
-  editor: { create: createEditor, createModel, getModel, setTheme },
+  editor: { create: createEditor, createModel, getModel, setModelLanguage, setTheme },
 }));
 
 vi.mock("monaco-editor/esm/vs/editor/editor.worker.js?worker", () => ({
   default: class TestEditorWorker {},
 }));
+
+type FakeModel = {
+  value: string;
+  uri: { path: string };
+  dispose: ReturnType<typeof vi.fn>;
+  getValue: () => string;
+  setValue: (value: string) => void;
+  onDidChangeContent: (listener: () => void) => { dispose: () => void };
+};
+
+const controllers: FileEditorController[] = [];
+
+function fakeModel(text: string, uri: { path: string }): FakeModel {
+  const listeners = new Set<() => void>();
+  const model: FakeModel = {
+    value: text,
+    uri,
+    dispose: vi.fn(),
+    getValue: () => model.value,
+    setValue: (value) => {
+      model.value = value;
+      for (const listener of listeners) listener();
+    },
+    onDidChangeContent: (listener) => {
+      listeners.add(listener);
+      return { dispose: () => listeners.delete(listener) };
+    },
+  };
+  return model;
+}
 
 function snapshot(revision = 4): FileResourceSnapshotV1 {
   return {
@@ -43,54 +77,126 @@ function snapshot(revision = 4): FileResourceSnapshotV1 {
   };
 }
 
-function props(client: FileResourceClient, revision = 4) {
-  return {
+async function editorHarness() {
+  const client = {
+    saveText: vi.fn().mockResolvedValue({
+      status: "saved",
+      revision: 5,
+      content_hash: "hash-5",
+    }),
+    checkpointRecovery: vi.fn(),
+    listRecoveries: vi.fn().mockResolvedValue([]),
+    getRecovery: vi.fn(),
+    discardRecovery: vi.fn(),
+  } as unknown as FileResourceClient;
+  const controller = new FileEditorController(snapshot().resource_id, client, {
+    checkpoint_debounce_ms: 60_000,
+  });
+  controllers.push(controller);
+  await controller.initialize({ owner: snapshot(), text: "const answer = 42;\n" });
+  const props = (surfaceId: string, revision = 4) => ({
     snapshot: snapshot(revision),
     client,
     lifecycle: { visible: true },
+    surface_id: surfaceId,
+    editor_controller: controller,
+    buffer_snapshot: Object.freeze({
+      resource_id: snapshot().resource_id,
+      revision,
+      buffer_generation: controller.getSnapshot().buffer_generation,
+      text: controller.getSnapshot().working_text,
+      dirty: controller.getSnapshot().dirty,
+    }),
+    editor_language: "typescript",
     on_open_file: vi.fn(),
     on_open_with: vi.fn(),
     on_reveal: vi.fn(),
-  };
+  });
+  return { client, controller, props };
 }
 
 describe("MonacoTextRenderer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getModel.mockReturnValue(null);
-    createModel.mockImplementation((_text, _language, uri) => ({ uri, dispose: vi.fn() }));
-    createEditor.mockImplementation(() => ({ dispose: vi.fn(), layout: vi.fn() }));
+    createModel.mockImplementation((text, _language, uri) => fakeModel(text, uri));
+    createEditor.mockImplementation(() => ({
+      addCommand: vi.fn(),
+      dispose: vi.fn(),
+      layout: vi.fn(),
+    }));
   });
 
-  it("shares revision-keyed models and disposes only after the last pane", async () => {
-    const client = {
-      readText: vi.fn().mockResolvedValue({
-        schema: 1,
-        resource_id: snapshot().resource_id,
-        revision: 4,
-        text: "const answer = 42;\n",
-      }),
-    } as unknown as FileResourceClient;
+  afterEach(() => {
+    for (const controller of controllers.splice(0)) controller.dispose();
+    vi.unstubAllGlobals();
+  });
 
-    const first = render(<MonacoTextRenderer {...props(client)} />);
-    const second = render(<MonacoTextRenderer {...props(client)} />);
+  it("shares canonical resource models and disposes only after the last pane", async () => {
+    const { controller, props } = await editorHarness();
+    const first = render(<MonacoTextRenderer {...props("files-a")} />);
+    const second = render(<MonacoTextRenderer {...props("files-b")} />);
 
     await waitFor(() => expect(createEditor).toHaveBeenCalledTimes(2));
     expect(createModel).toHaveBeenCalledTimes(1);
     expect(createModel.mock.calls[0]?.[1]).toBe("typescript");
     expect(uriFrom).toHaveBeenCalledWith(expect.objectContaining({
-      path: `/${snapshot().resource_id}@4`,
+      path: `/${encodeURIComponent(snapshot().resource_id)}`,
     }));
     expect(createEditor).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
-      automaticLayout: false,
-      readOnly: true,
+      model: createModel.mock.results[0]?.value,
+      readOnly: false,
     }));
 
-    const model = createModel.mock.results[0]?.value as { dispose: ReturnType<typeof vi.fn> };
+    const model = createModel.mock.results[0]?.value as FakeModel;
+    act(() => model.setValue("const answer = 43;\n"));
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "const answer = 43;\n",
+      dirty: true,
+      buffer_generation: 1,
+    });
+
     first.unmount();
-    expect(model.dispose).not.toHaveBeenCalled();
     second.unmount();
+    expect(model.dispose).not.toHaveBeenCalled();
+    controller.dispose();
     expect(model.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("applies controller text without a model feedback mutation", async () => {
+    const { controller, props } = await editorHarness();
+    render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    const model = createModel.mock.results[0]?.value as FakeModel;
+
+    act(() => { controller.mutate("changed from another pane\n"); });
+    await waitFor(() => expect(model.getValue()).toBe("changed from another pane\n"));
+    expect(controller.getSnapshot().buffer_generation).toBe(1);
+  });
+
+  it("routes Ctrl/Cmd+S through the active resource session", async () => {
+    const { client, controller, props } = await editorHarness();
+    act(() => { controller.mutate("save me\n"); });
+    render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    const editor = createEditor.mock.results[0]?.value as {
+      addCommand: ReturnType<typeof vi.fn>;
+    };
+    expect(editor.addCommand).toHaveBeenCalledWith(2048 | 49, expect.any(Function));
+    await act(async () => {
+      await editor.addCommand.mock.calls[0]?.[1]();
+    });
+    expect(client.saveText).toHaveBeenCalledWith(expect.objectContaining({ text: "save me\n" }));
+    expect(controller.getSnapshot().dirty).toBe(false);
+  });
+
+  it("does not recreate the model or editor for a newer snapshot revision", async () => {
+    const { props } = await editorHarness();
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
+    await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    view.rerender(<MonacoTextRenderer {...props("files-a", 5)} />);
+    expect(createModel).toHaveBeenCalledOnce();
+    expect(createEditor).toHaveBeenCalledOnce();
   });
 
   it("lays out from real ResizeObserver size changes without repeated jitter", async () => {
@@ -102,17 +208,10 @@ describe("MonacoTextRenderer", () => {
       unobserve() {}
       disconnect() { disconnect(); }
     });
-    const editor = { dispose: vi.fn(), layout: vi.fn() };
+    const editor = { addCommand: vi.fn(), dispose: vi.fn(), layout: vi.fn() };
     createEditor.mockReturnValue(editor);
-    const client = {
-      readText: vi.fn().mockResolvedValue({
-        schema: 1,
-        resource_id: snapshot().resource_id,
-        revision: 4,
-        text: "hello",
-      }),
-    } as unknown as FileResourceClient;
-    const view = render(<MonacoTextRenderer {...props(client)} />);
+    const { props } = await editorHarness();
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
     await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
 
     const target = view.getByTestId("monaco-text-renderer");
@@ -126,42 +225,12 @@ describe("MonacoTextRenderer", () => {
     expect(editor.layout).toHaveBeenCalledWith({ width: 640, height: 360 });
     view.unmount();
     expect(disconnect).toHaveBeenCalledOnce();
-    expect(editor.dispose).toHaveBeenCalledOnce();
-    vi.unstubAllGlobals();
-  });
-
-  it("does not read active HTML or an unavailable text descriptor", () => {
-    const client = { readText: vi.fn() } as unknown as FileResourceClient;
-    const activeHtml = snapshot();
-    activeHtml.descriptor.mime_type = "text/html";
-    const first = render(<MonacoTextRenderer {...props(client)} snapshot={activeHtml} />);
-    expect(client.readText).not.toHaveBeenCalled();
-    first.unmount();
-    const unavailable = snapshot();
-    unavailable.descriptor.capabilities.preview = false;
-    unavailable.descriptor.unavailable_reason = "monaco_size_limit_exceeded";
-    render(<MonacoTextRenderer {...props(client)} snapshot={unavailable} />);
-    expect(client.readText).not.toHaveBeenCalled();
-  });
-
-  it("accepts the registry's validated text MIME fallback", async () => {
-    const fallback = snapshot();
-    fallback.descriptor.renderer_kind = "unsupported";
-    const client = { readText: vi.fn().mockResolvedValue({
-      schema: 1, resource_id: fallback.resource_id, revision: fallback.revision, text: "fallback",
-    }) } as unknown as FileResourceClient;
-    render(<MonacoTextRenderer {...props(client)} snapshot={fallback} />);
-    await waitFor(() => expect(client.readText).toHaveBeenCalledOnce());
   });
 
   it("follows live Wardian data-theme changes without recreating the editor", async () => {
     document.documentElement.setAttribute("data-theme", "dark");
-    const client = {
-      readText: vi.fn().mockResolvedValue({
-        schema: 1, resource_id: snapshot().resource_id, revision: 4, text: "hello",
-      }),
-    } as unknown as FileResourceClient;
-    const view = render(<MonacoTextRenderer {...props(client)} />);
+    const { props } = await editorHarness();
+    const view = render(<MonacoTextRenderer {...props("files-a")} />);
     await waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
     expect(createEditor).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
       theme: "vs-dark",

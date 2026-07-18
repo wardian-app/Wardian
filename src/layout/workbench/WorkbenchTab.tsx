@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 
 import type { DeepReadonly } from "../../features/workbench/useWorkbenchStore";
 import { surfaceIconForToken } from "../../features/workbench/surfaceIcons";
-import type { WorkbenchSurfaceV1 } from "../../types";
+import type { SurfaceBadge, WorkbenchSurfaceV1 } from "../../types";
 import {
   WorkbenchContextMenu,
   type WorkbenchMenuItem,
@@ -20,6 +20,7 @@ export type WorkbenchTabProps = {
   surface: DeepReadonly<WorkbenchSurfaceV1>;
   title: string;
   icon?: string;
+  badges?: readonly SurfaceBadge[];
   group_id: string;
   pane_targets?: readonly WorkbenchPaneTarget[];
   on_close?: () => void;
@@ -34,6 +35,7 @@ export function WorkbenchTab({
   surface,
   title,
   icon = surface.surface_type,
+  badges = [],
   group_id,
   pane_targets = [],
   on_close,
@@ -133,6 +135,18 @@ export function WorkbenchTab({
         strokeWidth={1.75}
       />
       <span className="wardian-workbench-tab-label">{title}</span>
+      {badges.length > 0 ? (
+        <span className="wardian-workbench-tab-badges" aria-hidden="true">
+          {badges.map((badge) => (
+            <span
+              key={badge.badge_id}
+              className="wardian-workbench-tab-badge"
+              data-surface-badge={badge.badge_id}
+              title={badge.label}
+            />
+          ))}
+        </span>
+      ) : null}
       <span
         className="wardian-workbench-tab-close"
         aria-hidden="true"

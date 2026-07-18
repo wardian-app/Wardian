@@ -187,6 +187,7 @@ export default function MarkdownRenderer({
   snapshot,
   client,
   lifecycle,
+  buffer_snapshot,
   on_open_file,
 }: FileRendererProps) {
   const articleRef = useRef<HTMLElement>(null);
@@ -199,6 +200,11 @@ export default function MarkdownRenderer({
     if (!lifecycle.visible) return;
     const descriptor = snapshot.descriptor;
     if (!canRenderMarkdown(descriptor)) return;
+    if (buffer_snapshot?.resource_id === snapshot.resource_id) {
+      setText(buffer_snapshot.text);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setText(null);
     setError(null);
@@ -208,7 +214,7 @@ export default function MarkdownRenderer({
       if (!cancelled) setError(errorMessage(cause));
     });
     return () => { cancelled = true; };
-  }, [client, lifecycle.visible, retryToken, snapshot]);
+  }, [buffer_snapshot, client, lifecycle.visible, retryToken, snapshot]);
 
   if (!lifecycle.visible) {
     return <div className="files-resource-state" role="status">Markdown preview suspended.</div>;

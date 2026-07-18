@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type * as Monaco from "monaco-editor";
 
+import type { FileEditorController } from "../fileEditorController";
 import type { FileRendererProps } from "../rendererRegistry";
 
 type MonacoApi = typeof Monaco;
-type ModelLease = { model: Monaco.editor.ITextModel; references: number };
+type ModelLease = {
+  model: Monaco.editor.ITextModel;
+  references: number;
+  controller: FileEditorController;
+  applying_controller_text: boolean;
+  dispose_content_listener: () => void;
+  dispose_controller_listener: () => void;
+  dispose_controller_lifetime: () => void;
+};
 
 const models = new Map<string, ModelLease>();
 let monacoPromise: Promise<MonacoApi> | null = null;
@@ -31,78 +40,94 @@ function loadMonaco(): Promise<MonacoApi> {
   return monacoPromise;
 }
 
-const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
-  c: "c",
-  cc: "cpp",
-  cpp: "cpp",
-  css: "css",
-  go: "go",
-  h: "c",
-  hpp: "cpp",
-  ini: "ini",
-  java: "java",
-  js: "javascript",
-  json: "json",
-  jsx: "javascript",
-  py: "python",
-  rs: "rust",
-  sh: "shell",
-  sql: "sql",
-  toml: "ini",
-  ts: "typescript",
-  tsx: "typescript",
-  xml: "xml",
-  yaml: "yaml",
-  yml: "yaml",
-};
-
-function languageFor({ extension, mime_type }: FileRendererProps["snapshot"]["descriptor"]) {
-  if (mime_type === "application/json") return "json";
-  if (mime_type === "application/xml") return "xml";
-  if (mime_type === "application/javascript") return "javascript";
-  return extension ? LANGUAGE_BY_EXTENSION[extension] ?? "plaintext" : "plaintext";
+function disposeLease(key: string, lease: ModelLease): void {
+  if (models.get(key) !== lease) return;
+  models.delete(key);
+  lease.dispose_content_listener();
+  lease.dispose_controller_listener();
+  lease.dispose_controller_lifetime();
+  lease.model.dispose();
 }
 
 function acquireModel(
   monaco: MonacoApi,
   key: string,
-  text: string,
+  controller: FileEditorController,
   language: string,
 ): Monaco.editor.ITextModel {
   const existing = models.get(key);
   if (existing) {
+    if (existing.controller !== controller) {
+      throw new Error("The canonical Monaco model belongs to another editor session.");
+    }
     existing.references += 1;
+    monaco.editor.setModelLanguage(existing.model, language);
     return existing.model;
   }
-  const uri = monaco.Uri.from({ scheme: "wardian-file", path: `/${key}` });
-  const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, language, uri);
-  models.set(key, { model, references: 1 });
+  const uri = monaco.Uri.from({
+    scheme: "wardian-file",
+    path: `/${encodeURIComponent(key)}`,
+  });
+  const current = controller.getSnapshot();
+  const model = monaco.editor.getModel(uri)
+    ?? monaco.editor.createModel(current.working_text, language, uri);
+  const lease: ModelLease = {
+    model,
+    references: 1,
+    controller,
+    applying_controller_text: false,
+    dispose_content_listener: () => undefined,
+    dispose_controller_listener: () => undefined,
+    dispose_controller_lifetime: () => undefined,
+  };
+  const contentListener = model.onDidChangeContent(() => {
+    if (lease.applying_controller_text) return;
+    controller.mutate(model.getValue());
+  });
+  lease.dispose_content_listener = () => contentListener.dispose();
+  lease.dispose_controller_listener = controller.subscribe(() => {
+    const text = controller.getSnapshot().working_text;
+    if (model.getValue() === text) return;
+    lease.applying_controller_text = true;
+    try {
+      model.setValue(text);
+    } finally {
+      lease.applying_controller_text = false;
+    }
+  });
+  lease.dispose_controller_lifetime = controller.onDispose(() => disposeLease(key, lease));
+  models.set(key, lease);
+  if (model.getValue() !== current.working_text) {
+    lease.applying_controller_text = true;
+    try {
+      model.setValue(current.working_text);
+    } finally {
+      lease.applying_controller_text = false;
+    }
+  }
   return model;
 }
 
-function releaseModel(key: string, model: Monaco.editor.ITextModel) {
+function releaseModel(key: string, model: Monaco.editor.ITextModel): void {
   const lease = models.get(key);
   if (!lease || lease.model !== model) return;
-  lease.references -= 1;
-  if (lease.references === 0) {
-    models.delete(key);
-    model.dispose();
-  }
+  lease.references = Math.max(0, lease.references - 1);
+  // The controller registry owns model lifetime so hidden/re-rendered panes
+  // keep undo history. The controller's exact release disposes the lease.
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function canRenderText(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
+function canEditText(descriptor: FileRendererProps["snapshot"]["descriptor"]) {
   const mime = descriptor.mime_type.trim().toLowerCase();
   const validatedTextMime = mime.startsWith("text/")
     || mime === "application/json"
     || mime === "application/xml"
-    || mime === "application/javascript";
-  return (descriptor.renderer_kind === "text" || validatedTextMime)
-    && mime !== "text/html"
-    && mime !== "image/svg+xml"
+    || mime === "application/javascript"
+    || mime === "image/svg+xml";
+  return (descriptor.renderer_kind === "text" || descriptor.renderer_kind === "markdown" || validatedTextMime)
     && descriptor.encoding === "utf-8"
     && descriptor.capabilities.preview
     && descriptor.unavailable_reason === null
@@ -115,43 +140,54 @@ function monacoTheme() {
   return document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "vs";
 }
 
-export default function MonacoTextRenderer({ snapshot, client, lifecycle }: FileRendererProps) {
+export default function MonacoTextRenderer({
+  snapshot,
+  lifecycle,
+  surface_id,
+  editor_controller,
+  editor_language,
+}: FileRendererProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const controller = editor_controller ?? null;
+  const modelKey = snapshot.resource_id;
+  const language = editor_language ?? "plaintext";
+  const editorEligible = canEditText(snapshot.descriptor);
 
   useEffect(() => {
-    if (!lifecycle.visible) return;
-    const { descriptor } = snapshot;
-    if (!canRenderText(descriptor)) return;
+    if (!lifecycle.visible || !controller || !surface_id) return;
+    if (!editorEligible) return;
     let cancelled = false;
     let editor: Monaco.editor.IStandaloneCodeEditor | null = null;
     let model: Monaco.editor.ITextModel | null = null;
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
-    const modelKey = `${snapshot.resource_id}@${snapshot.revision}`;
     setError(null);
 
-    void Promise.all([
-      client.readText(snapshot),
-      loadMonaco(),
-    ]).then(([resource, monaco]) => {
+    void loadMonaco().then((monaco) => {
       if (cancelled) return;
       const host = hostRef.current;
-      if (!host || resource.revision !== snapshot.revision) return;
-      model = acquireModel(monaco, modelKey, resource.text, languageFor(descriptor));
+      if (!host) return;
+      model = acquireModel(monaco, modelKey, controller, language);
       editor = monaco.editor.create(host, {
         automaticLayout: false,
         fontSize: 13,
         minimap: { enabled: false },
         model,
-        readOnly: true,
+        readOnly: false,
         renderValidationDecorations: "off",
         scrollBeyondLastLine: false,
         theme: monacoTheme(),
         wordWrap: "off",
       });
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => (
+        controller.save(surface_id).catch((cause) => {
+          setError(`Save failed: ${errorMessage(cause)}`);
+          throw cause;
+        })
+      ));
       themeObserver = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
       themeObserver.observe(document.documentElement, {
         attributes: true,
@@ -182,22 +218,22 @@ export default function MonacoTextRenderer({ snapshot, client, lifecycle }: File
       editor?.dispose();
       if (model) releaseModel(modelKey, model);
     };
-  }, [client, lifecycle.visible, retryToken, snapshot]);
+  }, [controller, editorEligible, language, lifecycle.visible, modelKey, retryToken, surface_id]);
 
   if (!lifecycle.visible) {
-    return <div className="files-resource-state" role="status">Text preview suspended.</div>;
+    return <div className="files-resource-state" role="status">Text editor suspended.</div>;
   }
-  if (!canRenderText(snapshot.descriptor)) {
+  if (!controller || !surface_id || !editorEligible) {
     return (
       <div className="files-resource-state" role="status">
-        {snapshot.descriptor.unavailable_reason ?? "text_preview_unavailable"}
+        {snapshot.descriptor.unavailable_reason ?? "text_editor_unavailable"}
       </div>
     );
   }
   if (error) {
     return (
       <section className="files-resource-state" role="alert">
-        <h2>Text preview unavailable</h2>
+        <h2>Text editor unavailable</h2>
         <p>{error}</p>
         <button type="button" onClick={retry}>Retry</button>
       </section>

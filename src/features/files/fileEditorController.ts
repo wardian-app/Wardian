@@ -150,6 +150,7 @@ export class FileEditorController {
   readonly #client: FileEditorResourceClient;
   readonly #checkpointDebounceMs: number;
   readonly #listeners = new Set<() => void>();
+  readonly #disposeListeners = new Set<() => void>();
   readonly #presentations = new Map<string, PresentationEntry>();
   readonly #presentationOwners = new Map<string, PresentationOwnerCandidate>();
   readonly #presentationObservations = new Map<string, number>();
@@ -171,6 +172,7 @@ export class FileEditorController {
   readonly #durableQueue: Array<() => void> = [];
   #durableBusy = false;
   #durableOperationCount = 0;
+  #disposed = false;
 
   constructor(
     resourceKey: string,
@@ -212,6 +214,25 @@ export class FileEditorController {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   };
+
+  /** Retains editor-model resources for exactly this controller's registry lifetime. */
+  onDispose = (listener: () => void): (() => void) => {
+    if (this.#disposed) {
+      listener();
+      return () => undefined;
+    }
+    this.#disposeListeners.add(listener);
+    return () => this.#disposeListeners.delete(listener);
+  };
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#clearCheckpointTimer();
+    for (const listener of this.#disposeListeners) listener();
+    this.#disposeListeners.clear();
+    this.#listeners.clear();
+  }
 
   attachPresentation(
     surfaceId: string,
@@ -1334,6 +1355,7 @@ export class FileEditorControllerRegistry {
     this.#releaseWaiters.get(resourceKey)?.unsubscribe();
     this.#releaseWaiters.delete(resourceKey);
     this.#sessions.delete(resourceKey);
+    session.dispose();
     this.#authoritativeSynchronizations.delete(resourceKey);
     this.#authoritativeGenerations.delete(resourceKey);
     return true;

@@ -172,9 +172,9 @@ does not change. Workflows uses one shared builder resource across every
 presentation and advances a monotonic resource revision on load, initialize,
 edit, save, discard, and reset. Prepared Save and Discard effects recheck their
 observed identity and generation immediately before invoking the resource
-action; stale effects fail closed. Files receives a narrow injected adapter;
-until the Files editor controller is added, the default adapter reports clean
-state and performs no Save or Discard work.
+action; stale effects fail closed. Files registers its shared editor-controller
+adapter. The adapter snapshots buffer generation and canonical resource
+identity so close-time Save or Discard cannot act on a replaced editor session.
 
 Closing an Agent Session or every presentation of an agent never pauses,
 kills, clears, or removes the agent. Runtime lifecycle actions remain explicit
@@ -206,24 +206,36 @@ that state until a matching definition is installed and validates it.
 
 ### Files foundation state and runtime
 
-`FilesSurfaceStateV1` serializes only `resource_kind`, `mode`,
-`transient_preview`, `review_drawer_open`, `selected_version_id`, and
-`optional_checkpoint_id`. File bytes, canonical authorization, subscriptions,
-watchers, renderer tickets, and renderer leases remain backend-owned.
+`FilesSurfaceStateV2` serializes resource kind, transient-preview state,
+rendered/editor presentation, comparison preferences, and review identifiers.
+Restored V1 state is normalized at the surface boundary. File bytes, editor
+buffers, dirty state, canonical authorization, subscriptions, watchers,
+renderer tickets, and renderer leases remain outside the Workbench document.
 
-Renderer-contributed presentation state, including rendered Markdown versus
-read-only Monaco source, is ephemeral React state. It is never serialized into
-`FilesSurfaceStateV1` and never changes subscription ownership. Each mounted
-tab keeps its own presentation choice while the owning Files surface continues
-using its existing backend subscription.
+Each tab persists its rendered/editor choice, but presentation never changes
+subscription ownership. Text panes that share a canonical resource use one
+`FileEditorController` and one Monaco model URI keyed by backend `resource_id`.
+Every pane receives its own editor view over that model; revision refreshes do
+not recreate the model or discard undo history. The controller registry owns
+model lifetime and disposes it only after the final presentation and durable
+recovery hold are released.
 
 The current Files contribution is reachable from Explorer and restoration but
 is deliberately marked reserved in the New Surface catalog. Ordinary file
 single-click uses `open_transient`; double-click, keyboard open, context
-**Open**, and **Open to Side** create or pin permanent presentations. Artifact
-resources, Draft/Changes, review, and active HTML/SVG isolation are not part of
-this foundation, so activating the launcher would overstate the available
-contract.
+**Open**, and **Open to Side** create or pin permanent presentations. The first
+buffer mutation also pins a transient source-only file. Comparison and artifact
+review remain later capabilities rather than top-level Preview/Changes/Draft
+modes.
+
+The Files header contains a current-state Book/Pencil presentation control only
+when both rendered and editor presentations exist. Source-only resources open
+directly in Monaco. Dirty state appears as generic presentation badges in both
+Dockview and safe-layout tabs and as a dot beside the Explorer-safe breadcrumb;
+the title string is never changed with `*`. Save is explicit through
+Ctrl/Cmd+S or the overflow menu. Save As consumes a one-shot exact native picker
+grant, writes the working buffer, then opens the returned canonical path as a
+new ordinary file. It never retargets the source controller or artifact identity.
 
 The Rust lifecycle is:
 
@@ -275,8 +287,10 @@ evictable between a stale membership snapshot and grant selection.
 
 Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
 5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for
-images, and 256 MiB for PDFs. HTML and SVG resolve to the unsupported renderer
-until the zero-Tauri-capability, networkless active artifact host is available.
+images, and 256 MiB for PDFs. HTML and SVG are editor-only inert source in
+Monaco. They are never injected into Wardian's DOM; a future active artifact
+host must provide the zero-Tauri-capability, networkless isolation contract
+before either type can render live.
 PDF search is debounced and stops after 128 pages or two seconds, whichever
 comes first. Partial results state exactly how many pages were searched. The
 PDF renderer mounts a dynamic bounded window whose radius adapts to the

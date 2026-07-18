@@ -43,6 +43,23 @@ function props(client: FileResourceClient, on_open_file = vi.fn(), revision = 1)
 }
 
 describe("MarkdownRenderer", () => {
+  it("renders the immutable dirty working buffer without rereading disk", async () => {
+    const client = { readText: vi.fn() } as unknown as FileResourceClient;
+    render(<MarkdownRenderer
+      {...props(client)}
+      buffer_snapshot={Object.freeze({
+        resource_id: snapshot().resource_id,
+        revision: 1,
+        buffer_generation: 3,
+        text: "# Unsaved heading",
+        dirty: true,
+      })}
+    />);
+
+    expect(await screen.findByRole("heading", { name: "Unsaved heading" })).toBeInTheDocument();
+    expect(client.readText).not.toHaveBeenCalled();
+  });
+
   it("disables raw HTML, rejects unsafe schemes, and routes local links through Wardian", async () => {
     const onOpenFile = vi.fn();
     const client = {

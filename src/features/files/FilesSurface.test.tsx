@@ -159,45 +159,17 @@ describe("FilesSurface", () => {
     });
   });
 
-  it("renders one compact mode bar and a remaining-space preview region", async () => {
+  it("renders one compact conventional header without legacy mode tabs", async () => {
     const view = render(<FilesSurface {...props()} />);
 
-    expect(view.container.querySelectorAll(".files-mode-bar")).toHaveLength(1);
-    expect(view.container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
-    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
-    expect(screen.getByRole("tab", { name: "Draft" })).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
-    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAccessibleDescription(
-      /not available in this foundation/i,
-    );
-    expect(screen.getByRole("tab", { name: "Changes" })).not.toBeDisabled();
-    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute(
-      "title",
-      expect.stringMatching(/not available/i),
-    );
-    expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute(
-      "aria-describedby",
-      expect.not.stringContaining("file-C--work-docs-report-pdf"),
-    );
-    screen.getByRole("tab", { name: "Changes" }).focus();
-    expect(screen.getByRole("tab", { name: "Changes" })).toHaveFocus();
-    fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
-    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(view.container.querySelectorAll(".files-header")).toHaveLength(1);
+    expect(view.container.querySelectorAll('[role="tablist"]')).toHaveLength(0);
+    expect(screen.queryByText("Preview")).toBeNull();
+    expect(screen.queryByText("Changes")).toBeNull();
+    expect(screen.queryByText("Draft")).toBeNull();
     expect(screen.getByTestId("files-content-region")).toHaveClass("files-content-region");
     expect(await screen.findByTestId("preview-renderer")).toHaveTextContent("report.pdf");
-    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Edit source|View rendered/ })).toBeNull();
   });
 
   it("normalizes V2 presentation intent after renderer discovery", async () => {
@@ -261,7 +233,7 @@ describe("FilesSurface", () => {
       retry: vi.fn(),
     });
     const textRegistry = new RendererRegistry([
-      definition("text", PreviewRenderer, SourceRenderer),
+      definition("text"),
       definition("unsupported", UnsupportedPreview),
     ]);
     const legacyRestoredState: FilesSurfaceStateV2 = {
@@ -319,7 +291,7 @@ describe("FilesSurface", () => {
     expect(onStateChange).not.toHaveBeenCalled();
   });
 
-  it("switches Markdown between rendered and source presentations", async () => {
+  it("switches Markdown between rendered and editor presentations", async () => {
     const user = userEvent.setup();
     useFileResourceMock.mockReturnValue({
       status: "ready",
@@ -341,11 +313,11 @@ describe("FilesSurface", () => {
     ]);
     render(<FilesSurface {...props({ registry: markdownRegistry })} />);
 
-    const viewSource = screen.getByRole("button", { name: "View source" });
-    expect(viewSource).toHaveAttribute("aria-pressed", "false");
-    expect(viewSource).toHaveAttribute("title", "View source");
-    expect(viewSource.querySelector("svg")).toHaveClass("lucide-book-open");
-    fireEvent.click(viewSource);
+    const editSource = screen.getByRole("button", { name: "Edit source" });
+    expect(editSource).toHaveAttribute("aria-pressed", "false");
+    expect(editSource).toHaveAttribute("title", "Edit source");
+    expect(editSource.querySelector("svg")).toHaveClass("lucide-book-open");
+    fireEvent.click(editSource);
     expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View rendered" }))
       .toHaveAttribute("aria-pressed", "true");
@@ -412,11 +384,11 @@ describe("FilesSurface", () => {
     });
     const view = render(<FilesSurface {...visibleProps} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit source" }));
     expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
     view.rerender(<FilesSurface {...visibleProps} lifecycle={{ visible: false }} />);
     expect(screen.getByRole("status")).toHaveTextContent(/preview suspended/i);
-    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Edit source|View rendered/ })).toBeNull();
     view.rerender(<FilesSurface {...visibleProps} lifecycle={{ visible: true }} />);
     expect(await screen.findByTestId("source-renderer")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View rendered" })).toBeInTheDocument();
@@ -443,7 +415,7 @@ describe("FilesSurface", () => {
     />);
 
     expect(await screen.findByTestId("preview-renderer")).toHaveTextContent("next.md");
-    expect(screen.getByRole("button", { name: "View source" }))
+    expect(screen.getByRole("button", { name: "Edit source" }))
       .toHaveAttribute("aria-pressed", "false");
   });
 
@@ -474,11 +446,12 @@ describe("FilesSurface", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     render(<FilesSurface {...props({ registry: markdownRegistry })} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "View source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit source" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Source renderer failed");
     fireEvent.click(screen.getByRole("button", { name: "View rendered" }));
     expect(await screen.findByTestId("preview-renderer")).toBeInTheDocument();
-    expect(screen.queryByText("Source renderer failed")).toBeNull();
+    expect(screen.getByText("Source renderer failed").closest("[data-file-presentation]"))
+      .toHaveAttribute("hidden");
     consoleError.mockRestore();
   });
 
@@ -556,12 +529,107 @@ describe("FilesSurface", () => {
     expect(breadcrumb).toHaveClass("files-breadcrumb");
     const overflow = screen.getByRole("button", { name: "File actions" });
     expect(overflow).toBeInTheDocument();
-    expect(view.container.querySelector(".files-mode-bar")).toHaveClass("files-mode-bar");
+    expect(view.container.querySelector(".files-header")).toHaveClass("files-header");
     fireEvent.click(overflow);
     const menu = screen.getByRole("menu", { name: "File actions" });
     expect(within(menu).getByText("application/pdf")).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "Open With" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "Reveal" })).toBeInTheDocument();
+  });
+
+  it("opens a Save As copy only after native success without retargeting an artifact", async () => {
+    const artifactDescriptor = descriptor({
+      canonical_path: "C:/work/docs/artifact.md",
+      display_name: "artifact.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      line_count: 2,
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: {
+        ...snapshot(artifactDescriptor),
+        resource_id: "artifact:artifact-1",
+      },
+      error: null,
+      retry: vi.fn(),
+    });
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: "artifact:artifact-1",
+      revision: 1,
+      text: "# Original\n",
+    });
+    vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
+    const target = deferred<{ schema: 1; save_target_grant_id: string; selected_path: string } | null>();
+    const saved = deferred<{
+      schema: 1;
+      capability_id: string;
+      canonical_path: string;
+      resource_id: string;
+      content_hash: string;
+    }>();
+    vi.spyOn(client, "pickSaveTarget").mockReturnValue(target.promise);
+    const saveAs = vi.spyOn(client, "saveAsText").mockReturnValue(saved.promise);
+    const onOpenFile = vi.fn().mockResolvedValue(undefined);
+    const onCanonicalResource = vi.fn().mockResolvedValue("allow");
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    render(<FilesSurface {...props({
+      resource_key: "artifact:artifact-1",
+      state: {
+        resource_kind: "artifact",
+        transient_preview: false,
+        presentation: "rendered",
+        comparison_open: false,
+        comparison_layout_preference: "auto",
+        comparison_baseline: null,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      },
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+      on_open_file: onOpenFile,
+      on_canonical_resource: onCanonicalResource,
+    })} />);
+
+    const controller = editorRegistry.forResource("artifact:artifact-1");
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+    act(() => { controller.mutate("# Copy me\n"); });
+    await userEvent.click(screen.getByRole("button", { name: "File actions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Save As" }));
+    expect(onOpenFile).not.toHaveBeenCalled();
+    target.resolve({
+      schema: 1,
+      save_target_grant_id: "save-grant-1",
+      selected_path: "C:/work/docs/copy.md",
+    });
+    await waitFor(() => expect(saveAs).toHaveBeenCalledWith({
+      save_target_grant_id: "save-grant-1",
+      text: "# Copy me\n",
+    }));
+    expect(onOpenFile).not.toHaveBeenCalled();
+    saved.resolve({
+      schema: 1,
+      capability_id: "file-grant-copy",
+      canonical_path: "C:/work/docs/copy.md",
+      resource_id: "file:C:/work/docs/copy.md",
+      content_hash: "hash-copy",
+    });
+    await waitFor(() => expect(onOpenFile).toHaveBeenCalledWith("C:/work/docs/copy.md"));
+    expect(controller.getSnapshot().resource_id).toBe("artifact:artifact-1");
+    expect(onCanonicalResource).toHaveBeenCalledTimes(1);
+    expect(onCanonicalResource).toHaveBeenCalledWith("artifact:artifact-1");
   });
 
   it("retains the native resource and editor session while the renderer is suspended", async () => {
@@ -599,7 +667,7 @@ describe("FilesSurface", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(/preview suspended/i);
     expect(useFileResourceMock).toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Edit source|View rendered/ })).toBeNull();
     await waitFor(() => expect(
       editorRegistry.getExisting("file:C:/work/docs/notes.md")?.getSnapshot().status,
     ).toBe("ready"));
@@ -887,10 +955,12 @@ describe("FilesSurface", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/file editor initialization failed: read denied/i);
-    expect(filesPresentationBadges("files-1", "file:C:/work/docs/notes.md")).toContainEqual({
+    await waitFor(() => expect(
+      filesPresentationBadges("files-1", "file:C:/work/docs/notes.md"),
+    ).toContainEqual({
       badge_id: "attention",
       label: "Attention requested",
-    });
+    }));
     fireEvent.click(within(alert).getByRole("button", { name: "Retry Editor" }));
 
     await waitFor(() => expect(readText).toHaveBeenCalledTimes(2));

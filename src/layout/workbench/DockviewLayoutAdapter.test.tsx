@@ -980,6 +980,35 @@ describe("DockviewLayoutAdapter", () => {
     expect(documentModel.root.kind).toBe("split");
   });
 
+  it("projects generic surface badges through Dockview and safe layout tabs", async () => {
+    const documentModel = makeTwoGroupDocument();
+    const surfaceBadges = (surface: { surface_id: string }) => surface.surface_id === "surface-2"
+      ? [{ badge_id: "dirty", label: "Unsaved changes" }]
+      : [];
+    const view = render(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        surface_badges={surfaceBadges}
+      />,
+    );
+
+    await waitFor(() => expect(
+      view.container.querySelectorAll('[data-surface-badge="dirty"]'),
+    ).toHaveLength(1));
+    expect(screen.getByRole("tab", { name: "Agent Session" })).not.toHaveTextContent("*");
+
+    view.rerender(
+      <DockviewLayoutAdapter
+        document={documentModel}
+        safe_mode
+        surface_badges={surfaceBadges}
+      />,
+    );
+
+    expect(view.container.querySelectorAll('[data-surface-badge="dirty"]')).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "Agent Session" })).not.toHaveTextContent("*");
+  });
+
   it("does not feed model-owned initial activation back into the canonical writer", async () => {
     const onCommand = vi.fn();
     render(<DockviewLayoutAdapter document={makeTwoGroupDocument()} on_command={onCommand} />);

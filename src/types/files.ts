@@ -27,7 +27,7 @@ export type FilesSurfaceStateV2 = {
   optional_checkpoint_id: string | null;
 };
 
-/** Temporary compatibility input while the Files header is replaced in the editor UI task. */
+/** Migration boundary for restored V1 Files tabs and current V2 editor state. */
 export type FilesSurfaceState = FilesSurfaceStateV1 | FilesSurfaceStateV2;
 
 export type FileRendererKind = "text" | "markdown" | "image" | "pdf" | "unsupported";

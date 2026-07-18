@@ -136,6 +136,8 @@ export type WorkbenchIpcMockOptions = {
   responses?: Record<string, unknown>;
   explorer_root?: string;
   files?: WorkbenchFileFixture[];
+  /** Exact path returned by the next native Save As picker call; null models cancellation. */
+  save_target_path?: string | null;
 };
 
 export type WorkbenchIpcMockSnapshot = {
@@ -184,7 +186,17 @@ export async function installWorkbenchIpcMock(
   };
 
   await page.addInitScript(
-    ({ loadResult, agents, safeMode, resetDelayMs, resetOutcome, responses, explorerRoot, files }) => {
+    ({
+      loadResult,
+      agents,
+      safeMode,
+      resetDelayMs,
+      resetOutcome,
+      responses,
+      explorerRoot,
+      files,
+      saveTargetPath,
+    }) => {
       type Callback = (value: unknown) => void;
       type Listener = { callback_id: number; event_id: number };
       type Runtime = BrowserWorkbenchMockRuntime;
@@ -194,6 +206,8 @@ export async function installWorkbenchIpcMock(
       const callbacks = new Map<number, Callback>();
       const listeners = new Map<string, Listener[]>();
       let fileSubscriptionId = 1;
+      let saveTargetGrantId = 1;
+      let recoveryId = 1;
       const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/$/, "");
       const fileFixtures = new Map(files.map((file) => [normalizePath(file.path), {
         ...file,
@@ -201,6 +215,23 @@ export async function installWorkbenchIpcMock(
         revision: file.revision ?? 1,
       }]));
       const fileSubscriptions = new Map<string, string>();
+      const saveTargetGrants = new Map<string, string>();
+      let nextSaveTargetPath = saveTargetPath === null ? null : normalizePath(saveTargetPath);
+      const recoveries = new Map<string, {
+        schema: 1;
+        recovery_id: string;
+        resource_key: string;
+        base_content_hash: string;
+        base_opaque_revision: string;
+        recovery_revision: number;
+        created_at_ms: number;
+        updated_at_ms: number;
+        display_name: string;
+        extension: string | null;
+        mime_type: string;
+        base: string;
+        buffer: string;
+      }>();
       const resourceIdFor = (path: string) => `file:${normalizePath(path)}`;
       const descriptorFor = (file: typeof files[number]) => {
         const normalizedPath = normalizePath(file.path);
@@ -436,6 +467,193 @@ export async function installWorkbenchIpcMock(
               text: file.content,
             };
           }
+          if (command === "save_file_resource_text") {
+            const request = args?.request as {
+              resource_id?: string;
+              subscription_id?: string;
+              expected_revision?: number;
+              buffer_base_hash?: string;
+              text?: string;
+              recovery_cleanup?: {
+                recovery_id?: string;
+                expected_recovery_revision?: number;
+              } | null;
+            } | undefined;
+            const subscriptionId = String(request?.subscription_id ?? "");
+            const path = fileSubscriptions.get(subscriptionId);
+            const file = path ? fileFixtures.get(path) : undefined;
+            if (!path || !file || request?.resource_id !== resourceIdFor(path)) {
+              throw new Error("mock file subscription is not active for this resource");
+            }
+            const currentHash = descriptorFor(file).content_hash;
+            if (
+              request.expected_revision !== file.revision
+              || request.buffer_base_hash !== currentHash
+            ) {
+              return {
+                status: "stale_conflict",
+                revision: file.revision,
+                content_hash: currentHash,
+              };
+            }
+            if (typeof request.text !== "string") throw new Error("mock save text is required");
+            if (request.text === file.content) {
+              return {
+                status: "unchanged",
+                revision: file.revision,
+                content_hash: currentHash,
+              };
+            }
+            const cleanup = request.recovery_cleanup;
+            if (cleanup) {
+              const recovery = recoveries.get(String(cleanup.recovery_id ?? ""));
+              if (
+                !recovery
+                || recovery.recovery_revision !== cleanup.expected_recovery_revision
+              ) throw new Error("stale_recovery_revision");
+              recoveries.delete(recovery.recovery_id);
+            }
+            file.content = request.text;
+            file.revision += 1;
+            return {
+              status: "saved",
+              revision: file.revision,
+              content_hash: descriptorFor(file).content_hash,
+            };
+          }
+          if (command === "pick_file_resource_save_target") {
+            if (nextSaveTargetPath === null) return null;
+            const grantId = `mock-save-target-${saveTargetGrantId++}`;
+            const selectedPath = nextSaveTargetPath;
+            nextSaveTargetPath = null;
+            saveTargetGrants.set(grantId, selectedPath);
+            return {
+              schema: 1,
+              save_target_grant_id: grantId,
+              selected_path: selectedPath,
+            };
+          }
+          if (command === "save_file_resource_as_text") {
+            const request = args?.request as {
+              save_target_grant_id?: string;
+              text?: string;
+            } | undefined;
+            const grantId = String(request?.save_target_grant_id ?? "");
+            const path = saveTargetGrants.get(grantId);
+            if (!path) throw new Error("mock Save As grant is invalid or already consumed");
+            if (typeof request?.text !== "string") throw new Error("mock Save As text is required");
+            saveTargetGrants.delete(grantId);
+            const existing = fileFixtures.get(path);
+            if (existing) {
+              existing.content = request.text;
+              existing.revision += 1;
+            } else {
+              fileFixtures.set(path, {
+                path,
+                content: request.text,
+                revision: 1,
+              });
+            }
+            const saved = fileFixtures.get(path);
+            if (!saved) throw new Error("mock Save As target was not created");
+            return {
+              schema: 1,
+              capability_id: `mock-user-file-${grantId}`,
+              canonical_path: path,
+              resource_id: resourceIdFor(path),
+              content_hash: descriptorFor(saved).content_hash,
+            };
+          }
+          if (command === "list_file_recoveries") {
+            const request = args?.request as { resource_key?: string } | undefined;
+            return [...recoveries.values()]
+              .filter((recovery) => recovery.resource_key === request?.resource_key)
+              .map(({ base: _base, buffer: _buffer, ...summary }) => summary);
+          }
+          if (command === "get_file_recovery") {
+            const request = args?.request as {
+              recovery_id?: string;
+              resource_key?: string;
+            } | undefined;
+            const recovery = recoveries.get(String(request?.recovery_id ?? ""));
+            if (!recovery || recovery.resource_key !== request?.resource_key) {
+              throw new Error("mock file recovery not found");
+            }
+            return clone(recovery);
+          }
+          if (command === "checkpoint_file_recovery") {
+            const request = args?.request as {
+              recovery_id?: string | null;
+              expected_recovery_revision?: number | null;
+              resource_id?: string;
+              subscription_id?: string;
+              base_content_hash?: string;
+              resource_key?: string;
+              base?: string;
+              buffer?: string;
+            } | undefined;
+            const subscriptionId = String(request?.subscription_id ?? "");
+            const path = fileSubscriptions.get(subscriptionId);
+            const file = path ? fileFixtures.get(path) : undefined;
+            if (!path || !file || request?.resource_id !== resourceIdFor(path)) {
+              throw new Error("mock recovery subscription is not active");
+            }
+            if (request.base_content_hash !== descriptorFor(file).content_hash) {
+              throw new Error("stale_file_revision");
+            }
+            const existing = request.recovery_id
+              ? recoveries.get(request.recovery_id)
+              : undefined;
+            if (
+              request.recovery_id !== null
+              && (
+                !existing
+                || existing.recovery_revision !== request.expected_recovery_revision
+              )
+            ) throw new Error("stale_recovery_revision");
+            if (typeof request.resource_key !== "string") throw new Error("mock resource key is required");
+            if (typeof request.base !== "string" || typeof request.buffer !== "string") {
+              throw new Error("mock recovery text is required");
+            }
+            const now = Date.now();
+            const recovery_id = existing?.recovery_id ?? `mock-recovery-${recoveryId++}`;
+            const recovery_revision = (existing?.recovery_revision ?? 0) + 1;
+            const descriptor = descriptorFor(file);
+            const recovery = {
+              schema: 1 as const,
+              recovery_id,
+              resource_key: request.resource_key,
+              base_content_hash: request.base_content_hash,
+              base_opaque_revision: `mock-revision-${file.revision}`,
+              recovery_revision,
+              created_at_ms: existing?.created_at_ms ?? now,
+              updated_at_ms: now,
+              display_name: descriptor.display_name,
+              extension: descriptor.extension,
+              mime_type: descriptor.mime_type,
+              base: request.base,
+              buffer: request.buffer,
+            };
+            recoveries.set(recovery_id, recovery);
+            const { base: _base, buffer: _buffer, display_name: _displayName,
+              extension: _extension, mime_type: _mimeType, ...checkpoint } = recovery;
+            return checkpoint;
+          }
+          if (command === "discard_file_recovery") {
+            const request = args?.request as {
+              recovery_id?: string;
+              expected_recovery_revision?: number;
+              resource_key?: string;
+            } | undefined;
+            const recovery = recoveries.get(String(request?.recovery_id ?? ""));
+            if (
+              !recovery
+              || recovery.resource_key !== request?.resource_key
+              || recovery.recovery_revision !== request.expected_recovery_revision
+            ) throw new Error("stale_recovery_revision");
+            recoveries.delete(recovery.recovery_id);
+            return null;
+          }
           if (command === "issue_file_resource_ticket") {
             const request = args?.request as {
               resource_id?: string;
@@ -581,6 +799,7 @@ export async function installWorkbenchIpcMock(
       responses: options.responses ?? {},
       explorerRoot: options.explorer_root ?? "/workspace",
       files: options.files ?? [],
+      saveTargetPath: options.save_target_path ?? null,
     },
   );
 

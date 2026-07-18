@@ -15,14 +15,14 @@ import type {
   FilesSurfaceStateV2,
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
-import { FilePreview } from "./FilePreview";
+import { FileContentHost } from "./FileContentHost";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
 import {
   type FileEditorSnapshot,
   FileEditorControllerRegistry,
 } from "./fileEditorController";
 import { decodeFileResourceKey } from "./fileResourceKey";
-import { FilesModeBar } from "./FilesModeBar";
+import { FilesHeader } from "./FilesHeader";
 import {
   type FilesLegacyPresentationIntent,
   normalizeFilesSurfaceState,
@@ -30,7 +30,8 @@ import {
 import { useFilesPresentationStore } from "./filesPresentationStore";
 import {
   defaultRendererRegistry,
-  type FilePreviewPresentation,
+  type FileContentPresentation,
+  type FileEditorBufferSnapshot,
   type RendererRegistry,
 } from "./rendererRegistry";
 import { useFileResource, type UseFileResourceResult } from "./useFileResource";
@@ -97,13 +98,17 @@ type ActiveFilesSurfaceProps = Required<Pick<
   on_restore_access: () => void;
   on_discard_recovery: () => void;
   on_retry_recovery: () => void;
-  preview_presentation: FilePreviewPresentation;
-  on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
+  editor_controller: ReturnType<FileEditorControllerRegistry["forResource"]> | null;
+  editor_snapshot: FileEditorSnapshot | null;
+  presentation: FileContentPresentation;
+  on_presentation_change: (presentation: FileContentPresentation) => void;
+  on_save: () => Promise<void>;
+  on_save_as: () => Promise<void>;
 };
 
-type PreviewPresentationState = {
+type PresentationState = {
   resource_key: string;
-  presentation: FilePreviewPresentation;
+  presentation: FileContentPresentation;
 };
 
 type RecoveryOnlyState =
@@ -114,23 +119,43 @@ type RecoveryOnlyState =
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const requestedNormalization = useRef<string | null>(null);
   const resource = props.resource;
-  const sourceAvailable = resource.status === "ready" && resource.snapshot
-    ? props.registry.resolve(resource.snapshot.descriptor).source !== undefined
-    : false;
+  const renderer = resource.status === "ready" && resource.snapshot
+    ? props.registry.resolve(resource.snapshot.descriptor)
+    : null;
+  const activePresentation = renderer
+    ? props.presentation === "editor" && renderer.editor
+      ? "editor"
+      : props.presentation === "rendered" && renderer.rendered
+        ? "rendered"
+        : renderer.default_presentation ?? (renderer.editor ? "editor" : "rendered")
+    : props.presentation;
+  const presentationToggleAvailable = Boolean(renderer?.rendered && renderer.editor);
+  const editorReady = props.editor_snapshot?.status === "ready";
+  const editable = Boolean(renderer?.editor && props.editor_controller && editorReady);
+  const bufferSnapshot = useMemo<FileEditorBufferSnapshot | null>(() => {
+    const editor = props.editor_snapshot;
+    if (!editor || editor.status !== "ready" || editor.resource_id === null) return null;
+    return Object.freeze({
+      resource_id: editor.resource_id,
+      revision: editor.disk_head_revision ?? resource.snapshot?.revision ?? 0,
+      buffer_generation: editor.buffer_generation,
+      text: editor.working_text,
+      dirty: editor.dirty,
+    });
+  }, [props.editor_snapshot, resource.snapshot?.revision]);
 
   useEffect(() => {
     if (!("presentation" in props.state) || !resource.snapshot) return;
     const renderer = props.registry.resolve(resource.snapshot.descriptor);
-    const textEditor = renderer.renderer_id === "text";
     const baselineAvailability = props.state.comparison_baseline === null
       ? "unavailable"
       : props.state.comparison_baseline.kind === "saved_file"
         ? renderer.capabilities.changes === "line" ? "available" : "unavailable"
         : "unknown";
     const normalized = normalizeFilesSurfaceState(props.state, {
-      default_presentation: textEditor ? "editor" : "rendered",
-      rendered: !textEditor || renderer.source !== undefined,
-      editor: textEditor || renderer.source !== undefined,
+      default_presentation: renderer.default_presentation ?? "rendered",
+      rendered: renderer.rendered !== undefined,
+      editor: renderer.editor !== undefined,
       baseline_availability: baselineAvailability,
     }, {
       presentation_intent: props.legacy_presentation_intent,
@@ -163,14 +188,19 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
 
   return (
     <section className="files-surface" data-testid="files-surface">
-      <FilesModeBar
+      <FilesHeader
         resource_key={props.resource_key}
-        state={props.state}
         descriptor={resource.snapshot?.descriptor ?? null}
-        preview_presentation={props.preview_presentation}
-        source_available={sourceAvailable}
+        presentation={activePresentation}
+        presentation_toggle_available={presentationToggleAvailable}
+        dirty={props.editor_snapshot?.dirty ?? false}
+        save_available={editable}
+        save_as_available={editable}
+        saving={props.editor_snapshot?.save_state === "saving"}
         resource_actions_available={props.recovery_only.status !== "ready"}
-        on_preview_presentation_change={props.on_preview_presentation_change}
+        on_presentation_change={props.on_presentation_change}
+        on_save={props.on_save}
+        on_save_as={props.on_save_as}
         on_open_with={props.on_open_with}
         on_reveal={props.on_reveal}
       />
@@ -264,12 +294,15 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           </section>
         ) : null}
         {resource.status === "ready" && resource.snapshot ? (
-          <FilePreview
+          <FileContentHost
             snapshot={resource.snapshot}
             client={props.client}
             lifecycle={props.lifecycle}
             registry={props.registry}
-            presentation={props.preview_presentation}
+            presentation={activePresentation}
+            surface_id={props.surface_id}
+            editor_controller={props.editor_controller}
+            buffer_snapshot={bufferSnapshot}
             on_open_file={props.on_open_file}
             on_open_with={props.on_open_with}
             on_reveal={props.on_reveal}
@@ -367,7 +400,7 @@ export function FilesSurface({
     if (!snapshot) return null;
     const definition = registry.resolve(snapshot.descriptor);
     const editable = snapshot.descriptor.encoding !== null
-      && (definition.renderer_id === "text" || definition.source !== undefined);
+      && definition.editor !== undefined;
     return editable ? props.editor_registry.forResource(snapshot.resource_id) : null;
   }, [props.editor_registry, registry, resource.snapshot]);
   const subscribeEditor = useCallback((listener: () => void) => (
@@ -381,14 +414,14 @@ export function FilesSurface({
     readEditorSnapshot,
     readEditorSnapshot,
   );
-  const [previewState, setPreviewState] = useState<PreviewPresentationState>({
+  const [presentationState, setPresentationState] = useState<PresentationState>({
     resource_key: props.resource_key,
     presentation: "presentation" in props.state && props.state.presentation === "editor"
-      ? "source"
+      ? "editor"
       : "rendered",
   });
-  const previewPresentation = previewState.resource_key === props.resource_key
-    ? previewState.presentation
+  const presentation = presentationState.resource_key === props.resource_key
+    ? presentationState.presentation
     : "rendered";
 
   const updateControllerPresentation = useCallback((patch: Partial<FilesSurfaceStateV2>) => {
@@ -523,24 +556,21 @@ export function FilesSurface({
   }, [canonicalRetryToken, resource.snapshot?.resource_id, resource.snapshot?.subscription_id]);
 
   useEffect(() => {
-    setPreviewState({
+    setPresentationState({
       resource_key: props.resource_key,
       presentation: "presentation" in props.state && props.state.presentation === "editor"
-        ? "source"
+        ? "editor"
         : "rendered",
     });
   }, [props.resource_key, props.state]);
 
-  const setPreviewPresentation = useCallback((presentation: FilePreviewPresentation) => {
-    setPreviewState({ resource_key: props.resource_key, presentation });
-    if ("presentation" in props.state) {
-      void on_state_change({
-        ...props.state,
-        presentation: presentation === "source" ? "editor" : "rendered",
-        transient_preview: false,
-      });
-    }
-  }, [on_state_change, props.resource_key, props.state]);
+  const setFilePresentation = useCallback((nextPresentation: FileContentPresentation) => {
+    setPresentationState({ resource_key: props.resource_key, presentation: nextPresentation });
+    updateControllerPresentation({
+      presentation: nextPresentation,
+      transient_preview: false,
+    });
+  }, [props.resource_key, updateControllerPresentation]);
   const guardedOpenWith = useCallback(async (path: string) => {
     try {
       await on_open_with(path);
@@ -557,17 +587,57 @@ export function FilesSurface({
       setActionError(`Reveal failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [on_reveal]);
+  const saveFile = useCallback(async () => {
+    if (!editorController) throw new Error("The file editor is unavailable.");
+    try {
+      await editorController.save(props.surface_id);
+      setActionError(null);
+    } catch (error) {
+      const message = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
+      setActionError(message);
+      throw error;
+    }
+  }, [editorController, props.surface_id]);
+  const saveFileAs = useCallback(async () => {
+    const snapshot = editorController?.getSnapshot();
+    const descriptor = resource.snapshot?.descriptor;
+    if (!editorController || !snapshot || snapshot.status !== "ready" || !descriptor) {
+      throw new Error("The file editor is unavailable.");
+    }
+    try {
+      const grant = await client.pickSaveTarget({
+        title: "Save As",
+        default_name: descriptor.display_name,
+      });
+      if (!grant) return;
+      const saved = await client.saveAsText({
+        save_target_grant_id: grant.save_target_grant_id,
+        text: snapshot.working_text,
+      });
+      await on_open_file(saved.canonical_path);
+      setActionError(null);
+    } catch (error) {
+      const message = `Save As failed: ${error instanceof Error ? error.message : String(error)}`;
+      setActionError(message);
+      throw error;
+    }
+  }, [client, editorController, on_open_file, resource.snapshot?.descriptor]);
 
   if (!props.lifecycle.visible) {
     return (
       <section className="files-surface" data-testid="files-surface" data-suspended="true">
-        <FilesModeBar
+        <FilesHeader
           resource_key={props.resource_key}
-          state={props.state}
           descriptor={null}
-          preview_presentation={previewPresentation}
-          source_available={false}
-          on_preview_presentation_change={setPreviewPresentation}
+          presentation={presentation}
+          presentation_toggle_available={false}
+          dirty={editorSnapshot?.dirty ?? false}
+          save_available={false}
+          save_as_available={false}
+          saving={editorSnapshot?.save_state === "saving"}
+          on_presentation_change={setFilePresentation}
+          on_save={saveFile}
+          on_save_as={saveFileAs}
           on_open_with={guardedOpenWith}
           on_reveal={guardedReveal}
         />
@@ -607,8 +677,12 @@ export function FilesSurface({
       on_restore_access={restoreAccess}
       on_discard_recovery={discardRecovery}
       on_retry_recovery={() => setRecoveryOnlyRetryToken((value) => value + 1)}
-      preview_presentation={previewPresentation}
-      on_preview_presentation_change={setPreviewPresentation}
+      editor_controller={editorController}
+      editor_snapshot={editorSnapshot}
+      presentation={presentation}
+      on_presentation_change={setFilePresentation}
+      on_save={saveFile}
+      on_save_as={saveFileAs}
     />
   );
 }

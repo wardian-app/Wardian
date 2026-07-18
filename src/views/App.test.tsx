@@ -533,7 +533,7 @@ describe("Workbench persistence boot integration", () => {
       }
       if (command === "open_file_resource") {
         return Promise.resolve({
-          resource_id: "resource-files-app",
+          resource_id: "file:C:/work/report.txt",
           subscription_id: "subscription-files-app",
           revision: 1,
           descriptor: {
@@ -558,15 +558,23 @@ describe("Workbench persistence boot integration", () => {
           },
         });
       }
+      if (command === "read_file_resource_text") {
+        return Promise.resolve({
+          schema: 1,
+          resource_id: "file:C:/work/report.txt",
+          revision: 1,
+          text: "restored file",
+        });
+      }
+      if (command === "list_file_recoveries") return Promise.resolve([]);
       return defaultInvoke?.(command, args) ?? Promise.resolve(null);
     });
 
     render(<App />);
 
     const filesSurface = await screen.findByTestId("files-surface");
-    const previewTab = Array.from(filesSurface.querySelectorAll('[role="tab"]'))
-      .find((tab) => tab.textContent === "Preview");
-    expect(previewTab).toHaveAttribute("aria-selected", "true");
+    expect(filesSurface.querySelector(".files-breadcrumb")).toHaveTextContent("report.txt");
+    expect(within(filesSurface).queryByRole("tablist", { name: "File mode" })).toBeNull();
     expect(mockInvoke).toHaveBeenCalledWith("open_file_resource", {
       request: {
         path: "C:/work/report.txt",
