@@ -148,6 +148,16 @@ test("artifact CLI opens an authorized file and restores it after relaunch", { t
   await spawnArtifactAgent(session.driver, sessionId, workspace);
   const presented = present(cli, harness, sessionId, file);
   await assertArtifactCanOpen(session, presented.artifact_id, "initial presentation", true);
+  const screenshotPath = path.join(
+    harness.repoRoot,
+    "e2e",
+    "screenshots",
+    "artifact-presentation",
+    "2026-07-18",
+    "artifact-file-open.png",
+  );
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, await session.driver.takeScreenshot(), "base64");
   await waitForArtifactPersistence(harness, presented.artifact_id);
 
   await session.close();
