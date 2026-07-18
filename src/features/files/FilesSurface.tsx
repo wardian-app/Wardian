@@ -87,7 +87,12 @@ type ActiveFilesSurfaceProps = Required<Pick<
   legacy_presentation_intent?: FilesLegacyPresentationIntent;
   action_error: string | null;
   editor_error: string | null;
+  editor_recovery_conflict: Extract<
+    FileEditorSnapshot["recovery"],
+    { status: "conflict" }
+  > | null;
   on_retry_editor: () => void;
+  on_resolve_recovery_conflict: (choice: "keep_current" | "use_recovered") => void;
   recovery_only: RecoveryOnlyState;
   on_restore_access: () => void;
   on_discard_recovery: () => void;
@@ -177,6 +182,31 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           <section className="files-resource-state" role="alert">
             <p>{props.editor_error}</p>
             <button type="button" onClick={props.on_retry_editor}>Retry Editor</button>
+          </section>
+        ) : null}
+        {props.editor_recovery_conflict ? (
+          <section className="files-resource-state" role="alert">
+            <h2>Recovery conflict</h2>
+            <p>{props.editor_recovery_conflict.message}</p>
+            <p>
+              Current edits are checkpointed separately. Choose which version to continue
+              editing; neither recovery is deleted by this choice.
+            </p>
+            <div className="files-resource-actions">
+              <button
+                type="button"
+                disabled={!props.editor_recovery_conflict.current_durable}
+                onClick={() => props.on_resolve_recovery_conflict("keep_current")}
+              >
+                Keep current edits
+              </button>
+              <button
+                type="button"
+                onClick={() => props.on_resolve_recovery_conflict("use_recovered")}
+              >
+                Use recovered edits
+              </button>
+            </div>
           </section>
         ) : null}
         {resource.status === "loading" ? (
@@ -408,6 +438,19 @@ export function FilesSurface({
   const restoreAccess = useCallback(() => {
     void resource.retry();
   }, [resource]);
+  const resolveRecoveryConflict = useCallback((
+    choice: "keep_current" | "use_recovered",
+  ) => {
+    if (!editorController) return;
+    try {
+      editorController.resolveRecoveryConflict(choice);
+      setEditorError(null);
+    } catch (error) {
+      setEditorError(`Recovery conflict resolution failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`);
+    }
+  }, [editorController]);
   const discardRecovery = useCallback(() => {
     if (recoveryOnlyState.status !== "ready" || recoveryOnlyState.discarding) return;
     const recovered = recoveryOnlyState.recovery;
@@ -554,7 +597,11 @@ export function FilesSurface({
       on_state_change={on_state_change}
       action_error={actionError}
       editor_error={editorError}
+      editor_recovery_conflict={editorSnapshot?.recovery.status === "conflict"
+        ? editorSnapshot.recovery
+        : null}
       on_retry_editor={retryEditor}
+      on_resolve_recovery_conflict={resolveRecoveryConflict}
       recovery_only={recoveryOnlyState}
       on_restore_access={restoreAccess}
       on_discard_recovery={discardRecovery}

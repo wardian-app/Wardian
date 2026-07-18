@@ -42,7 +42,19 @@ export type FileEditorRecoveryState =
       readonly buffer_generation: number;
       readonly retryable: true;
       readonly message: string;
+    }
+  | {
+      readonly status: "conflict";
+      readonly conflicting_recovery_id: string;
+      readonly conflicting_recovery_revision: number;
+      readonly current_recovery_id: string | null;
+      readonly current_recovery_revision: number | null;
+      readonly current_durable: boolean;
+      readonly buffer_generation: number;
+      readonly message: string;
     };
+
+export type FileEditorRecoveryConflictChoice = "keep_current" | "use_recovered";
 
 export type FileEditorSnapshot = {
   readonly resource_key: string;
@@ -59,7 +71,12 @@ export type FileEditorSnapshot = {
   readonly stale: boolean;
   readonly save_state: "idle" | "saving" | "error";
   readonly recovery: FileEditorRecoveryState;
-  readonly recovery_discovery: "not_started" | "discovering" | "complete" | "error";
+  readonly recovery_discovery:
+    | "not_started"
+    | "discovering"
+    | "complete"
+    | "error"
+    | "conflict";
   readonly buffer_generation: number;
   readonly presentation_generation: number;
   readonly presentation_ids: readonly string[];
@@ -147,6 +164,7 @@ export class FileEditorController {
   #pendingInitializationCount = 0;
   #saveOperationCount = 0;
   #recoveryMetadata: RecoveryMetadata | null = null;
+  #recoveryConflict: FileRecoveryV1 | null = null;
   #checkpointTimer: ReturnType<typeof setTimeout> | null = null;
   #checkpointRequestedGeneration: number | null = null;
   #checkpointLoop: Promise<void> | null = null;
@@ -248,7 +266,10 @@ export class FileEditorController {
     if (!this.#presentations.has(surfaceId)) return;
     const candidate = { owner, text, order: ++this.#ownerCandidateOrder };
     this.#presentationOwners.set(surfaceId, candidate);
-    if (!makeCurrent) return;
+    if (!makeCurrent) {
+      if (this.#ownerPresentationId === null) this.#promotePresentationOwner();
+      return;
+    }
     this.#ownerPresentationId = surfaceId;
     this.#applyAuthoritative(owner, text);
   }
@@ -279,6 +300,10 @@ export class FileEditorController {
         return;
       }
       if (this.#snapshot.recovery_discovery === "complete") return;
+      if (this.#snapshot.recovery_discovery === "conflict") {
+        await this.flushRecovery();
+        return;
+      }
       this.#publish({ recovery_discovery: "discovering" });
 
       let recoveries: readonly FileRecoverySummaryV1[];
@@ -299,12 +324,8 @@ export class FileEditorController {
       const newest = newestRecovery(recoveries);
       if (!newest) {
         this.#publish({ recovery_discovery: "complete", last_error: null });
+        if (this.#snapshot.dirty) await this.flushRecovery();
         return;
-      }
-      if (bufferGeneration !== this.#snapshot.buffer_generation) {
-        const message = "Recovery discovery was interrupted by newer in-memory edits.";
-        this.#publish({ recovery_discovery: "error", last_error: message });
-        throw new Error(message);
       }
       let recovered: FileRecoveryV1;
       try {
@@ -323,9 +344,8 @@ export class FileEditorController {
       }
       if (initializationGeneration !== this.#initializationGeneration) return;
       if (alreadyDirty || bufferGeneration !== this.#snapshot.buffer_generation) {
-        const message = "Recovered changes were found after newer in-memory edits; the newer edits were preserved.";
-        this.#publish({ recovery_discovery: "error", last_error: message });
-        throw new Error(message);
+        await this.#enterRecoveryConflict(recovered);
+        return;
       }
       this.#applyRecovery(recovered);
       this.#publish({ recovery_discovery: "complete" });
@@ -390,7 +410,11 @@ export class FileEditorController {
       throw new Error("The file editor is not initialized.");
     }
     if (text === this.#snapshot.working_text) {
-      if (!this.#snapshot.dirty && this.#snapshot.recovery.status !== "none") {
+      if (
+        !this.#recoveryConflict
+        && !this.#snapshot.dirty
+        && this.#snapshot.recovery.status !== "none"
+      ) {
         void this.#retireRecoveryForCleanGeneration(this.#snapshot.buffer_generation)
           .catch(() => undefined);
       }
@@ -411,7 +435,16 @@ export class FileEditorController {
       this.#scheduleCheckpoint(bufferGeneration);
     } else {
       this.#clearCheckpointTimer();
-      void this.#retireRecoveryForCleanGeneration(bufferGeneration).catch(() => undefined);
+      if (this.#recoveryConflict) {
+        this.#publish({
+          recovery: this.#recoveryConflictState(
+            false,
+            "Recovered changes conflict with newer in-memory edits. Both versions were preserved.",
+          ),
+        });
+      } else {
+        void this.#retireRecoveryForCleanGeneration(bufferGeneration).catch(() => undefined);
+      }
     }
     return bufferGeneration;
   }
@@ -421,10 +454,14 @@ export class FileEditorController {
       throw new Error("The file editor has no live authorized subscription.");
     }
     if (
-      this.#snapshot.recovery_discovery === "discovering"
+      this.#snapshot.recovery_discovery === "not_started"
+      || this.#snapshot.recovery_discovery === "discovering"
       || this.#snapshot.recovery_discovery === "error"
     ) {
       throw new Error("Recovery discovery must complete before Save.");
+    }
+    if (this.#snapshot.recovery_discovery === "conflict") {
+      throw new Error("Recovery conflict must be resolved before Save.");
     }
     const requestedOwnerGeneration = this.#ownerGeneration;
     const bufferGeneration = this.#snapshot.buffer_generation;
@@ -561,11 +598,63 @@ export class FileEditorController {
   }
 
   async retryRecovery(): Promise<void> {
+    if (
+      this.#snapshot.recovery_discovery === "error"
+      || this.#snapshot.recovery_discovery === "not_started"
+    ) {
+      const owner = this.#owner;
+      if (!owner) throw new Error("Recovery discovery requires a live authorized subscription.");
+      await this.initialize({
+        owner,
+        text: this.#snapshot.saved_text,
+        discover_recovery: true,
+      });
+      return;
+    }
+    if (this.#snapshot.recovery_discovery === "conflict") {
+      if (this.#snapshot.dirty) await this.flushRecovery();
+      return;
+    }
     if (this.#snapshot.dirty) {
       await this.flushRecovery();
       return;
     }
     await this.#retireRecoveryForCleanGeneration(this.#snapshot.buffer_generation);
+  }
+
+  resolveRecoveryConflict(choice: FileEditorRecoveryConflictChoice): void {
+    const conflict = this.#recoveryConflict;
+    if (!conflict || this.#snapshot.recovery.status !== "conflict") {
+      throw new Error("The file editor has no recovery conflict to resolve.");
+    }
+    if (choice === "keep_current") {
+      const current = this.#recoveryMetadata;
+      if (this.#snapshot.dirty && (
+        !current
+        || current.buffer_generation !== this.#snapshot.buffer_generation
+        || !this.#snapshot.recovery.current_durable
+      )) {
+        throw new Error("Current edits must be durable before resolving the recovery conflict.");
+      }
+      this.#recoveryConflict = null;
+      if (!this.#snapshot.dirty) this.#recoveryMetadata = null;
+      this.#publish({
+        recovery_discovery: "complete",
+        recovery: current && this.#snapshot.dirty
+          ? Object.freeze({
+              status: "durable" as const,
+              recovery_id: current.recovery_id,
+              recovery_revision: current.recovery_revision,
+              buffer_generation: current.buffer_generation,
+            })
+          : Object.freeze({ status: "none" as const }),
+        last_error: null,
+      });
+      return;
+    }
+    this.#recoveryConflict = null;
+    this.#applyChosenRecovery(conflict);
+    this.#publish({ recovery_discovery: "complete", last_error: null });
   }
 
   async discard(expectedBufferGeneration: number): Promise<boolean> {
@@ -586,6 +675,10 @@ export class FileEditorController {
           && this.#recoveryMetadata.recovery_revision === recovery.recovery_revision
         ) this.#recoveryMetadata = null;
       }
+      if (this.#recoveryConflict) {
+        this.#recoveryConflict = null;
+        this.#recoveryMetadata = null;
+      }
       if (expectedBufferGeneration !== this.#snapshot.buffer_generation) {
         this.#publish({ recovery: Object.freeze({ status: "none" }) });
         this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
@@ -596,6 +689,7 @@ export class FileEditorController {
         working_text: this.#snapshot.saved_text,
         dirty: false,
         stale: false,
+        recovery_discovery: "complete",
         recovery: Object.freeze({ status: "none" }),
         last_error: null,
       });
@@ -606,6 +700,9 @@ export class FileEditorController {
   canReleaseAfterPostcommit(expectedPresentationGeneration: number): boolean {
     const recoveryIsReleasable = this.#snapshot.dirty
       ? this.#snapshot.recovery.status === "durable"
+        && this.#snapshot.recovery.buffer_generation === this.#snapshot.buffer_generation
+        || this.#snapshot.recovery.status === "conflict"
+        && this.#snapshot.recovery.current_durable
         && this.#snapshot.recovery.buffer_generation === this.#snapshot.buffer_generation
       : this.#snapshot.recovery.status === "none";
     return this.#presentations.size === 0
@@ -677,6 +774,65 @@ export class FileEditorController {
     }
   }
 
+  async #enterRecoveryConflict(recovered: FileRecoveryV1): Promise<void> {
+    if (recovered.resource_key !== this.#resourceKey) {
+      throw new Error("The recovered buffer does not match this editor resource.");
+    }
+    this.#recoveryConflict = recovered;
+    this.#clearCheckpointTimer();
+    const message = "Recovered changes conflict with newer in-memory edits. Both versions were preserved.";
+    this.#publish({
+      recovery_discovery: "conflict",
+      recovery: this.#recoveryConflictState(false, message),
+      last_error: message,
+    });
+    this.#checkpointRequestedGeneration = this.#snapshot.buffer_generation;
+    await this.#ensureCheckpointLoop();
+  }
+
+  #applyChosenRecovery(recovered: FileRecoveryV1): void {
+    const bufferGeneration = this.#snapshot.buffer_generation + 1;
+    this.#recoveryMetadata = {
+      recovery_id: recovered.recovery_id,
+      recovery_revision: recovered.recovery_revision,
+      buffer_generation: bufferGeneration,
+      needs_reconciliation: false,
+    };
+    const stale = this.#snapshot.disk_head_hash !== recovered.base_content_hash;
+    if (!stale) this.#baseRevision = this.#snapshot.disk_head_revision;
+    this.#publish({
+      base_revision: this.#baseRevision,
+      buffer_base_hash: recovered.base_content_hash,
+      saved_text: recovered.base,
+      working_text: recovered.buffer,
+      dirty: recovered.buffer !== recovered.base,
+      stale,
+      buffer_generation: bufferGeneration,
+      recovery: Object.freeze({
+        status: "durable",
+        recovery_id: recovered.recovery_id,
+        recovery_revision: recovered.recovery_revision,
+        buffer_generation: bufferGeneration,
+      }),
+    });
+    if (this.#snapshot.dirty) this.#pinPresentations();
+  }
+
+  #recoveryConflictState(currentDurable: boolean, message: string): FileEditorRecoveryState {
+    const conflict = this.#recoveryConflict;
+    if (!conflict) throw new Error("The file editor has no recovery conflict.");
+    return Object.freeze({
+      status: "conflict" as const,
+      conflicting_recovery_id: conflict.recovery_id,
+      conflicting_recovery_revision: conflict.recovery_revision,
+      current_recovery_id: this.#recoveryMetadata?.recovery_id ?? null,
+      current_recovery_revision: this.#recoveryMetadata?.recovery_revision ?? null,
+      current_durable: currentDurable,
+      buffer_generation: this.#snapshot.buffer_generation,
+      message,
+    });
+  }
+
   #pinPresentations(): void {
     for (const [surfaceId, presentation] of this.#presentations) {
       if (this.#pinnedPresentations.has(surfaceId)) continue;
@@ -735,6 +891,8 @@ export class FileEditorController {
   async #checkpointCurrentInsideQueue(): Promise<number | null> {
     if (!this.#snapshot.dirty) return null;
     if (
+      this.#snapshot.recovery_discovery === "not_started"
+      ||
       this.#snapshot.recovery_discovery === "discovering"
       || this.#snapshot.recovery_discovery === "error"
     ) {
@@ -774,27 +932,34 @@ export class FileEditorController {
       base: this.#snapshot.saved_text,
       buffer: this.#snapshot.working_text,
     };
+    const conflictMessage = this.#recoveryConflict
+      ? "Recovered changes conflict with newer in-memory edits. Both versions were preserved."
+      : null;
     this.#publish({
-      recovery: Object.freeze({
-        status: "checkpointing",
-        recovery_id: recovery?.recovery_id ?? null,
-        recovery_revision: recovery?.recovery_revision ?? null,
-        buffer_generation: bufferGeneration,
-      }),
+      recovery: conflictMessage
+        ? this.#recoveryConflictState(false, conflictMessage)
+        : Object.freeze({
+            status: "checkpointing" as const,
+            recovery_id: recovery?.recovery_id ?? null,
+            recovery_revision: recovery?.recovery_revision ?? null,
+            buffer_generation: bufferGeneration,
+          }),
     });
     let committed: FileRecoveryCheckpointV1;
     try {
       committed = await this.#client.checkpointRecovery(request);
     } catch (error) {
       this.#publish({
-        recovery: Object.freeze({
-          status: "error",
-          recovery_id: recovery?.recovery_id ?? null,
-          recovery_revision: recovery?.recovery_revision ?? null,
-          buffer_generation: this.#snapshot.buffer_generation,
-          retryable: true,
-          message: errorMessage(error),
-        }),
+        recovery: this.#recoveryConflict
+          ? this.#recoveryConflictState(false, errorMessage(error))
+          : Object.freeze({
+              status: "error" as const,
+              recovery_id: recovery?.recovery_id ?? null,
+              recovery_revision: recovery?.recovery_revision ?? null,
+              buffer_generation: this.#snapshot.buffer_generation,
+              retryable: true as const,
+              message: errorMessage(error),
+            }),
         last_error: errorMessage(error),
       });
       throw error;
@@ -809,13 +974,20 @@ export class FileEditorController {
       needs_reconciliation: false,
     };
     this.#publish({
-      recovery: Object.freeze({
-        status: "durable",
-        recovery_id: committed.recovery_id,
-        recovery_revision: committed.recovery_revision,
-        buffer_generation: bufferGeneration,
-      }),
-      last_error: null,
+      recovery: this.#recoveryConflict
+        ? this.#recoveryConflictState(
+            bufferGeneration === this.#snapshot.buffer_generation,
+            "Recovered changes conflict with newer in-memory edits. Both versions were preserved.",
+          )
+        : Object.freeze({
+            status: "durable" as const,
+            recovery_id: committed.recovery_id,
+            recovery_revision: committed.recovery_revision,
+            buffer_generation: bufferGeneration,
+          }),
+      last_error: this.#recoveryConflict
+        ? "Recovered changes conflict with newer in-memory edits. Both versions were preserved."
+        : null,
     });
     return bufferGeneration;
   }
@@ -869,6 +1041,7 @@ export class FileEditorController {
   }
 
   #retireRecoveryForCleanGeneration(bufferGeneration: number): Promise<void> {
+    if (this.#recoveryConflict) return Promise.resolve();
     return this.#enqueueDurable(async () => {
       if (this.#snapshot.dirty || this.#snapshot.buffer_generation !== bufferGeneration) return;
       try {
@@ -979,11 +1152,8 @@ export class FileEditorControllerRegistry {
     key: string;
     generation: number;
     pending: boolean;
-    promise: Promise<{
-      controller: FileEditorController;
-      resource: FileResourceTextV1;
-      accepted: boolean;
-    }>;
+    resource: Promise<FileResourceTextV1>;
+    promise: Promise<FileEditorController>;
   }>();
   readonly #authoritativeGenerations = new Map<string, number>();
   readonly #client: FileEditorResourceClient;
@@ -1029,44 +1199,62 @@ export class FileEditorControllerRegistry {
       owner.descriptor.content_hash,
     ]);
     const current = this.#authoritativeSynchronizations.get(resourceKey);
-    const bindPresentation = (synchronization: Promise<{
-      controller: FileEditorController;
-      resource: FileResourceTextV1;
-      accepted: boolean;
-    }>) => synchronization.then(({ controller, resource, accepted }) => {
-      if (presentationId) {
-        controller.bindPresentationOwner(presentationId, owner, resource.text, accepted);
-      }
-      return controller;
-    });
-    if (current?.key === key) return bindPresentation(current.promise);
+    if (current?.key === key) {
+      return current.resource.then((resource) => {
+        const latest = this.#authoritativeSynchronizations.get(resourceKey);
+        if (presentationId) {
+          this.forResource(resourceKey).bindPresentationOwner(
+            presentationId,
+            owner,
+            resource.text,
+            latest?.generation === current.generation,
+          );
+        }
+        return current.promise;
+      });
+    }
 
     const generation = (this.#authoritativeGenerations.get(resourceKey) ?? 0) + 1;
     this.#authoritativeGenerations.set(resourceKey, generation);
     const controller = this.forResource(resourceKey);
-    let synchronization: Promise<{
-      controller: FileEditorController;
-      resource: FileResourceTextV1;
-      accepted: boolean;
-    }>;
-    synchronization = (async () => {
-      const resource = await readExactText();
+    const resource = readExactText().then((exact) => {
       if (
-        resource.resource_id !== owner.resource_id
-        || resource.revision !== owner.revision
+        exact.resource_id !== owner.resource_id
+        || exact.revision !== owner.revision
       ) {
         throw new Error("The text read did not match the authoritative file snapshot.");
       }
+      return exact;
+    });
+    let synchronization: Promise<FileEditorController>;
+    synchronization = (async () => {
+      const exact = await resource;
       const latest = this.#authoritativeSynchronizations.get(resourceKey);
-      if (latest?.generation !== generation) {
-        return { controller, resource, accepted: false };
+      const attached = presentationId === undefined
+        || controller.observePresentation(presentationId).attached;
+      if (!attached) {
+        if (latest?.generation === generation) {
+          this.#authoritativeSynchronizations.delete(resourceKey);
+        }
+        return controller;
       }
+      const accepted = latest?.generation === generation || latest === undefined;
+      if (presentationId) {
+        controller.bindPresentationOwner(presentationId, owner, exact.text, accepted);
+        if (!controller.observePresentation(presentationId).attached) {
+          if (latest?.generation === generation) {
+            this.#authoritativeSynchronizations.delete(resourceKey);
+          }
+          return controller;
+        }
+      }
+      if (!accepted) return controller;
       await controller.initialize({
         owner,
-        text: resource.text,
+        text: exact.text,
         discover_recovery: true,
       });
-      return { controller, resource, accepted: true };
+      return controller;
     })().catch((error) => {
       const latest = this.#authoritativeSynchronizations.get(resourceKey);
       if (latest?.generation === generation) {
@@ -1088,9 +1276,10 @@ export class FileEditorControllerRegistry {
       key,
       generation,
       pending: true,
+      resource,
       promise: synchronization,
     });
-    return bindPresentation(synchronization);
+    return synchronization;
   }
 
   releaseAfterPostcommit(

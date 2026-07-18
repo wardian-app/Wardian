@@ -898,7 +898,7 @@ describe("FilesSurface", () => {
       .toBe("ready");
   });
 
-  it("keeps Retry Editor visible when a first mutation races recovery discovery", async () => {
+  it("exposes safe recovery conflict actions when a first mutation races discovery", async () => {
     const markdownDescriptor = descriptor({
       canonical_path: "C:/work/docs/notes.md",
       display_name: "notes.md",
@@ -947,6 +947,16 @@ describe("FilesSurface", () => {
       base: "base\n",
       buffer: "older recovered edit\n",
     });
+    vi.spyOn(client, "checkpointRecovery").mockResolvedValue({
+      schema: 1,
+      recovery_id: "recovery-current",
+      resource_key: markdownSnapshot.resource_id,
+      base_content_hash: markdownDescriptor.content_hash,
+      base_opaque_revision: "opaque-current",
+      recovery_revision: 1,
+      created_at_ms: 30,
+      updated_at_ms: 30,
+    });
     const editorRegistry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
     });
@@ -966,15 +976,18 @@ describe("FilesSurface", () => {
     pendingDiscovery.resolve([recoverySummaryValue]);
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/recovery discovery was interrupted/i);
+    expect(alert).toHaveTextContent(/recovery conflict/i);
+    expect(alert).toHaveTextContent(/both versions were preserved/i);
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
-    fireEvent.click(within(alert).getByRole("button", { name: "Retry Editor" }));
-    await waitFor(() => expect(listRecoveries).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(alert).toHaveTextContent(/newer edits were preserved/i));
+    expect(listRecoveries).toHaveBeenCalledOnce();
+    expect(within(alert).getByRole("button", { name: "Use recovered edits" }))
+      .toBeEnabled();
+    fireEvent.click(within(alert).getByRole("button", { name: "Keep current edits" }));
+    await waitFor(() => expect(screen.queryByText("Recovery conflict")).toBeNull());
     expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
-    expect(filesPresentationBadges("files-1", markdownSnapshot.resource_id)).toContainEqual({
-      badge_id: "attention",
-      label: "Attention requested",
+    expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "durable",
+      recovery_id: "recovery-current",
     });
   });
 
