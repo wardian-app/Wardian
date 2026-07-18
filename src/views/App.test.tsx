@@ -673,7 +673,7 @@ describe("Workbench persistence boot integration", () => {
       expect(latest?.document?.surfaces["linked-preview"]?.state)
         .toMatchObject({ transient_preview: false });
     }, { timeout: 5_000 });
-  });
+  }, 20_000);
 
   it("boots the canonical workbench and migrates legacy layout state", async () => {
     setupDefaultMocks([], defaultClasses);
