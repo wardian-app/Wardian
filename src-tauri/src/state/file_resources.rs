@@ -2,6 +2,7 @@
 
 use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -29,6 +30,7 @@ const DEFAULT_MAX_SAVE_TARGET_GRANTS: usize = 32;
 const DEFAULT_SAVE_TARGET_TTL: Duration = Duration::from_secs(60);
 const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_TICKET_SNAPSHOT_RESERVATION_BYTES: u64 = 4 * 1024 * 1024;
+const RECOVERY_ORPHAN_GRACE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +70,90 @@ pub enum FileResourceSaveResultV1 {
     Unchanged { revision: u64, content_hash: String },
     /// The editor base no longer matches the currently authorized target.
     StaleConflict { revision: u64, content_hash: String },
+}
+
+/// Metadata returned after an editor recovery checkpoint is durably committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileRecoveryCheckpointV1 {
+    pub schema: u8,
+    pub recovery_id: String,
+    pub resource_key: String,
+    pub base_content_hash: String,
+    pub base_opaque_revision: String,
+    pub recovery_revision: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// Optional exact durable-recovery generation cleaned after a successful
+/// guarded save. The calling WebView scope is supplied by the command layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct FileRecoveryCleanupV1 {
+    pub recovery_id: String,
+    pub expected_recovery_revision: u64,
+}
+
+/// Read-only durable editor recovery payload. It contains only the persisted
+/// base and buffer; current filesystem bytes require a live subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileRecoveryV1 {
+    pub schema: u8,
+    pub recovery_id: String,
+    pub resource_key: String,
+    pub display_name: String,
+    pub extension: Option<String>,
+    pub mime_type: String,
+    pub base_content_hash: String,
+    pub base_opaque_revision: String,
+    pub recovery_revision: u64,
+    pub base: String,
+    pub buffer: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// Structured three-way recovery merge outcome. Conflicts always return
+/// explicit markers instead of selecting either editor or disk bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FileRecoveryMergeResultV1 {
+    Clean {
+        recovery_revision: u64,
+        current_revision: u64,
+        current_content_hash: String,
+        disk_changed: bool,
+        merged_text: String,
+    },
+    Conflicted {
+        recovery_revision: u64,
+        current_revision: u64,
+        current_content_hash: String,
+        disk_changed: bool,
+        merged_text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct FileRecoveryManifestV1 {
+    schema: u8,
+    recovery_id: String,
+    resource_key: String,
+    display_name: String,
+    extension: Option<String>,
+    mime_type: String,
+    base_content_hash: String,
+    base_resource_revision: u64,
+    base_opaque_revision: String,
+    base_blob: String,
+    buffer_blob: String,
+    recovery_revision: u64,
+    webview_scope: String,
+    created_at_ms: u64,
+    updated_at_ms: u64,
 }
 
 /// Short-lived one-shot authority returned by the native Save As picker.
@@ -152,6 +238,8 @@ struct FileResourceRuntimeInner {
     events: broadcast::Sender<FileResourceEventV1>,
     app_handle: RwLock<Option<tauri::AppHandle>>,
     agent_config_resolver: RwLock<CurrentAgentConfigResolver>,
+    recovery_root: RwLock<Option<PathBuf>>,
+    recovery_io: Mutex<()>,
     #[cfg(test)]
     issue_ticket_after_validation_hook: Mutex<Option<IssueTicketAfterValidationHook>>,
     #[cfg(test)]
@@ -164,6 +252,8 @@ struct FileResourceRuntimeInner {
     grant_eviction_before_lock_hook: Mutex<Option<GrantEvictionBeforeLockHook>>,
     #[cfg(test)]
     save_after_validation_hook: Mutex<Option<SaveAfterValidationHook>>,
+    #[cfg(test)]
+    fail_recovery_before_manifest: AtomicBool,
     #[cfg(test)]
     refresh_scan_count: AtomicU64,
 }
@@ -511,6 +601,8 @@ impl FileResourceRuntime {
                 events,
                 app_handle: RwLock::new(None),
                 agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
+                recovery_root: RwLock::new(default_recovery_root()),
+                recovery_io: Mutex::new(()),
                 #[cfg(test)]
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -523,6 +615,8 @@ impl FileResourceRuntime {
                 grant_eviction_before_lock_hook: Mutex::new(None),
                 #[cfg(test)]
                 save_after_validation_hook: Mutex::new(None),
+                #[cfg(test)]
+                fail_recovery_before_manifest: AtomicBool::new(false),
                 #[cfg(test)]
                 refresh_scan_count: AtomicU64::new(0),
             }),
@@ -557,15 +651,32 @@ impl FileResourceRuntime {
                 events,
                 app_handle: RwLock::new(None),
                 agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
+                recovery_root: RwLock::new(default_recovery_root()),
+                recovery_io: Mutex::new(()),
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 ticket_publication_hook: Mutex::new(None),
                 forced_refresh_error: Mutex::new(None),
                 open_after_entry_miss_hook: Mutex::new(None),
                 grant_eviction_before_lock_hook: Mutex::new(None),
                 save_after_validation_hook: Mutex::new(None),
+                fail_recovery_before_manifest: AtomicBool::new(false),
                 refresh_scan_count: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[cfg(test)]
+    fn with_recovery_root(
+        stability_delay: Duration,
+        ticket_ttl: Duration,
+        recovery_root: PathBuf,
+    ) -> Self {
+        let runtime = Self::with_timing(stability_delay, ticket_ttl);
+        match runtime.inner.recovery_root.write() {
+            Ok(mut current) => *current = Some(recovery_root),
+            Err(poisoned) => *poisoned.into_inner() = Some(recovery_root),
+        }
+        runtime
     }
 
     pub fn attach_app_handle(&self, app_handle: tauri::AppHandle) {
@@ -595,6 +706,13 @@ impl FileResourceRuntime {
     fn revoke_test_agent_config(&self, agent_id: &str) {
         self.current_agent_config_resolver()
             .revoke_opening_snapshot(agent_id);
+    }
+
+    #[cfg(test)]
+    fn fail_next_recovery_before_manifest(&self) {
+        self.inner
+            .fail_recovery_before_manifest
+            .store(true, Ordering::Release);
     }
 
     #[must_use]
@@ -1956,6 +2074,448 @@ impl FileResourceRuntime {
         Ok(())
     }
 
+    /// Durably checkpoints one dirty editor buffer under the exact live file
+    /// subscription and a compare-and-swap recovery revision.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn checkpoint_recovery(
+        &self,
+        recovery_id: Option<&str>,
+        expected_recovery_revision: Option<u64>,
+        resource_id: &str,
+        subscription_id: &str,
+        base_revision: u64,
+        base_content_hash: &str,
+        resource_key: &str,
+        webview_scope: &str,
+        buffer: &str,
+    ) -> Result<FileRecoveryCheckpointV1, FileResourceErrorV1> {
+        validate_submitted_text(buffer, &self.inner.limits)?;
+        if resource_key.trim().is_empty() || webview_scope.trim().is_empty() {
+            return Err(error(
+                "invalid_request",
+                "recovery resource key and webview scope must not be empty",
+            ));
+        }
+        let operation = {
+            let entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            if !entry.subscribers.contains_key(subscription_id) {
+                return Err(error(
+                    "unauthorized_resource",
+                    "subscription does not grant the requested resource",
+                ));
+            }
+            entry.operation.clone()
+        };
+        let _operation = operation.lock().await;
+        let (current_revision, authorized, descriptor, revision_token) = self
+            .validated_save_authorization(resource_id, subscription_id)
+            .await?;
+        if file_resource_id(&descriptor.canonical_path) != resource_key
+            || resource_id != resource_key
+        {
+            return Err(error(
+                "unauthorized_resource",
+                "live subscription does not match the recovery resource key",
+            ));
+        }
+        let recovery_root = self.recovery_root()?;
+        let _recovery_io = self.inner.recovery_io.lock().await;
+        let now = now_epoch_ms();
+        let (manifest, base) = match recovery_id {
+            Some(recovery_id) => {
+                let current = load_recovery_manifest(&recovery_root, recovery_id)?;
+                authorize_recovery_manifest(&current, resource_key, webview_scope)?;
+                if expected_recovery_revision != Some(current.recovery_revision) {
+                    return Err(error(
+                        "recovery_conflict",
+                        "recovery checkpoint revision is no longer current",
+                    ));
+                }
+                if current.base_resource_revision != base_revision
+                    || current.base_content_hash != base_content_hash
+                {
+                    return Err(error(
+                        "recovery_conflict",
+                        "recovery checkpoint base no longer matches",
+                    ));
+                }
+                let base = read_recovery_blob(
+                    &recovery_root,
+                    &current,
+                    &current.base_blob,
+                    &self.inner.limits,
+                )?;
+                (current, base)
+            }
+            None => {
+                if expected_recovery_revision.is_some() {
+                    return Err(error(
+                        "recovery_conflict",
+                        "a new recovery checkpoint has no prior revision",
+                    ));
+                }
+                if current_revision != base_revision || descriptor.content_hash != base_content_hash
+                {
+                    return Err(error(
+                        "stale_revision",
+                        "recovery base no longer matches the authorized file",
+                    ));
+                }
+                let maximum_length_bytes = self.inner.limits.monaco_max_size_bytes;
+                let base = tauri::async_runtime::spawn_blocking(move || {
+                    authorized.read_verified_text(&revision_token, maximum_length_bytes)
+                })
+                .await
+                .map_err(join_error)??;
+                let recovery_id = Uuid::new_v4().to_string();
+                (
+                    FileRecoveryManifestV1 {
+                        schema: 1,
+                        recovery_id,
+                        resource_key: resource_key.to_string(),
+                        display_name: descriptor.display_name,
+                        extension: descriptor.extension,
+                        mime_type: descriptor.mime_type,
+                        base_content_hash: descriptor.content_hash,
+                        base_resource_revision: base_revision,
+                        base_opaque_revision: Uuid::new_v4().to_string(),
+                        base_blob: String::new(),
+                        buffer_blob: String::new(),
+                        recovery_revision: 0,
+                        webview_scope: webview_scope.to_string(),
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    },
+                    base,
+                )
+            }
+        };
+        let fail_before_manifest = {
+            #[cfg(test)]
+            {
+                self.inner
+                    .fail_recovery_before_manifest
+                    .swap(false, Ordering::AcqRel)
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        let committed = write_recovery_checkpoint(
+            &recovery_root,
+            manifest,
+            &base,
+            buffer,
+            now,
+            fail_before_manifest,
+        )?;
+        Ok(recovery_checkpoint_metadata(&committed))
+    }
+
+    /// Reads only persisted recovery bytes under the exact WebView and stable
+    /// resource key. This deliberately performs no filesystem authorization.
+    pub async fn get_recovery(
+        &self,
+        recovery_id: &str,
+        resource_key: &str,
+        webview_scope: &str,
+    ) -> Result<FileRecoveryV1, FileResourceErrorV1> {
+        let recovery_root = self.recovery_root()?;
+        let _recovery_io = self.inner.recovery_io.lock().await;
+        let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
+        authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
+        let base = read_recovery_blob(
+            &recovery_root,
+            &manifest,
+            &manifest.base_blob,
+            &self.inner.limits,
+        )?;
+        let buffer = read_recovery_blob(
+            &recovery_root,
+            &manifest,
+            &manifest.buffer_blob,
+            &self.inner.limits,
+        )?;
+        garbage_collect_recovery_blobs(&recovery_root, &manifest);
+        Ok(FileRecoveryV1 {
+            schema: 1,
+            recovery_id: manifest.recovery_id,
+            resource_key: manifest.resource_key,
+            display_name: manifest.display_name,
+            extension: manifest.extension,
+            mime_type: manifest.mime_type,
+            base_content_hash: manifest.base_content_hash,
+            base_opaque_revision: manifest.base_opaque_revision,
+            recovery_revision: manifest.recovery_revision,
+            base,
+            buffer,
+            created_at_ms: manifest.created_at_ms,
+            updated_at_ms: manifest.updated_at_ms,
+        })
+    }
+
+    /// Discards one exact scoped recovery generation after a recovery CAS
+    /// check. Discard never opens or mutates the underlying file resource.
+    pub async fn discard_recovery(
+        &self,
+        recovery_id: &str,
+        expected_recovery_revision: u64,
+        resource_key: &str,
+        webview_scope: &str,
+    ) -> Result<(), FileResourceErrorV1> {
+        let recovery_root = self.recovery_root()?;
+        let _recovery_io = self.inner.recovery_io.lock().await;
+        let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
+        authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
+        if manifest.recovery_revision != expected_recovery_revision {
+            return Err(error(
+                "recovery_conflict",
+                "recovery checkpoint revision is no longer current",
+            ));
+        }
+        remove_recovery_record(&recovery_root, recovery_id)
+    }
+
+    /// Three-way merges persisted base/editor bytes with the newly scanned
+    /// disk head from one exact, currently authorized live subscription.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn merge_recovery(
+        &self,
+        recovery_id: &str,
+        expected_recovery_revision: u64,
+        resource_key: &str,
+        webview_scope: &str,
+        resource_id: &str,
+        subscription_id: &str,
+    ) -> Result<FileRecoveryMergeResultV1, FileResourceErrorV1> {
+        let operation = {
+            let entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            if !entry.subscribers.contains_key(subscription_id) {
+                return Err(error(
+                    "unauthorized_resource",
+                    "subscription does not grant the requested resource",
+                ));
+            }
+            entry.operation.clone()
+        };
+        let _operation = operation.lock().await;
+        let (_, authorized, descriptor, _) = self
+            .validated_save_authorization(resource_id, subscription_id)
+            .await?;
+        if file_resource_id(&descriptor.canonical_path) != resource_key
+            || resource_id != resource_key
+        {
+            return Err(error(
+                "unauthorized_resource",
+                "live subscription does not match the recovery resource key",
+            ));
+        }
+
+        let recovery_root = self.recovery_root()?;
+        let (manifest, base, buffer) = {
+            let _recovery_io = self.inner.recovery_io.lock().await;
+            let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
+            authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
+            if manifest.recovery_revision != expected_recovery_revision {
+                return Err(error(
+                    "recovery_conflict",
+                    "recovery checkpoint revision is no longer current",
+                ));
+            }
+            let base = read_recovery_blob(
+                &recovery_root,
+                &manifest,
+                &manifest.base_blob,
+                &self.inner.limits,
+            )?;
+            let buffer = read_recovery_blob(
+                &recovery_root,
+                &manifest,
+                &manifest.buffer_blob,
+                &self.inner.limits,
+            )?;
+            validate_recovery_diff_side(&base, &self.inner.limits)?;
+            validate_recovery_diff_side(&buffer, &self.inner.limits)?;
+            (manifest, base, buffer)
+        };
+
+        let (authorized, snapshot) = self.refresh_from_authorization(authorized).await?;
+        let (current_descriptor, current_token) = snapshot.into_parts();
+        if !matches!(
+            current_descriptor.renderer_kind,
+            FileRendererKind::Text | FileRendererKind::Markdown
+        ) || current_descriptor.encoding.as_deref() != Some("utf-8")
+            || !current_descriptor.capabilities.draft
+        {
+            return Err(error(
+                "unsupported_content",
+                "current file is not an editable UTF-8 text model",
+            ));
+        }
+        if !current_descriptor.capabilities.changes {
+            return Err(error(
+                "file_too_large",
+                "current file exceeds the per-side recovery merge limits",
+            ));
+        }
+        let maximum_length_bytes = self.inner.limits.monaco_max_size_bytes;
+        let authorized_for_read = authorized.clone();
+        let token_for_read = current_token.clone();
+        let current = tauri::async_runtime::spawn_blocking(move || {
+            authorized_for_read.read_verified_text(&token_for_read, maximum_length_bytes)
+        })
+        .await
+        .map_err(join_error)??;
+        validate_recovery_diff_side(&current, &self.inner.limits)?;
+
+        let (current_revision, event, user_grant_update) = {
+            let mut entries = self.inner.entries.lock().await;
+            let entry = entries
+                .get_mut(resource_id)
+                .ok_or_else(|| error("resource_not_found", "file resource is not open"))?;
+            let access = entry.subscribers.get_mut(subscription_id).ok_or_else(|| {
+                error(
+                    "unauthorized_resource",
+                    "subscription does not grant the requested resource",
+                )
+            })?;
+            access.authorized = authorized.clone();
+            let user_grant_update = match &access.claim {
+                FileAccessClaim::User { capability_id } => {
+                    Some((capability_id.clone(), authorized))
+                }
+                FileAccessClaim::Agent { .. } => None,
+            };
+            entry.revision_token = current_token;
+            let changed = entry.descriptor.content_hash != current_descriptor.content_hash
+                || entry.descriptor.unavailable_reason != current_descriptor.unavailable_reason;
+            entry.descriptor = current_descriptor.clone();
+            let event = changed.then(|| {
+                entry.revision = entry.revision.saturating_add(1);
+                FileResourceEventV1 {
+                    schema: 1,
+                    resource_id: resource_id.to_string(),
+                    revision: entry.revision,
+                    descriptor: current_descriptor.clone(),
+                }
+            });
+            (entry.revision, event, user_grant_update)
+        };
+        if let Some((capability_id, authorized)) = user_grant_update {
+            if let Some(grant) = self
+                .inner
+                .user_file_grants
+                .lock()
+                .await
+                .get_mut(&capability_id)
+            {
+                grant.authorized = authorized;
+                grant.last_used_at = Instant::now();
+            }
+        }
+        if let Some(event) = event {
+            self.emit(event);
+        }
+
+        let current_content_hash = current_descriptor.content_hash;
+        let disk_changed = current_content_hash != manifest.base_content_hash;
+        let merged = if disk_changed {
+            diffy::merge(&base, &buffer, &current)
+        } else {
+            Ok(buffer)
+        };
+        Ok(match merged {
+            Ok(merged_text) => FileRecoveryMergeResultV1::Clean {
+                recovery_revision: manifest.recovery_revision,
+                current_revision,
+                current_content_hash,
+                disk_changed,
+                merged_text,
+            },
+            Err(merged_text) => FileRecoveryMergeResultV1::Conflicted {
+                recovery_revision: manifest.recovery_revision,
+                current_revision,
+                current_content_hash,
+                disk_changed,
+                merged_text,
+            },
+        })
+    }
+
+    /// Performs a guarded save and then best-effort cleanup of one exact
+    /// scoped recovery generation. A committed save is never reported as a
+    /// failure solely because recovery cleanup raced or became unavailable.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_text_with_recovery_cleanup(
+        &self,
+        resource_id: &str,
+        subscription_id: &str,
+        expected_revision: u64,
+        buffer_base_hash: &str,
+        text: &str,
+        recovery_cleanup: Option<&FileRecoveryCleanupV1>,
+        webview_scope: &str,
+    ) -> Result<FileResourceSaveResultV1, FileResourceErrorV1> {
+        if recovery_cleanup.is_some() && webview_scope.trim().is_empty() {
+            return Err(error(
+                "invalid_request",
+                "recovery cleanup requires a calling webview scope",
+            ));
+        }
+        let result = self
+            .save_text(
+                resource_id,
+                subscription_id,
+                expected_revision,
+                buffer_base_hash,
+                text,
+            )
+            .await?;
+        if matches!(
+            result,
+            FileResourceSaveResultV1::Saved { .. } | FileResourceSaveResultV1::Unchanged { .. }
+        ) {
+            if let Some(cleanup) = recovery_cleanup {
+                if let Err(failure) = self
+                    .discard_recovery(
+                        &cleanup.recovery_id,
+                        cleanup.expected_recovery_revision,
+                        resource_id,
+                        webview_scope,
+                    )
+                    .await
+                {
+                    crate::manager::log_debug(&format!(
+                        "[Wardian] saved file but left recovery {} for conservative cleanup: {}",
+                        cleanup.recovery_id, failure
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn recovery_root(&self) -> Result<PathBuf, FileResourceErrorV1> {
+        self.inner
+            .recovery_root
+            .read()
+            .map(|root| root.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            .ok_or_else(|| {
+                error(
+                    "runtime_unavailable",
+                    "Wardian recovery home is unavailable",
+                )
+            })
+    }
+
     /// Saves UTF-8 text through one exact live subscription and its private
     /// retained-handle revision capability.
     ///
@@ -2957,6 +3517,31 @@ fn validate_submitted_text(
     text: &str,
     limits: &FileResourceLimits,
 ) -> Result<(), FileResourceErrorV1> {
+    let (size_bytes, line_count) = text_size_and_line_count(text)?;
+    if !limits.allows_monaco(size_bytes, line_count) {
+        return Err(error(
+            "file_too_large",
+            "submitted text exceeds the complete model limits",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_diff_side(
+    text: &str,
+    limits: &FileResourceLimits,
+) -> Result<(), FileResourceErrorV1> {
+    let (size_bytes, line_count) = text_size_and_line_count(text)?;
+    if !limits.allows_diff_side(size_bytes, line_count) {
+        return Err(error(
+            "file_too_large",
+            "recovery text exceeds the per-side diff limits",
+        ));
+    }
+    Ok(())
+}
+
+fn text_size_and_line_count(text: &str) -> Result<(u64, u64), FileResourceErrorV1> {
     let size_bytes = u64::try_from(text.len()).map_err(|_| {
         error(
             "file_too_large",
@@ -2981,13 +3566,7 @@ fn validate_submitted_text(
             _ => {}
         }
     }
-    if !limits.allows_monaco(size_bytes, line_count) {
-        return Err(error(
-            "file_too_large",
-            "submitted text exceeds the complete model limits",
-        ));
-    }
-    Ok(())
+    Ok((size_bytes, line_count))
 }
 
 fn prospective_save_target_canonical_path(
@@ -3263,6 +3842,487 @@ fn file_resource_id(canonical_path: &str) -> String {
     format!("file:{canonical_path}")
 }
 
+fn default_recovery_root() -> Option<PathBuf> {
+    crate::utils::fs::get_wardian_home().map(|home| home.join("files").join("recovery"))
+}
+
+fn recovery_record_dir(
+    recovery_root: &Path,
+    recovery_id: &str,
+) -> Result<PathBuf, FileResourceErrorV1> {
+    let parsed = Uuid::parse_str(recovery_id).map_err(|_| {
+        error(
+            "invalid_request",
+            "recovery id is not a valid opaque identifier",
+        )
+    })?;
+    if parsed.to_string() != recovery_id {
+        return Err(error(
+            "invalid_request",
+            "recovery id is not in canonical form",
+        ));
+    }
+    Ok(recovery_root.join(recovery_id))
+}
+
+fn validate_direct_child_directory(
+    parent: &Path,
+    child: &Path,
+    label: &str,
+) -> Result<(), FileResourceErrorV1> {
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot inspect recovery {label} parent: {cause}"),
+        )
+    })?;
+    let child_metadata = std::fs::symlink_metadata(child).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot inspect recovery {label}: {cause}"),
+        )
+    })?;
+    if !parent_metadata.file_type().is_dir() || !child_metadata.file_type().is_dir() {
+        return Err(error(
+            "invalid_recovery",
+            format!("recovery {label} is not an ordinary directory"),
+        ));
+    }
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot resolve recovery {label} parent: {cause}"),
+        )
+    })?;
+    let canonical_child = std::fs::canonicalize(child).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot resolve recovery {label}: {cause}"),
+        )
+    })?;
+    if canonical_child.parent() != Some(canonical_parent.as_path()) {
+        return Err(error(
+            "invalid_recovery",
+            format!("recovery {label} is not a direct child of its backend-owned parent"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_root(recovery_root: &Path) -> Result<(), FileResourceErrorV1> {
+    let metadata = std::fs::symlink_metadata(recovery_root).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot inspect recovery root: {cause}"),
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(error(
+            "invalid_recovery",
+            "recovery root is not an ordinary directory",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_record_dir(
+    recovery_root: &Path,
+    recovery_id: &str,
+) -> Result<PathBuf, FileResourceErrorV1> {
+    let record_dir = recovery_record_dir(recovery_root, recovery_id)?;
+    match std::fs::symlink_metadata(&record_dir) {
+        Ok(_) => {}
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error(
+                "recovery_not_found",
+                "recovery checkpoint does not exist",
+            ));
+        }
+        Err(cause) => {
+            return Err(error(
+                "recovery_unavailable",
+                format!("cannot inspect recovery checkpoint: {cause}"),
+            ));
+        }
+    }
+    validate_direct_child_directory(recovery_root, &record_dir, "record directory")?;
+    Ok(record_dir)
+}
+
+fn recovery_checkpoint_metadata(manifest: &FileRecoveryManifestV1) -> FileRecoveryCheckpointV1 {
+    FileRecoveryCheckpointV1 {
+        schema: 1,
+        recovery_id: manifest.recovery_id.clone(),
+        resource_key: manifest.resource_key.clone(),
+        base_content_hash: manifest.base_content_hash.clone(),
+        base_opaque_revision: manifest.base_opaque_revision.clone(),
+        recovery_revision: manifest.recovery_revision,
+        created_at_ms: manifest.created_at_ms,
+        updated_at_ms: manifest.updated_at_ms,
+    }
+}
+
+fn authorize_recovery_manifest(
+    manifest: &FileRecoveryManifestV1,
+    resource_key: &str,
+    webview_scope: &str,
+) -> Result<(), FileResourceErrorV1> {
+    if manifest.schema != 1
+        || manifest.resource_key != resource_key
+        || manifest.webview_scope != webview_scope
+    {
+        return Err(error(
+            "unauthorized_recovery",
+            "recovery does not belong to this resource and webview scope",
+        ));
+    }
+    Ok(())
+}
+
+fn load_recovery_manifest(
+    recovery_root: &Path,
+    recovery_id: &str,
+) -> Result<FileRecoveryManifestV1, FileResourceErrorV1> {
+    let record_dir = validate_recovery_record_dir(recovery_root, recovery_id)?;
+    let path = record_dir.join("manifest.json");
+    let metadata = std::fs::symlink_metadata(&path).map_err(|cause| {
+        if cause.kind() == std::io::ErrorKind::NotFound {
+            error("recovery_not_found", "recovery checkpoint does not exist")
+        } else {
+            error(
+                "recovery_unavailable",
+                format!("cannot inspect recovery manifest: {cause}"),
+            )
+        }
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 {
+        return Err(error(
+            "invalid_recovery",
+            "recovery manifest is not a bounded ordinary file",
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot read recovery manifest: {cause}"),
+        )
+    })?;
+    let manifest: FileRecoveryManifestV1 = serde_json::from_slice(&bytes).map_err(|cause| {
+        error(
+            "invalid_recovery",
+            format!("recovery manifest is invalid: {cause}"),
+        )
+    })?;
+    if manifest.recovery_id != recovery_id || manifest.schema != 1 {
+        return Err(error(
+            "invalid_recovery",
+            "recovery manifest identity or schema is invalid",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn recovery_blob_name(text: &str) -> String {
+    format!("sha256-{:x}.txt", Sha256::digest(text.as_bytes()))
+}
+
+fn is_recovery_blob_name(blob_name: &str) -> bool {
+    blob_name.starts_with("sha256-")
+        && blob_name.ends_with(".txt")
+        && blob_name.len() == "sha256-".len() + 64 + ".txt".len()
+        && blob_name["sha256-".len()..blob_name.len() - ".txt".len()]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn write_recovery_blob(record_dir: &Path, text: &str) -> Result<String, FileResourceErrorV1> {
+    let blob_name = recovery_blob_name(text);
+    let blobs_dir = record_dir.join("blobs");
+    std::fs::create_dir_all(&blobs_dir).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot create recovery blob directory: {cause}"),
+        )
+    })?;
+    validate_direct_child_directory(record_dir, &blobs_dir, "blob directory")?;
+    let path = blobs_dir.join(&blob_name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            validate_existing_recovery_blob(&path, &metadata, text)?;
+            return Ok(blob_name);
+        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Err(cause) => {
+            return Err(error(
+                "invalid_recovery",
+                format!("cannot inspect recovery blob target: {cause}"),
+            ));
+        }
+    }
+    match OpenOptions::new().create_new(true).write(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|cause| {
+                    let _ = std::fs::remove_file(&path);
+                    error(
+                        "recovery_unavailable",
+                        format!("cannot write recovery blob: {cause}"),
+                    )
+                })?;
+            sync_recovery_directory(&blobs_dir).map_err(|cause| {
+                error(
+                    "recovery_unavailable",
+                    format!("cannot flush recovery blob directory: {cause}"),
+                )
+            })?;
+        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&path).map_err(|metadata_cause| {
+                error(
+                    "invalid_recovery",
+                    format!("cannot inspect existing recovery blob: {metadata_cause}"),
+                )
+            })?;
+            validate_existing_recovery_blob(&path, &metadata, text)?;
+        }
+        Err(cause) => {
+            return Err(error(
+                "recovery_unavailable",
+                format!("cannot create recovery blob: {cause}"),
+            ));
+        }
+    }
+    Ok(blob_name)
+}
+
+fn validate_existing_recovery_blob(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    text: &str,
+) -> Result<(), FileResourceErrorV1> {
+    let expected_length = u64::try_from(text.len()).map_err(|_| {
+        error(
+            "file_too_large",
+            "recovery blob length cannot fit in the supported size",
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() != expected_length {
+        return Err(error(
+            "invalid_recovery",
+            "existing recovery blob is not the expected bounded ordinary file",
+        ));
+    }
+    let existing = std::fs::read(path).map_err(|cause| {
+        error(
+            "invalid_recovery",
+            format!("cannot verify existing recovery blob: {cause}"),
+        )
+    })?;
+    if existing != text.as_bytes() {
+        return Err(error(
+            "invalid_recovery",
+            "hash-addressed recovery blob contains different bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn read_recovery_blob(
+    recovery_root: &Path,
+    manifest: &FileRecoveryManifestV1,
+    blob_name: &str,
+    limits: &FileResourceLimits,
+) -> Result<String, FileResourceErrorV1> {
+    if !is_recovery_blob_name(blob_name) {
+        return Err(error(
+            "invalid_recovery",
+            "recovery blob name is not hash-addressed",
+        ));
+    }
+    let record_dir = validate_recovery_record_dir(recovery_root, &manifest.recovery_id)?;
+    let blobs_dir = record_dir.join("blobs");
+    validate_direct_child_directory(&record_dir, &blobs_dir, "blob directory")?;
+    let path = blobs_dir.join(blob_name);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|cause| {
+        error(
+            "invalid_recovery",
+            format!("recovery blob is unavailable: {cause}"),
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > limits.monaco_max_size_bytes {
+        return Err(error(
+            "invalid_recovery",
+            "recovery blob is not a bounded ordinary file",
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|cause| {
+        error(
+            "invalid_recovery",
+            format!("cannot read recovery blob: {cause}"),
+        )
+    })?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| error("invalid_recovery", "recovery blob is not valid UTF-8 text"))?;
+    if recovery_blob_name(&text) != blob_name {
+        return Err(error(
+            "invalid_recovery",
+            "recovery blob hash does not match its immutable name",
+        ));
+    }
+    validate_submitted_text(&text, limits).map_err(|_| {
+        error(
+            "invalid_recovery",
+            "recovery blob exceeds the complete text-model limits",
+        )
+    })?;
+    Ok(text)
+}
+
+fn write_recovery_checkpoint(
+    recovery_root: &Path,
+    mut manifest: FileRecoveryManifestV1,
+    base: &str,
+    buffer: &str,
+    now: u64,
+    fail_before_manifest: bool,
+) -> Result<FileRecoveryManifestV1, FileResourceErrorV1> {
+    let record_dir = recovery_record_dir(recovery_root, &manifest.recovery_id)?;
+    std::fs::create_dir_all(recovery_root).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot create recovery root: {cause}"),
+        )
+    })?;
+    validate_recovery_root(recovery_root)?;
+    std::fs::create_dir(&record_dir)
+        .or_else(|cause| {
+            if cause.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(cause)
+            }
+        })
+        .map_err(|cause| {
+            error(
+                "recovery_unavailable",
+                format!("cannot create recovery directory: {cause}"),
+            )
+        })?;
+    validate_recovery_record_dir(recovery_root, &manifest.recovery_id)?;
+    manifest.base_blob = write_recovery_blob(&record_dir, base)?;
+    manifest.buffer_blob = write_recovery_blob(&record_dir, buffer)?;
+    manifest.recovery_revision = manifest
+        .recovery_revision
+        .checked_add(1)
+        .ok_or_else(|| error("recovery_conflict", "recovery revision is exhausted"))?;
+    manifest.updated_at_ms = now;
+    if fail_before_manifest {
+        return Err(error(
+            "recovery_unavailable",
+            "injected failure before recovery manifest replacement",
+        ));
+    }
+    wardian_core::conversations::write_json_atomic(&record_dir.join("manifest.json"), &manifest)
+        .map_err(|cause| {
+            error(
+                "recovery_unavailable",
+                format!("cannot commit recovery manifest: {cause}"),
+            )
+        })?;
+    garbage_collect_recovery_blobs(recovery_root, &manifest);
+    Ok(manifest)
+}
+
+#[cfg(not(windows))]
+fn sync_recovery_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_recovery_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn garbage_collect_recovery_blobs(recovery_root: &Path, manifest: &FileRecoveryManifestV1) {
+    let Ok(record_dir) = validate_recovery_record_dir(recovery_root, &manifest.recovery_id) else {
+        return;
+    };
+    let blobs_dir = record_dir.join("blobs");
+    if validate_direct_child_directory(&record_dir, &blobs_dir, "blob directory").is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(blobs_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_recovery_blob_name(name)
+            || name == manifest.base_blob
+            || name == manifest.buffer_blob
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !metadata.file_type().is_file()
+            || metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_none_or(|age| age < RECOVERY_ORPHAN_GRACE_PERIOD)
+        {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
+fn remove_recovery_record(
+    recovery_root: &Path,
+    recovery_id: &str,
+) -> Result<(), FileResourceErrorV1> {
+    let record_dir = validate_recovery_record_dir(recovery_root, recovery_id)?;
+    let root = std::fs::canonicalize(recovery_root).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot resolve recovery root before discard: {cause}"),
+        )
+    })?;
+    let record = std::fs::canonicalize(&record_dir).map_err(|cause| {
+        if cause.kind() == std::io::ErrorKind::NotFound {
+            error("recovery_not_found", "recovery checkpoint does not exist")
+        } else {
+            error(
+                "recovery_unavailable",
+                format!("cannot resolve recovery checkpoint before discard: {cause}"),
+            )
+        }
+    })?;
+    let metadata = std::fs::symlink_metadata(&record).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot inspect recovery checkpoint before discard: {cause}"),
+        )
+    })?;
+    if !metadata.file_type().is_dir() || record.parent() != Some(root.as_path()) {
+        return Err(error(
+            "invalid_recovery",
+            "recovery checkpoint is outside the configured recovery root",
+        ));
+    }
+    std::fs::remove_dir_all(&record).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot discard recovery checkpoint: {cause}"),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3282,6 +4342,600 @@ mod tests {
 
     fn test_runtime() -> FileResourceRuntime {
         FileResourceRuntime::with_timing(Duration::from_millis(150), Duration::from_secs(60))
+    }
+
+    #[tokio::test]
+    async fn file_recovery_checkpoint_create_update_enforces_cas_revision() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base text").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            temp.path().join("recovery"),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        let created = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "first edit",
+            )
+            .await
+            .expect("create recovery");
+        assert_eq!(created.recovery_revision, 1);
+
+        let updated = runtime
+            .checkpoint_recovery(
+                Some(&created.recovery_id),
+                Some(created.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "second edit",
+            )
+            .await
+            .expect("update recovery");
+        assert_eq!(updated.recovery_revision, 2);
+
+        let conflict = runtime
+            .checkpoint_recovery(
+                Some(&created.recovery_id),
+                Some(created.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "stale edit",
+            )
+            .await
+            .expect_err("stale recovery CAS must fail");
+        assert_eq!(conflict.code(), "recovery_conflict");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_restart_read_is_scoped_and_discard_is_cas_guarded() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "stored base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "stored buffer",
+            )
+            .await
+            .expect("checkpoint");
+        drop(runtime);
+        fs::write(&path, "current disk secret").expect("external write");
+
+        let restarted = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let restored = restarted
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect("read-only restart restore");
+        assert_eq!(restored.base, "stored base");
+        assert_eq!(restored.buffer, "stored buffer");
+        assert!(!restored.base.contains("current disk secret"));
+        assert!(!restored.buffer.contains("current disk secret"));
+        let current_read = restarted
+            .read_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                Some(&config),
+            )
+            .await
+            .expect_err("recovery-only runtime must not revive a file subscription");
+        assert_eq!(current_read.code(), "resource_not_found");
+
+        let wrong_scope = restarted
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "other")
+            .await
+            .expect_err("another webview must not read recovery");
+        assert_eq!(wrong_scope.code(), "unauthorized_recovery");
+        let wrong_resource = restarted
+            .get_recovery(&checkpoint.recovery_id, "file:/another.txt", "main")
+            .await
+            .expect_err("another resource must not read recovery");
+        assert_eq!(wrong_resource.code(), "unauthorized_recovery");
+
+        let stale_discard = restarted
+            .discard_recovery(
+                &checkpoint.recovery_id,
+                checkpoint.recovery_revision + 1,
+                &opened.resource_id,
+                "main",
+            )
+            .await
+            .expect_err("discard must enforce recovery CAS");
+        assert_eq!(stale_discard.code(), "recovery_conflict");
+        restarted
+            .discard_recovery(
+                &checkpoint.recovery_id,
+                checkpoint.recovery_revision,
+                &opened.resource_id,
+                "main",
+            )
+            .await
+            .expect("discard");
+        let discarded = restarted
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect_err("discarded recovery must stay gone");
+        assert_eq!(discarded.code(), "recovery_not_found");
+        assert_eq!(
+            fs::read_to_string(path).expect("disk bytes"),
+            "current disk secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_recovery_manifest_last_failure_never_mixes_blob_generations() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "durable base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let first = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "first generation",
+            )
+            .await
+            .expect("first checkpoint");
+        let first_manifest =
+            load_recovery_manifest(&recovery_root, &first.recovery_id).expect("first manifest");
+        assert!(first_manifest.base_blob.starts_with("sha256-"));
+        assert!(first_manifest.buffer_blob.starts_with("sha256-"));
+
+        runtime.fail_next_recovery_before_manifest();
+        let interrupted = runtime
+            .checkpoint_recovery(
+                Some(&first.recovery_id),
+                Some(first.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "uncommitted generation",
+            )
+            .await
+            .expect_err("fault before manifest must fail checkpoint");
+        assert_eq!(interrupted.code(), "recovery_unavailable");
+        drop(runtime);
+
+        let restarted = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let restored = restarted
+            .get_recovery(&first.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect("restore committed generation");
+        assert_eq!(restored.recovery_revision, first.recovery_revision);
+        assert_eq!(restored.base, "durable base");
+        assert_eq!(restored.buffer, "first generation");
+        assert_ne!(restored.buffer, "uncommitted generation");
+        let manifest = load_recovery_manifest(
+            &restarted.recovery_root().expect("recovery root"),
+            &first.recovery_id,
+        )
+        .expect("committed manifest");
+        let blob_count = fs::read_dir(
+            restarted
+                .recovery_root()
+                .expect("recovery root")
+                .join(&first.recovery_id)
+                .join("blobs"),
+        )
+        .expect("blob directory")
+        .count();
+        assert!(
+            blob_count > 2,
+            "fresh unreachable blob is retained conservatively"
+        );
+        assert!(is_recovery_blob_name(&manifest.base_blob));
+    }
+
+    #[tokio::test]
+    async fn file_recovery_merge_reports_clean_and_conflicted_stale_outcomes() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "one\ntwo\nthree\n").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let clean_checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "ONE\ntwo\nthree\n",
+            )
+            .await
+            .expect("clean checkpoint");
+        fs::write(&path, "one\ntwo\nTHREE\n").expect("external clean edit");
+
+        let clean = runtime
+            .merge_recovery(
+                &clean_checkpoint.recovery_id,
+                clean_checkpoint.recovery_revision,
+                &opened.resource_id,
+                "main",
+                &opened.resource_id,
+                &opened.subscription_id,
+            )
+            .await
+            .expect("clean merge");
+        match clean {
+            FileRecoveryMergeResultV1::Clean {
+                disk_changed,
+                merged_text,
+                ..
+            } => {
+                assert!(disk_changed);
+                assert_eq!(merged_text, "ONE\ntwo\nTHREE\n");
+            }
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(&path).expect("disk after clean merge"),
+            "one\ntwo\nTHREE\n"
+        );
+
+        let conflict_path = workspace.join("conflict.txt");
+        fs::write(&conflict_path, "shared line\n").expect("conflict fixture");
+        let conflict_opened = runtime
+            .open_agent_file("agent-a", &config, &conflict_path, None)
+            .await
+            .expect("open conflict");
+        let conflict_checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &conflict_opened.resource_id,
+                &conflict_opened.subscription_id,
+                conflict_opened.revision,
+                &conflict_opened.descriptor.content_hash,
+                &conflict_opened.resource_id,
+                "main",
+                "buffer line\n",
+            )
+            .await
+            .expect("conflict checkpoint");
+        fs::write(&conflict_path, "disk line\n").expect("external conflict edit");
+        let conflicted = runtime
+            .merge_recovery(
+                &conflict_checkpoint.recovery_id,
+                conflict_checkpoint.recovery_revision,
+                &conflict_opened.resource_id,
+                "main",
+                &conflict_opened.resource_id,
+                &conflict_opened.subscription_id,
+            )
+            .await
+            .expect("conflicted merge outcome");
+        match conflicted {
+            FileRecoveryMergeResultV1::Conflicted {
+                disk_changed,
+                merged_text,
+                ..
+            } => {
+                assert!(disk_changed);
+                assert!(merged_text.contains("<<<<<<<"));
+                assert!(merged_text.contains("buffer line"));
+                assert!(merged_text.contains("======="));
+                assert!(merged_text.contains("disk line"));
+                assert!(merged_text.contains(">>>>>>>"));
+            }
+            other => panic!("expected conflicted merge, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(conflict_path).expect("disk after conflict merge"),
+            "disk line\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_recovery_merge_requires_new_live_authorization_after_restart() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            temp.path().join("recovery"),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "buffer",
+            )
+            .await
+            .expect("checkpoint");
+        runtime.revoke_test_agent_config("agent-a");
+
+        let restored = runtime
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect("stored bytes remain readable");
+        assert_eq!(restored.buffer, "buffer");
+        let merge = runtime
+            .merge_recovery(
+                &checkpoint.recovery_id,
+                checkpoint.recovery_revision,
+                &opened.resource_id,
+                "main",
+                &opened.resource_id,
+                &opened.subscription_id,
+            )
+            .await
+            .expect_err("revoked subscription must not read disk for merge");
+        assert_eq!(merge.code(), "unauthorized_path");
+        let save = runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                "recovery must not authorize this write",
+            )
+            .await
+            .expect_err("recovery must not revive revoked file authority");
+        assert_eq!(save.code(), "unauthorized_path");
+        assert_eq!(fs::read_to_string(path).expect("disk bytes"), "base");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_rejects_oversized_and_tampered_bodies_without_path_escape() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let oversized = "x".repeat(
+            usize::try_from(FileResourceLimits::default().monaco_max_size_bytes)
+                .expect("limit fits usize")
+                + 1,
+        );
+        let too_large = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                &oversized,
+            )
+            .await
+            .expect_err("oversized recovery buffer must fail");
+        assert_eq!(too_large.code(), "file_too_large");
+
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "buffer",
+            )
+            .await
+            .expect("checkpoint");
+        let mut manifest =
+            load_recovery_manifest(&recovery_root, &checkpoint.recovery_id).expect("manifest");
+        let buffer_path = recovery_root
+            .join(&checkpoint.recovery_id)
+            .join("blobs")
+            .join(&manifest.buffer_blob);
+        fs::write(&buffer_path, [0xff, 0xfe]).expect("corrupt blob");
+        let invalid_utf8 = runtime
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect_err("invalid UTF-8 recovery blob must fail");
+        assert_eq!(invalid_utf8.code(), "invalid_recovery");
+
+        let secret = temp.path().join("secret.txt");
+        fs::write(&secret, "must not be exposed").expect("secret fixture");
+        manifest.buffer_blob = "../../secret.txt".to_string();
+        wardian_core::conversations::write_json_atomic(
+            &recovery_root
+                .join(&checkpoint.recovery_id)
+                .join("manifest.json"),
+            &manifest,
+        )
+        .expect("tamper manifest");
+        let escaped = runtime
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect_err("tampered blob path must not escape recovery record");
+        assert_eq!(escaped.code(), "invalid_recovery");
+        assert_eq!(
+            fs::read_to_string(secret).expect("secret bytes"),
+            "must not be exposed"
+        );
+    }
+
+    #[test]
+    fn file_recovery_rejects_non_file_preexisting_hash_blob() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let record_dir = temp.path().join("recovery-id");
+        let blobs_dir = record_dir.join("blobs");
+        fs::create_dir_all(&blobs_dir).expect("blob directory");
+        fs::create_dir(blobs_dir.join(recovery_blob_name("buffer")))
+            .expect("non-file blob fixture");
+
+        let failure = write_recovery_blob(&record_dir, "buffer")
+            .expect_err("non-file hash blob must fail closed");
+        assert_eq!(failure.code(), "invalid_recovery");
+    }
+
+    #[tokio::test]
+    async fn file_recovery_is_cleaned_after_successful_guarded_save() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            temp.path().join("recovery"),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let checkpoint = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "saved buffer",
+            )
+            .await
+            .expect("checkpoint");
+
+        let saved = runtime
+            .save_text_with_recovery_cleanup(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                "saved buffer",
+                Some(&FileRecoveryCleanupV1 {
+                    recovery_id: checkpoint.recovery_id.clone(),
+                    expected_recovery_revision: checkpoint.recovery_revision,
+                }),
+                "main",
+            )
+            .await
+            .expect("save");
+        assert!(matches!(saved, FileResourceSaveResultV1::Saved { .. }));
+        let recovery = runtime
+            .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
+            .await
+            .expect_err("successful save must clean recovery");
+        assert_eq!(recovery.code(), "recovery_not_found");
+        assert_eq!(
+            fs::read_to_string(path).expect("saved bytes"),
+            "saved buffer"
+        );
     }
 
     #[tokio::test]

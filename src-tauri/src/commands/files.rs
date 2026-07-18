@@ -1,7 +1,7 @@
 use crate::state::{
-    AppState, FileResourceRuntime, FileResourceSaveAsResultV1, FileResourceSaveResultV1,
-    FileResourceSnapshotV1, FileResourceTextV1, FileResourceTicketV1, SaveTargetGrantV1,
-    UserFileGrantV1,
+    AppState, FileRecoveryCleanupV1, FileResourceRuntime, FileResourceSaveAsResultV1,
+    FileResourceSaveResultV1, FileResourceSnapshotV1, FileResourceTextV1, FileResourceTicketV1,
+    SaveTargetGrantV1, UserFileGrantV1,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -40,6 +40,8 @@ pub struct SaveFileResourceTextRequestV1 {
     pub expected_revision: u64,
     pub buffer_base_hash: String,
     pub text: String,
+    #[serde(default)]
+    pub recovery_cleanup: Option<FileRecoveryCleanupV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,15 +201,18 @@ pub async fn read_file_resource_text(
 pub async fn save_file_resource_text(
     request: SaveFileResourceTextRequestV1,
     state: tauri::State<'_, AppState>,
+    webview: tauri::WebviewWindow,
 ) -> Result<FileResourceSaveResultV1, FileResourceErrorV1> {
     state
         .file_resources
-        .save_text(
+        .save_text_with_recovery_cleanup(
             &request.resource_id,
             &request.subscription_id,
             request.expected_revision,
             &request.buffer_base_hash,
             &request.text,
+            request.recovery_cleanup.as_ref(),
+            webview.label(),
         )
         .await
 }

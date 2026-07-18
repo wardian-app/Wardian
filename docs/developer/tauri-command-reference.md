@@ -215,7 +215,11 @@ revision token remains the write authority and is never serialized.
     "subscription_id": "subscription-uuid",
     "expected_revision": 1,
     "buffer_base_hash": "sha256:<content-hash>",
-    "text": "# Updated project\n"
+    "text": "# Updated project\n",
+    "recovery_cleanup": {
+      "recovery_id": "recovery-uuid",
+      "expected_recovery_revision": 4
+    }
   }
 }
 ```
@@ -232,6 +236,92 @@ The tagged response is `saved`, `unchanged`, or `stale_conflict`:
 
 A stale conflict returns current metadata only after revalidating the
 subscription. It does not return current file bytes.
+
+`recovery_cleanup` is optional. The command derives recovery scope from the
+calling WebView rather than request JSON. After `saved` or `unchanged`, it
+best-effort removes only that exact recovery generation when its resource,
+WebView, and CAS revision still match. A cleanup race leaves recovery intact
+and does not change a committed save into an error.
+
+### `checkpoint_file_recovery`
+
+Creates or updates a durable dirty editor buffer through an exact live file
+subscription. Create uses `null` for both recovery fields. Update supplies the
+returned ID and exact current recovery revision.
+
+```json
+{
+  "request": {
+    "recovery_id": null,
+    "expected_recovery_revision": null,
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "base_revision": 1,
+    "base_content_hash": "sha256:<base-content-hash>",
+    "resource_key": "file:<canonical-path>",
+    "buffer": "# Unsaved edit\n"
+  }
+}
+```
+
+The backend derives WebView scope from the Tauri caller. The returned metadata
+contains `recovery_id`, `recovery_revision`, base hash/opaque revision, and
+timestamps; the private retained file revision never crosses IPC.
+
+### `get_file_recovery`
+
+Returns only the stored base and editor buffer for the exact recovery ID,
+stable resource key, and calling WebView. It intentionally works after restart
+when current file authorization is unavailable.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+This command cannot read current disk bytes, save, or recreate an expired or
+revoked file capability.
+
+### `discard_file_recovery`
+
+Removes one exact scoped recovery generation after a recovery CAS check.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "expected_recovery_revision": 4,
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+### `merge_file_recovery`
+
+Requires a newly verified live subscription for the same target, reads the
+current authorized UTF-8 disk head, and runs a three-way merge against the
+stored base and buffer.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "expected_recovery_revision": 4,
+    "resource_key": "file:<canonical-path>",
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "new-live-subscription-uuid"
+  }
+}
+```
+
+The tagged response is `clean` or `conflicted`. Both contain
+`recovery_revision`, `current_revision`, `current_content_hash`,
+`disk_changed`, and `merged_text`. Conflict text includes explicit markers and
+both sides. The command never writes the file.
 
 ### `pick_file_resource_save_target`
 
