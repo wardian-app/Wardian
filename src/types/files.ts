@@ -9,6 +9,27 @@ export type FilesSurfaceStateV1 = {
   optional_checkpoint_id: string | null;
 };
 
+export type FilesComparisonBaseline =
+  | { kind: "saved_file" }
+  | { kind: "prompt_checkpoint"; checkpoint_id: string }
+  | { kind: "presented_version"; version_id: string }
+  | { kind: "previous_presented_version"; version_id: string };
+
+export type FilesSurfaceStateV2 = {
+  resource_kind: "file" | "artifact";
+  transient_preview: boolean;
+  presentation: "rendered" | "editor";
+  comparison_open: boolean;
+  comparison_layout_preference: "auto" | "unified" | "side_by_side";
+  comparison_baseline: FilesComparisonBaseline | null;
+  review_drawer_open: boolean;
+  selected_version_id: string | null;
+  optional_checkpoint_id: string | null;
+};
+
+/** Temporary compatibility input while the Files header is replaced in the editor UI task. */
+export type FilesSurfaceState = FilesSurfaceStateV1 | FilesSurfaceStateV2;
+
 export type FileRendererKind = "text" | "markdown" | "image" | "pdf" | "unsupported";
 
 export type FileResourceCapabilitiesV1 = {

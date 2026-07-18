@@ -7,6 +7,7 @@ import type {
   WorkbenchSurfaceV1,
 } from "../../types";
 import { useFilesPresentationStore } from "../files/filesPresentationStore";
+import { migrateFilesSurfaceStateV1 } from "../files/filesSurfaceState";
 import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
 import { createWorkbenchNavigationService } from "./navigationService";
 import { createSurfaceRegistry } from "./surfaceRegistry";
@@ -769,7 +770,7 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces["left-preview"]).toMatchObject({
       surface_id: "left-preview",
       resource_key: "file:C:/work/left-b.md",
-      state: filesState(true),
+      state: migrateFilesSurfaceStateV1(filesState(true)),
     });
     expect(store.getState().document.surfaces["right-preview"]).toEqual(rightTransient);
     expect(store.getState().document.groups.right.surface_ids).toEqual(["right-preview"]);
@@ -806,7 +807,7 @@ describe("workbench navigation service", () => {
     })).toBe("preview");
     expect(store.getState().document.surfaces.preview).toMatchObject({
       resource_key: "file:C:/work/report.md",
-      state: filesState(true),
+      state: migrateFilesSurfaceStateV1(filesState(true)),
     });
   });
 
@@ -1580,11 +1581,11 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.surfaces.preview).toMatchObject({
       surface_id: "preview",
       resource_key: "file:C:/work/report.md",
-      state: {
+      state: migrateFilesSurfaceStateV1({
         ...filesState(false),
         review_drawer_open: true,
         selected_version_id: "version-1",
-      },
+      }),
     });
     expect(store.getState().document.revision).toBe(1);
   });

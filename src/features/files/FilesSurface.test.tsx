@@ -165,6 +165,50 @@ describe("FilesSurface", () => {
     expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
   });
 
+  it("normalizes V2 presentation intent after renderer discovery", async () => {
+    const textDescriptor = descriptor({
+      canonical_path: "C:/work/docs/report.txt",
+      display_name: "report.txt",
+      extension: "txt",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+      renderer_kind: "text",
+      capabilities: { preview: true, changes: true, draft: true, stream: true },
+    });
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: snapshot(textDescriptor),
+      error: null,
+      retry: vi.fn(),
+    });
+    const textRegistry = new RendererRegistry([
+      definition("text"),
+      definition("unsupported", UnsupportedPreview),
+    ]);
+    const onStateChange = vi.fn();
+    render(<FilesSurface {...props({
+      resource_key: "file:C:/work/docs/report.txt",
+      registry: textRegistry,
+      state: {
+        resource_kind: "file",
+        transient_preview: true,
+        presentation: "rendered",
+        comparison_open: false,
+        comparison_layout_preference: "auto",
+        comparison_baseline: null,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      },
+      on_state_change: onStateChange,
+    })} />);
+
+    await waitFor(() => expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({
+      presentation: "editor",
+      transient_preview: true,
+    })));
+  });
+
   it("switches Markdown between rendered and source presentations", async () => {
     const user = userEvent.setup();
     useFileResourceMock.mockReturnValue({

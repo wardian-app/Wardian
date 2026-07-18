@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import type { CloseDecision, FilesSurfaceStateV1 } from "../../types";
+import type { CloseDecision, FilesSurfaceState, FilesSurfaceStateV2 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FilePreview } from "./FilePreview";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
 import { decodeFileResourceKey } from "./fileResourceKey";
 import { FilesModeBar } from "./FilesModeBar";
+import { normalizeFilesSurfaceState } from "./filesSurfaceState";
 import { useFilesPresentationStore } from "./filesPresentationStore";
 import {
   defaultRendererRegistry,
@@ -19,7 +20,7 @@ import "./FilesSurface.css";
 export type FilesSurfaceProps = {
   surface_id: string;
   resource_key: string;
-  state: FilesSurfaceStateV1;
+  state: FilesSurfaceState;
   lifecycle: { visible: boolean };
   client?: FileResourceClient;
   registry?: RendererRegistry;
@@ -29,6 +30,7 @@ export type FilesSurfaceProps = {
   on_open_file?: (path: string) => Promise<void> | void;
   on_open_with?: (path: string) => Promise<void> | void;
   on_reveal?: (path: string) => Promise<void> | void;
+  on_state_change?: (state: FilesSurfaceStateV2) => Promise<void> | void;
 };
 
 function pathFromResourceKey(resourceKey: string) {
@@ -62,6 +64,7 @@ type ActiveFilesSurfaceProps = Required<Pick<
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
+  on_state_change: (state: FilesSurfaceStateV2) => Promise<void> | void;
   action_error: string | null;
   preview_presentation: FilePreviewPresentation;
   on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
@@ -85,6 +88,22 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const sourceAvailable = resource.status === "ready" && resource.snapshot
     ? props.registry.resolve(resource.snapshot.descriptor).source !== undefined
     : false;
+
+  useEffect(() => {
+    if (!("presentation" in props.state) || !resource.snapshot) return;
+    const renderer = props.registry.resolve(resource.snapshot.descriptor);
+    const textEditor = renderer.renderer_id === "text";
+    const normalized = normalizeFilesSurfaceState(props.state, {
+      default_presentation: textEditor ? "editor" : "rendered",
+      rendered: !textEditor,
+      editor: textEditor || renderer.source !== undefined,
+      baseline_available: props.state.comparison_baseline?.kind === "saved_file"
+        && renderer.capabilities.changes === "line",
+    });
+    if (JSON.stringify(normalized) !== JSON.stringify(props.state)) {
+      void props.on_state_change(normalized);
+    }
+  }, [props.on_state_change, props.registry, props.state, resource.snapshot]);
 
   useEffect(() => {
     canonicalCallback.current = props.on_canonical_resource;
@@ -182,24 +201,39 @@ export function FilesSurface({
   on_open_file = () => undefined,
   on_open_with = openWithConfiguredEditor,
   on_reveal = revealPath,
+  on_state_change = () => undefined,
   ...props
 }: FilesSurfaceProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [previewState, setPreviewState] = useState<PreviewPresentationState>({
     resource_key: props.resource_key,
-    presentation: "rendered",
+    presentation: "presentation" in props.state && props.state.presentation === "editor"
+      ? "source"
+      : "rendered",
   });
   const previewPresentation = previewState.resource_key === props.resource_key
     ? previewState.presentation
     : "rendered";
 
   useEffect(() => {
-    setPreviewState({ resource_key: props.resource_key, presentation: "rendered" });
-  }, [props.resource_key]);
+    setPreviewState({
+      resource_key: props.resource_key,
+      presentation: "presentation" in props.state && props.state.presentation === "editor"
+        ? "source"
+        : "rendered",
+    });
+  }, [props.resource_key, props.state]);
 
   const setPreviewPresentation = useCallback((presentation: FilePreviewPresentation) => {
     setPreviewState({ resource_key: props.resource_key, presentation });
-  }, [props.resource_key]);
+    if ("presentation" in props.state) {
+      void on_state_change({
+        ...props.state,
+        presentation: presentation === "source" ? "editor" : "rendered",
+        transient_preview: false,
+      });
+    }
+  }, [on_state_change, props.resource_key, props.state]);
   const guardedCanonicalResource = useCallback(async (resourceKey: string) => {
     try {
       const decision = await on_canonical_resource(resourceKey);
@@ -260,6 +294,7 @@ export function FilesSurface({
       on_open_file={on_open_file}
       on_open_with={guardedOpenWith}
       on_reveal={guardedReveal}
+      on_state_change={on_state_change}
       action_error={actionError}
       preview_presentation={previewPresentation}
       on_preview_presentation_change={setPreviewPresentation}

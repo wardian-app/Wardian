@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useBuilderStore } from "../../store/useBuilderStore";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
+import type {
+  FileContentDescriptorV1,
+  FilesSurfaceStateV1,
+  FilesSurfaceStateV2,
+} from "../../types";
 import { artifactResourceKey, fileResourceKey } from "../files/fileResourceKey";
 import { useFilesPresentationStore } from "../files/filesPresentationStore";
 import {
@@ -39,6 +43,7 @@ describe("core workbench surface registry", () => {
       open_policy: "focus_resource",
       runtime_policy: "view_only",
       close_policy: "confirm_if_dirty",
+      state_schema_version: 2,
     });
     expect(CORE_SURFACE_CONTRIBUTIONS).toContainEqual({
       surface_type: "files",
@@ -88,9 +93,25 @@ describe("core workbench surface registry", () => {
       surface_type: "files",
       resource_key: "artifact:opaque\\artifact-id",
       state: artifactState,
-    })).restore_result).toEqual({ ok: true, state: artifactState });
+    })).restore_result).toEqual({
+      ok: true,
+      state: {
+        resource_kind: "artifact",
+        transient_preview: true,
+        presentation: "rendered",
+        comparison_open: false,
+        comparison_layout_preference: "auto",
+        comparison_baseline: null,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      } satisfies FilesSurfaceStateV2,
+    });
 
-    expect(files.restore_state(state, 1)).toEqual({ ok: true, state });
+    expect(files.restore_state(state, 1)).toMatchObject({
+      ok: true,
+      state: { presentation: "rendered", comparison_open: false },
+    });
     expect(files.restore_state({ ...state, extra: true }, 1)).toEqual({
       ok: false,
       error: "files state is malformed",
@@ -99,9 +120,9 @@ describe("core workbench surface registry", () => {
       ok: false,
       error: "files state is malformed",
     });
-    expect(files.restore_state(state, 2)).toEqual({
-      ok: false,
-      error: "unsupported files state version 2",
+    expect(files.restore_state(registry.default_state("files"), 2)).toEqual({
+      ok: true,
+      state: registry.default_state("files"),
     });
 
     for (const persisted of [

@@ -1,7 +1,7 @@
 import type {
   AgentsOverviewSurfaceState,
   FileResourceKey,
-  FilesSurfaceStateV1,
+  FilesSurfaceStateV2,
   OpenSurfaceRequest,
   SurfaceDefinition,
   SurfaceClosePolicy,
@@ -20,6 +20,11 @@ import {
   useFilesPresentationStore,
 } from "../files/filesPresentationStore";
 import { decodeFileResourceKey } from "../files/fileResourceKey";
+import {
+  isFilesSurfaceStateV1,
+  isFilesSurfaceStateV2,
+  restoreFilesSurfaceState,
+} from "../files/filesSurfaceState";
 import { createSurfaceRegistry, type WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import {
   CORE_VIEW_SURFACE_DEFINITIONS,
@@ -62,6 +67,7 @@ type DefinitionOptions = {
   open_policy: SurfaceOpenPolicy;
   runtime_policy?: SurfaceRuntimePolicy;
   close_policy?: SurfaceClosePolicy;
+  state_schema_version?: number;
   max_state_bytes?: number;
   default_state?: () => unknown;
   presentation_title?: (surface: WorkbenchSurfaceV1) => string;
@@ -95,7 +101,7 @@ function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
     open_policy: options.open_policy,
     runtime_policy: options.runtime_policy ?? "view_only",
     close_policy: options.close_policy ?? "close_view",
-    state_schema_version: 1,
+    state_schema_version: options.state_schema_version ?? 1,
     max_state_bytes: options.max_state_bytes ?? 64 * 1024,
     ...(options.resource_key ? { resource_key: options.resource_key } : {}),
     default_state: options.default_state ?? (() => ({})),
@@ -132,54 +138,28 @@ const DEFAULT_AGENTS_OVERVIEW_STATE: AgentsOverviewSurfaceState = {
   status_filter: [],
 };
 
-const DEFAULT_FILES_SURFACE_STATE: FilesSurfaceStateV1 = {
+const DEFAULT_FILES_SURFACE_STATE: FilesSurfaceStateV2 = {
   resource_kind: "file",
-  mode: "preview",
   transient_preview: false,
+  presentation: "rendered",
+  comparison_open: false,
+  comparison_layout_preference: "auto",
+  comparison_baseline: null,
   review_drawer_open: false,
   selected_version_id: null,
   optional_checkpoint_id: null,
 };
 
-const FILES_STATE_KEYS = Object.freeze([
-  "mode",
-  "optional_checkpoint_id",
-  "resource_kind",
-  "review_drawer_open",
-  "selected_version_id",
-  "transient_preview",
-] as const);
-
-function restoreFilesSurfaceState(value: unknown, version: number) {
-  if (version !== 1) {
-    return { ok: false as const, error: `unsupported files state version ${version}` };
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false as const, error: "files state is malformed" };
-  }
-  const state = value as Record<string, unknown>;
-  const keys = Object.keys(state).sort();
-  if (
-    keys.length !== FILES_STATE_KEYS.length
-    || keys.some((key, index) => key !== FILES_STATE_KEYS[index])
-    || !["file", "artifact"].includes(state.resource_kind as string)
-    || !["preview", "changes", "draft"].includes(state.mode as string)
-    || typeof state.transient_preview !== "boolean"
-    || typeof state.review_drawer_open !== "boolean"
-    || (state.selected_version_id !== null && typeof state.selected_version_id !== "string")
-    || (
-      state.optional_checkpoint_id !== null
-      && typeof state.optional_checkpoint_id !== "string"
-    )
-  ) return { ok: false as const, error: "files state is malformed" };
-  return { ok: true as const, state: { ...state } as FilesSurfaceStateV1 };
-}
-
 function filesResourceKey(request: OpenSurfaceRequest): FileResourceKey {
   const decoded = decodeFileResourceKey(request.resource_key ?? "");
   const expectedKind = decoded.resource_kind;
   if (request.state !== undefined) {
-    const restored = restoreFilesSurfaceState(request.state, 1);
+    const version = isFilesSurfaceStateV2(request.state)
+      ? 2
+      : isFilesSurfaceStateV1(request.state)
+        ? 1
+        : 2;
+    const restored = restoreFilesSurfaceState(request.state, version);
     if (!restored.ok) throw new Error(restored.error);
     if (restored.state.resource_kind !== expectedKind) {
       throw new Error(`Files ${expectedKind}: resource requires ${expectedKind} state`);
@@ -301,7 +281,8 @@ function coreSurfaceDefinitions(
       open_policy: "focus_resource",
       runtime_policy: "view_only",
       close_policy: "confirm_if_dirty",
-      default_state: (): FilesSurfaceStateV1 => ({ ...DEFAULT_FILES_SURFACE_STATE }),
+      state_schema_version: 2,
+      default_state: (): FilesSurfaceStateV2 => ({ ...DEFAULT_FILES_SURFACE_STATE }),
       resource_key: filesResourceKey,
       presentation_title: (surface) => filesPresentationTitle(
         surface.surface_id,
@@ -321,18 +302,21 @@ function coreSurfaceDefinitions(
       ),
       can_close: createFilesSurfaceCloseGuard(dirtySurfacePrompt),
       serialize_state: (state) => {
-        const restored = restoreFilesSurfaceState(state, 1);
+        const restored = restoreFilesSurfaceState(
+          state,
+          isFilesSurfaceStateV1(state) ? 1 : 2,
+        );
         if (!restored.ok) throw new Error(restored.error);
         return restored.state;
       },
       restore_state: restoreFilesSurfaceState,
       transient_state: {
         is_transient: (state) => (
-          restoreFilesSurfaceState(state, 1).ok
-          && (state as FilesSurfaceStateV1).transient_preview
+          restoreFilesSurfaceState(state, 2).ok
+          && (state as FilesSurfaceStateV2).transient_preview
         ),
         pin: (state) => {
-          const restored = restoreFilesSurfaceState(state, 1);
+          const restored = restoreFilesSurfaceState(state, 2);
           if (!restored.ok) throw new Error(restored.error);
           return { ...restored.state, transient_preview: false };
         },

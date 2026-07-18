@@ -1,4 +1,4 @@
-import type { FileResourceKey, FilesSurfaceStateV1 } from "../../types";
+import type { FileResourceKey, FilesSurfaceStateV2 } from "../../types";
 
 const WINDOWS_DRIVE_ABSOLUTE_PATH = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_ABSOLUTE_PATH = /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/;
@@ -61,11 +61,14 @@ export function decodeFileResourceKey(resourceKey: string): DecodedFileResourceK
 }
 
 /** The complete bounded state contract for an ordinary file presentation. */
-export function createFileSurfaceState(transient_preview: boolean): FilesSurfaceStateV1 {
+export function createFileSurfaceState(transient_preview: boolean): FilesSurfaceStateV2 {
   return {
     resource_kind: "file",
-    mode: "preview",
     transient_preview,
+    presentation: "rendered",
+    comparison_open: false,
+    comparison_layout_preference: "auto",
+    comparison_baseline: null,
     review_drawer_open: false,
     selected_version_id: null,
     optional_checkpoint_id: null,

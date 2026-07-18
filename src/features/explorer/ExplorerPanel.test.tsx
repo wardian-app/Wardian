@@ -357,8 +357,11 @@ describe('ExplorerPanel', () => {
         resource_key: 'file:C:/Users/test/repo/notes.md',
         state: {
           resource_kind: 'file',
-          mode: 'preview',
           transient_preview: true,
+          presentation: 'rendered',
+          comparison_open: false,
+          comparison_layout_preference: 'auto',
+          comparison_baseline: null,
           review_drawer_open: false,
           selected_version_id: null,
           optional_checkpoint_id: null,

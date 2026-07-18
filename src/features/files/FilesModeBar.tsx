@@ -9,14 +9,15 @@ import {
   type KeyboardEvent,
 } from "react";
 import { BookOpen, Pencil } from "lucide-react";
-import type { FileContentDescriptorV1, FilesSurfaceStateV1 } from "../../types";
+import type { FileContentDescriptorV1, FilesSurfaceState } from "../../types";
 import { formatExplorerPathForDisplay } from "../../utils/displayPath";
 import { decodeFileResourceKey, isWindowsAbsoluteFilePath } from "./fileResourceKey";
+import { legacyFilesMode } from "./filesSurfaceState";
 import type { FilePreviewPresentation } from "./rendererRegistry";
 
 type FilesModeBarProps = {
   resource_key: string;
-  state: FilesSurfaceStateV1;
+  state: FilesSurfaceState;
   descriptor: FileContentDescriptorV1 | null;
   preview_presentation: FilePreviewPresentation;
   source_available: boolean;
@@ -141,8 +142,10 @@ export function FilesModeBar({
     }
   };
 
+  const restoredMode = "mode" in state ? state.mode : legacyFilesMode(state);
+
   return (
-    <header className="files-mode-bar" data-restored-mode={state.mode}>
+    <header className="files-mode-bar" data-restored-mode={restoredMode}>
       <nav className="files-breadcrumb" aria-label="File location" title={displayPath}>
         {parts.map((part, index) => (
           <span className="files-breadcrumb-part" key={`${part.separator}${part.label}-${index}`}>

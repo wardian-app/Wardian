@@ -76,7 +76,8 @@ import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfa
 import { FilesSurface } from "../features/files/FilesSurface";
 import { fileResourceClient } from "../features/files/fileResourceClient";
 import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
-import type { FilesSurfaceStateV1 } from "../types";
+import { filesSurfaceMigrationCommands } from "../features/files/filesSurfaceState";
+import type { FilesSurfaceStateV2 } from "../types";
 
 declare global {
   interface Window {
@@ -260,6 +261,19 @@ function AppBody() {
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
   }), [dirtySurfacePrompt.prompt]);
+  useEffect(() => {
+    if (workbenchPersistence.status !== "ready") return;
+    const commands = filesSurfaceMigrationCommands(
+      workbenchPersistence.store.getState().document,
+    );
+    if (commands.length === 0) return;
+    const result = workbenchPersistence.store.getState().apply_commands(commands);
+    if (result.accepted) void workbenchPersistence.flush();
+  }, [
+    workbenchPersistence.flush,
+    workbenchPersistence.status,
+    workbenchPersistence.store,
+  ]);
   const [, setSurfaceRecoveryAttempt] = useState(0);
   const workbenchNavigation = useMemo(
     () => createWorkbenchNavigationService({
@@ -1121,18 +1135,26 @@ function AppBody() {
         <FilesSurface
           surface_id={surface.surface_id}
           resource_key={surface.resource_key ?? ""}
-          state={restoredSurface.state as FilesSurfaceStateV1}
+          state={restoredSurface.state as FilesSurfaceStateV2}
           lifecycle={{ visible: lifecycle?.visible !== false }}
           client={fileResourceClient}
           on_canonical_resource={async (resourceKey) => {
             return await workbenchNavigation.canonicalize_resource(surface.surface_id, {
               surface_type: "files",
               resource_key: resourceKey,
-              state: restoredSurface.state as FilesSurfaceStateV1,
+              state: restoredSurface.state as FilesSurfaceStateV2,
             });
           }}
           on_open_file={(path) => {
             openPermanentFileSurface(workbenchNavigation, path);
+          }}
+          on_state_change={(state) => {
+            workbenchPersistence.store.getState().apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 2,
+              state,
+            }]);
           }}
         />
       );
