@@ -8,7 +8,12 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import type { CloseDecision, FilesSurfaceState, FilesSurfaceStateV2 } from "../../types";
+import type {
+  CloseDecision,
+  FileRecoveryV1,
+  FilesSurfaceState,
+  FilesSurfaceStateV2,
+} from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { FilePreview } from "./FilePreview";
 import { type FileResourceClient, fileResourceClient } from "./fileResourceClient";
@@ -83,6 +88,10 @@ type ActiveFilesSurfaceProps = Required<Pick<
   action_error: string | null;
   editor_error: string | null;
   on_retry_editor: () => void;
+  recovery_only: RecoveryOnlyState;
+  on_restore_access: () => void;
+  on_discard_recovery: () => void;
+  on_retry_recovery: () => void;
   preview_presentation: FilePreviewPresentation;
   on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
 };
@@ -91,6 +100,11 @@ type PreviewPresentationState = {
   resource_key: string;
   presentation: FilePreviewPresentation;
 };
+
+type RecoveryOnlyState =
+  | { status: "idle" | "loading" | "none" }
+  | { status: "ready"; recovery: FileRecoveryV1; discarding: boolean }
+  | { status: "error"; message: string };
 
 function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
   const requestedNormalization = useRef<string | null>(null);
@@ -150,6 +164,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         descriptor={resource.snapshot?.descriptor ?? null}
         preview_presentation={props.preview_presentation}
         source_available={sourceAvailable}
+        resource_actions_available={props.recovery_only.status !== "ready"}
         on_preview_presentation_change={props.on_preview_presentation_change}
         on_open_with={props.on_open_with}
         on_reveal={props.on_reveal}
@@ -167,12 +182,47 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
         {resource.status === "loading" ? (
           <div className="files-resource-state" role="status">Loading preview…</div>
         ) : null}
-        {resource.status === "error" ? (
+        {resource.status === "error" && props.recovery_only.status === "ready" ? (
+          <section className="files-resource-state" aria-label="Read-only recovery">
+            <h2>Recovered unsaved changes</h2>
+            <p>
+              File access is unavailable. The recovered content is read-only until access is
+              restored.
+            </p>
+            <pre aria-label="Recovered buffer">{props.recovery_only.recovery.buffer}</pre>
+            <details>
+              <summary>Saved base</summary>
+              <pre aria-label="Recovered saved base">{props.recovery_only.recovery.base}</pre>
+            </details>
+            <div className="files-resource-actions">
+              <button type="button" onClick={props.on_restore_access}>Restore access</button>
+              <button
+                type="button"
+                disabled={props.recovery_only.discarding}
+                onClick={props.on_discard_recovery}
+              >
+                Discard recovery
+              </button>
+            </div>
+          </section>
+        ) : null}
+        {resource.status === "error" && props.recovery_only.status !== "ready" ? (
           <section className="files-resource-state" role="alert">
             <h2>File unavailable</h2>
             <p>{resource.error?.message ?? "The file resource could not be loaded."}</p>
+            {props.recovery_only.status === "loading" ? (
+              <p role="status">Looking for recovered unsaved changes…</p>
+            ) : null}
+            {props.recovery_only.status === "error" ? (
+              <p>
+                Recovery could not be checked: {props.recovery_only.message}
+              </p>
+            ) : null}
             <div className="files-resource-actions">
               <button type="button" onClick={() => void resource.retry()}>Retry</button>
+              {props.recovery_only.status === "error" ? (
+                <button type="button" onClick={props.on_retry_recovery}>Retry recovery</button>
+              ) : null}
               <button type="button" onClick={() => void props.on_open_with(pathFromResourceKey(props.resource_key))}>
                 Open With
               </button>
@@ -212,6 +262,10 @@ export function FilesSurface({
   const [actionError, setActionError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorRetryToken, setEditorRetryToken] = useState(0);
+  const [recoveryOnlyRetryToken, setRecoveryOnlyRetryToken] = useState(0);
+  const [recoveryOnlyState, setRecoveryOnlyState] = useState<RecoveryOnlyState>({
+    status: "idle",
+  });
   const retryEditor = useCallback(() => {
     setEditorRetryToken((value) => value + 1);
   }, []);
@@ -238,6 +292,45 @@ export function FilesSurface({
     agent_id: null,
     user_file_capability_id: null,
   }, client);
+  useEffect(() => {
+    if (resource.status !== "error") {
+      setRecoveryOnlyState({ status: "idle" });
+      return;
+    }
+    let active = true;
+    setRecoveryOnlyState({ status: "loading" });
+    void client.listRecoveries({ resource_key: props.resource_key }).then(async (recoveries) => {
+      if (!active) return;
+      const newest = [...recoveries].sort((left, right) => (
+        right.updated_at_ms - left.updated_at_ms
+        || right.recovery_revision - left.recovery_revision
+        || right.recovery_id.localeCompare(left.recovery_id)
+      ))[0];
+      if (!newest) {
+        setRecoveryOnlyState({ status: "none" });
+        return;
+      }
+      const recovered = await client.getRecovery({
+        recovery_id: newest.recovery_id,
+        resource_key: props.resource_key,
+      });
+      if (!active) return;
+      if (
+        recovered.resource_key !== props.resource_key
+        || recovered.recovery_id !== newest.recovery_id
+      ) {
+        throw new Error("The recovered buffer did not match this Files surface.");
+      }
+      setRecoveryOnlyState({ status: "ready", recovery: recovered, discarding: false });
+    }).catch((error) => {
+      if (!active) return;
+      setRecoveryOnlyState({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return () => { active = false; };
+  }, [client, props.resource_key, recoveryOnlyRetryToken, resource.status]);
   const editorController = useMemo(() => {
     const snapshot = resource.snapshot;
     if (!snapshot) return null;
@@ -299,6 +392,7 @@ export function FilesSurface({
     void props.editor_registry.synchronizeAuthoritative(
       snapshot,
       () => client.readText(snapshot),
+      props.surface_id,
     ).then(() => {
       if (active) setEditorError(null);
     }).catch((error) => {
@@ -311,6 +405,27 @@ export function FilesSurface({
     return () => { active = false; };
   }, [client, editorController, editorRetryToken, props.editor_registry, resource.snapshot]);
 
+  const restoreAccess = useCallback(() => {
+    void resource.retry();
+  }, [resource]);
+  const discardRecovery = useCallback(() => {
+    if (recoveryOnlyState.status !== "ready" || recoveryOnlyState.discarding) return;
+    const recovered = recoveryOnlyState.recovery;
+    setRecoveryOnlyState({ status: "ready", recovery: recovered, discarding: true });
+    void client.discardRecovery({
+      recovery_id: recovered.recovery_id,
+      expected_recovery_revision: recovered.recovery_revision,
+      resource_key: props.resource_key,
+    }).then(() => {
+      setRecoveryOnlyState({ status: "none" });
+    }).catch((error) => {
+      setRecoveryOnlyState({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [client, props.resource_key, recoveryOnlyState]);
+
   useEffect(() => {
     useFilesPresentationStore.getState().setPresentation(props.surface_id, {
       resource_key: props.resource_key,
@@ -321,9 +436,18 @@ export function FilesSurface({
         || editorSnapshot?.last_error
         || editorSnapshot?.recovery.status === "error"
         || editorError
+        || recoveryOnlyState.status === "ready"
+        || recoveryOnlyState.status === "error"
       ),
     });
-  }, [editorError, editorSnapshot, props.resource_key, props.surface_id, resource.snapshot]);
+  }, [
+    editorError,
+    editorSnapshot,
+    props.resource_key,
+    props.surface_id,
+    recoveryOnlyState.status,
+    resource.snapshot,
+  ]);
 
   useEffect(() => {
     canonicalCallback.current = guardedCanonicalResource;
@@ -431,6 +555,10 @@ export function FilesSurface({
       action_error={actionError}
       editor_error={editorError}
       on_retry_editor={retryEditor}
+      recovery_only={recoveryOnlyState}
+      on_restore_access={restoreAccess}
+      on_discard_recovery={discardRecovery}
+      on_retry_recovery={() => setRecoveryOnlyRetryToken((value) => value + 1)}
       preview_presentation={previewPresentation}
       on_preview_presentation_change={setPreviewPresentation}
     />

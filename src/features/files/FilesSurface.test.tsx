@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   FileContentDescriptorV1,
+  FileRecoverySummaryV1,
+  FileRecoveryV1,
   FileResourceSnapshotV1,
   FilesSurfaceStateV2,
 } from "../../types";
@@ -25,6 +27,14 @@ const useFileResourceMock = vi.hoisted(() => vi.fn());
 vi.mock("./useFileResource", () => ({
   useFileResource: useFileResourceMock,
 }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function descriptor(
   overrides: Partial<FileContentDescriptorV1> = {},
@@ -888,6 +898,86 @@ describe("FilesSurface", () => {
       .toBe("ready");
   });
 
+  it("keeps Retry Editor visible when a first mutation races recovery discovery", async () => {
+    const markdownDescriptor = descriptor({
+      canonical_path: "C:/work/docs/notes.md",
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "markdown",
+      capabilities: { preview: true, changes: true, draft: true, stream: false },
+    });
+    const markdownSnapshot = {
+      ...snapshot(markdownDescriptor),
+      resource_id: "file:C:/work/docs/notes.md",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: markdownSnapshot,
+      error: null,
+      retry: vi.fn(),
+    });
+    const pendingDiscovery = deferred<FileRecoverySummaryV1[]>();
+    const recoverySummaryValue: FileRecoverySummaryV1 = {
+      schema: 1,
+      recovery_id: "recovery-raced",
+      resource_key: markdownSnapshot.resource_id,
+      display_name: "notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      base_content_hash: markdownDescriptor.content_hash,
+      base_opaque_revision: "opaque-base",
+      recovery_revision: 1,
+      created_at_ms: 10,
+      updated_at_ms: 20,
+    };
+    const client = new FileResourceClient();
+    vi.spyOn(client, "readText").mockResolvedValue({
+      schema: 1,
+      resource_id: markdownSnapshot.resource_id,
+      revision: markdownSnapshot.revision,
+      text: "base\n",
+    });
+    const listRecoveries = vi.spyOn(client, "listRecoveries")
+      .mockReturnValueOnce(pendingDiscovery.promise)
+      .mockResolvedValueOnce([recoverySummaryValue]);
+    vi.spyOn(client, "getRecovery").mockResolvedValue({
+      ...recoverySummaryValue,
+      base: "base\n",
+      buffer: "older recovered edit\n",
+    });
+    const editorRegistry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    render(<FilesSurface {...props({
+      resource_key: markdownSnapshot.resource_id,
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+    const controller = editorRegistry.forResource(markdownSnapshot.resource_id);
+    await waitFor(() => expect(controller.getSnapshot().status).toBe("ready"));
+
+    act(() => { controller.mutate("newer in-memory edit\n"); });
+    pendingDiscovery.resolve([recoverySummaryValue]);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/recovery discovery was interrupted/i);
+    expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry Editor" }));
+    await waitFor(() => expect(listRecoveries).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(alert).toHaveTextContent(/newer edits were preserved/i));
+    expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
+    expect(filesPresentationBadges("files-1", markdownSnapshot.resource_id)).toContainEqual({
+      badge_id: "attention",
+      label: "Attention requested",
+    });
+  });
+
   it("contains resource load errors and offers applicable recovery actions", async () => {
     const retry = vi.fn().mockResolvedValue(undefined);
     const onOpenWith = vi.fn().mockResolvedValue(undefined);
@@ -913,6 +1003,76 @@ describe("FilesSurface", () => {
       expect(onReveal).toHaveBeenCalledWith("C:/work/docs/report.pdf");
     });
     expect(screen.queryByRole("button", { name: /View (source|rendered)/ })).toBeNull();
+  });
+
+  it("opens scoped recovery read-only when live file authorization is unavailable", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    useFileResourceMock.mockReturnValue({
+      status: "error",
+      snapshot: null,
+      error: new Error("Access was revoked"),
+      retry,
+    });
+    const resourceKey = "file:C:/work/docs/recovered.md";
+    const recoverySummaryValue: FileRecoverySummaryV1 = {
+      schema: 1,
+      recovery_id: "recovery-read-only",
+      resource_key: resourceKey,
+      display_name: "recovered.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      base_content_hash: "hash-recovery-base",
+      base_opaque_revision: "opaque-recovery-base",
+      recovery_revision: 7,
+      created_at_ms: 10,
+      updated_at_ms: 20,
+    };
+    const recovered: FileRecoveryV1 = {
+      ...recoverySummaryValue,
+      base: "saved recovery base\n",
+      buffer: "unsaved recovered buffer\n",
+    };
+    const client = new FileResourceClient();
+    const listRecoveries = vi.spyOn(client, "listRecoveries")
+      .mockResolvedValue([recoverySummaryValue]);
+    const getRecovery = vi.spyOn(client, "getRecovery").mockResolvedValue(recovered);
+    const discardRecovery = vi.spyOn(client, "discardRecovery").mockResolvedValue(undefined);
+    const readText = vi.spyOn(client, "readText");
+    const saveText = vi.spyOn(client, "saveText");
+    render(<FilesSurface {...props({
+      resource_key: resourceKey,
+      client,
+      editor_registry: new FileEditorControllerRegistry(client),
+    })} />);
+
+    expect(await screen.findByRole("heading", { name: "Recovered unsaved changes" }))
+      .toBeInTheDocument();
+    expect(screen.getByLabelText("Recovered buffer")).toHaveTextContent(
+      "unsaved recovered buffer",
+    );
+    expect(screen.getByLabelText("Recovered saved base")).toHaveTextContent(
+      "saved recovery base",
+    );
+    expect(listRecoveries).toHaveBeenCalledWith({ resource_key: resourceKey });
+    expect(getRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-read-only",
+      resource_key: resourceKey,
+    });
+    expect(readText).not.toHaveBeenCalled();
+    expect(saveText).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "File actions" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore access" }));
+    await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Discard recovery" }));
+    await waitFor(() => expect(discardRecovery).toHaveBeenCalledWith({
+      recovery_id: "recovery-read-only",
+      expected_recovery_revision: 7,
+      resource_key: resourceKey,
+    }));
+    await waitFor(() => expect(
+      screen.queryByRole("heading", { name: "Recovered unsaved changes" }),
+    ).toBeNull());
   });
 
   it("shows unsupported metadata without attempting the renderer", async () => {

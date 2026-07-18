@@ -21,6 +21,7 @@ type FilesModeBarProps = {
   descriptor: FileContentDescriptorV1 | null;
   preview_presentation: FilePreviewPresentation;
   source_available: boolean;
+  resource_actions_available?: boolean;
   on_preview_presentation_change: (presentation: FilePreviewPresentation) => void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -64,6 +65,7 @@ export function FilesModeBar({
   descriptor,
   preview_presentation,
   source_available,
+  resource_actions_available = true,
   on_preview_presentation_change,
   on_open_with,
   on_reveal,
@@ -193,6 +195,7 @@ export function FilesModeBar({
             <SourceIcon size={15} aria-hidden="true" />
           </button>
         ) : null}
+        {resource_actions_available ? (
         <div ref={overflowRef} className="files-overflow" onBlur={onOverflowBlur}>
         <button
           ref={triggerRef}
@@ -248,6 +251,7 @@ export function FilesModeBar({
           </div>
         ) : null}
         </div>
+        ) : null}
       </div>
     </header>
   );

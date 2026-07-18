@@ -153,14 +153,26 @@ describe("FileEditorController", () => {
     expect(controller.getSnapshot().working_text).toBe("base\n");
     controller.mutate("typed before discovery\n");
     discovery.resolve([recoverySummary()]);
-    await initialization;
+    await expect(initialization).rejects.toThrow(
+      "Recovery discovery was interrupted by newer in-memory edits.",
+    );
 
     expect(client.getRecovery).not.toHaveBeenCalled();
     expect(controller.getSnapshot()).toMatchObject({
       working_text: "typed before discovery\n",
       dirty: true,
       buffer_generation: 1,
+      recovery_discovery: "error",
+      last_error: "Recovery discovery was interrupted by newer in-memory edits.",
     });
+    await expect(controller.save()).rejects.toThrow(
+      "Recovery discovery must complete before Save.",
+    );
+    await expect(controller.flushRecovery()).rejects.toThrow(
+      "Recovery discovery must complete before checkpointing newer edits.",
+    );
+    expect(client.saveText).not.toHaveBeenCalled();
+    expect(client.checkpointRecovery).not.toHaveBeenCalled();
 
     const restored = new FileEditorControllerRegistry(fakeClient())
       .forResource(owner.resource_id);
@@ -194,6 +206,53 @@ describe("FileEditorController", () => {
     expect(controller.getSnapshot()).toMatchObject({ dirty: true });
     expect(pin).toHaveBeenCalledOnce();
   });
+
+  it.each(["list", "get"] as const)(
+    "retries an incomplete %s recovery discovery without replacing the ready controller",
+    async (failurePoint) => {
+      const client = fakeClient();
+      if (failurePoint === "list") {
+        vi.mocked(client.listRecoveries)
+          .mockRejectedValueOnce(new Error("recovery list unavailable"))
+          .mockResolvedValueOnce([recoverySummary()]);
+      } else {
+        vi.mocked(client.listRecoveries).mockResolvedValue([recoverySummary()]);
+        vi.mocked(client.getRecovery)
+          .mockRejectedValueOnce(new Error("recovery read unavailable"))
+          .mockResolvedValueOnce(recovery());
+      }
+      const registry = new FileEditorControllerRegistry(client);
+      const controller = registry.forResource(owner.resource_id);
+      const pin = vi.fn();
+      controller.attachPresentation("surface-a", { on_pin: pin });
+      const read = vi.fn().mockResolvedValue({
+        schema: 1 as const,
+        resource_id: owner.resource_id,
+        revision: owner.revision,
+        text: "base\n",
+      });
+
+      await expect(
+        registry.synchronizeAuthoritative(owner, read, "surface-a"),
+      ).rejects.toThrow(failurePoint === "list" ? "list unavailable" : "read unavailable");
+      expect(controller.getSnapshot()).toMatchObject({
+        status: "ready",
+        working_text: "base\n",
+        dirty: false,
+      });
+
+      await registry.synchronizeAuthoritative(owner, read, "surface-a");
+
+      expect(controller.getSnapshot()).toMatchObject({
+        working_text: "recovered edit\n",
+        dirty: true,
+        recovery: { status: "durable", recovery_id: "recovery-1" },
+      });
+      expect(pin).toHaveBeenCalledOnce();
+      expect(client.listRecoveries).toHaveBeenCalledTimes(2);
+      expect(client.getRecovery).toHaveBeenCalledTimes(failurePoint === "list" ? 1 : 2);
+    },
+  );
 
   it("coalesces exact authoritative reads and discovers recovery only for an uninitialized controller", async () => {
     const client = fakeClient();
@@ -412,6 +471,48 @@ describe("FileEditorController", () => {
       dirty: false,
       stale: false,
     });
+  });
+
+  it("rebinds Save and recovery to a surviving presentation owner when an alias closes", async () => {
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockResolvedValue([]);
+    vi.mocked(client.checkpointRecovery).mockResolvedValue(checkpoint(1, {
+      recovery_id: "recovery-survivor",
+    }));
+    const registry = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    });
+    const controller = registry.forResource(owner.resource_id);
+    const firstMembership = controller.attachPresentation("surface-a", {});
+    const secondMembership = controller.attachPresentation("surface-b", {});
+    const firstOwner = { ...owner, subscription_id: "subscription-a" };
+    const secondOwner = { ...owner, subscription_id: "subscription-b" };
+    const read = (candidate: FileResourceSnapshotV1) => vi.fn().mockResolvedValue({
+      schema: 1 as const,
+      resource_id: candidate.resource_id,
+      revision: candidate.revision,
+      text: "base\n",
+    });
+
+    await registry.synchronizeAuthoritative(firstOwner, read(firstOwner), "surface-a");
+    await registry.synchronizeAuthoritative(secondOwner, read(secondOwner), "surface-b");
+    expect(controller.getSnapshot().subscription_id).toBe("subscription-b");
+
+    secondMembership.detach();
+    expect(controller.getSnapshot().subscription_id).toBe("subscription-a");
+    controller.mutate("surviving edit\n");
+    await controller.flushRecovery();
+    await controller.save("surface-a");
+
+    expect(client.checkpointRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      subscription_id: "subscription-a",
+      buffer: "surviving edit\n",
+    }));
+    expect(client.saveText).toHaveBeenCalledWith(expect.objectContaining({
+      subscription_id: "subscription-a",
+      text: "surviving edit\n",
+    }));
+    firstMembership.detach();
   });
 
   it("deduplicates queued Saves of one generation after the first Save succeeds", async () => {
@@ -662,6 +763,127 @@ describe("FileEditorController", () => {
       dirty: false,
       stale: false,
       recovery: { status: "none" },
+    });
+  });
+
+  it("creates a fresh recovery after Save deleted the old record but verification failed", async () => {
+    let persistedRecoveries = [recoverySummary()];
+    let failVerification = false;
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockImplementation(async () => {
+      if (failVerification) {
+        failVerification = false;
+        throw new Error("verification unavailable");
+      }
+      return [...persistedRecoveries];
+    });
+    vi.mocked(client.getRecovery).mockImplementation(async (request) => {
+      const summary = persistedRecoveries.find((candidate) => (
+        candidate.recovery_id === request.recovery_id
+      ));
+      if (!summary) throw new Error("not found");
+      return recovery({
+        ...summary,
+        base: summary.base_content_hash === "hash-saved" ? "recovered edit\n" : "base\n",
+        buffer: summary.recovery_id === "recovery-fresh"
+          ? "new edit after ambiguous cleanup\n"
+          : "recovered edit\n",
+      });
+    });
+    vi.mocked(client.saveText).mockImplementation(async () => {
+      persistedRecoveries = [];
+      failVerification = true;
+      return { status: "saved", revision: 5, content_hash: "hash-saved" };
+    });
+    vi.mocked(client.checkpointRecovery).mockImplementation(async (request) => {
+      const committed = checkpoint(1, {
+        recovery_id: request.recovery_id ?? "recovery-fresh",
+        base_content_hash: request.base_content_hash,
+      });
+      persistedRecoveries = [{
+        ...recoverySummary(),
+        recovery_id: committed.recovery_id,
+        recovery_revision: committed.recovery_revision,
+        base_content_hash: committed.base_content_hash,
+      }];
+      return committed;
+    });
+    const controller = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    }).forResource(owner.resource_id);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: true });
+
+    await expect(controller.save()).rejects.toThrow("verification unavailable");
+    controller.mutate("new edit after ambiguous cleanup\n");
+    await controller.retryRecovery();
+
+    expect(client.checkpointRecovery).toHaveBeenCalledWith(expect.objectContaining({
+      recovery_id: null,
+      expected_recovery_revision: null,
+      base_content_hash: "hash-saved",
+      base: "recovered edit\n",
+      buffer: "new edit after ambiguous cleanup\n",
+    }));
+    expect(controller.getSnapshot().recovery).toMatchObject({
+      status: "durable",
+      recovery_id: "recovery-fresh",
+    });
+
+    const restartedOwner = {
+      ...owner,
+      revision: 5,
+      descriptor: { ...descriptor, content_hash: "hash-saved" },
+    };
+    const restarted = new FileEditorControllerRegistry(client).forResource(owner.resource_id);
+    await restarted.initialize({
+      owner: restartedOwner,
+      text: "recovered edit\n",
+      discover_recovery: true,
+    });
+    expect(restarted.getSnapshot()).toMatchObject({
+      saved_text: "recovered edit\n",
+      working_text: "new edit after ambiguous cleanup\n",
+      dirty: true,
+      recovery: { status: "durable", recovery_id: "recovery-fresh" },
+    });
+  });
+
+  it("preserves an ambiguous recovery and refuses to checkpoint over an advanced revision", async () => {
+    let verificationFailed = false;
+    const client = fakeClient();
+    vi.mocked(client.listRecoveries).mockImplementation(async () => {
+      if (verificationFailed) {
+        verificationFailed = false;
+        throw new Error("verification unavailable");
+      }
+      return [recoverySummary({ recovery_revision: 3 })];
+    });
+    vi.mocked(client.saveText).mockImplementation(async () => {
+      verificationFailed = true;
+      return { status: "saved", revision: 5, content_hash: "hash-saved" };
+    });
+    const controller = new FileEditorControllerRegistry(client, {
+      checkpoint_debounce_ms: 60_000,
+    }).forResource(owner.resource_id);
+    vi.mocked(client.listRecoveries).mockResolvedValueOnce([recoverySummary()]);
+    await controller.initialize({ owner, text: "base\n", discover_recovery: true });
+
+    await expect(controller.save()).rejects.toThrow("verification unavailable");
+    controller.mutate("edit after advanced recovery\n");
+    await expect(controller.retryRecovery()).rejects.toThrow(
+      "Recovery advanced while its previous outcome was being reconciled.",
+    );
+
+    expect(client.checkpointRecovery).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({
+      working_text: "edit after advanced recovery\n",
+      dirty: true,
+      recovery: {
+        status: "error",
+        recovery_id: "recovery-1",
+        recovery_revision: 2,
+        retryable: true,
+      },
     });
   });
 

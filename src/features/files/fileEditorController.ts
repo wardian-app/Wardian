@@ -59,6 +59,7 @@ export type FileEditorSnapshot = {
   readonly stale: boolean;
   readonly save_state: "idle" | "saving" | "error";
   readonly recovery: FileEditorRecoveryState;
+  readonly recovery_discovery: "not_started" | "discovering" | "complete" | "error";
   readonly buffer_generation: number;
   readonly presentation_generation: number;
   readonly presentation_ids: readonly string[];
@@ -89,11 +90,18 @@ type RecoveryMetadata = {
   recovery_id: string;
   recovery_revision: number;
   buffer_generation: number;
+  needs_reconciliation: boolean;
 };
 
 type PresentationEntry = {
   generation: number;
   callbacks: FileEditorPresentationCallbacks;
+};
+
+type PresentationOwnerCandidate = {
+  owner: FileResourceSnapshotV1;
+  text: string;
+  order: number;
 };
 
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 750;
@@ -126,10 +134,13 @@ export class FileEditorController {
   readonly #checkpointDebounceMs: number;
   readonly #listeners = new Set<() => void>();
   readonly #presentations = new Map<string, PresentationEntry>();
+  readonly #presentationOwners = new Map<string, PresentationOwnerCandidate>();
   readonly #presentationObservations = new Map<string, number>();
   readonly #pinnedPresentations = new Set<string>();
   #snapshot: FileEditorSnapshot;
   #owner: FileResourceSnapshotV1 | null = null;
+  #ownerPresentationId: string | null = null;
+  #ownerCandidateOrder = 0;
   #ownerGeneration = 0;
   #baseRevision: number | null = null;
   #initializationGeneration = 0;
@@ -169,6 +180,7 @@ export class FileEditorController {
       stale: false,
       save_state: "idle",
       recovery: Object.freeze({ status: "none" }),
+      recovery_discovery: "not_started",
       buffer_generation: 0,
       presentation_generation: 0,
       presentation_ids: Object.freeze([]),
@@ -204,6 +216,10 @@ export class FileEditorController {
         const current = this.#presentations.get(surfaceId);
         if (current?.generation !== generation) return;
         this.#presentations.delete(surfaceId);
+        this.#presentationOwners.delete(surfaceId);
+        if (this.#ownerPresentationId === surfaceId) {
+          this.#promotePresentationOwner();
+        }
         this.#presentationObservations.set(surfaceId, generation + 1);
         this.#publishMembership();
       },
@@ -218,6 +234,37 @@ export class FileEditorController {
     };
   }
 
+  /**
+   * Retains one live authorization candidate per presenting pane. Detaching
+   * the active candidate promotes the newest remaining pane before later
+   * guarded writes or recovery checkpoints acquire their operation snapshot.
+   */
+  bindPresentationOwner(
+    surfaceId: string,
+    owner: FileResourceSnapshotV1,
+    text: string,
+    makeCurrent = true,
+  ): void {
+    if (!this.#presentations.has(surfaceId)) return;
+    const candidate = { owner, text, order: ++this.#ownerCandidateOrder };
+    this.#presentationOwners.set(surfaceId, candidate);
+    if (!makeCurrent) return;
+    this.#ownerPresentationId = surfaceId;
+    this.#applyAuthoritative(owner, text);
+  }
+
+  #promotePresentationOwner(): void {
+    const candidate = [...this.#presentationOwners.entries()].sort((left, right) => (
+      right[1].order - left[1].order || left[0].localeCompare(right[0])
+    ))[0];
+    if (!candidate) {
+      this.#ownerPresentationId = null;
+      return;
+    }
+    this.#ownerPresentationId = candidate[0];
+    this.#applyAuthoritative(candidate[1].owner, candidate[1].text);
+  }
+
   async initialize(input: FileEditorInitialization): Promise<void> {
     this.#pendingInitializationCount += 1;
     const initializationGeneration = ++this.#initializationGeneration;
@@ -225,26 +272,63 @@ export class FileEditorController {
       const alreadyDirty = this.#snapshot.dirty;
       this.#applyAuthoritative(input.owner, input.text);
       const bufferGeneration = this.#snapshot.buffer_generation;
-      if (input.discover_recovery === false || alreadyDirty) return;
+      if (input.discover_recovery === false) {
+        if (this.#snapshot.recovery_discovery === "not_started") {
+          this.#publish({ recovery_discovery: "complete" });
+        }
+        return;
+      }
+      if (this.#snapshot.recovery_discovery === "complete") return;
+      this.#publish({ recovery_discovery: "discovering" });
 
-      const recoveries = await this.#client.listRecoveries({
-        resource_key: this.#resourceKey,
-      } satisfies ListFileRecoveriesRequestV1);
-      if (
-        initializationGeneration !== this.#initializationGeneration
-        || bufferGeneration !== this.#snapshot.buffer_generation
-      ) return;
+      let recoveries: readonly FileRecoverySummaryV1[];
+      try {
+        recoveries = await this.#client.listRecoveries({
+          resource_key: this.#resourceKey,
+        } satisfies ListFileRecoveriesRequestV1);
+      } catch (error) {
+        if (initializationGeneration === this.#initializationGeneration) {
+          this.#publish({
+            recovery_discovery: "error",
+            last_error: errorMessage(error),
+          });
+        }
+        throw error;
+      }
+      if (initializationGeneration !== this.#initializationGeneration) return;
       const newest = newestRecovery(recoveries);
-      if (!newest) return;
-      const recovered = await this.#client.getRecovery({
-        recovery_id: newest.recovery_id,
-        resource_key: this.#resourceKey,
-      });
-      if (
-        initializationGeneration !== this.#initializationGeneration
-        || bufferGeneration !== this.#snapshot.buffer_generation
-      ) return;
+      if (!newest) {
+        this.#publish({ recovery_discovery: "complete", last_error: null });
+        return;
+      }
+      if (bufferGeneration !== this.#snapshot.buffer_generation) {
+        const message = "Recovery discovery was interrupted by newer in-memory edits.";
+        this.#publish({ recovery_discovery: "error", last_error: message });
+        throw new Error(message);
+      }
+      let recovered: FileRecoveryV1;
+      try {
+        recovered = await this.#client.getRecovery({
+          recovery_id: newest.recovery_id,
+          resource_key: this.#resourceKey,
+        });
+      } catch (error) {
+        if (initializationGeneration === this.#initializationGeneration) {
+          this.#publish({
+            recovery_discovery: "error",
+            last_error: errorMessage(error),
+          });
+        }
+        throw error;
+      }
+      if (initializationGeneration !== this.#initializationGeneration) return;
+      if (alreadyDirty || bufferGeneration !== this.#snapshot.buffer_generation) {
+        const message = "Recovered changes were found after newer in-memory edits; the newer edits were preserved.";
+        this.#publish({ recovery_discovery: "error", last_error: message });
+        throw new Error(message);
+      }
       this.#applyRecovery(recovered);
+      this.#publish({ recovery_discovery: "complete" });
     } finally {
       this.#pendingInitializationCount = Math.max(0, this.#pendingInitializationCount - 1);
       this.#publish({});
@@ -336,6 +420,12 @@ export class FileEditorController {
     if (!this.#owner || this.#baseRevision === null || this.#snapshot.buffer_base_hash === null) {
       throw new Error("The file editor has no live authorized subscription.");
     }
+    if (
+      this.#snapshot.recovery_discovery === "discovering"
+      || this.#snapshot.recovery_discovery === "error"
+    ) {
+      throw new Error("Recovery discovery must complete before Save.");
+    }
     const requestedOwnerGeneration = this.#ownerGeneration;
     const bufferGeneration = this.#snapshot.buffer_generation;
     const submittedText = this.#snapshot.working_text;
@@ -405,6 +495,10 @@ export class FileEditorController {
           try {
             await this.#reconcileSavedRecovery(cleanup);
           } catch (error) {
+            if (
+              this.#recoveryMetadata?.recovery_id === cleanup.recovery_id
+              && this.#recoveryMetadata.recovery_revision === cleanup.expected_recovery_revision
+            ) this.#recoveryMetadata.needs_reconciliation = true;
             cleanupFailure = error instanceof Error ? error : new Error(errorMessage(error));
           }
         }
@@ -536,6 +630,7 @@ export class FileEditorController {
         recovery_id: recovered.recovery_id,
         recovery_revision: recovered.recovery_revision,
         buffer_generation: bufferGeneration,
+        needs_reconciliation: false,
       };
       this.#publish({
         recovery: Object.freeze({
@@ -554,6 +649,7 @@ export class FileEditorController {
       recovery_id: recovered.recovery_id,
       recovery_revision: recovered.recovery_revision,
       buffer_generation: bufferGeneration,
+      needs_reconciliation: false,
     };
     const diskHeadHash = this.#snapshot.disk_head_hash;
     const stale = diskHeadHash !== recovered.base_content_hash;
@@ -638,12 +734,35 @@ export class FileEditorController {
 
   async #checkpointCurrentInsideQueue(): Promise<number | null> {
     if (!this.#snapshot.dirty) return null;
+    if (
+      this.#snapshot.recovery_discovery === "discovering"
+      || this.#snapshot.recovery_discovery === "error"
+    ) {
+      throw new Error("Recovery discovery must complete before checkpointing newer edits.");
+    }
     const owner = this.#owner;
     const baseHash = this.#snapshot.buffer_base_hash;
     if (!owner || this.#baseRevision === null || baseHash === null) {
       throw new Error("Dirty recovery requires a live authorized subscription.");
     }
     const bufferGeneration = this.#snapshot.buffer_generation;
+    try {
+      await this.#reconcileAmbiguousRecovery();
+    } catch (error) {
+      const recovery = this.#recoveryMetadata;
+      this.#publish({
+        recovery: Object.freeze({
+          status: "error",
+          recovery_id: recovery?.recovery_id ?? null,
+          recovery_revision: recovery?.recovery_revision ?? null,
+          buffer_generation: this.#snapshot.buffer_generation,
+          retryable: true,
+          message: errorMessage(error),
+        }),
+        last_error: errorMessage(error),
+      });
+      throw error;
+    }
     const recovery = this.#recoveryMetadata;
     const request: CheckpointFileRecoveryRequestV1 = {
       recovery_id: recovery?.recovery_id ?? null,
@@ -687,6 +806,7 @@ export class FileEditorController {
       recovery_id: committed.recovery_id,
       recovery_revision: committed.recovery_revision,
       buffer_generation: bufferGeneration,
+      needs_reconciliation: false,
     };
     this.#publish({
       recovery: Object.freeze({
@@ -732,9 +852,42 @@ export class FileEditorController {
     ) this.#recoveryMetadata = null;
   }
 
+  async #reconcileAmbiguousRecovery(): Promise<void> {
+    const recovery = this.#recoveryMetadata;
+    if (!recovery?.needs_reconciliation) return;
+    const candidate = (await this.#client.listRecoveries({
+      resource_key: this.#resourceKey,
+    })).find((entry) => entry.recovery_id === recovery.recovery_id);
+    if (!candidate) {
+      if (this.#recoveryMetadata === recovery) this.#recoveryMetadata = null;
+      return;
+    }
+    if (candidate.recovery_revision !== recovery.recovery_revision) {
+      throw new Error("Recovery advanced while its previous outcome was being reconciled.");
+    }
+    if (this.#recoveryMetadata === recovery) recovery.needs_reconciliation = false;
+  }
+
   #retireRecoveryForCleanGeneration(bufferGeneration: number): Promise<void> {
     return this.#enqueueDurable(async () => {
       if (this.#snapshot.dirty || this.#snapshot.buffer_generation !== bufferGeneration) return;
+      try {
+        await this.#reconcileAmbiguousRecovery();
+      } catch (error) {
+        const recovery = this.#recoveryMetadata;
+        this.#publish({
+          recovery: Object.freeze({
+            status: "error",
+            recovery_id: recovery?.recovery_id ?? null,
+            recovery_revision: recovery?.recovery_revision ?? null,
+            buffer_generation: bufferGeneration,
+            retryable: true,
+            message: errorMessage(error),
+          }),
+          last_error: errorMessage(error),
+        });
+        throw error;
+      }
       const recovery = this.#recoveryMetadata;
       if (recovery) {
         try {
@@ -826,7 +979,11 @@ export class FileEditorControllerRegistry {
     key: string;
     generation: number;
     pending: boolean;
-    promise: Promise<FileEditorController>;
+    promise: Promise<{
+      controller: FileEditorController;
+      resource: FileResourceTextV1;
+      accepted: boolean;
+    }>;
   }>();
   readonly #authoritativeGenerations = new Map<string, number>();
   readonly #client: FileEditorResourceClient;
@@ -863,6 +1020,7 @@ export class FileEditorControllerRegistry {
   synchronizeAuthoritative(
     owner: FileResourceSnapshotV1,
     readExactText: () => Promise<FileResourceTextV1>,
+    presentationId?: string,
   ): Promise<FileEditorController> {
     const resourceKey = owner.resource_id;
     const key = JSON.stringify([
@@ -871,12 +1029,26 @@ export class FileEditorControllerRegistry {
       owner.descriptor.content_hash,
     ]);
     const current = this.#authoritativeSynchronizations.get(resourceKey);
-    if (current?.key === key) return current.promise;
+    const bindPresentation = (synchronization: Promise<{
+      controller: FileEditorController;
+      resource: FileResourceTextV1;
+      accepted: boolean;
+    }>) => synchronization.then(({ controller, resource, accepted }) => {
+      if (presentationId) {
+        controller.bindPresentationOwner(presentationId, owner, resource.text, accepted);
+      }
+      return controller;
+    });
+    if (current?.key === key) return bindPresentation(current.promise);
 
     const generation = (this.#authoritativeGenerations.get(resourceKey) ?? 0) + 1;
     this.#authoritativeGenerations.set(resourceKey, generation);
     const controller = this.forResource(resourceKey);
-    let synchronization: Promise<FileEditorController>;
+    let synchronization: Promise<{
+      controller: FileEditorController;
+      resource: FileResourceTextV1;
+      accepted: boolean;
+    }>;
     synchronization = (async () => {
       const resource = await readExactText();
       if (
@@ -886,17 +1058,15 @@ export class FileEditorControllerRegistry {
         throw new Error("The text read did not match the authoritative file snapshot.");
       }
       const latest = this.#authoritativeSynchronizations.get(resourceKey);
-      if (latest?.generation !== generation) return controller;
-      if (controller.getSnapshot().status === "uninitialized") {
-        await controller.initialize({
-          owner,
-          text: resource.text,
-          discover_recovery: true,
-        });
-      } else {
-        controller.applyAuthoritative(owner, resource.text);
+      if (latest?.generation !== generation) {
+        return { controller, resource, accepted: false };
       }
-      return controller;
+      await controller.initialize({
+        owner,
+        text: resource.text,
+        discover_recovery: true,
+      });
+      return { controller, resource, accepted: true };
     })().catch((error) => {
       const latest = this.#authoritativeSynchronizations.get(resourceKey);
       if (latest?.generation === generation) {
@@ -920,7 +1090,7 @@ export class FileEditorControllerRegistry {
       pending: true,
       promise: synchronization,
     });
-    return synchronization;
+    return bindPresentation(synchronization);
   }
 
   releaseAfterPostcommit(
