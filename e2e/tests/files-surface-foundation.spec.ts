@@ -17,6 +17,18 @@ const BETA_PATH = `${ROOT}/beta.md`;
 const ALPHA_COPY_PATH = `${ROOT}/alpha-copy.md`;
 const WIDE_PDF_PATH = `${ROOT}/wide.pdf`;
 const IMAGE_PATH = `${ROOT}/figure.png`;
+const MANY_CHANGES_PATH = `${ROOT}/many-changes.txt`;
+
+const MANY_CHANGES_BASE = Array.from(
+  { length: 25 },
+  (_, index) => `Stable line ${index + 1}`,
+).join("\n");
+const MANY_CHANGES_EDITED = Array.from(
+  { length: 25 },
+  (_, index) => index % 2 === 0
+    ? `Stable line ${index + 1}`
+    : `Changed line ${index + 1}`,
+).join("\n");
 
 const ONE_PIXEL_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -98,6 +110,7 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
     files: [
       { path: ALPHA_PATH, content: "# Alpha document\n\nFirst file." },
       { path: BETA_PATH, content: "# Beta document\n\nSecond file." },
+      { path: MANY_CHANGES_PATH, content: MANY_CHANGES_BASE },
       {
         path: WIDE_PDF_PATH,
         content: "wide PDF fixture",
@@ -146,6 +159,26 @@ async function bootFilesWorkbench(page: Page): Promise<WorkbenchIpcMockControlle
 
 async function persistedDocument(ipc: WorkbenchIpcMockController) {
   return (await ipc.snapshot()).load_result.document;
+}
+
+async function replaceMonacoText(page: Page, surface: Locator, text: string) {
+  const editorLines = surface.locator(".monaco-editor .view-lines");
+  const editorInput = surface.locator(".monaco-editor .native-edit-context");
+  await editorLines.click({ position: { x: 100, y: 8 } });
+  await expect(editorInput).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.insertText(text);
+}
+
+async function visibleMonacoText(surface: Locator) {
+  return (await surface.locator(".monaco-editor .view-line").evaluateAll((lines) => (
+    lines.map((line) => line.textContent ?? "").join("\n")
+  ))).replace(/\u00a0/g, " ").replace(/\u00b7/g, "");
+}
+
+async function closeTabFromContextMenu(page: Page, tab: Locator) {
+  await tab.click({ button: "right", position: { x: 16, y: 12 } });
+  await page.getByRole("menuitem", { name: "Close tab" }).click();
 }
 
 test("routes Explorer files through transient, permanent, and side Workbench presentations", async ({
@@ -376,16 +409,8 @@ test("edits and saves in place, then Save As opens an ordinary file without reta
   await page.getByRole("button", { name: "Edit source" }).click();
 
   const activeSurface = page.locator('[data-testid="files-surface"]:not([data-suspended="true"])');
-  const editorInput = activeSurface.locator(".monaco-editor .native-edit-context");
-  const editorLines = activeSurface.locator(".monaco-editor .view-lines");
-  await editorLines.click({ position: { x: 120, y: 8 } });
-  await expect(editorInput).toBeFocused();
   const savedText = "# Alpha edited\n\nSaved from Monaco.";
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.type("# Alpha edited");
-  await page.keyboard.press("Enter");
-  await page.keyboard.press("Enter");
-  await page.keyboard.type("Saved from Monaco.");
+  await replaceMonacoText(page, activeSurface, savedText);
 
   await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
   await expect(activeSurface.getByLabel("Unsaved changes")).toBeVisible();
@@ -404,13 +429,7 @@ test("edits and saves in place, then Save As opens an ordinary file without reta
   });
 
   const copiedText = "# Alpha copy\n\nUnsaved source retained.";
-  await editorLines.click({ position: { x: 120, y: 8 } });
-  await expect(editorInput).toBeFocused();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.type("# Alpha copy");
-  await page.keyboard.press("Enter");
-  await page.keyboard.press("Enter");
-  await page.keyboard.type("Unsaved source retained.");
+  await replaceMonacoText(page, activeSurface, copiedText);
   await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
 
   await activeSurface.getByRole("button", { name: "File actions" }).click();
@@ -441,6 +460,199 @@ test("edits and saves in place, then Save As opens an ordinary file without reta
     ),
     fullPage: true,
   });
+});
+
+test("shares one Monaco buffer across panes and guards only the final dirty close", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const ipc = await bootFilesWorkbench(page);
+  const alphaRow = page.getByRole("treeitem", { name: "alpha.md" });
+
+  await alphaRow.dblclick();
+  await page.getByRole("button", { name: "Edit source" }).click();
+  await alphaRow.click({ button: "right" });
+  await page.getByRole("button", { name: "Open to Side", exact: true }).click();
+
+  const surfaces = page.getByTestId("files-surface");
+  await expect(surfaces).toHaveCount(2);
+  for (let index = 0; index < 2; index += 1) {
+    const editSource = surfaces.nth(index).getByRole("button", { name: "Edit source" });
+    if (await editSource.count()) await editSource.click();
+    await expect(surfaces.nth(index).getByTestId("monaco-text-renderer")).toBeVisible();
+  }
+
+  const sharedText = "# Shared buffer acceptance\n\nBoth panes see these exact bytes.";
+  await replaceMonacoText(page, surfaces.nth(0), sharedText);
+  await expect.poll(() => visibleMonacoText(surfaces.nth(0))).toContain("Shared buffer acceptance");
+  await expect.poll(() => visibleMonacoText(surfaces.nth(1))).toContain("Both panes see these exact bytes.");
+  const firstPaneText = await visibleMonacoText(surfaces.nth(0));
+  await expect.poll(() => visibleMonacoText(surfaces.nth(1))).toBe(firstPaneText);
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]'))
+    .toHaveCount(2);
+  await expect(surfaces.nth(0).getByLabel("Unsaved changes")).toBeVisible();
+  await expect(surfaces.nth(1).getByLabel("Unsaved changes")).toBeVisible();
+  await expect.poll(async () => (await ipc.calls("checkpoint_file_recovery")).length)
+    .toBeGreaterThan(0);
+
+  await closeTabFromContextMenu(page, filesTab(page, ALPHA_PATH).first());
+  await expect(filesTab(page, ALPHA_PATH)).toHaveCount(1);
+  await expect(page.getByRole("dialog", { name: /Unsaved Files changes/ })).toHaveCount(0);
+  await expect(filesTab(page, ALPHA_PATH).locator('[data-surface-badge="dirty"]')).toBeVisible();
+
+  await closeTabFromContextMenu(page, filesTab(page, ALPHA_PATH));
+  const closePrompt = page.getByRole("dialog", { name: /Unsaved Files changes/ });
+  await expect(closePrompt).toBeVisible();
+  await closePrompt.getByRole("button", { name: "Cancel" }).click();
+  await expect(closePrompt).toHaveCount(0);
+  await expect(filesTab(page, ALPHA_PATH)).toHaveCount(1);
+
+  const saveCountBeforeClose = (await ipc.calls("save_file_resource_text")).length;
+  await closeTabFromContextMenu(page, filesTab(page, ALPHA_PATH));
+  await closePrompt.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(async () => (await ipc.calls("save_file_resource_text")).length)
+    .toBeGreaterThan(saveCountBeforeClose);
+  const finalCloseSave = (await ipc.calls("save_file_resource_text")).at(-1)?.args?.request as {
+    text?: string;
+  } | undefined;
+  expect(finalCloseSave?.text).toBe(sharedText);
+  await expect(filesTab(page, ALPHA_PATH)).toHaveCount(0);
+
+  await alphaRow.dblclick();
+  await page.getByRole("button", { name: "Edit source" }).click();
+  const reopenedSurface = page.getByTestId("files-surface");
+  const checkpointCountBeforeDiscard = (await ipc.calls("checkpoint_file_recovery")).length;
+  await replaceMonacoText(page, reopenedSurface, "# Discard this generation\n");
+  await expect.poll(async () => (await ipc.calls("checkpoint_file_recovery")).length)
+    .toBeGreaterThan(checkpointCountBeforeDiscard);
+
+  const discardCountBeforeClose = (await ipc.calls("discard_file_recovery")).length;
+  await closeTabFromContextMenu(page, filesTab(page, ALPHA_PATH));
+  await closePrompt.getByRole("button", { name: "Don't Save" }).click();
+  await expect.poll(async () => (await ipc.calls("discard_file_recovery")).length)
+    .toBeGreaterThan(discardCountBeforeClose);
+  await expect(filesTab(page, ALPHA_PATH)).toHaveCount(0);
+});
+
+test("keeps inline saved-file changes and responsive comparison independent of presentation", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1800, height: 1000 });
+  await bootFilesWorkbench(page);
+  await page.getByRole("treeitem", { name: "alpha.md" }).dblclick();
+  await page.getByRole("button", { name: "Edit source" }).click();
+
+  const surface = page.getByTestId("files-surface");
+  const host = surface.getByTestId("files-content-host-shell");
+  await host.evaluate((element) => {
+    element.dataset.acceptanceHost = "preserved";
+  });
+  await replaceMonacoText(
+    page,
+    surface,
+    "# Alpha revised\n\nFirst file.\n\nA new saved-file annotation.",
+  );
+
+  await expect.poll(async () => surface.locator(".files-diff-modified-line").count())
+    .toBeGreaterThan(0);
+  await expect.poll(async () => surface.locator(".files-diff-added-line").count())
+    .toBeGreaterThan(0);
+  const diffControl = surface.getByRole("button", { name: /Open comparison:/ });
+  await expect(diffControl).toBeVisible();
+  await expect(diffControl).toHaveAttribute("aria-pressed", "false");
+  await expect(surface.getByRole("group", { name: "Saved file changes" })).toBeVisible();
+
+  await diffControl.click();
+  const lens = surface.getByRole("region", { name: "File comparison" });
+  const comparisonBody = lens.locator(".files-comparison-body");
+  await expect(lens).toBeVisible();
+  await expect(host).toHaveAttribute("data-comparison-open", "true");
+  await expect(host).toHaveAttribute("data-acceptance-host", "preserved");
+  await expect(surface.getByRole("button", { name: "View rendered" }))
+    .toHaveAttribute("aria-pressed", "true");
+
+  await surface.evaluate((element) => {
+    element.style.width = "900px";
+    element.style.maxWidth = "900px";
+    element.style.flex = "0 0 900px";
+  });
+  await expect(comparisonBody).toHaveAttribute("data-layout", "side_by_side");
+  const monacoDiff = lens.locator(".monaco-diff-editor");
+  await expect(monacoDiff).toHaveClass(/side-by-side/);
+
+  const screenshotPath = path.resolve(
+    "e2e/screenshots/files-editor/2026-07-18/saved-file-comparison-lens.png",
+  );
+  await surface.screenshot({ path: screenshotPath });
+
+  await surface.evaluate((element) => {
+    element.style.width = "650px";
+    element.style.maxWidth = "650px";
+    element.style.flex = "0 0 650px";
+  });
+  await expect(comparisonBody).toHaveAttribute("data-layout", "unified");
+  await expect(monacoDiff).not.toHaveClass(/side-by-side/);
+
+  const layout = lens.getByRole("combobox", { name: "Comparison layout" });
+  await layout.selectOption("side_by_side");
+  await expect(layout).toHaveValue("side_by_side");
+  await expect(comparisonBody).toHaveAttribute("data-layout", "side_by_side");
+  await expect(monacoDiff).toHaveClass(/side-by-side/);
+
+  await surface.evaluate((element) => {
+    element.style.width = "520px";
+    element.style.maxWidth = "520px";
+    element.style.flex = "0 0 520px";
+  });
+  await expect(comparisonBody).toHaveAttribute("data-layout", "unified");
+  await expect(monacoDiff).not.toHaveClass(/side-by-side/);
+  await expect(layout).toHaveValue("side_by_side");
+  await expect(layout).toHaveAttribute("title", /needs at least 560 px/i);
+
+  await lens.getByRole("button", { name: "Close comparison" }).click();
+  await expect(lens).toHaveCount(0);
+  await expect(host).toHaveAttribute("data-comparison-open", "false");
+  await expect(host).toHaveAttribute("data-acceptance-host", "preserved");
+  await expect(surface.getByRole("button", { name: "View rendered" }))
+    .toHaveAttribute("aria-pressed", "true");
+  await expect(surface.getByTestId("monaco-text-renderer")).toBeVisible();
+});
+
+test("contains a multi-digit saved-file diff control in a 100px pane", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await bootFilesWorkbench(page);
+  await page.getByRole("treeitem", { name: "many-changes.txt" }).dblclick();
+
+  const surface = page.getByTestId("files-surface");
+  await expect(surface.getByTestId("monaco-text-renderer")).toBeVisible();
+  await replaceMonacoText(page, surface, MANY_CHANGES_EDITED);
+
+  const diffControl = surface.getByRole("button", {
+    name: /Open comparison: 12 change regions, 0 added, 12 modified, 0 deleted against Saved file/i,
+  });
+  await expect(diffControl).toBeVisible();
+  await expect(diffControl.locator(".files-diff-count")).toHaveText("12");
+
+  await surface.evaluate((element) => {
+    element.style.width = "100px";
+    element.style.maxWidth = "100px";
+    element.style.flex = "0 0 100px";
+  });
+  await expect.poll(async () => surface.evaluate((element) => element.clientWidth)).toBe(100);
+
+  const surfaceBox = await surface.boundingBox();
+  expect(surfaceBox).not.toBeNull();
+  for (const control of [diffControl, surface.getByRole("button", { name: "File actions" })]) {
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(surfaceBox!.x - 0.5);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(surfaceBox!.x + surfaceBox!.width + 0.5);
+  }
+  const headerMetrics = await surface.locator(".files-header").evaluate((element) => ({
+    client_width: element.clientWidth,
+    scroll_width: element.scrollWidth,
+  }));
+  expect(headerMetrics.scroll_width).toBeLessThanOrEqual(headerMetrics.client_width);
 });
 
 test("keeps oversized PDF page origins reachable and centers pages that fit", async ({ page }) => {

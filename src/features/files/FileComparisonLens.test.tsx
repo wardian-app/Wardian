@@ -226,6 +226,7 @@ describe("FileComparisonLens", () => {
     };
     expect(createDiffEditor).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
       renderSideBySide: true,
+      useInlineViewWhenSpaceIsLimited: false,
     }));
 
     act(() => {

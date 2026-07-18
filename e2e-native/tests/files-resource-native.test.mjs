@@ -5,6 +5,7 @@ import path from "node:path";
 import { By, until } from "selenium-webdriver";
 
 import { fileResourceUrlConversion } from "../../src/features/files/resourceTicketUrl.mjs";
+import { closeWorkbenchSurface } from "../lib/workbench.mjs";
 
 import {
   createNativeHarness,
@@ -48,6 +49,10 @@ function createFixtures(harness) {
 
   const primaryFile = path.join(primary, "report.txt");
   const additionalFile = path.join(additional, "notes.txt");
+  const editableFile = path.join(primary, "editable.txt");
+  const mismatchFile = path.join(primary, "mismatch.txt");
+  const recoveryCleanFile = path.join(primary, "recovery-clean.txt");
+  const recoveryConflictFile = path.join(primary, "recovery-conflict.txt");
   const pickerFile = path.join(external, "selected.txt");
   const pickerSibling = path.join(external, "sibling.txt");
   const pdfFile = path.join(primary, "artifact.pdf");
@@ -59,6 +64,10 @@ function createFixtures(harness) {
 
   fs.writeFileSync(primaryFile, "revision one\n");
   fs.writeFileSync(additionalFile, "additional root\n");
+  fs.writeFileSync(editableFile, "save base\n");
+  fs.writeFileSync(mismatchFile, "mismatch target\n");
+  fs.writeFileSync(recoveryCleanFile, "one\ntwo\nthree\n");
+  fs.writeFileSync(recoveryConflictFile, "shared line\n");
   fs.writeFileSync(pickerFile, "selected only\n");
   fs.writeFileSync(pickerSibling, "must stay denied\n");
   fs.writeFileSync(pdfFile, pdfBytes);
@@ -74,6 +83,10 @@ function createFixtures(harness) {
     external,
     primaryFile,
     additionalFile,
+    editableFile,
+    mismatchFile,
+    recoveryCleanFile,
+    recoveryConflictFile,
     pickerFile,
     pickerSibling,
     pdfFile,
@@ -121,6 +134,19 @@ async function expectFileError(driver, command, args, code) {
   return result.error;
 }
 
+async function waitForFileRuntimeStats(driver, resourceId, predicate, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await invokeTauri(driver, "debug_file_resource_stats", {
+      resourceId,
+    });
+    if (predicate(latest)) return latest;
+    await sleep(100);
+  }
+  assert.fail(`file runtime stats did not settle: ${JSON.stringify(latest)}`);
+}
+
 async function fetchResource(driver, url, { method = "GET", range = null } = {}) {
   const conversion = fileResourceUrlConversion(url);
   return driver.executeAsyncScript((resourceUrl, resourceConversion, resourceMethod, resourceRange, done) => {
@@ -165,7 +191,7 @@ function tryCreateEscapeLink(t, fixtures) {
   }
 }
 
-test("native Files resources enforce roots, revisions, ranges, and cleanup", { timeout: 240_000 }, async (t) => {
+test("native Files resources enforce roots, revisions, ranges, and cleanup", { timeout: 360_000 }, async (t) => {
   const harness = await createNativeHarness();
   assert.ok(harness.appPath);
 
@@ -186,9 +212,11 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
     t.skip(String(error));
     return;
   }
-  t.after(async () => session.close());
+  t.after(async () => {
+    if (session) await session.close();
+  });
 
-  const { driver } = session;
+  let { driver } = session;
   await waitForAppShell(driver, 20_000);
   const agent = await createOffMockAgent(driver, fixtures);
   assert.equal(agent.session_id, SESSION_ID);
@@ -417,6 +445,357 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
   assert.equal(retainedStats.renderer_lease_count, 0);
   assert.equal(retainedStats.user_grant_count, 1);
 
+  const editableCapture = await startTauriEventCapture(driver, FILE_REVISION_EVENT);
+  const editable = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.editableFile, { agentId: SESSION_ID }),
+  );
+  const mismatch = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.mismatchFile, { agentId: SESSION_ID }),
+  );
+  const savedText = "saved through retained authorization\n";
+  const saved = await invokeTauri(driver, "save_file_resource_text", {
+    request: {
+      resource_id: editable.resource_id,
+      subscription_id: editable.subscription_id,
+      expected_revision: editable.revision,
+      buffer_base_hash: editable.descriptor.content_hash,
+      text: savedText,
+      recovery_cleanup: null,
+    },
+  });
+  assert.equal(saved.status, "saved");
+  assert.equal(saved.revision, editable.revision + 1);
+  assert.equal(saved.content_hash.startsWith("sha256:"), true);
+  assert.notEqual(saved.content_hash, editable.descriptor.content_hash);
+  assert.equal(fs.readFileSync(fixtures.editableFile, "utf8"), savedText);
+  const savedEvent = await waitForTauriEvent(
+    driver,
+    editableCapture,
+    (event) => event.resource_id === editable.resource_id && event.revision === saved.revision,
+    15_000,
+  );
+  assert.equal(savedEvent.descriptor.content_hash, saved.content_hash);
+  const savedReadback = await invokeTauri(driver, "read_file_resource_text", {
+    request: {
+      resource_id: editable.resource_id,
+      subscription_id: editable.subscription_id,
+      revision: saved.revision,
+    },
+  });
+  assert.equal(savedReadback.text, savedText);
+  await sleep(450);
+  const savedEvents = (await readTauriEventCapture(driver, editableCapture))
+    .filter((event) => event.resource_id === editable.resource_id);
+  assert.equal(
+    savedEvents.length,
+    1,
+    `guarded save emitted duplicate events: ${JSON.stringify(savedEvents)}`,
+  );
+  await stopTauriEventCapture(driver, editableCapture);
+
+  await expectFileError(driver, "save_file_resource_text", {
+    request: {
+      resource_id: editable.resource_id,
+      subscription_id: mismatch.subscription_id,
+      expected_revision: saved.revision,
+      buffer_base_hash: saved.content_hash,
+      text: "must not cross resource ownership\n",
+      recovery_cleanup: null,
+    },
+  }, "unauthorized_resource");
+  assert.equal(fs.readFileSync(fixtures.editableFile, "utf8"), savedText);
+  assert.equal(fs.readFileSync(fixtures.mismatchFile, "utf8"), "mismatch target\n");
+
+  const staleCapture = await startTauriEventCapture(driver, FILE_REVISION_EVENT);
+  const externalText = "external edit wins\n";
+  fs.writeFileSync(fixtures.editableFile, externalText);
+  const stale = await invokeTauri(driver, "save_file_resource_text", {
+    request: {
+      resource_id: editable.resource_id,
+      subscription_id: editable.subscription_id,
+      expected_revision: saved.revision,
+      buffer_base_hash: saved.content_hash,
+      text: "must not overwrite the external edit\n",
+      recovery_cleanup: null,
+    },
+  });
+  assert.equal(stale.status, "stale_conflict");
+  assert.ok(stale.revision > saved.revision);
+  assert.notEqual(stale.content_hash, saved.content_hash);
+  assert.equal(fs.readFileSync(fixtures.editableFile, "utf8"), externalText);
+  const staleEvent = await waitForTauriEvent(
+    driver,
+    staleCapture,
+    (event) => event.resource_id === editable.resource_id && event.revision === stale.revision,
+    15_000,
+  );
+  assert.equal(staleEvent.descriptor.content_hash, stale.content_hash);
+  await stopTauriEventCapture(driver, staleCapture);
+
+  const revocablePrimary = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.primaryFile, { agentId: SESSION_ID }),
+  );
+  const revocableAdditional = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.additionalFile, { agentId: SESSION_ID }),
+  );
+  const restoredAgentConfig = {
+    ...agent,
+    folder: fixtures.primary,
+    include_directories: [fixtures.additional],
+  };
+  await invokeTauri(driver, "update_agent_config", {
+    newConfig: {
+      ...restoredAgentConfig,
+      folder: fixtures.external,
+      include_directories: [],
+    },
+  });
+  for (const opened of [revocablePrimary, revocableAdditional]) {
+    await expectFileError(driver, "read_file_resource_text", {
+      request: {
+        resource_id: opened.resource_id,
+        subscription_id: opened.subscription_id,
+        revision: opened.revision,
+      },
+    }, "unauthorized_path");
+    await expectFileError(driver, "save_file_resource_text", {
+      request: {
+        resource_id: opened.resource_id,
+        subscription_id: opened.subscription_id,
+        expected_revision: opened.revision,
+        buffer_base_hash: opened.descriptor.content_hash,
+        text: "revoked roots must not write\n",
+        recovery_cleanup: null,
+      },
+    }, "unauthorized_path");
+  }
+  assert.equal(fs.readFileSync(fixtures.primaryFile, "utf8"), currentText);
+  assert.equal(fs.readFileSync(fixtures.additionalFile, "utf8"), "additional root\n");
+  await invokeTauri(driver, "update_agent_config", {
+    newConfig: restoredAgentConfig,
+  });
+  const restoredPrimary = await invokeTauri(driver, "read_file_resource_text", {
+    request: {
+      resource_id: revocablePrimary.resource_id,
+      subscription_id: revocablePrimary.subscription_id,
+      revision: revocablePrimary.revision,
+    },
+  });
+  const restoredAdditional = await invokeTauri(driver, "read_file_resource_text", {
+    request: {
+      resource_id: revocableAdditional.resource_id,
+      subscription_id: revocableAdditional.subscription_id,
+      revision: revocableAdditional.revision,
+    },
+  });
+  assert.equal(restoredPrimary.text, currentText);
+  assert.equal(restoredAdditional.text, "additional root\n");
+
+  const recoveryClean = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.recoveryCleanFile, { agentId: SESSION_ID }),
+  );
+  const recoveryConflict = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.recoveryConflictFile, { agentId: SESSION_ID }),
+  );
+  await expectFileError(driver, "checkpoint_file_recovery", {
+    request: {
+      recovery_id: null,
+      expected_recovery_revision: null,
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryConflict.subscription_id,
+      base_content_hash: recoveryClean.descriptor.content_hash,
+      base: "one\ntwo\nthree\n",
+      resource_key: recoveryClean.resource_id,
+      buffer: "ONE\ntwo\nthree\n",
+    },
+  }, "unauthorized_resource");
+  const cleanCheckpoint = await invokeTauri(driver, "checkpoint_file_recovery", {
+    request: {
+      recovery_id: null,
+      expected_recovery_revision: null,
+      resource_id: recoveryClean.resource_id,
+      subscription_id: recoveryClean.subscription_id,
+      base_content_hash: recoveryClean.descriptor.content_hash,
+      base: "one\ntwo\nthree\n",
+      resource_key: recoveryClean.resource_id,
+      buffer: "ONE\ntwo\nthree\n",
+    },
+  });
+  const conflictCheckpoint = await invokeTauri(driver, "checkpoint_file_recovery", {
+    request: {
+      recovery_id: null,
+      expected_recovery_revision: null,
+      resource_id: recoveryConflict.resource_id,
+      subscription_id: recoveryConflict.subscription_id,
+      base_content_hash: recoveryConflict.descriptor.content_hash,
+      base: "shared line\n",
+      resource_key: recoveryConflict.resource_id,
+      buffer: "buffer line\n",
+    },
+  });
+  assert.equal(cleanCheckpoint.recovery_revision, 1);
+  assert.equal(conflictCheckpoint.recovery_revision, 1);
+
+  const acceptanceResources = [
+    editable,
+    mismatch,
+    revocablePrimary,
+    revocableAdditional,
+    recoveryClean,
+    recoveryConflict,
+  ];
+  for (const opened of acceptanceResources) {
+    await closeResource(driver, opened.subscription_id);
+  }
+  for (const opened of acceptanceResources) {
+    await waitForFileRuntimeStats(
+      driver,
+      opened.resource_id,
+      (stats) => stats.subscriber_count === 0,
+    );
+  }
+  await waitForFileRuntimeStats(
+    driver,
+    null,
+    (stats) => stats.watcher_count === 0
+      && stats.ticket_count === 0
+      && stats.renderer_lease_count === 0,
+  );
+
+  await session.close();
+  session = null;
+  session = await startNativeSession(harness);
+  driver = session.driver;
+  await waitForAppShell(driver, 20_000);
+
+  const listedCleanRecoveries = await invokeTauri(driver, "list_file_recoveries", {
+    request: { resource_key: recoveryClean.resource_id },
+  });
+  const listedConflictRecoveries = await invokeTauri(driver, "list_file_recoveries", {
+    request: { resource_key: recoveryConflict.resource_id },
+  });
+  assert.deepEqual(
+    listedCleanRecoveries.map((recovery) => recovery.recovery_id),
+    [cleanCheckpoint.recovery_id],
+  );
+  assert.deepEqual(
+    listedConflictRecoveries.map((recovery) => recovery.recovery_id),
+    [conflictCheckpoint.recovery_id],
+  );
+  const restoredCleanRecovery = await invokeTauri(driver, "get_file_recovery", {
+    request: {
+      recovery_id: cleanCheckpoint.recovery_id,
+      resource_key: recoveryClean.resource_id,
+    },
+  });
+  const restoredConflictRecovery = await invokeTauri(driver, "get_file_recovery", {
+    request: {
+      recovery_id: conflictCheckpoint.recovery_id,
+      resource_key: recoveryConflict.resource_id,
+    },
+  });
+  assert.equal(restoredCleanRecovery.base, "one\ntwo\nthree\n");
+  assert.equal(restoredCleanRecovery.buffer, "ONE\ntwo\nthree\n");
+  assert.equal(restoredConflictRecovery.base, "shared line\n");
+  assert.equal(restoredConflictRecovery.buffer, "buffer line\n");
+
+  fs.writeFileSync(fixtures.recoveryCleanFile, "one\ntwo\nTHREE\n");
+  fs.writeFileSync(fixtures.recoveryConflictFile, "disk line\n");
+  const reopenedClean = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.recoveryCleanFile, { agentId: SESSION_ID }),
+  );
+  const reopenedConflict = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.recoveryConflictFile, { agentId: SESSION_ID }),
+  );
+  const cleanMerge = await invokeTauri(driver, "merge_file_recovery", {
+    request: {
+      recovery_id: cleanCheckpoint.recovery_id,
+      expected_recovery_revision: cleanCheckpoint.recovery_revision,
+      resource_key: recoveryClean.resource_id,
+      resource_id: reopenedClean.resource_id,
+      subscription_id: reopenedClean.subscription_id,
+    },
+  });
+  assert.equal(cleanMerge.status, "clean");
+  assert.equal(cleanMerge.disk_changed, true);
+  assert.equal(cleanMerge.merged_text, "ONE\ntwo\nTHREE\n");
+  assert.equal(fs.readFileSync(fixtures.recoveryCleanFile, "utf8"), "one\ntwo\nTHREE\n");
+
+  const conflictedMerge = await invokeTauri(driver, "merge_file_recovery", {
+    request: {
+      recovery_id: conflictCheckpoint.recovery_id,
+      expected_recovery_revision: conflictCheckpoint.recovery_revision,
+      resource_key: recoveryConflict.resource_id,
+      resource_id: reopenedConflict.resource_id,
+      subscription_id: reopenedConflict.subscription_id,
+    },
+  });
+  assert.equal(conflictedMerge.status, "conflicted");
+  assert.equal(conflictedMerge.disk_changed, true);
+  assert.match(
+    conflictedMerge.merged_text,
+    /<<<<<<<[\s\S]*buffer line[\s\S]*=======[\s\S]*disk line[\s\S]*>>>>>>>/,
+  );
+  assert.equal(fs.readFileSync(fixtures.recoveryConflictFile, "utf8"), "disk line\n");
+
+  for (const checkpoint of [cleanCheckpoint, conflictCheckpoint]) {
+    const resourceKey = checkpoint.recovery_id === cleanCheckpoint.recovery_id
+      ? recoveryClean.resource_id
+      : recoveryConflict.resource_id;
+    await invokeTauri(driver, "discard_file_recovery", {
+      request: {
+        recovery_id: checkpoint.recovery_id,
+        expected_recovery_revision: checkpoint.recovery_revision,
+        resource_key: resourceKey,
+      },
+    });
+    assert.deepEqual(
+      await invokeTauri(driver, "list_file_recoveries", {
+        request: { resource_key: resourceKey },
+      }),
+      [],
+    );
+  }
+  await closeResource(driver, reopenedClean.subscription_id);
+  await closeResource(driver, reopenedConflict.subscription_id);
+  for (const opened of [reopenedClean, reopenedConflict]) {
+    await waitForFileRuntimeStats(
+      driver,
+      opened.resource_id,
+      (stats) => stats.subscriber_count === 0,
+    );
+  }
+  await waitForFileRuntimeStats(
+    driver,
+    null,
+    (stats) => stats.watcher_count === 0
+      && stats.ticket_count === 0
+      && stats.renderer_lease_count === 0,
+  );
+
+  const imageIdentity = await invokeTauri(
+    driver,
+    "open_file_resource",
+    request(fixtures.imageFile, { agentId: SESSION_ID }),
+  );
+  await closeResource(driver, imageIdentity.subscription_id);
+
   // Persist and reload a real Files surface so this native layer crosses the
   // production FileResourceClient -> ImageRenderer URL conversion boundary.
   // Removing that client conversion makes the image decode fail and this
@@ -444,7 +823,7 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
         [surfaceId]: {
           surface_id: surfaceId,
           surface_type: "files",
-          resource_key: `file:${fixtures.imageFile.replace(/\\/g, "/")}`,
+          resource_key: imageIdentity.resource_id,
           state_schema_version: 1,
           state: {
             resource_kind: "file",
@@ -482,6 +861,16 @@ test("native Files resources enforce roots, revisions, ranges, and cleanup", { t
   ), 20_000);
   const renderedSource = await renderedImage.getAttribute("src");
   assert.equal(renderedSource.startsWith("wardian-resource://"), false);
+  await closeWorkbenchSurface(driver, "files", imageIdentity.resource_id);
+  const finalImageStats = await waitForFileRuntimeStats(
+    driver,
+    imageIdentity.resource_id,
+    (stats) => stats.watcher_count === 0
+      && stats.subscriber_count === 0
+      && stats.ticket_count === 0
+      && stats.renderer_lease_count === 0,
+  );
+  assert.equal(finalImageStats.user_grant_count, 0);
   const finalTitle = await driver.getTitle();
   assert.equal(typeof finalTitle, "string");
   t.diagnostic("native Files runtime remained live through final cleanup assertion");

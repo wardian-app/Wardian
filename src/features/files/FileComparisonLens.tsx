@@ -151,6 +151,7 @@ export function FileComparisonLens({
           contentWidth!,
           "text",
         ) === "side_by_side",
+        useInlineViewWhenSpaceIsLimited: false,
         renderValidationDecorations: "off",
         scrollBeyondLastLine: false,
         theme: theme(),

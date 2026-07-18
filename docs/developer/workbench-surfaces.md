@@ -224,9 +224,11 @@ The current Files contribution is reachable from Explorer and restoration but
 is deliberately marked reserved in the New Surface catalog. Ordinary file
 single-click uses `open_transient`; double-click, keyboard open, context
 **Open**, and **Open to Side** create or pin permanent presentations. The first
-buffer mutation also pins a transient source-only file. Comparison and artifact
-review remain later capabilities rather than top-level Preview/Changes/Draft
-modes.
+buffer mutation also pins a transient source-only file. The shipped comparison
+surface uses the Saved-file baseline; prompt-checkpoint and presented-version
+baselines remain explicit unavailable variants until downstream adapters supply
+their exact historical content. Files never falls back to a nearby revision or
+adds top-level Preview/Changes/Draft modes.
 
 The Files header contains a current-state Book/Pencil presentation control only
 when both rendered and editor presentations exist. Source-only resources open
@@ -236,6 +238,43 @@ the title string is never changed with `*`. Save is explicit through
 Ctrl/Cmd+S or the overflow menu. Save As consumes a one-shot exact native picker
 grant, writes the working buffer, then opens the returned canonical path as a
 new ordinary file. It never retargets the source controller or artifact identity.
+
+The controller persists a recovery record outside the Workbench document for
+each dirty canonical resource. A restart may reconstruct dirty, stale, or
+read-only recovery state. The same Wardian app webview may read the exact saved
+recovery base and buffer without current file authorization so the user can
+inspect or discard them, but that recovery grants no access to current disk
+bytes. Restoring write access, merging against disk, or saving still requires a
+newly authorized live subscription for the exact target. The final presentation
+close uses the ordinary shared-resource **Save** / **Don't Save** / **Cancel**
+transaction. There is no review-owned draft model or second editor buffer.
+
+`FileComparisonLens` keeps comparison presentation separate from the working
+buffer. The editor controller keeps `buffer_base_hash` and `disk_head_hash`
+independent; Saved-file comparison uses the former. Downstream historical
+baseline adapters must supply a separate immutable `review_base_hash` without
+changing either editor hash. Saved-file changes are annotated inline and
+summarized with a compact changed-region count. The lens selects side-by-side
+layout at 720 px of available pane width and unified layout below it. An
+explicit side-by-side preference remains effective to a 560 px hard minimum;
+narrower panes receive a temporary unified override without mutating that
+preference. Review-drawer width is removed before applying either threshold.
+
+When a watcher publishes a new disk head while the controller is dirty, the
+controller enters stale state. **Merge** rebases the shared buffer and leaves it
+dirty until explicit Save, **Reload from disk** discards the buffer and recovery
+record and adopts the new disk head, and **Cancel** preserves the stale state.
+All three actions validate the same canonical controller identity and observed
+generation before taking effect.
+
+The reserved downstream artifact integration keeps `artifact:<id>` as its
+durable provenance/navigation identity. Its attachment adapter must resolve the
+currently presented backing version to an authorized canonical file or
+immutable blob controller and then attach the Files presentation to that
+controller. Duplicate file and artifact presentations therefore share one
+editor model when they resolve to the same canonical file; artifacts do not own
+a second buffer. **Save As** always creates an ordinary file presentation and
+never retargets the artifact thread.
 
 The Rust lifecycle is:
 
@@ -286,7 +325,7 @@ active-subscription counts under one mutex, so a concurrent open cannot become
 evictable between a stale membership snapshot and grant selection.
 
 Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
-5 MiB/100,000 lines per future diff side, 64 MiB/64 million decoded pixels for
+5 MiB/100,000 lines per diff side, 64 MiB/64 million decoded pixels for
 images, and 256 MiB for PDFs. HTML and SVG are editor-only inert source in
 Monaco. They are never injected into Wardian's DOM; a future active artifact
 host must provide the zero-Tauri-capability, networkless isolation contract
@@ -299,7 +338,8 @@ maximum of 25 mounted page slots.
 
 A byte- or decoded-pixel-limit violation is a stable metadata revision, not an
 open failure. Its descriptor keeps the canonical name, type, byte size, and
-modified time but disables preview, changes, draft, and stream capabilities.
+modified time but disables content rendering, comparison, editing, and stream
+capabilities.
 Exact readable scans use `sha256:<full-content-digest>` as their revision
 identity. Metadata-only scans use `bounded-sha256:<revision-fingerprint>`,
 derived from retained file identity, stable write metadata, and a bounded
@@ -307,6 +347,13 @@ leading probe. The bounded form is never presented as a full-content hash and
 its opaque token cannot authorize reads or tickets. Watcher refresh compares
 the bounded identity, suppresses unchanged oversized scans, and advances when
 the oversized revision changes or recovers within its renderer limit.
+
+Browser E2E proves Files rendering, controls, annotations, comparison layout,
+and stale-choice wiring only against mocked IPC. Native E2E is the authority
+for picker and root authorization, retained file handles, atomic filesystem
+writes, real watcher conflicts, durable recovery after runtime recreation, and
+subscription or renderer-lease cleanup. Browser evidence must not be used to
+claim those native properties.
 
 ## Persistence and Migration
 

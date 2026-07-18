@@ -4,7 +4,7 @@
 
 **Goal:** Let an authorized Wardian agent present a local file as a durable, versioned artifact thread that opens in a background Files tab, remains discoverable after close or restart, and can be queried through provider-neutral CLI commands.
 
-**Architecture:** `wardian-core` owns inspectable artifact schemas, immutable content-addressed blobs, reuse rules, and atomic store transactions. The desktop control server resolves the session origin, captures a stable file revision, persists before emitting an acknowledged presentation event, and returns structured JSON only after background routing completes. React treats artifact identity as `artifact:<artifact_id>` and adds versions, provenance, attention, Queue, and Quick Open without changing ordinary file identity.
+**Architecture:** `wardian-core` owns inspectable artifact schemas, immutable content-addressed blobs, reuse rules, and atomic store transactions. The desktop control server resolves the session origin, captures a stable file revision, persists before emitting an acknowledged presentation event, and returns structured JSON only after background routing completes. React keeps `artifact:<artifact_id>` as the presentation and provenance identity, then resolves the presented backing file or blob through an attachment adapter into the conventional Files controller. Artifact views add versions, provenance, attention, Queue, and Quick Open without creating another editor buffer or changing ordinary file identity.
 
 **Tech Stack:** Rust, serde, SHA-256, Tauri control endpoint/events, clap, React 19, Zustand, Workbench NavigationService, Vitest, Playwright, and native E2E.
 
@@ -19,6 +19,10 @@
 - File writes and watcher events do not create artifact versions. Only an explicit present request does.
 - A closed tab does not delete the thread, version, attention item, or recent entry.
 - All persistence is versioned, snake_case, content-addressed, and atomic. No file bytes enter Workbench state or Queue state.
+- This plan owns artifact persistence, CLI presentation/retrieval, provenance, versions, attention, Queue, and Quick Open. The review plan owns historical baseline adapters, comments, Send, and approval; the live-isolation plan owns sandboxed HTML/SVG rendering and final Files activation.
+- The editor core remains authoritative for the shared buffer, durable recovery, Saved-file comparison, stale handling, close prompts, and explicit Save. Artifact UI must not add Preview/Changes/Draft modes or a second draft buffer.
+- An `artifact:<id>` attachment resolves the selected presented version to an authorized canonical file or immutable blob controller. Presentations of the same canonical file attach to the same controller and Monaco model.
+- **Save As** always creates an ordinary file presentation. It never changes the artifact's backing reference, selected version, thread identity, or future presentation target.
 - The Files launcher card remains reserved through this plan.
 
 ---
@@ -343,7 +347,11 @@ git commit -m "feat(artifacts): route presentations in background"
 - Modify: `src/types/files.ts`
 - Modify: `src/features/files/fileResourceClient.ts`
 - Modify: `src/features/files/FilesSurface.tsx`
-- Modify: `src/features/files/FilesModeBar.tsx`
+- Modify: `src/features/files/FilesHeader.tsx`
+- Modify: `src/features/files/FileContentHost.tsx`
+- Modify: `src/features/files/fileEditorController.ts`
+- Create: `src/features/files/artifactAttachmentAdapter.ts`
+- Create: `src/features/files/artifactAttachmentAdapter.test.ts`
 - Create: `src/features/files/ArtifactDetails.tsx`
 - Create: `src/features/files/ArtifactDetails.test.tsx`
 - Create: `src/features/files/useArtifactResource.ts`
@@ -353,12 +361,12 @@ git commit -m "feat(artifacts): route presentations in background"
 - Modify: `src-tauri/src/commands/artifacts.rs`
 
 **Interfaces:**
-- Consumes: artifact manifest/version DTOs, Plan 1 live file revisions, `artifact:<id>`, and presentation attention.
-- Produces: `get_artifact_resource`, `mark_artifact_attention_read`, version selector, provenance summary, `Changed since presented`, and attention badges.
+- Consumes: artifact manifest/version DTOs, Plan 1 live file revisions, `artifact:<id>`, presentation attention, and the shipped canonical `FileEditorController` registry.
+- Produces: `get_artifact_resource`, `mark_artifact_attention_read`, an artifact-to-file/blob attachment adapter, version selector, provenance summary, `Changed since presented`, and attention badges.
 
 - [ ] **Step 1: Add failing artifact-controller tests**
 
-Assert current working descriptor and selected immutable version load separately; watcher refresh updates working hash without appending a version; hash mismatch shows `Changed since presented`; selecting a version changes preview but not working state; attention clears only after the artifact tab becomes visible; and missing manifests remain resource-local.
+Assert current working descriptor and selected immutable version load separately; watcher refresh updates working hash without appending a version; hash mismatch shows `Changed since presented`; selecting a version changes the presented baseline but not the shared working buffer; file and artifact presentations of one canonical file share one controller/model; Save As opens an ordinary file without retargeting the artifact; attention clears only after the artifact tab becomes visible; and missing manifests remain resource-local.
 
 - [ ] **Step 2: Run focused tests and confirm artifact resources are not rendered**
 
@@ -368,11 +376,13 @@ Expected: artifact controller and details imports fail.
 
 - [ ] **Step 3: Add one aggregate artifact-resource command**
 
-`get_artifact_resource(artifact_id, selected_version_id)` returns the manifest summary, selected version descriptor/read ticket source, current working descriptor, comparison hashes, attention state, and typed errors. It never returns every version's bytes. `mark_artifact_attention_read` updates the index/manifest atomically.
+`get_artifact_resource(artifact_id, selected_version_id)` returns the manifest summary, selected immutable blob descriptor, current working descriptor, exact comparison hashes, attention state, and typed errors. It never returns every version's bytes. `mark_artifact_attention_read` updates the index/manifest atomically.
 
-- [ ] **Step 4: Implement artifact rendering in the existing Files shell**
+- [ ] **Step 4: Attach artifact presentations to the existing Files controller**
 
-Reuse the same renderer registry. Preview defaults to the current working state while the version selector can inspect immutable presented versions. Show concise origin, presented time, version number, and status in `ArtifactDetails`. Show `Changed since presented` when current and selected hashes differ. Do not add a nested tab bar.
+`artifactAttachmentAdapter` keeps the `artifact:<id>` Workbench key while resolving its current working file to the canonical file controller or its selected immutable version to a read-only blob controller. It attaches through the same controller registry and `FileContentHost`; it never creates an artifact-specific editor model. Reuse the Book/Pencil current-state control and existing comparison lens. Show concise origin, presented time, version number, and status in `ArtifactDetails`, and show `Changed since presented` when working and selected hashes differ. Do not add a nested tab bar or Preview/Changes/Draft modes.
+
+The selected presented version is a comparison/provenance baseline, not an alternate editable draft. Editing always targets the one shared authorized file buffer. If only an immutable blob is available, the presentation is read-only and reports that capability explicitly. Saving follows the editor core's explicit Save contract; Save As opens an ordinary file and leaves the artifact attachment unchanged.
 
 - [ ] **Step 5: Clear attention on actual visibility**
 
@@ -485,7 +495,7 @@ Expected: all mocked UI lifecycle assertions pass.
 
 - [ ] **Step 4: Document CLI and lifecycle**
 
-Document exact present/show/review-show syntax, structured response/error fields, same-home/session requirements, thread reuse, immutable versions, background attention, working-state drift, Queue/recent discovery, and the fact that review submission arrives in Plan 3. Use cross-platform placeholders and POSIX shell before PowerShell.
+Document exact present/show/review-show syntax, structured response/error fields, same-home/session requirements, thread reuse, immutable versions, background attention, working-state drift, Queue/recent discovery, the artifact attachment-to-canonical-controller rule, Save As non-retargeting, and the fact that baseline adapters/comments/Send/approval arrive in Plan 3. Use cross-platform placeholders and POSIX shell before PowerShell.
 
 - [ ] **Step 5: Run the slice verification suite**
 

@@ -66,11 +66,37 @@ current buffer to the exact destination selected by the native picker and opens
 that copy in a new ordinary file tab; it does not retarget the original tab or
 an artifact relationship.
 
+Wardian keeps one working buffer for each canonical file, even when that file
+is visible in more than one pane. The buffer has durable recovery: unsaved text
+can be inspected read-only after a restart even when file access has been
+revoked, but the recovery itself cannot read or write the current file. Saving
+or merging requires restoring access to that exact file. Only the final
+presentation of an unsaved file asks **Save**, **Don't Save**, or **Cancel**
+before it closes.
+
+For a text file, changed regions are annotated inline in the editor and the
+header shows a compact change count. Its comparison button opens the full
+Saved-file lens. The lens uses side-by-side columns when its available
+pane width is at least 720 px and a unified layout below that. A saved
+side-by-side preference is honored down to a 560 px hard minimum; below 560 px
+Wardian temporarily uses unified layout without changing the preference. An
+open review drawer is subtracted before Wardian chooses the layout.
+
+If the file changes on disk while the shared buffer is dirty, Wardian marks the
+editor stale and offers **Merge**, **Reload from disk**, or **Cancel**. Merge
+rebases the working text and keeps it dirty until an explicit Save. Reload
+discards the working buffer and its recovery record. Cancel leaves the stale
+state unchanged. Saved-file comparison is available now; prompt checkpoints
+and presented artifact versions are explicit unavailable baselines until their
+downstream adapters are installed. Wardian never substitutes another revision
+and labels it as the requested history.
+
 The foundation renders Markdown, images, and PDFs and edits validated text.
 HTML and SVG are available as inert source only; Wardian never injects them into
-the application DOM. Line-level comparison, comments, approval, artifact
-versions, and isolated live HTML/SVG remain later capabilities rather than
-Preview/Changes/Draft modes. Unsupported and oversized resources stay local to their tab and offer
+the application DOM. Prompt and presented-version baselines, comments,
+approval, and isolated live HTML/SVG remain downstream capabilities; they do
+not add Preview/Changes/Draft modes or another editing buffer. Unsupported and
+oversized resources stay local to their tab and offer
 metadata, Retry, **Open With**, or Reveal rather than failing the Workbench.
 Ordinary saves and atomic editor saves refresh through the same stable revision
 stream. If a file is temporarily unreadable or keeps changing during a scan,
@@ -85,6 +111,11 @@ typed limit reason, **Open With**, and Reveal actions. If the file later moves
 back within its limit, the existing tab refreshes into the normal preview.
 
 Files is intentionally absent from the New Surface launcher in this slice.
+
+Browser tests cover the responsive Files UI with mocked native calls. Claims
+about picker authorization, retained handles, real filesystem writes and stale
+conflicts, durable recovery across runtime recreation, and subscription cleanup
+require the native desktop test harness.
 Open files from Explorer; the launcher will become available only when the
 artifact review and isolated active-content contracts are complete. A restored
 file tab is resolved again by the Rust backend against current agent primary

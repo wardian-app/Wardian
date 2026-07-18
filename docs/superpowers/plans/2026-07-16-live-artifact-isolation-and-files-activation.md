@@ -4,13 +4,16 @@
 
 **Goal:** Safely render live HTML and active SVG, harden retention/performance/recovery and desktop-only behavior, connect remaining file entry points, then activate the complete Files contribution.
 
-**Architecture:** A fail-closed native security proof selects a live-document host only if adversarial content cannot reach Wardian privileges or any network. Rust issues short-lived artifact/version-scoped capability URLs and serves canonical authorized local dependencies under a restrictive document CSP. The Files controller owns renderer leases and restoration while backend GC retains referenced blobs. Activation is a final isolated commit after native denial, lifecycle, full-suite, documentation, and screenshot gates pass.
+**Architecture:** A fail-closed native security proof selects a live-document host only if adversarial content cannot reach Wardian privileges or any network. Rust issues short-lived artifact/version-scoped capability URLs and serves canonical authorized local dependencies under a restrictive document CSP. The conventional Files controller remains the sole owner of the shared editor buffer, durable recovery, explicit Save, Saved-file comparison, and stale handling; this plan adds only isolated rendered HTML/SVG presentation and renderer leases. Backend GC retains referenced blobs, and Files activation is a final isolated commit after native denial, lifecycle, full-suite, documentation, and screenshot gates pass.
 
 **Tech Stack:** Rust, Tauri 2 ACL/custom protocols or child webviews, Axum test sentinels, React 19, sandboxed browser primitives, Monaco, PDF.js, Vitest, Playwright, Wardian native E2E, and VitePress.
 
 ## Global Constraints
 
-- Plans 1–3 must be merged first. This plan may refine their interfaces but may not bypass authorization, revision, artifact, checkpoint, draft, or review services.
+- Plans 1–3 and the Files editor core must be merged first. This plan may refine their interfaces but may not bypass authorization, revision, artifact, checkpoint, immutable review-snapshot, or review services.
+- This plan owns HTML/SVG/active-Markdown sandboxing, capability leases, renderer retention, and final Files activation. The lifecycle plan owns artifact persistence/CLI/provenance/attention; the review plan owns historical baseline adapters, comments, Send, and approval.
+- HTML/SVG activation must reuse the Book/Pencil current-state control, `FileComparisonLens`, and one canonical `FileEditorController`. It must not add Preview/Changes/Draft modes, an artifact-specific model, or a second draft buffer.
+- `artifact:<id>` remains a presentation/provenance identity whose attachment adapter resolves the selected backing file or immutable blob to the canonical controller. **Save As** creates an ordinary file and never retargets the artifact.
 - Live HTML and active SVG are required release behavior. Source-only fallback does not satisfy activation.
 - Artifact scripts may run only inside the artifact document. They receive no parent DOM, Tauri IPC, arbitrary filesystem, shell, clipboard, persistent storage, popup, download, top-navigation, or form-submission privilege.
 - Network access is never allowed in v1. There is no per-artifact allow button.
@@ -205,12 +208,12 @@ git commit -m "feat(security): broker local artifact dependencies"
 - Test: `src/features/files/FilesSurface.test.tsx`
 
 **Interfaces:**
-- Consumes: selected live host, capability issue/revoke commands, HTML/SVG descriptors, renderer lifecycle, Monaco source diff/Draft, and trusted link confirmation.
-- Produces: live Preview for HTML/active SVG, isolated active Markdown fragments, source Changes/Draft, renderer reset, and missing-dependency errors.
+- Consumes: selected live host, capability issue/revoke commands, HTML/SVG descriptors, renderer lifecycle, the shipped Book/Pencil current-state control, shared Monaco buffer, `FileComparisonLens`, and trusted link confirmation.
+- Produces: isolated rendered presentation for HTML/active SVG and active Markdown fragments, inert source editing/comparison through existing Files components, renderer reset, and missing-dependency errors.
 
 - [ ] **Step 1: Add failing renderer policy tests**
 
-Assert HTML and active SVG resolve to `live-artifact`, Preview mounts the selected host, Changes uses source Monaco diff, Draft uses source Monaco editor, ordinary Markdown stays passive, Markdown with allowed active embedded HTML uses the live boundary, local links are intercepted, external links require trusted confirmation, and suspension revokes/destroys the host.
+Assert HTML and active SVG resolve to `live-artifact`; Book/Pencil switches between the isolated rendered document and the existing shared source editor; the comparison lens compares inert source against the selected exact baseline; ordinary Markdown stays passive; Markdown with allowed active embedded HTML uses the live boundary; local links are intercepted; external links require trusted confirmation; and suspension revokes/destroys the host. Assert no additional editor model or buffer is created.
 
 - [ ] **Step 2: Run focused renderer tests**
 
@@ -218,13 +221,13 @@ Run: `npm run test -- --run src/features/files/renderers/LiveArtifactRenderer.te
 
 Expected: HTML/SVG still select `UnsupportedRenderer`.
 
-- [ ] **Step 3: Implement live Preview without source-only fallback**
+- [ ] **Step 3: Implement isolated rendered presentation without source-only fallback**
 
-Issue a capability only while Preview is visible, pass the entry URL to the selected host, show loading/ready/crashed/missing-dependency/expired states, and offer Reset Renderer. Never render artifact HTML with `dangerouslySetInnerHTML` in the Wardian document.
+Issue a capability only while the rendered presentation is visible, pass the entry URL to the selected host, show loading/ready/crashed/missing-dependency/expired states, and offer Reset Renderer. Never render artifact HTML with `dangerouslySetInnerHTML` in the Wardian document.
 
-- [ ] **Step 4: Keep editing and diffs in trusted Monaco**
+- [ ] **Step 4: Keep one shared editor and trusted source comparison**
 
-Changes for HTML/SVG compares source from checkpoint/presented version. Draft edits source and uses the existing three-way merge/apply/review services. Preview after draft edits uses a draft-scoped immutable blob/capability, not unsaved text injected into parent DOM.
+HTML/SVG source editing uses the existing canonical `FileEditorController`; explicit Save, recovery, and stale Merge/Reload/Cancel remain unchanged. Historical comparisons consume only the exact prompt/presented-version adapters from the review plan, while Saved-file comparison remains available. To render unsaved working text, freeze a short-lived immutable renderer blob tied to the current buffer generation and renderer lease. Never copy that text into a review-owned buffer or inject it into the parent DOM.
 
 - [ ] **Step 5: Define active Markdown explicitly**
 
@@ -262,12 +265,13 @@ git commit -m "feat(files): render live html and svg artifacts"
 - Modify: `src-tauri/src/commands/mod.rs`
 - Modify: `src-tauri/src/lib.rs`
 - Modify: `src/features/files/FilesSurface.tsx`
-- Modify: `src/features/files/FilePreview.tsx`
+- Modify: `src/features/files/FileContentHost.tsx`
+- Modify: `src/features/files/fileEditorController.ts`
 - Modify: `src/features/files/FilesSurface.test.tsx`
 - Test: `src-tauri/src/state/file_resource_cache.rs`
 
 **Interfaces:**
-- Consumes: manifests, reviews, comments, drafts, checkpoints, recent/open resource leases, renderer lifecycle, and configured limits.
+- Consumes: manifests, reviews, comments, immutable review snapshots, editor recovery holds, checkpoints, recent/open resource leases, renderer lifecycle, and configured limits.
 - Produces: reference-aware GC, 30-day/2-GiB defaults, bounded LRU caches, renderer lease synchronization, suspension cleanup, and typed recovery actions.
 
 - [ ] **Step 1: Add failing retention/cache/recovery tests**
@@ -286,7 +290,7 @@ Expected: GC/cache types and several recovery states are missing.
 
 - [ ] **Step 3: Implement reference-aware GC**
 
-Retain blobs referenced by active threads, open reviews, unresolved comments, drafts, selected checkpoints, open/restored/recent tabs, active streams, and manifest transactions. Closed unreferenced data becomes eligible after 30 days. A 2 GiB soft budget evicts oldest eligible blobs first. GC acquires a store lease and never deletes a referenced or open blob.
+Retain blobs referenced by active threads, open reviews, unresolved comments, frozen review snapshots, editor recovery holds, selected checkpoints, open/restored/recent tabs, active streams, and manifest transactions. Closed unreferenced data becomes eligible after 30 days. A 2 GiB soft budget evicts oldest eligible blobs first. GC acquires a store lease and never deletes a referenced or open blob.
 
 - [ ] **Step 4: Add bounded resource caches**
 
@@ -294,7 +298,7 @@ Cache text/Monaco models by content hash, PDF documents/pages by version hash, a
 
 - [ ] **Step 5: Complete typed resource-local recovery**
 
-Map errors to unauthorized/revoked, missing/moved, changed-since-base, unsupported encoding/renderer, oversized, missing dependency, baseline unavailable, renderer crash/resource limit, and manifest/version unavailable. Actions are Retry, Locate File, Keep Draft, Discard Draft, Compare Presented Version, Open With, Reveal, Reset Renderer, and Close. None throws to the fatal App boundary.
+Map errors to unauthorized/revoked, missing/moved, stale disk head, unsupported encoding/renderer, oversized, missing dependency, baseline unavailable, renderer crash/resource limit, and manifest/version unavailable. Actions include Retry, Locate File, Restore Recovery, Discard Recovery, Merge, Reload from disk, Cancel, Compare Presented Version, Open With, Reveal, Reset Renderer, and Close as appropriate to the typed state. None throws to the fatal App boundary, and restoration never restores revoked authority.
 
 - [ ] **Step 6: Add explicit delete and settings commands**
 
@@ -399,7 +403,7 @@ Expected: Files is still reserved and cannot be launched.
 
 - [ ] **Step 3: Add a resource-resolving launcher action**
 
-Extend surface contributions with `launch_behavior: "direct" | "pick_file"`. Files uses `pick_file`; Home/OpenSurfaceDialog invoke the injected picker, then call `open_from_placeholder` with `file:<canonical-path>` and a permanent Preview state. Cancel closes only the picker and preserves focus/placeholder.
+Extend surface contributions with `launch_behavior: "direct" | "pick_file"`. Files uses `pick_file`; Home/OpenSurfaceDialog invoke the injected picker, then call `open_from_placeholder` with `file:<canonical-path>` and a permanent Files presentation. Cancel closes only the picker and preserves focus/placeholder.
 
 - [ ] **Step 4: Make the activation change in isolation**
 
@@ -419,7 +423,7 @@ Remove `reserved: true`. Do not add a separate Artifacts card.
 
 - [ ] **Step 5: Add complete browser E2E**
 
-Cover New Surface picker flow, Explorer transient/permanent/split, text/Markdown/image/PDF/live HTML/SVG, Changes/Draft, conflict, review drawer, Queue/Quick Open, responsive overlay, renderer failure, and unsupported mocked browser/mobile state. Use mocks only for native boundaries.
+Cover New Surface picker flow, Explorer transient/permanent/split, Book/Pencil current state, text/Markdown/image/PDF/live HTML/SVG, inline Saved-file annotations/diff count, historical baseline choices and explicit unavailable states, shared-buffer editing, stale-choice UI, review drawer, Queue/Quick Open, responsive comparison/overlay behavior, renderer failure, and unsupported mocked browser/mobile state. Use mocks only for native boundaries.
 
 Run: `npx playwright test --config e2e/playwright.workbench.config.ts e2e/tests/files-surface-complete.spec.ts`
 
@@ -427,7 +431,7 @@ Expected: complete browser behavior passes.
 
 - [ ] **Step 6: Add complete native E2E**
 
-Compose the targeted native helpers to prove real picker grant, authorized roots, stable watch, CLI presentation/reuse, restart, checkpoint diff, apply/conflict, review retrieval, live denial, renderer suspension, multi-pane stability, and app-not-running error in one release smoke.
+Compose the targeted native helpers to prove real picker grant, authorized roots, stable watch, CLI presentation/reuse, one shared file/artifact controller, explicit atomic Save, Save As non-retargeting, restart recovery, checkpoint diff, real stale Merge/Reload/Cancel behavior, review retrieval, live denial, renderer suspension, subscription cleanup, multi-pane stability, and app-not-running error in one release smoke.
 
 Run: `npm run test:e2e:native:fast -- e2e-native/tests/files-surface-complete-native.test.mjs`
 
@@ -464,7 +468,7 @@ git commit -m "feat(workbench): activate complete files surface"
 
 - [ ] **Step 1: Update docs to the shipped contract**
 
-Document Files opening/pinning/splits, Preview/Changes/Draft, renderer limits, live networkless behavior, authorized roots/native picker, artifact CLI, versions/working drift, comments/approval, Apply versus Send, conflicts, Queue/Quick Open, retention/settings, typed recovery, desktop-only support, and security architecture. Use placeholders, POSIX examples first, and labeled PowerShell alternatives.
+Document Files opening/pinning/splits, Book/Pencil current state, explicit Save and Save As non-retargeting, durable shared recovery, inline Saved-file annotations/diff count, the 720/560 comparison lens, exact historical baseline availability, stale Merge/Reload/Cancel, renderer limits, live networkless behavior, authorized roots/native picker, artifact CLI and attachment adapter, versions/working drift, comments/approval, Save versus Send, Queue/Quick Open, retention/settings, typed recovery, desktop-only support, and security architecture. State that browser E2E proves mocked UI behavior while native E2E is required for authorization, retained handles, filesystem atomicity/watcher conflicts, durable runtime recreation, and cleanup. Use placeholders, POSIX examples first, and labeled PowerShell alternatives.
 
 - [ ] **Step 2: Capture feature-specific screenshots**
 

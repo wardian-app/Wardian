@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add trustworthy Changes since prompt, durable user drafts, conflict-safe apply, line/spatial review, approval, and structured agent feedback to the artifact-enabled Files surface.
+**Goal:** Add trustworthy prompt/presented-version baselines, line/spatial review, approval, and structured agent feedback to the conventional artifact-enabled Files editor without replacing its shared buffer or explicit Save workflow.
 
-**Architecture:** A shared backend `PromptChangeTracker` maintains content-addressed indexes for each agent's authorized roots and captures durable checkpoints immediately before user-originated delivery. A backend draft/review service stores proposed text, computes three-way merges, applies atomically, and sends concise review references. React adds Changes and Draft modes plus a responsive review drawer; it never performs authoritative merge, apply, anchoring, or comment-state transitions.
+**Architecture:** A shared backend `PromptChangeTracker` maintains content-addressed indexes for each agent's authorized roots and captures durable checkpoints immediately before user-originated delivery. Exact prompt and presented-version adapters feed the shipped `FileComparisonLens`, while the existing canonical `FileEditorController` remains the only working buffer and durable recovery owner. A backend review service freezes immutable submission snapshots, stores anchored comments and approval state, and sends concise review references. React adds a responsive review drawer and historical baseline choices; it never creates another editor mode or buffer or performs authoritative anchoring and comment-state transitions.
 
 **Tech Stack:** Rust, notify, SHA-256, diffy, serde, Tauri delivery services, Monaco Diff Editor, React 19, Zustand, Vitest, Playwright, and native E2E.
 
@@ -15,9 +15,13 @@
 - Capture a checkpoint immediately before Wardian delivers a user-originated prompt. Inter-agent control messages, terminal escape replies, and provider output do not advance it.
 - Prompt delivery must not synchronously crawl a workspace. If the incremental index is not ready, deliver with a durable `baseline_unavailable` association.
 - Index `AgentConfig.folder` and `include_directories`; exclude `system_include_directories`, Wardian state, VCS internals, and default high-churn caches.
-- Draft text is backend-owned and durable. Entering Draft pins a transient tab.
-- Apply and Send are independent operations. Send never writes the file; Apply never sends a message.
-- Apply repeats the base/current hash check and atomically replaces the target. Never silently overwrite drift.
+- The shipped Files editor owns one durable shared buffer, explicit Save, stale Merge/Reload/Cancel, and final-close Save/Don't Save/Cancel. This plan must not add a draft service, Apply operation, or second Monaco model.
+- Save and Send are independent operations. Save writes the shared buffer through the editor core; Send never writes the file or clears dirty state.
+- Send freezes one immutable snapshot of the current shared buffer, selected exact baseline, patch, general note, and included comments. Retries reuse the same review ID and payload.
+- Comments created while a Send is in flight remain queued for the next submission and are never silently folded into the in-flight snapshot.
+- `artifact:<id>` remains a provenance/presentation key. Its attachment adapter resolves to the canonical file/blob controller; review UI consumes that controller and never owns artifact text.
+- Save As creates an ordinary file presentation and never retargets an artifact thread or its review provenance.
+- This plan owns prompt and presented-version baseline adapters, comments, Send, retrieval, addressed-state transitions, and approval. The lifecycle plan owns artifact persistence/CLI/provenance/attention; the live-isolation plan owns HTML/SVG sandboxing and final Files activation.
 - Non-overlapping drift rebases automatically. Overlapping drift produces an explicit three-way conflict result rendered by Monaco.
 - Comment state transitions are explicit: `open`, `agent_marked_addressed`, `resolved`, or `outdated`. Content changes never imply semantic resolution.
 - Text anchors are line/column ranges; image/PDF anchors use intrinsic normalized coordinates and a trusted overlay.
@@ -188,7 +192,7 @@ git add src-tauri/src/state src-tauri/src/delivery src-tauri/src/commands/termin
 git commit -m "feat(delivery): checkpoint user prompts before submit"
 ```
 
-### Task 3: Changes since prompt API and Files Changes mode
+### Task 3: Prompt and presented-version baseline adapters
 
 **Files:**
 - Create: `src-tauri/src/commands/changes.rs`
@@ -198,181 +202,178 @@ git commit -m "feat(delivery): checkpoint user prompts before submit"
 - Modify: `src/features/files/fileResourceClient.ts`
 - Create: `src/features/files/usePromptChanges.ts`
 - Create: `src/features/files/usePromptChanges.test.tsx`
-- Create: `src/features/files/renderers/MonacoDiffRenderer.tsx`
-- Create: `src/features/files/renderers/MonacoDiffRenderer.test.tsx`
+- Modify: `src/features/files/fileDiffModel.ts`
+- Modify: `src/features/files/fileDiffModel.test.ts`
+- Modify: `src/features/files/FileComparisonLens.tsx`
+- Modify: `src/features/files/FileComparisonLens.test.tsx`
 - Create: `src/features/files/renderers/BinaryVersionCompare.tsx`
 - Create: `src/features/files/renderers/BinaryVersionCompare.test.tsx`
 - Modify: `src/features/files/FilesSurface.tsx`
-- Modify: `src/features/files/FilesModeBar.tsx`
-- Modify: `src/features/files/rendererRegistry.ts`
+- Modify: `src/features/files/FilesHeader.tsx`
 - Modify: `src/features/files/FilesSurface.test.tsx`
 
 **Interfaces:**
-- Consumes: `PromptChangeTracker`, selected agent/checkpoint context, current file revision, artifact selected version, Monaco diff limits, and resource tickets.
-- Produces: `get_file_prompt_changes`, `FilePromptChangesV1`, Changes mode, baseline-unavailable UI, and image/PDF previous/current comparison.
+- Consumes: `PromptChangeTracker`, selected agent/checkpoint context, artifact selected version, the shared `FileEditorController`, shipped Saved-file comparison variants, Monaco diff limits, and resource tickets.
+- Produces: `get_file_prompt_changes`, `FilePromptChangesV1`, exact prompt/presented-version `FileDiffBaseline` adapters, baseline-unavailable UI, and image/PDF previous/current comparison.
 
 - [ ] **Step 1: Add failing API and renderer tests**
 
-Cover modified/added/deleted/renamed text paths, current agent context, explicitly selected checkpoint, no context, unavailable baseline, stale checkpoint, line limits, image/PDF metadata, and exact **Changes since prompt** labeling.
+Cover modified/added/deleted/renamed text paths, current agent context, explicitly selected checkpoint, selected artifact version, no context, unavailable baseline, stale checkpoint, line limits, image/PDF metadata, and exact **Changes since prompt** labeling. Assert the adapter does not replace the shared Monaco model and keeps `buffer_base_hash`, `disk_head_hash`, and `review_base_hash` distinct.
 
 ```ts
-expect(screen.getByRole("tab", { name: "Changes since prompt" })).toBeEnabled();
+expect(screen.getByRole("button", { name: "Compare against Changes since prompt" })).toBeEnabled();
 expect(screen.queryByText(/agent changes/i)).not.toBeInTheDocument();
 ```
 
-- [ ] **Step 2: Run focused tests and confirm Changes remains disabled**
+- [ ] **Step 2: Run focused tests and confirm historical baselines remain unavailable**
 
-Run: `npm run test -- --run src/features/files/usePromptChanges.test.tsx src/features/files/renderers/MonacoDiffRenderer.test.tsx src/features/files/renderers/BinaryVersionCompare.test.tsx src/features/files/FilesSurface.test.tsx`
+Run: `npm run test -- --run src/features/files/usePromptChanges.test.tsx src/features/files/fileDiffModel.test.ts src/features/files/FileComparisonLens.test.tsx src/features/files/renderers/BinaryVersionCompare.test.tsx src/features/files/FilesSurface.test.tsx`
 
-Expected: missing modules and disabled-mode assertions fail.
+Expected: missing adapter modules and historical-baseline assertions fail while Saved-file comparison remains green.
 
 - [ ] **Step 3: Add a typed comparison command**
 
-`get_file_prompt_changes` accepts resource key, canonical path, `agent_id`, optional `checkpoint_id`, and current revision. It returns baseline state, path change kind, old/new descriptors, revision-bound read sources, checkpoint metadata, and a precise unavailable reason. It never substitutes first-observed or presented-version comparisons under a prompt-scoped label.
+`get_file_prompt_changes` accepts resource key, canonical path, `agent_id`, optional `checkpoint_id`, and current revision. It returns baseline state, path change kind, old/new descriptors, revision-bound read sources, checkpoint metadata, and a precise unavailable reason. A presented-version adapter resolves only the exact selected artifact blob. Neither adapter substitutes Saved-file, first-observed, or another presented revision under a historical label.
 
 - [ ] **Step 4: Implement Monaco line comparison**
 
-Load old/current models lazily, key them by content hash, enforce 5 MiB/100,000-line limits per side, and dispose by reference count. Added/deleted files use an empty counterpart. A rename displays both paths. Keep the diff editor read-only; entering Draft occurs through the mode bar.
+Extend `fileDiffModel` and `FileComparisonLens` with prompt-checkpoint and presented-version baseline variants. Load the immutable baseline lazily, keep the current side bound to the existing shared controller, enforce 5 MiB/100,000-line limits per side, and dispose baseline models by reference count. Added/deleted files use an empty counterpart and a rename displays both paths. Comparison remains read-only and never changes editor presentation or buffer ownership.
 
 - [ ] **Step 5: Implement binary version comparison**
 
-For image/PDF artifacts, Changes shows selected presented version and current working state side by side with dimensions/page count, byte size, hashes, and timestamps. Do not label it a semantic visual diff. Ordinary binary files without a checkpoint-readable old blob show a typed unavailable state.
+For image/PDF artifacts, the comparison lens shows the selected exact baseline and current working state side by side with dimensions/page count, byte size, hashes, and timestamps. Do not label it a semantic visual diff. Ordinary binary files without a checkpoint-readable old blob show a typed unavailable state.
 
-- [ ] **Step 6: Enable mode only for honest comparisons**
+- [ ] **Step 6: Expose only honest baseline choices**
 
-Files mode state may persist `changes`, but restoration falls back to the unavailable view rather than Preview when the baseline is absent. The mode bar reports why. HTML/SVG source comparison is registered only after Plan 4 activates those renderers.
+Files presentation state may remember the selected baseline variant, but an unavailable historical source stays visible as a typed unavailable comparison. It never falls back to Saved-file or a current rendering while retaining the historical label. HTML/SVG source comparison becomes eligible only after the live-isolation plan activates those renderers; the comparison still uses inert source, not the live document.
 
 - [ ] **Step 7: Run focused tests**
 
-Run: `npm run test -- --run src/features/files/usePromptChanges.test.tsx src/features/files/renderers/MonacoDiffRenderer.test.tsx src/features/files/renderers/BinaryVersionCompare.test.tsx src/features/files/FilesSurface.test.tsx`
+Run: `npm run test -- --run src/features/files/usePromptChanges.test.tsx src/features/files/fileDiffModel.test.ts src/features/files/FileComparisonLens.test.tsx src/features/files/renderers/BinaryVersionCompare.test.tsx src/features/files/FilesSurface.test.tsx`
 
 Run: `cargo test -p Wardian changes -- --test-threads=1`
 
 Expected: scope, labels, unavailable states, limits, and comparison tests pass.
 
-- [ ] **Step 8: Commit Changes mode**
+- [ ] **Step 8: Commit historical baseline adapters**
 
 ```bash
 git add src-tauri/src/commands src-tauri/src/lib.rs src/types/files.ts src/features/files
-git commit -m "feat(files): show changes since prompt"
+git commit -m "feat(files): add historical review baselines"
 ```
 
-### Task 4: Durable drafts, three-way merge, and atomic apply
+### Task 4: Immutable review submission snapshots
 
 **Files:**
-- Modify: `Cargo.toml`
-- Modify: `Cargo.lock`
-- Modify: `crates/wardian-core/Cargo.toml`
-- Create: `crates/wardian-core/src/artifacts/draft.rs`
-- Create: `crates/wardian-core/src/artifacts/merge.rs`
+- Create: `crates/wardian-core/src/artifacts/review_snapshot.rs`
 - Modify: `crates/wardian-core/src/artifacts/mod.rs`
 - Modify: `crates/wardian-core/src/artifacts/models.rs`
 - Modify: `crates/wardian-core/src/artifacts/store.rs`
-- Create: `src-tauri/src/commands/drafts.rs`
+- Create: `src-tauri/src/commands/review_snapshots.rs`
 - Modify: `src-tauri/src/commands/mod.rs`
 - Modify: `src-tauri/src/lib.rs`
-- Test: `crates/wardian-core/src/artifacts/draft.rs`
-- Test: `crates/wardian-core/src/artifacts/merge.rs`
-- Test: `src-tauri/src/commands/drafts.rs`
+- Test: `crates/wardian-core/src/artifacts/review_snapshot.rs`
+- Test: `src-tauri/src/commands/review_snapshots.rs`
 
 **Interfaces:**
-- Consumes: artifact blob store, file revision/hash, exact file capability, shared atomic-write helpers, and prompt/version references.
-- Produces: `DraftRecordV1`, `DraftMergeResultV1`, `create_or_load_draft`, `save_draft`, `rebase_draft`, `apply_draft`, `discard_draft`, and `get_draft`.
+- Consumes: artifact blob store, the current shared-buffer bytes plus observed controller generation, distinct buffer/disk/review hashes, exact prompt/version references, and queued comment IDs.
+- Produces: `ReviewSnapshotV1`, `freeze_review_snapshot`, immutable patch/body blob references, and idempotent snapshot lookup by review ID.
 
-- [ ] **Step 1: Add failing persistence, merge, and apply tests**
+- [ ] **Step 1: Add failing snapshot and idempotency tests**
 
-Cover restart survival, one draft per resource/user context, non-overlapping rebase, overlapping conflict hunks, current hash drift between preview and apply, same-directory temp write/flush/replace, permission failure retaining draft, exact-picker apply, unauthorized apply, and apply without send.
+Cover unsaved and saved shared-buffer text, exact baseline identity, distinct `buffer_base_hash`/`disk_head_hash`/`review_base_hash`, stale controller generation, restart survival, immutable patch/body blobs, one payload per review ID, byte/line limits, unauthorized resources, and a retry returning the original payload after the editor or comment queue changes.
 
 ```rust
 #[test]
-fn overlapping_changes_return_conflict_without_mutating_disk() {
-    let result = merge_three_way("a\nb\n", "a\ncurrent\n", "a\nproposed\n");
-    assert!(matches!(result, DraftMergeResultV1::Conflict { .. }));
-    assert_eq!(std::fs::read_to_string(test_file()).unwrap(), "a\ncurrent\n");
+fn retry_keeps_the_frozen_payload() {
+    let first = store
+        .freeze_review_snapshot(request("review-1", "buffer-a"))
+        .unwrap();
+    let retry = store
+        .freeze_review_snapshot(request("review-1", "buffer-b"))
+        .unwrap();
+    assert_eq!(first.payload_hash, retry.payload_hash);
 }
 ```
 
-- [ ] **Step 2: Add the merge dependency and run focused tests**
-
-Run: `cargo add diffy -p wardian-core`
+- [ ] **Step 2: Run focused tests and confirm snapshot APIs are missing**
 
 Run: `cargo test -p wardian-core artifacts:: -- --test-threads=1`
 
-Expected: tests fail because draft/store APIs are missing.
+Run: `cargo test -p Wardian review_snapshots -- --test-threads=1`
 
-- [ ] **Step 3: Persist backend-owned drafts**
+Expected: tests fail because review snapshot/store APIs are missing.
 
-Add `artifacts/drafts/<draft-id>.json` to the store. A record includes resource key, canonical path, base content hash/blob, current draft blob, artifact/version/checkpoint references, created/updated timestamps, and optional applied hash. Blob text is immutable/deduplicated; the record is atomic.
+- [ ] **Step 3: Persist immutable review snapshots**
 
-- [ ] **Step 4: Implement authoritative merge outcomes**
+Store one atomic record per review ID containing canonical resource identity, artifact/version/checkpoint references, the three distinct hashes, frozen working-buffer blob, derived patch blob, included comment IDs, general note, and created timestamp. Deduplicate immutable blobs by content hash. The record contains no writable editor state and never becomes a recovery source.
 
-Wrap `diffy` behind `DraftMergeService` so UI never depends on library-specific conflict markers. Return `Unchanged`, `Rebased { text, new_base_hash }`, or `Conflict { base_text_ref, current_text_ref, proposed_text_ref, conflicts }`. Each conflict contains base/current/proposed line ranges.
+- [ ] **Step 4: Freeze exactly one Send payload**
 
-- [ ] **Step 5: Implement atomic apply**
+`freeze_review_snapshot` validates canonical resource identity, observed controller generation, exact baseline reference, and included comment revisions before storing. A repeated review ID returns the original snapshot and does not observe later buffer or comment changes. New comments remain queued outside that snapshot.
 
-Re-authorize the canonical target, read current hash, merge/reject drift, create a temporary file in the target's directory, preserve appropriate permissions, write and flush bytes, atomically replace, and record `applied_hash`. A failure leaves the original file and durable draft intact.
+- [ ] **Step 5: Keep persistence out of review snapshots**
 
-- [ ] **Step 6: Expose typed draft commands**
+Do not add apply, merge, file-write, or draft commands. The Files editor core remains the only owner of explicit Save, atomic replacement, stale Merge/Reload/Cancel, and durable recovery. Send may snapshot dirty buffer text without saving it.
 
-Every command takes `resource_key` plus draft ID where applicable. `save_draft` uses an expected draft revision to reject stale UI writes. `apply_draft` returns applied/rebased/conflict without throwing conflict as an application error.
+- [ ] **Step 6: Expose typed snapshot commands**
+
+Commands take `review_id`, `resource_key`, observed controller generation, exact baseline reference, working-buffer bytes or immutable blob reference, and included comment revisions. Return typed stale-generation, baseline-unavailable, authorization, and size errors without mutating disk.
 
 - [ ] **Step 7: Run core and Tauri tests**
 
 Run: `cargo test -p wardian-core artifacts:: -- --test-threads=1`
 
-Run: `cargo test -p Wardian drafts -- --test-threads=1`
+Run: `cargo test -p Wardian review_snapshots -- --test-threads=1`
 
-Expected: persistence, restart, merge, authorization, atomicity, and failure-retention tests pass.
+Expected: persistence, restart, exact-baseline, immutable-payload, authorization, and retry-idempotency tests pass.
 
-- [ ] **Step 8: Commit draft services**
+- [ ] **Step 8: Commit review snapshot services**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/wardian-core src-tauri/src/commands src-tauri/src/lib.rs
-git commit -m "feat(artifacts): add durable conflict-safe drafts"
+git add crates/wardian-core src-tauri/src/commands src-tauri/src/lib.rs
+git commit -m "feat(artifacts): freeze review submission snapshots"
 ```
 
-### Task 5: Draft mode, close guard, and Monaco conflict UI
+### Task 5: Attach review state to the shared editor controller
 
 **Files:**
-- Create: `src/features/files/useFileDraft.ts`
-- Create: `src/features/files/useFileDraft.test.tsx`
-- Create: `src/features/files/renderers/MonacoDraftRenderer.tsx`
-- Create: `src/features/files/renderers/MonacoDraftRenderer.test.tsx`
-- Create: `src/features/files/renderers/MonacoMergeRenderer.tsx`
-- Create: `src/features/files/renderers/MonacoMergeRenderer.test.tsx`
+- Create: `src/features/files/useReviewWorkingSet.ts`
+- Create: `src/features/files/useReviewWorkingSet.test.tsx`
+- Modify: `src/features/files/fileEditorController.ts`
+- Modify: `src/features/files/fileEditorController.test.ts`
+- Modify: `src/features/files/FileComparisonLens.tsx`
+- Modify: `src/features/files/FileComparisonLens.test.tsx`
 - Modify: `src/features/files/FilesSurface.tsx`
-- Modify: `src/features/files/FilesModeBar.tsx`
+- Modify: `src/features/files/FilesHeader.tsx`
 - Modify: `src/features/files/filesPresentationStore.ts`
-- Modify: `src/features/workbench/coreSurfaceRegistry.ts`
-- Modify: `src/features/workbench/coreSurfaceRegistry.test.ts`
-- Modify: `src/features/workbench/navigationService.ts`
 - Test: `src/features/files/FilesSurface.test.tsx`
 
 **Interfaces:**
-- Consumes: Task 4 draft commands, Monaco, transient pinning, Files dirty presentation store, and Workbench dirty prompt.
-- Produces: Draft mode, debounced durable save, Apply to file, conflict resolution, and Keep Draft/Discard Draft/Cancel close behavior.
+- Consumes: Task 3 baseline adapters, Task 4 snapshot command, the canonical `FileEditorController`, current Saved-file annotations, and Files presentation state.
+- Produces: review working-set metadata over the shared buffer, historical baseline selection, queued-snapshot state, and unchanged editor-core Save/close behavior.
 
-- [ ] **Step 1: Add failing Draft and close tests**
+- [ ] **Step 1: Add failing shared-controller review tests**
 
-Assert entering Draft pins transient previews, loads/creates a durable draft, marks the tab dirty only for unapplied/unsent changes, survives remount, applies without sending, renders a three-way conflict, keeps the draft on close, discards only after confirmation, and Cancel leaves the surface open.
+Assert a review opened from `artifact:<id>` attaches to the same canonical controller as an ordinary file presentation; edits, undo, dirty dots, Saved-file annotations, durable recovery, and stale state remain shared; selecting a historical baseline does not replace the working model; Send can snapshot unsaved text; Save As opens an ordinary file and leaves the artifact/review target unchanged; and no additional editor mode or buffer is created.
 
 - [ ] **Step 2: Run focused frontend tests**
 
-Run: `npm run test -- --run src/features/files/useFileDraft.test.tsx src/features/files/renderers/MonacoDraftRenderer.test.tsx src/features/files/renderers/MonacoMergeRenderer.test.tsx src/features/files/FilesSurface.test.tsx src/features/workbench/coreSurfaceRegistry.test.ts`
+Run: `npm run test -- --run src/features/files/useReviewWorkingSet.test.tsx src/features/files/fileEditorController.test.ts src/features/files/FileComparisonLens.test.tsx src/features/files/FilesSurface.test.tsx`
 
-Expected: Draft remains disabled and the close guard cannot distinguish outcomes.
+Expected: missing review working-set wiring fails while existing editor core tests stay green.
 
-- [ ] **Step 3: Implement revision-safe draft editing**
+- [ ] **Step 3: Implement a metadata-only review working set**
 
-Use an editable Monaco model keyed by `draft_id`, save after a 300 ms idle debounce with expected revision, flush on mode change/close, and display backend conflicts without fabricating markers. A stale save reloads and offers compare/retry; it does not overwrite another presentation's newer draft.
+Track selected baseline, included comment revisions, general note, and pending/in-flight review IDs. Read working text and generation from the canonical controller only when freezing a snapshot. Do not copy text into review state, create another Monaco URI, or debounce a review-owned persistence path.
 
-- [ ] **Step 4: Wire independent Apply**
+- [ ] **Step 4: Preserve independent Save and Send**
 
-Apply invokes only `apply_draft`. On success, keep or clear the draft according to whether draft text equals the applied file; update working revision through the normal watcher event. Do not invoke prompt delivery or mark review sent.
+Save continues to invoke only the editor core's guarded write and does not mark a review sent. Preparing or sending a review invokes no file write, does not clear dirty state, and does not advance `buffer_base_hash` or `disk_head_hash`.
 
-- [ ] **Step 5: Replace the Files close prompt with three outcomes**
+- [ ] **Step 5: Preserve the Files close and stale contracts**
 
-Extend the injected Files dirty prompt to return `keep_draft`, `discard_draft`, or `cancel`. Keep flushes the durable draft and allows close; Discard invokes backend discard then allows; Cancel rejects. Other surface close guards retain their current two-state contract.
+The final dirty presentation still asks **Save**, **Don't Save**, or **Cancel**. A stale dirty buffer still offers **Merge**, **Reload from disk**, or **Cancel**. Review metadata never changes those choices and is retained independently according to the review store.
 
 - [ ] **Step 6: Run focused tests and lint**
 
@@ -380,13 +381,13 @@ Run: `npm run test -- --run src/features/files src/features/workbench/coreSurfac
 
 Run: `npm run lint`
 
-Expected: Draft pinning, save, apply, conflict, dirty badge, and close outcomes pass.
+Expected: shared editing, independent Save/Send, historical baseline selection, dirty badges, recovery, and unchanged close/stale outcomes pass.
 
-- [ ] **Step 7: Commit Draft UI**
+- [ ] **Step 7: Commit shared-controller review wiring**
 
 ```bash
 git add src/features/files src/features/workbench
-git commit -m "feat(files): add draft and merge workflow"
+git commit -m "feat(files): attach reviews to shared editor state"
 ```
 
 ### Task 6: Review schemas, annotations, and explicit comment lifecycle
@@ -404,7 +405,7 @@ git commit -m "feat(files): add draft and merge workflow"
 - Test: `src-tauri/src/commands/reviews.rs`
 
 **Interfaces:**
-- Consumes: artifact versions, drafts, checkpoint IDs, content hashes, normalized intrinsic coordinates, and addressed IDs from Plan 2 presentation.
+- Consumes: artifact versions, immutable Task 4 review snapshots, checkpoint IDs, content hashes, normalized intrinsic coordinates, and addressed IDs from Plan 2 presentation.
 - Produces: `ReviewAnchorV1`, `ReviewCommentV1`, `ReviewCommentState`, `ArtifactReviewV1`, `create_review`, `resolve_review_comment`, `approve_artifact`, and deterministic anchor carry-forward.
 
 - [ ] **Step 1: Add failing schema and transition tests**
@@ -419,7 +420,7 @@ Expected: review types and transition functions are missing.
 
 - [ ] **Step 3: Define review and anchor contracts**
 
-`ArtifactReviewV1` contains review ID, artifact/version IDs, base/current/draft hashes, unified patch blob hash, structured comments, general note, apply state, prompt checkpoint reference, delivery state, and timestamps. Each comment stores its originating version ID and explicit state.
+`ArtifactReviewV1` contains review ID, artifact/version IDs, distinct buffer-base/disk-head/review-base hashes, frozen working-buffer and unified-patch blob hashes, structured included-comment revisions, general note, prompt checkpoint reference, delivery state, and timestamps. It records no apply state and owns no editable draft. Each comment stores its originating version ID and explicit state.
 
 - [ ] **Step 4: Implement deterministic mapping only**
 
@@ -458,7 +459,7 @@ git commit -m "feat(artifacts): add review and annotation model"
 - Create: `src/features/files/annotations/SpatialAnnotationOverlay.tsx`
 - Create: `src/features/files/annotations/SpatialAnnotationOverlay.test.tsx`
 - Modify: `src/features/files/renderers/MonacoTextRenderer.tsx`
-- Modify: `src/features/files/renderers/MonacoDiffRenderer.tsx`
+- Modify: `src/features/files/FileComparisonLens.tsx`
 - Modify: `src/features/files/renderers/ImageRenderer.tsx`
 - Modify: `src/features/files/renderers/PdfRenderer.tsx`
 - Modify: `src/features/files/FilesSurface.tsx`
@@ -481,7 +482,9 @@ Expected: drawer and annotation modules are missing.
 
 - [ ] **Step 3: Implement a pane-container-responsive drawer**
 
-Use the Files pane container query, not viewport media queries. At or above 760px inline size, the drawer is a collapsible 320px side region. Below it, the drawer is a focus-trapped overlay with a scrim and restores focus on close. Keep Preview/Changes/Draft in the mode row, not in the drawer.
+Use the Files pane container query, not viewport media queries. At or above 760px inline size, the drawer is a collapsible 320px side region. Below it, the drawer is a focus-trapped overlay with a scrim and restores focus on close. Keep the Book/Pencil current-state control, comparison button, annotations, and diff count in their existing Files locations; do not add Preview/Changes/Draft modes.
+
+When the drawer is inline, subtract its occupied width before resolving the comparison lens. The existing lens remains side by side at 720 px or wider and unified below 720 px. A forced side-by-side preference is honored to the 560 px hard minimum, then receives only a temporary unified override.
 
 - [ ] **Step 4: Implement trusted anchors**
 
@@ -518,16 +521,16 @@ git commit -m "feat(files): add artifact review drawer"
 - Test: `src-tauri/src/artifact_review_service.rs`
 - Test: `crates/wardian-cli/tests/artifact_cli.rs`
 - Modify: `src/features/files/ReviewDrawer.tsx`
-- Modify: `src/features/files/FilesModeBar.tsx`
+- Modify: `src/features/files/FilesHeader.tsx`
 - Test: `src/features/files/ReviewDrawer.test.tsx`
 
 **Interfaces:**
-- Consumes: durable review, artifact origin session, Task 2 checkpointed user-delivery wrapper, `ArtifactReviewShow` control request, and current Queue item.
-- Produces: `send_artifact_review`, concise attributed provider input, review retrieval JSON, `feedback_sent` lifecycle transition, and independent Apply/Send UI state.
+- Consumes: immutable review snapshot, artifact origin session, Task 2 checkpointed user-delivery wrapper, `ArtifactReviewShow` control request, current Queue item, and queued comment revisions.
+- Produces: `send_artifact_review`, concise attributed provider input, review retrieval JSON, `feedback_sent` lifecycle transition, and independent Save/Send UI state.
 
 - [ ] **Step 1: Add failing delivery-order and independence tests**
 
-Assert review persist -> prompt checkpoint persist -> provider submit -> delivery outcome persist; message contains review/artifact IDs and retrieval command but not a large patch; send does not modify disk; apply does not send; failed delivery retains review; successful send transitions status/Queue; and `review show --latest` returns all structured fields.
+Assert snapshot/review persist -> prompt checkpoint persist -> provider submit -> delivery outcome persist; message contains review/artifact IDs and retrieval command but not a large patch; Send does not modify disk or clear dirty state; Save does not send; a failed delivery retains the frozen review; Retry reuses the same review ID and payload; comments added in flight remain queued; successful Send transitions status/Queue; and `review show --latest` returns all structured fields.
 
 - [ ] **Step 2: Run focused service/CLI/UI tests**
 
@@ -541,7 +544,7 @@ Expected: send service and lifecycle assertions fail.
 
 - [ ] **Step 3: Persist before checkpoint and delivery**
 
-Create an immutable review with patch/comments/note first. Invoke `submit_user_prompt_with_checkpoint` using `origin_kind: artifact_review`; update the review with the returned checkpoint ID before provider submission through the wrapper's pre-submit association hook. The provider message is:
+Freeze an immutable review with the current shared-buffer bytes, exact baseline, patch, included comments, and note first. Invoke `submit_user_prompt_with_checkpoint` using `origin_kind: artifact_review`; update the review with the returned checkpoint ID before provider submission through the wrapper's pre-submit association hook. The provider message is:
 
 ```text
 Wardian artifact review <review-id> is available for artifact <artifact-id>.
@@ -552,15 +555,15 @@ Include title and general note only when the complete message remains under the 
 
 - [ ] **Step 4: Record delivery and lifecycle atomically**
 
-On successful submit, set review delivery state and manifest status `feedback_sent`; mark Queue action handled. On failure, retain the review with failed delivery detail and offer Retry. Retry reuses the same review ID and creates a new delivery attempt, not a duplicate review.
+On successful submit, set review delivery state and manifest status `feedback_sent`; mark Queue action handled. On failure, retain the review with failed delivery detail and offer Retry. Retry reuses the same review ID, frozen payload, and included-comment set while creating a new delivery attempt. Comments created after freezing remain queued for a future review.
 
 - [ ] **Step 5: Complete review retrieval**
 
-`ArtifactReviewShowResponseV1` returns base/current hashes, unified patch text or revision-bound blob reference according to size, comments, general note, apply state, checkpoint ID, and delivery attempts. Disk fallback remains read-only and schema-validated.
+`ArtifactReviewShowResponseV1` returns the three distinct hashes, frozen working-buffer reference, unified patch text or revision-bound blob reference according to size, included comments, general note, checkpoint ID, and delivery attempts. Disk fallback remains read-only and schema-validated.
 
-- [ ] **Step 6: Wire independent buttons**
+- [ ] **Step 6: Wire independent Save and Send actions**
 
-Show Apply to file only for text drafts and Send to agent only for artifacts with an origin. Either may be used first. The UI displays separate applied and sent state; it never combines them into one ambiguous Save button.
+Keep **Save** in the conventional Files action and show **Send to agent** only for artifacts with an origin. Either may be used first. Send freezes the current shared buffer and selected exact baseline without invoking Save. The UI displays dirty/saved state separately from queued/in-flight/sent review state and never adds Apply or a review-owned Save action.
 
 - [ ] **Step 7: Run focused tests**
 
@@ -595,25 +598,25 @@ git commit -m "feat(artifacts): deliver structured artifact reviews"
 
 **Interfaces:**
 - Consumes: native mock agent, real filesystem, real CLI/control endpoint, Files UI, and checkpoint/review stores.
-- Produces: evidence for checkpoint ordering/diffs, restart drafts, merge/apply, review delivery/retrieval, addressed comment lifecycle, and responsive review UI.
+- Produces: evidence for checkpoint ordering and exact historical diffs, shared-buffer review snapshots, independent Save/Send, review delivery/retrieval, addressed comment lifecycle, and responsive review UI.
 
 - [ ] **Step 1: Add a failing native end-to-end review loop**
 
-Start a mock agent, wait for index readiness, submit a prompt, change/add/delete/rename files, open Changes, draft a text edit, create line and image comments, send review, retrieve it with CLI, re-present with `--address`, resolve as user, apply the draft, restart, and verify all durable state.
+Start a mock agent, wait for index readiness, submit a prompt, change/add/delete/rename files, select **Changes since prompt** in the comparison lens, edit the shared buffer, create line and image comments, Send without saving, retrieve the frozen review with CLI, Save independently, re-present with `--address`, resolve as user, restart, and verify recovery, comments, and review state. Also prove that a duplicate ordinary-file presentation and `artifact:<id>` presentation share one buffer and that Save As opens an ordinary file without retargeting the artifact.
 
 - [ ] **Step 2: Add conflict and unavailable-baseline scenarios**
 
-Create overlapping external edits and assert disk remains unchanged until conflict resolution. Submit a prompt before initial indexing completes and assert the UI says `Prompt baseline unavailable` rather than displaying a mislabeled diff.
+Create an external edit while the shared buffer is dirty and assert the exact **Merge**, **Reload from disk**, and **Cancel** stale choices. Merge must remain dirty until explicit Save; Reload must discard recovery and adopt disk; Cancel must preserve stale state. Submit a prompt before initial indexing completes and assert the UI says `Prompt baseline unavailable` rather than displaying a mislabeled diff. Request an unavailable presented version and prove Wardian does not substitute Saved-file or another version.
 
 - [ ] **Step 3: Run the native test**
 
 Run: `npm run test:e2e:native:fast -- e2e-native/tests/artifact-review-native.test.mjs`
 
-Expected before final wiring: the first checkpoint/draft/review command fails.
+Expected before final wiring: the first checkpoint/baseline/review-snapshot command fails.
 
 - [ ] **Step 4: Add browser review interactions**
 
-Mock descriptors and review commands to prove mode changes, Monaco diff state, transient pinning, independent actions, wide/overlay drawer, keyboard comment list, explicit addressed/resolved states, and conflict UI. Do not claim real merge or delivery behavior.
+Mock descriptors and review commands to prove baseline selection, inline annotations and diff count, Book/Pencil current state, independent Save/Send actions, wide/overlay drawer, keyboard comment list, explicit addressed/resolved states, and stale-choice UI. Prove side-by-side at 720 px, unified below 720 px, forced side-by-side to 560 px, and drawer-width subtraction. Do not claim native authorization, filesystem atomicity, durable restart recovery, real watcher conflict behavior, or delivery transport from browser coverage.
 
 Run: `npx playwright test --config e2e/playwright.workbench.config.ts e2e/tests/files-review.spec.ts`
 
@@ -621,7 +624,7 @@ Expected: all browser interaction assertions pass.
 
 - [ ] **Step 5: Document the review contract**
 
-Explain Changes since prompt semantics and authorship caveat, index readiness, Draft persistence, Apply versus Send, conflicts, comment anchors/states, approval, CLI retrieval, and agent `--address`. Use cross-platform paths and commands.
+Explain Changes since prompt semantics and authorship caveat, index readiness, exact historical-baseline availability, shared durable editor recovery, explicit Save versus Send, stale Merge/Reload/Cancel, comment anchors/states, approval, CLI retrieval, and agent `--address`. Document that `artifact:<id>` attaches to the canonical file/blob controller, that one buffer is shared, and that Save As never retargets the artifact. Use cross-platform paths and commands.
 
 - [ ] **Step 6: Run the slice verification suite**
 
@@ -645,7 +648,7 @@ Expected: every command passes and Files remains reserved.
 
 - [ ] **Step 7: Capture PR evidence and commit tests/docs**
 
-Capture Changes plus the review drawer and a conflict state under `e2e/screenshots/files-surface/<timestamp>/`, upload at least one representative image, and embed its HTTPS URL in the PR body.
+Capture the historical comparison lens with inline annotations/diff count, the review drawer, and a stale-buffer state under `e2e/screenshots/files-surface/<timestamp>/`, upload at least one representative image, and embed its HTTPS URL in the PR body.
 
 ```bash
 git add e2e-native e2e docs/guide docs/developer
