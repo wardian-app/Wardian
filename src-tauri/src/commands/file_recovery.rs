@@ -1,6 +1,9 @@
 //! Narrow Tauri commands for durable editor recovery and authorized merging.
 
-use crate::state::{AppState, FileRecoveryCheckpointV1, FileRecoveryMergeResultV1, FileRecoveryV1};
+use crate::state::{
+    AppState, FileRecoveryCheckpointV1, FileRecoveryMergeResultV1, FileRecoverySummaryV1,
+    FileRecoveryV1,
+};
 use serde::{Deserialize, Serialize};
 use wardian_core::files::FileResourceErrorV1;
 
@@ -21,6 +24,12 @@ pub struct CheckpointFileRecoveryRequestV1 {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct GetFileRecoveryRequestV1 {
     pub recovery_id: String,
+    pub resource_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ListFileRecoveriesRequestV1 {
     pub resource_key: String,
 }
 
@@ -76,6 +85,20 @@ pub async fn get_file_recovery(
     state
         .file_resources
         .get_recovery(&request.recovery_id, &request.resource_key, webview.label())
+        .await
+}
+
+/// Discovers body-free recovery metadata under the calling WebView. Scope is
+/// injected by Tauri and cannot be forged in request JSON.
+#[tauri::command]
+pub async fn list_file_recoveries(
+    request: ListFileRecoveriesRequestV1,
+    state: tauri::State<'_, AppState>,
+    webview: tauri::WebviewWindow,
+) -> Result<Vec<FileRecoverySummaryV1>, FileResourceErrorV1> {
+    state
+        .file_resources
+        .list_recoveries(&request.resource_key, webview.label())
         .await
 }
 
@@ -149,6 +172,18 @@ mod tests {
                 "webview_scope": "forged"
             }));
         assert!(scope_injection.is_err());
+
+        let list: ListFileRecoveriesRequestV1 = serde_json::from_value(serde_json::json!({
+            "resource_key": "file:/workspace/readme.md"
+        }))
+        .expect("list request");
+        assert_eq!(list.resource_key, "file:/workspace/readme.md");
+        let forged_list_scope =
+            serde_json::from_value::<ListFileRecoveriesRequestV1>(serde_json::json!({
+                "resource_key": "file:/workspace/readme.md",
+                "webview_scope": "forged"
+            }));
+        assert!(forged_list_scope.is_err());
     }
 
     #[test]

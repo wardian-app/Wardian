@@ -563,6 +563,7 @@ pub fn run() {
             commands::files::pick_file_resource_save_target,
             commands::files::save_file_resource_as_text,
             commands::file_recovery::checkpoint_file_recovery,
+            commands::file_recovery::list_file_recoveries,
             commands::file_recovery::get_file_recovery,
             commands::file_recovery::discard_file_recovery,
             commands::file_recovery::merge_file_recovery,

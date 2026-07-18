@@ -32,9 +32,17 @@ Creating or updating a checkpoint requires the exact live file subscription
 for the same canonical `resource_key`. A new checkpoint reads its base through
 the retained authorized handle. Updates preserve that original base and use a
 recovery compare-and-swap revision so an older debounce completion cannot
-overwrite a newer buffer.
+overwrite a newer buffer. `base_revision` and `base_content_hash` authorize
+creation only. On update, the backend reauthorizes the recovery ID, exact
+resource/WebView scope, recovery CAS generation, and current live subscription;
+it does not require a restarted runtime to reproduce the private logical
+revision that existed when the base was captured.
 
-After restart, `get_file_recovery` may return only the stored base and buffer.
+After restart, `list_file_recoveries` discovers body-free recovery metadata for
+the exact stable resource key and calling WebView, newest first. Discovery
+validates bounded ordinary blob metadata but does not synchronously read or
+hash every body. The frontend then selects an ID and `get_file_recovery`
+performs complete body validation before returning the stored base and buffer.
 The backend scopes lookup to the exact stable resource key and the calling
 Tauri WebView label. The label comes from `WebviewWindow::label()` and is never
 accepted from request JSON. This read-only path does not open the current file,
@@ -55,7 +63,8 @@ The result is explicitly tagged `clean` or `conflicted`. Both variants include
 current revision/hash metadata, whether disk changed from the recovery base,
 and merged text. A conflicted result retains conflict markers and both sides;
 the backend never silently selects either editor or disk bytes. Merge itself
-does not save.
+does not save. The final clean or conflict-marker text is revalidated against
+the complete Monaco model byte and line limits before it crosses IPC.
 
 ## Limits, integrity, and cleanup
 
@@ -70,10 +79,18 @@ Before invoking `diffy`, all three merge sides must also fit the centralized
 per-side diff byte and line limits. A larger but still editable recovery remains
 readable and discardable; only the resource-intensive merge is rejected.
 
-Unreferenced hash blobs are collected only after a 24-hour grace period and
-only when their filenames match the backend-owned blob pattern. This protects
-readers from a recently interrupted or concurrent generation while bounding
-long-lived crash debris conservatively.
+Recovery writes and maintenance share one `recovery_io` critical section. The
+store admits at most 128 recovery record directories and 512 MiB of ordinary
+body files. Admission counts fresh manifestless records, malformed records,
+live generations, and fresh unreferenced immutable bodies; it never evicts a
+live or fresh record to make room. Capacity failures return
+`recovery_capacity_exceeded` before publishing new bodies.
+
+Every recovery-store sweep visits every direct canonical UUID record, not only
+the record being opened. Unreferenced hash blobs and manifestless records are
+collected only after a 24-hour grace period. Malformed records, unexpected
+entries, live manifest generations, and fresh crash debris are retained
+conservatively while still counting against admission where applicable.
 
 A guarded save may include one exact recovery ID and expected recovery CAS
 revision. After `saved` or `unchanged`, Wardian best-effort discards only that
@@ -84,9 +101,21 @@ into a reported failure.
 
 ## Verification
 
-Focused Rust tests cover create/update CAS, runtime recreation, scoped
-read-only restore, discard CAS, manifest-last injected failure, immutable blob
-generation selection, conservative orphan retention, oversized and tampered
-bodies, path-escape rejection, stale clean merge, overlapping conflict
-markers, revoked authorization, no current-byte read or write from recovery
-alone, and exact cleanup after a successful guarded save.
+Focused Rust tests cover create/update CAS, runtime recreation without retaining
+a recovery ID, scoped discovery/restore, restart-safe recheckpointing, discard
+CAS, initial and update manifest-last failures, immutable generation selection,
+root-wide conservative sweeping, record/byte admission budgets, metadata-only
+discovery, oversized and tampered bodies, path-escape rejection, final merged
+model limits, stale clean merge, overlapping conflict markers, revoked
+authorization, no current-byte read or write from recovery alone, and exact
+cleanup after a successful guarded save.
+
+## Residual filesystem race
+
+Recovery path validation rejects preplaced symlinks, junction escapes,
+non-files, and non-direct children before access. A hostile same-user process
+could still swap a path between metadata validation and a later path-based
+open/read on platforms where a portable no-follow retained-handle sequence is
+not available here. Closing that TOCTOU window requires a separate
+cross-platform handle-relative filesystem design and is not broadened into
+this recovery lifecycle change.

@@ -247,7 +247,11 @@ and does not change a committed save into an error.
 
 Creates or updates a durable dirty editor buffer through an exact live file
 subscription. Create uses `null` for both recovery fields. Update supplies the
-returned ID and exact current recovery revision.
+returned ID and exact current recovery revision. `base_revision` and
+`base_content_hash` are checked against the live file when creating; an update
+preserves the stored base and instead reauthorizes the ID, CAS generation,
+resource/WebView scope, and current exact live subscription. A restarted
+runtime therefore does not need to reproduce an old private logical revision.
 
 ```json
 {
@@ -267,6 +271,27 @@ returned ID and exact current recovery revision.
 The backend derives WebView scope from the Tauri caller. The returned metadata
 contains `recovery_id`, `recovery_revision`, base hash/opaque revision, and
 timestamps; the private retained file revision never crosses IPC.
+
+### `list_file_recoveries`
+
+Discovers durable recovery metadata for one stable resource key under the
+calling WebView, newest first. The WebView label is injected by Tauri and is
+not accepted from request JSON.
+
+```json
+{
+  "request": {
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+The response is an array containing `recovery_id`, resource/display metadata,
+base hash/opaque revision, recovery CAS revision, and timestamps. It never
+contains base or buffer bodies and grants no current-file authority. Discovery
+checks manifest and bounded ordinary blob metadata only; `get_file_recovery`
+performs full UTF-8, size, line-count, and content-hash validation for the
+selected record.
 
 ### `get_file_recovery`
 
@@ -322,6 +347,8 @@ The tagged response is `clean` or `conflicted`. Both contain
 `recovery_revision`, `current_revision`, `current_content_hash`,
 `disk_changed`, and `merged_text`. Conflict text includes explicit markers and
 both sides. The command never writes the file.
+The final clean or conflict-marker `merged_text` must also fit the complete
+Monaco model byte and line limits.
 
 ### `pick_file_resource_save_target`
 

@@ -3,7 +3,7 @@
 use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -31,6 +31,8 @@ const DEFAULT_SAVE_TARGET_TTL: Duration = Duration::from_secs(60);
 const MAX_TICKET_SNAPSHOT_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_TICKET_SNAPSHOT_RESERVATION_BYTES: u64 = 4 * 1024 * 1024;
 const RECOVERY_ORPHAN_GRACE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_MAX_RECOVERY_RECORDS: usize = 128;
+const DEFAULT_MAX_RECOVERY_BODY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +81,24 @@ pub struct FileRecoveryCheckpointV1 {
     pub schema: u8,
     pub recovery_id: String,
     pub resource_key: String,
+    pub base_content_hash: String,
+    pub base_opaque_revision: String,
+    pub recovery_revision: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+/// Body-free metadata used to discover durable editor recovery records after
+/// a frontend or native runtime restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FileRecoverySummaryV1 {
+    pub schema: u8,
+    pub recovery_id: String,
+    pub resource_key: String,
+    pub display_name: String,
+    pub extension: Option<String>,
+    pub mime_type: String,
     pub base_content_hash: String,
     pub base_opaque_revision: String,
     pub recovery_revision: u64,
@@ -146,7 +166,6 @@ struct FileRecoveryManifestV1 {
     extension: Option<String>,
     mime_type: String,
     base_content_hash: String,
-    base_resource_revision: u64,
     base_opaque_revision: String,
     base_blob: String,
     buffer_blob: String,
@@ -154,6 +173,29 @@ struct FileRecoveryManifestV1 {
     webview_scope: String,
     created_at_ms: u64,
     updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileRecoveryStoreLimits {
+    max_records: usize,
+    max_body_bytes: u64,
+    orphan_grace_period: Duration,
+}
+
+impl Default for FileRecoveryStoreLimits {
+    fn default() -> Self {
+        Self {
+            max_records: DEFAULT_MAX_RECOVERY_RECORDS,
+            max_body_bytes: DEFAULT_MAX_RECOVERY_BODY_BYTES,
+            orphan_grace_period: RECOVERY_ORPHAN_GRACE_PERIOD,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FileRecoveryStoreUsage {
+    records: usize,
+    body_bytes: u64,
 }
 
 /// Short-lived one-shot authority returned by the native Save As picker.
@@ -240,6 +282,7 @@ struct FileResourceRuntimeInner {
     agent_config_resolver: RwLock<CurrentAgentConfigResolver>,
     recovery_root: RwLock<Option<PathBuf>>,
     recovery_io: Mutex<()>,
+    recovery_store_limits: RwLock<FileRecoveryStoreLimits>,
     #[cfg(test)]
     issue_ticket_after_validation_hook: Mutex<Option<IssueTicketAfterValidationHook>>,
     #[cfg(test)]
@@ -603,6 +646,7 @@ impl FileResourceRuntime {
                 agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
                 recovery_root: RwLock::new(default_recovery_root()),
                 recovery_io: Mutex::new(()),
+                recovery_store_limits: RwLock::new(FileRecoveryStoreLimits::default()),
                 #[cfg(test)]
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -653,6 +697,7 @@ impl FileResourceRuntime {
                 agent_config_resolver: RwLock::new(CurrentAgentConfigResolver::default()),
                 recovery_root: RwLock::new(default_recovery_root()),
                 recovery_io: Mutex::new(()),
+                recovery_store_limits: RwLock::new(FileRecoveryStoreLimits::default()),
                 issue_ticket_after_validation_hook: Mutex::new(None),
                 ticket_publication_hook: Mutex::new(None),
                 forced_refresh_error: Mutex::new(None),
@@ -713,6 +758,24 @@ impl FileResourceRuntime {
         self.inner
             .fail_recovery_before_manifest
             .store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn configure_recovery_store_for_test(
+        &self,
+        max_records: usize,
+        max_body_bytes: u64,
+        orphan_grace_period: Duration,
+    ) {
+        let limits = FileRecoveryStoreLimits {
+            max_records,
+            max_body_bytes,
+            orphan_grace_period,
+        };
+        match self.inner.recovery_store_limits.write() {
+            Ok(mut current) => *current = limits,
+            Err(poisoned) => *poisoned.into_inner() = limits,
+        }
     }
 
     #[must_use]
@@ -2123,6 +2186,8 @@ impl FileResourceRuntime {
         }
         let recovery_root = self.recovery_root()?;
         let _recovery_io = self.inner.recovery_io.lock().await;
+        let store_limits = self.recovery_store_limits();
+        sweep_recovery_store(&recovery_root, store_limits.orphan_grace_period)?;
         let now = now_epoch_ms();
         let (manifest, base) = match recovery_id {
             Some(recovery_id) => {
@@ -2132,14 +2197,6 @@ impl FileResourceRuntime {
                     return Err(error(
                         "recovery_conflict",
                         "recovery checkpoint revision is no longer current",
-                    ));
-                }
-                if current.base_resource_revision != base_revision
-                    || current.base_content_hash != base_content_hash
-                {
-                    return Err(error(
-                        "recovery_conflict",
-                        "recovery checkpoint base no longer matches",
                     ));
                 }
                 let base = read_recovery_blob(
@@ -2180,7 +2237,6 @@ impl FileResourceRuntime {
                         extension: descriptor.extension,
                         mime_type: descriptor.mime_type,
                         base_content_hash: descriptor.content_hash,
-                        base_resource_revision: base_revision,
                         base_opaque_revision: Uuid::new_v4().to_string(),
                         base_blob: String::new(),
                         buffer_blob: String::new(),
@@ -2193,6 +2249,13 @@ impl FileResourceRuntime {
                 )
             }
         };
+        enforce_recovery_admission(
+            &recovery_root,
+            &manifest.recovery_id,
+            &base,
+            buffer,
+            store_limits,
+        )?;
         let fail_before_manifest = {
             #[cfg(test)]
             {
@@ -2212,8 +2275,64 @@ impl FileResourceRuntime {
             buffer,
             now,
             fail_before_manifest,
+            store_limits.orphan_grace_period,
         )?;
         Ok(recovery_checkpoint_metadata(&committed))
+    }
+
+    /// Discovers body-free recovery metadata for one exact stable resource key
+    /// and calling WebView scope. Results are newest-first and never confer
+    /// current-file authority.
+    pub async fn list_recoveries(
+        &self,
+        resource_key: &str,
+        webview_scope: &str,
+    ) -> Result<Vec<FileRecoverySummaryV1>, FileResourceErrorV1> {
+        if resource_key.trim().is_empty() || webview_scope.trim().is_empty() {
+            return Err(error(
+                "invalid_request",
+                "recovery resource key and webview scope must not be empty",
+            ));
+        }
+        let recovery_root = self.recovery_root()?;
+        let _recovery_io = self.inner.recovery_io.lock().await;
+        let store_limits = self.recovery_store_limits();
+        sweep_recovery_store(&recovery_root, store_limits.orphan_grace_period)?;
+        let mut recoveries = Vec::new();
+        for recovery_id in recovery_record_ids(&recovery_root)? {
+            let Ok(manifest) = load_recovery_manifest(&recovery_root, &recovery_id) else {
+                continue;
+            };
+            if authorize_recovery_manifest(&manifest, resource_key, webview_scope).is_err() {
+                continue;
+            }
+            if validate_recovery_blob_metadata(
+                &recovery_root,
+                &manifest,
+                &manifest.base_blob,
+                &self.inner.limits,
+            )
+            .and_then(|_| {
+                validate_recovery_blob_metadata(
+                    &recovery_root,
+                    &manifest,
+                    &manifest.buffer_blob,
+                    &self.inner.limits,
+                )
+            })
+            .is_err()
+            {
+                continue;
+            }
+            recoveries.push(recovery_summary_metadata(&manifest));
+        }
+        recoveries.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| right.recovery_id.cmp(&left.recovery_id))
+        });
+        Ok(recoveries)
     }
 
     /// Reads only persisted recovery bytes under the exact WebView and stable
@@ -2226,6 +2345,8 @@ impl FileResourceRuntime {
     ) -> Result<FileRecoveryV1, FileResourceErrorV1> {
         let recovery_root = self.recovery_root()?;
         let _recovery_io = self.inner.recovery_io.lock().await;
+        let store_limits = self.recovery_store_limits();
+        sweep_recovery_store(&recovery_root, store_limits.orphan_grace_period)?;
         let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
         authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
         let base = read_recovery_blob(
@@ -2240,7 +2361,6 @@ impl FileResourceRuntime {
             &manifest.buffer_blob,
             &self.inner.limits,
         )?;
-        garbage_collect_recovery_blobs(&recovery_root, &manifest);
         Ok(FileRecoveryV1 {
             schema: 1,
             recovery_id: manifest.recovery_id,
@@ -2269,6 +2389,8 @@ impl FileResourceRuntime {
     ) -> Result<(), FileResourceErrorV1> {
         let recovery_root = self.recovery_root()?;
         let _recovery_io = self.inner.recovery_io.lock().await;
+        let store_limits = self.recovery_store_limits();
+        sweep_recovery_store(&recovery_root, store_limits.orphan_grace_period)?;
         let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
         authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
         if manifest.recovery_revision != expected_recovery_revision {
@@ -2321,6 +2443,8 @@ impl FileResourceRuntime {
         let recovery_root = self.recovery_root()?;
         let (manifest, base, buffer) = {
             let _recovery_io = self.inner.recovery_io.lock().await;
+            let store_limits = self.recovery_store_limits();
+            sweep_recovery_store(&recovery_root, store_limits.orphan_grace_period)?;
             let manifest = load_recovery_manifest(&recovery_root, recovery_id)?;
             authorize_recovery_manifest(&manifest, resource_key, webview_scope)?;
             if manifest.recovery_revision != expected_recovery_revision {
@@ -2431,22 +2555,14 @@ impl FileResourceRuntime {
         } else {
             Ok(buffer)
         };
-        Ok(match merged {
-            Ok(merged_text) => FileRecoveryMergeResultV1::Clean {
-                recovery_revision: manifest.recovery_revision,
-                current_revision,
-                current_content_hash,
-                disk_changed,
-                merged_text,
-            },
-            Err(merged_text) => FileRecoveryMergeResultV1::Conflicted {
-                recovery_revision: manifest.recovery_revision,
-                current_revision,
-                current_content_hash,
-                disk_changed,
-                merged_text,
-            },
-        })
+        finalize_recovery_merge(
+            merged,
+            manifest.recovery_revision,
+            current_revision,
+            current_content_hash,
+            disk_changed,
+            &self.inner.limits,
+        )
     }
 
     /// Performs a guarded save and then best-effort cleanup of one exact
@@ -2514,6 +2630,14 @@ impl FileResourceRuntime {
                     "Wardian recovery home is unavailable",
                 )
             })
+    }
+
+    fn recovery_store_limits(&self) -> FileRecoveryStoreLimits {
+        self.inner
+            .recovery_store_limits
+            .read()
+            .map(|limits| *limits)
+            .unwrap_or_else(|poisoned| *poisoned.into_inner())
     }
 
     /// Saves UTF-8 text through one exact live subscription and its private
@@ -3541,6 +3665,36 @@ fn validate_recovery_diff_side(
     Ok(())
 }
 
+fn finalize_recovery_merge(
+    merged: Result<String, String>,
+    recovery_revision: u64,
+    current_revision: u64,
+    current_content_hash: String,
+    disk_changed: bool,
+    limits: &FileResourceLimits,
+) -> Result<FileRecoveryMergeResultV1, FileResourceErrorV1> {
+    let merged_text = match &merged {
+        Ok(merged_text) | Err(merged_text) => merged_text,
+    };
+    validate_submitted_text(merged_text, limits)?;
+    Ok(match merged {
+        Ok(merged_text) => FileRecoveryMergeResultV1::Clean {
+            recovery_revision,
+            current_revision,
+            current_content_hash,
+            disk_changed,
+            merged_text,
+        },
+        Err(merged_text) => FileRecoveryMergeResultV1::Conflicted {
+            recovery_revision,
+            current_revision,
+            current_content_hash,
+            disk_changed,
+            merged_text,
+        },
+    })
+}
+
 fn text_size_and_line_count(text: &str) -> Result<(u64, u64), FileResourceErrorV1> {
     let size_bytes = u64::try_from(text.len()).map_err(|_| {
         error(
@@ -3846,6 +4000,48 @@ fn default_recovery_root() -> Option<PathBuf> {
     crate::utils::fs::get_wardian_home().map(|home| home.join("files").join("recovery"))
 }
 
+fn recovery_record_ids(recovery_root: &Path) -> Result<Vec<String>, FileResourceErrorV1> {
+    match std::fs::symlink_metadata(recovery_root) {
+        Ok(_) => validate_recovery_root(recovery_root)?,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(cause) => {
+            return Err(error(
+                "recovery_unavailable",
+                format!("cannot inspect recovery root: {cause}"),
+            ));
+        }
+    }
+    let entries = std::fs::read_dir(recovery_root).map_err(|cause| {
+        error(
+            "recovery_unavailable",
+            format!("cannot enumerate recovery records: {cause}"),
+        )
+    })?;
+    let mut recovery_ids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(recovery_id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(parsed) = Uuid::parse_str(&recovery_id) else {
+            continue;
+        };
+        if parsed.to_string() != recovery_id {
+            continue;
+        }
+        let Ok(metadata) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if metadata.file_type().is_dir()
+            && validate_direct_child_directory(recovery_root, &entry.path(), "record directory")
+                .is_ok()
+        {
+            recovery_ids.push(recovery_id);
+        }
+    }
+    recovery_ids.sort();
+    Ok(recovery_ids)
+}
+
 fn recovery_record_dir(
     recovery_root: &Path,
     recovery_id: &str,
@@ -3954,6 +4150,22 @@ fn recovery_checkpoint_metadata(manifest: &FileRecoveryManifestV1) -> FileRecove
         schema: 1,
         recovery_id: manifest.recovery_id.clone(),
         resource_key: manifest.resource_key.clone(),
+        base_content_hash: manifest.base_content_hash.clone(),
+        base_opaque_revision: manifest.base_opaque_revision.clone(),
+        recovery_revision: manifest.recovery_revision,
+        created_at_ms: manifest.created_at_ms,
+        updated_at_ms: manifest.updated_at_ms,
+    }
+}
+
+fn recovery_summary_metadata(manifest: &FileRecoveryManifestV1) -> FileRecoverySummaryV1 {
+    FileRecoverySummaryV1 {
+        schema: 1,
+        recovery_id: manifest.recovery_id.clone(),
+        resource_key: manifest.resource_key.clone(),
+        display_name: manifest.display_name.clone(),
+        extension: manifest.extension.clone(),
+        mime_type: manifest.mime_type.clone(),
         base_content_hash: manifest.base_content_hash.clone(),
         base_opaque_revision: manifest.base_opaque_revision.clone(),
         recovery_revision: manifest.recovery_revision,
@@ -4134,28 +4346,7 @@ fn read_recovery_blob(
     blob_name: &str,
     limits: &FileResourceLimits,
 ) -> Result<String, FileResourceErrorV1> {
-    if !is_recovery_blob_name(blob_name) {
-        return Err(error(
-            "invalid_recovery",
-            "recovery blob name is not hash-addressed",
-        ));
-    }
-    let record_dir = validate_recovery_record_dir(recovery_root, &manifest.recovery_id)?;
-    let blobs_dir = record_dir.join("blobs");
-    validate_direct_child_directory(&record_dir, &blobs_dir, "blob directory")?;
-    let path = blobs_dir.join(blob_name);
-    let metadata = std::fs::symlink_metadata(&path).map_err(|cause| {
-        error(
-            "invalid_recovery",
-            format!("recovery blob is unavailable: {cause}"),
-        )
-    })?;
-    if !metadata.file_type().is_file() || metadata.len() > limits.monaco_max_size_bytes {
-        return Err(error(
-            "invalid_recovery",
-            "recovery blob is not a bounded ordinary file",
-        ));
-    }
+    let path = validate_recovery_blob_metadata(recovery_root, manifest, blob_name, limits)?;
     let bytes = std::fs::read(&path).map_err(|cause| {
         error(
             "invalid_recovery",
@@ -4179,6 +4370,191 @@ fn read_recovery_blob(
     Ok(text)
 }
 
+fn validate_recovery_blob_metadata(
+    recovery_root: &Path,
+    manifest: &FileRecoveryManifestV1,
+    blob_name: &str,
+    limits: &FileResourceLimits,
+) -> Result<PathBuf, FileResourceErrorV1> {
+    if !is_recovery_blob_name(blob_name) {
+        return Err(error(
+            "invalid_recovery",
+            "recovery blob name is not hash-addressed",
+        ));
+    }
+    let record_dir = validate_recovery_record_dir(recovery_root, &manifest.recovery_id)?;
+    let blobs_dir = record_dir.join("blobs");
+    validate_direct_child_directory(&record_dir, &blobs_dir, "blob directory")?;
+    let path = blobs_dir.join(blob_name);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|cause| {
+        error(
+            "invalid_recovery",
+            format!("recovery blob is unavailable: {cause}"),
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > limits.monaco_max_size_bytes {
+        return Err(error(
+            "invalid_recovery",
+            "recovery blob is not a bounded ordinary file",
+        ));
+    }
+    Ok(path)
+}
+
+fn sweep_recovery_store(
+    recovery_root: &Path,
+    orphan_grace_period: Duration,
+) -> Result<(), FileResourceErrorV1> {
+    for recovery_id in recovery_record_ids(recovery_root)? {
+        match load_recovery_manifest(recovery_root, &recovery_id) {
+            Ok(manifest) => {
+                garbage_collect_recovery_blobs(recovery_root, &manifest, orphan_grace_period)
+            }
+            Err(failure) if failure.code() == "recovery_not_found" => {
+                let record_dir = validate_recovery_record_dir(recovery_root, &recovery_id)?;
+                let metadata = std::fs::symlink_metadata(&record_dir).map_err(|cause| {
+                    error(
+                        "recovery_unavailable",
+                        format!("cannot inspect incomplete recovery record: {cause}"),
+                    )
+                })?;
+                let old_enough = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age >= orphan_grace_period);
+                if old_enough {
+                    remove_recovery_record(recovery_root, &recovery_id)?;
+                }
+            }
+            Err(_) => {
+                // Malformed or temporarily unreadable records remain intact.
+                // Admission accounting below still charges their directories
+                // and ordinary body files against the bounded store.
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recovery_store_usage(
+    recovery_root: &Path,
+) -> Result<FileRecoveryStoreUsage, FileResourceErrorV1> {
+    let recovery_ids = recovery_record_ids(recovery_root)?;
+    let mut usage = FileRecoveryStoreUsage {
+        records: recovery_ids.len(),
+        body_bytes: 0,
+    };
+    for recovery_id in recovery_ids {
+        let record_dir = recovery_record_dir(recovery_root, &recovery_id)?;
+        let blobs_dir = record_dir.join("blobs");
+        let metadata = match std::fs::symlink_metadata(&blobs_dir) {
+            Ok(metadata) => metadata,
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(cause) => {
+                return Err(error(
+                    "recovery_unavailable",
+                    format!("cannot inspect recovery blob directory: {cause}"),
+                ));
+            }
+        };
+        if !metadata.file_type().is_dir()
+            || validate_direct_child_directory(&record_dir, &blobs_dir, "blob directory").is_err()
+        {
+            continue;
+        }
+        let entries = std::fs::read_dir(&blobs_dir).map_err(|cause| {
+            error(
+                "recovery_unavailable",
+                format!("cannot enumerate recovery blobs: {cause}"),
+            )
+        })?;
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if metadata.file_type().is_file() {
+                usage.body_bytes = usage.body_bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(usage)
+}
+
+fn enforce_recovery_admission(
+    recovery_root: &Path,
+    recovery_id: &str,
+    base: &str,
+    buffer: &str,
+    limits: FileRecoveryStoreLimits,
+) -> Result<(), FileResourceErrorV1> {
+    let usage = recovery_store_usage(recovery_root)?;
+    let record_dir = recovery_record_dir(recovery_root, recovery_id)?;
+    let record_exists = match std::fs::symlink_metadata(&record_dir) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() {
+                return Err(error(
+                    "invalid_recovery",
+                    "recovery record target is not an ordinary directory",
+                ));
+            }
+            true
+        }
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => false,
+        Err(cause) => {
+            return Err(error(
+                "recovery_unavailable",
+                format!("cannot inspect recovery record admission target: {cause}"),
+            ));
+        }
+    };
+    if !record_exists && usage.records >= limits.max_records {
+        return Err(error(
+            "recovery_capacity_exceeded",
+            "durable editor recovery record limit is reached",
+        ));
+    }
+
+    let mut additional_bytes = 0_u64;
+    let mut prospective_names = HashSet::new();
+    for text in [base, buffer] {
+        let blob_name = recovery_blob_name(text);
+        if !prospective_names.insert(blob_name.clone()) {
+            continue;
+        }
+        let already_exists = if record_exists {
+            match std::fs::symlink_metadata(record_dir.join("blobs").join(blob_name)) {
+                Ok(_) => true,
+                Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => false,
+                Err(cause) => {
+                    return Err(error(
+                        "recovery_unavailable",
+                        format!("cannot inspect recovery blob admission target: {cause}"),
+                    ));
+                }
+            }
+        } else {
+            false
+        };
+        if !already_exists {
+            let length = u64::try_from(text.len()).map_err(|_| {
+                error(
+                    "recovery_capacity_exceeded",
+                    "recovery body length exceeds the storage budget representation",
+                )
+            })?;
+            additional_bytes = additional_bytes.saturating_add(length);
+        }
+    }
+    if usage.body_bytes.saturating_add(additional_bytes) > limits.max_body_bytes {
+        return Err(error(
+            "recovery_capacity_exceeded",
+            "durable editor recovery body-byte limit is reached",
+        ));
+    }
+    Ok(())
+}
+
 fn write_recovery_checkpoint(
     recovery_root: &Path,
     mut manifest: FileRecoveryManifestV1,
@@ -4186,6 +4562,7 @@ fn write_recovery_checkpoint(
     buffer: &str,
     now: u64,
     fail_before_manifest: bool,
+    orphan_grace_period: Duration,
 ) -> Result<FileRecoveryManifestV1, FileResourceErrorV1> {
     let record_dir = recovery_record_dir(recovery_root, &manifest.recovery_id)?;
     std::fs::create_dir_all(recovery_root).map_err(|cause| {
@@ -4230,7 +4607,7 @@ fn write_recovery_checkpoint(
                 format!("cannot commit recovery manifest: {cause}"),
             )
         })?;
-    garbage_collect_recovery_blobs(recovery_root, &manifest);
+    garbage_collect_recovery_blobs(recovery_root, &manifest, orphan_grace_period);
     Ok(manifest)
 }
 
@@ -4244,7 +4621,11 @@ fn sync_recovery_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn garbage_collect_recovery_blobs(recovery_root: &Path, manifest: &FileRecoveryManifestV1) {
+fn garbage_collect_recovery_blobs(
+    recovery_root: &Path,
+    manifest: &FileRecoveryManifestV1,
+    orphan_grace_period: Duration,
+) {
     let Ok(record_dir) = validate_recovery_record_dir(recovery_root, &manifest.recovery_id) else {
         return;
     };
@@ -4274,7 +4655,7 @@ fn garbage_collect_recovery_blobs(recovery_root: &Path, manifest: &FileRecoveryM
                 .modified()
                 .ok()
                 .and_then(|modified| modified.elapsed().ok())
-                .is_none_or(|age| age < RECOVERY_ORPHAN_GRACE_PERIOD)
+                .is_none_or(|age| age < orphan_grace_period)
         {
             continue;
         }
@@ -4512,6 +4893,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_recovery_restart_discovers_and_recheckpoints_without_private_base_revision() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "revision one").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+        let saved = runtime
+            .save_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                "revision two",
+            )
+            .await
+            .expect("advance logical revision");
+        let (base_revision, base_hash) = match saved {
+            FileResourceSaveResultV1::Saved {
+                revision,
+                content_hash,
+            } => (revision, content_hash),
+            other => panic!("expected saved revision, got {other:?}"),
+        };
+        assert!(base_revision > 1);
+        runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                base_revision,
+                &base_hash,
+                &opened.resource_id,
+                "main",
+                "first recovered edit",
+            )
+            .await
+            .expect("checkpoint after later logical revision");
+        let resource_key = opened.resource_id.clone();
+        drop(runtime);
+
+        let restarted = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root,
+        );
+        let discovered = restarted
+            .list_recoveries(&resource_key, "main")
+            .await
+            .expect("discover after process restart");
+        assert_eq!(discovered.len(), 1);
+        assert!(restarted
+            .list_recoveries(&resource_key, "other")
+            .await
+            .expect("wrong scope discovery")
+            .is_empty());
+        assert!(restarted
+            .list_recoveries("file:/another.txt", "main")
+            .await
+            .expect("wrong resource discovery")
+            .is_empty());
+        let restored = restarted
+            .get_recovery(&discovered[0].recovery_id, &resource_key, "main")
+            .await
+            .expect("restore discovered recovery");
+        assert_eq!(restored.buffer, "first recovered edit");
+
+        let reopened = restarted
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("new live authorization");
+        assert_eq!(reopened.revision, 1, "runtime revision is process-local");
+        let updated = restarted
+            .checkpoint_recovery(
+                Some(&discovered[0].recovery_id),
+                Some(discovered[0].recovery_revision),
+                &reopened.resource_id,
+                &reopened.subscription_id,
+                reopened.revision,
+                &reopened.descriptor.content_hash,
+                &resource_key,
+                "main",
+                "second recovered edit",
+            )
+            .await
+            .expect("checkpoint recovered buffer with new runtime revision");
+        assert_eq!(
+            updated.recovery_revision,
+            discovered[0].recovery_revision + 1
+        );
+        assert_eq!(
+            restarted
+                .get_recovery(&updated.recovery_id, &resource_key, "main")
+                .await
+                .expect("updated recovery")
+                .buffer,
+            "second recovered edit"
+        );
+    }
+
+    #[tokio::test]
     async fn file_recovery_manifest_last_failure_never_mixes_blob_generations() {
         let temp = tempfile::tempdir().expect("temp root");
         let recovery_root = temp.path().join("recovery");
@@ -4598,6 +5091,160 @@ mod tests {
             "fresh unreachable blob is retained conservatively"
         );
         assert!(is_recovery_blob_name(&manifest.base_blob));
+    }
+
+    #[tokio::test]
+    async fn file_recovery_store_sweeps_crash_debris_and_enforces_admission_budgets() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let recovery_root = temp.path().join("recovery");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let path = workspace.join("draft.txt");
+        fs::write(&path, "base").expect("fixture");
+        let config = agent_config("agent-a", &workspace);
+        let runtime = FileResourceRuntime::with_recovery_root(
+            Duration::from_millis(150),
+            Duration::from_secs(60),
+            recovery_root.clone(),
+        );
+        runtime.configure_recovery_store_for_test(2, 18, Duration::ZERO);
+        let opened = runtime
+            .open_agent_file("agent-a", &config, &path, None)
+            .await
+            .expect("open");
+
+        runtime.fail_next_recovery_before_manifest();
+        let interrupted = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "lost",
+            )
+            .await
+            .expect_err("initial manifest-last fault must fail");
+        assert_eq!(interrupted.code(), "recovery_unavailable");
+        assert_eq!(
+            fs::read_dir(&recovery_root).expect("recovery root").count(),
+            1
+        );
+        assert!(runtime
+            .list_recoveries(&opened.resource_id, "main")
+            .await
+            .expect("sweep manifestless record")
+            .is_empty());
+        assert_eq!(
+            fs::read_dir(&recovery_root).expect("recovery root").count(),
+            0
+        );
+
+        runtime.configure_recovery_store_for_test(2, 18, RECOVERY_ORPHAN_GRACE_PERIOD);
+        let first = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "one",
+            )
+            .await
+            .expect("first bounded record");
+        let second = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "two",
+            )
+            .await
+            .expect("second bounded record");
+        let record_limit = runtime
+            .checkpoint_recovery(
+                None,
+                None,
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "new",
+            )
+            .await
+            .expect_err("third recovery id must exceed record budget");
+        assert_eq!(record_limit.code(), "recovery_capacity_exceeded");
+
+        let byte_limit = runtime
+            .checkpoint_recovery(
+                Some(&first.recovery_id),
+                Some(first.recovery_revision),
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                &opened.descriptor.content_hash,
+                &opened.resource_id,
+                "main",
+                "three",
+            )
+            .await
+            .expect_err("fresh immutable generations must count toward byte budget");
+        assert_eq!(byte_limit.code(), "recovery_capacity_exceeded");
+
+        let second_manifest =
+            load_recovery_manifest(&recovery_root, &second.recovery_id).expect("second manifest");
+        let second_record = recovery_root.join(&second.recovery_id);
+        let orphan_blob = write_recovery_blob(&second_record, "orphan").expect("orphan fixture");
+        runtime.configure_recovery_store_for_test(2, 18, Duration::ZERO);
+        let discovered = runtime
+            .list_recoveries(&opened.resource_id, "main")
+            .await
+            .expect("store-wide sweep");
+        assert_eq!(discovered.len(), 2);
+        assert!(!second_record.join("blobs").join(orphan_blob).exists());
+        assert!(second_record
+            .join("blobs")
+            .join(second_manifest.buffer_blob)
+            .is_file());
+        assert_eq!(
+            runtime
+                .get_recovery(&first.recovery_id, &opened.resource_id, "main")
+                .await
+                .expect("live recovery retained")
+                .buffer,
+            "one"
+        );
+    }
+
+    #[test]
+    fn file_recovery_merge_rejects_an_oversized_final_model() {
+        let limits = FileResourceLimits {
+            monaco_max_size_bytes: 8,
+            ..FileResourceLimits::default()
+        };
+        let result = finalize_recovery_merge(
+            Err("conflict!".to_string()),
+            2,
+            4,
+            "sha256:current".to_string(),
+            true,
+            &limits,
+        )
+        .expect_err("final conflict-marker model must be bounded");
+        assert_eq!(result.code(), "file_too_large");
     }
 
     #[tokio::test]
@@ -4838,6 +5485,14 @@ mod tests {
             .join("blobs")
             .join(&manifest.buffer_blob);
         fs::write(&buffer_path, [0xff, 0xfe]).expect("corrupt blob");
+        assert_eq!(
+            runtime
+                .list_recoveries(&opened.resource_id, "main")
+                .await
+                .expect("discovery validates metadata without reading every body")
+                .len(),
+            1
+        );
         let invalid_utf8 = runtime
             .get_recovery(&checkpoint.recovery_id, &opened.resource_id, "main")
             .await
