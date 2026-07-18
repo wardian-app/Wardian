@@ -1,3 +1,4 @@
+pub mod artifact_service;
 pub mod commands;
 pub mod control;
 pub mod delivery;
