@@ -609,6 +609,8 @@ export function FilesSurface({
       && definition.editor !== undefined;
     return editable ? props.editor_registry.forResource(snapshot.resource_id) : null;
   }, [props.editor_registry, registry, resource.snapshot]);
+  const editorControllerContext = useRef(editorController);
+  editorControllerContext.current = editorController;
   const recoveryConflictOperationGeneration = useRef(0);
   const recoveryConflictOperationPending = useRef(false);
   const [resolvingRecoveryConflict, setResolvingRecoveryConflict] = useState(false);
@@ -736,21 +738,26 @@ export function FilesSurface({
   ) => {
     if (!editorController || recoveryConflictOperationPending.current) return;
     const generation = ++recoveryConflictOperationGeneration.current;
+    const operationController = editorController;
+    const ownsOperation = () => (
+      recoveryConflictOperationGeneration.current === generation
+      && editorControllerContext.current === operationController
+    );
     recoveryConflictOperationPending.current = true;
     setResolvingRecoveryConflict(true);
     try {
       await editorController.resolveRecoveryConflict(choice);
-      if (recoveryConflictOperationGeneration.current === generation) {
+      if (ownsOperation()) {
         setEditorError(null);
       }
     } catch (error) {
-      if (recoveryConflictOperationGeneration.current === generation) {
+      if (ownsOperation()) {
         setEditorError(`Recovery conflict resolution failed: ${
           error instanceof Error ? error.message : String(error)
         }`);
       }
     } finally {
-      if (recoveryConflictOperationGeneration.current === generation) {
+      if (ownsOperation()) {
         recoveryConflictOperationPending.current = false;
         setResolvingRecoveryConflict(false);
       }

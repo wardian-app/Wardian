@@ -41,10 +41,12 @@ vi.mock("./FileComparisonLens", () => ({
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function descriptor(
@@ -899,12 +901,12 @@ describe("FilesSurface", () => {
       retry,
     });
     const client = new FileResourceClient();
-    vi.spyOn(client, "readText").mockResolvedValue({
+    vi.spyOn(client, "readText").mockImplementation(async (resource) => ({
       schema: 1,
-      resource_id: markdownSnapshot.resource_id,
-      revision: markdownSnapshot.revision,
+      resource_id: resource.resource_id,
+      revision: resource.revision,
       text: "base\n",
-    });
+    }));
     vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
     vi.spyOn(client, "saveText").mockRejectedValue({
       code: "unauthorized_path",
@@ -1069,12 +1071,12 @@ describe("FilesSurface", () => {
       retry: vi.fn(),
     });
     const client = new FileResourceClient();
-    vi.spyOn(client, "readText").mockResolvedValue({
+    vi.spyOn(client, "readText").mockImplementation(async (resource) => ({
       schema: 1,
-      resource_id: markdownSnapshot.resource_id,
-      revision: markdownSnapshot.revision,
+      resource_id: resource.resource_id,
+      revision: resource.revision,
       text: "base\n",
-    });
+    }));
     vi.spyOn(client, "listRecoveries").mockResolvedValue([]);
     const editorRegistry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
@@ -1361,12 +1363,12 @@ describe("FilesSurface", () => {
       updated_at_ms: 20,
     };
     const client = new FileResourceClient();
-    vi.spyOn(client, "readText").mockResolvedValue({
+    vi.spyOn(client, "readText").mockImplementation(async (resource) => ({
       schema: 1,
-      resource_id: markdownSnapshot.resource_id,
-      revision: markdownSnapshot.revision,
+      resource_id: resource.resource_id,
+      revision: resource.revision,
       text: "base\n",
-    });
+    }));
     const listRecoveries = vi.spyOn(client, "listRecoveries")
       .mockReturnValueOnce(pendingDiscovery.promise)
       .mockResolvedValueOnce([recoverySummaryValue]);
@@ -1381,7 +1383,7 @@ describe("FilesSurface", () => {
     const editorRegistry = new FileEditorControllerRegistry(client, {
       checkpoint_debounce_ms: 60_000,
     });
-    render(<FilesSurface {...props({
+    const view = render(<FilesSurface {...props({
       resource_key: markdownSnapshot.resource_id,
       client,
       editor_registry: editorRegistry,
@@ -1427,14 +1429,42 @@ describe("FilesSurface", () => {
     expect(discardRecovery).toHaveBeenCalledOnce();
     expect(keepCurrent).toBeDisabled();
     expect(useRecovered).toBeDisabled();
-    pendingConflictDiscard.resolve(undefined);
-    await waitFor(() => expect(screen.queryByText("Recovery conflict")).toBeNull());
-    expect(screen.queryByRole("button", { name: "Retry Editor" })).toBeNull();
-    expect(controller.getSnapshot().working_text).toBe("newer in-memory edit\n");
-    expect(controller.getSnapshot().recovery).toMatchObject({
-      status: "durable",
-      recovery_id: "recovery-current",
+    const replacementDescriptor = {
+      ...markdownDescriptor,
+      canonical_path: "C:/work/docs/replacement.md",
+      display_name: "replacement.md",
+      content_hash: "hash-replacement",
+    };
+    const replacementSnapshot = {
+      ...snapshot(replacementDescriptor),
+      resource_id: "file:C:/work/docs/replacement.md",
+    };
+    useFileResourceMock.mockReturnValue({
+      status: "ready",
+      snapshot: replacementSnapshot,
+      error: null,
+      retry: vi.fn().mockResolvedValue(undefined),
     });
+    listRecoveries.mockReset();
+    listRecoveries.mockResolvedValue([]);
+    view.rerender(<FilesSurface {...props({
+      resource_key: replacementSnapshot.resource_id,
+      client,
+      editor_registry: editorRegistry,
+      registry: new RendererRegistry([
+        definition("markdown", PreviewRenderer, SourceRenderer),
+        definition("unsupported", UnsupportedPreview),
+      ]),
+    })} />);
+    await waitFor(() => expect(
+      editorRegistry.forResource(replacementSnapshot.resource_id).getSnapshot().status,
+    ).toBe("ready"));
+    pendingConflictDiscard.reject(new Error("old conflict choice failed"));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.queryByText(/old conflict choice failed/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry Editor" })).toBeNull();
+    expect(screen.getByTestId("preview-renderer")).toHaveTextContent("replacement.md");
   });
 
   it("contains resource load errors and offers applicable recovery actions", async () => {
