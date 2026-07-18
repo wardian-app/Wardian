@@ -19,8 +19,9 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-workbench-runtime-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-workbench-runtime-${RUN_ID}`;
 const SESSION_NAME = `E2E-Workbench-Runtime-${RUN_ID}`;
+let wardianSessionId = null;
 
 async function invokeTauri(driver, command, args = {}) {
   const result = await driver.executeAsyncScript((cmd, payload, done) => {
@@ -50,12 +51,16 @@ function createRuntimeMockScript() {
   const script = `
 "use strict";
 let sequence = 0;
+const providerSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
+if (!providerSessionId) {
+  throw new Error("WARDIAN_MOCK_SESSION_ID is required");
+}
 process.stdout.write(JSON.stringify({
   type: "init",
-  session_id: ${JSON.stringify(SESSION_ID)},
+  session_id: providerSessionId,
   timestamp: new Date().toISOString(),
 }) + "\\n");
-process.stdout.write("runtime-start:${SESSION_ID}\\r\\n");
+process.stdout.write("runtime-start:" + providerSessionId + "\\r\\n");
 let inputBuffer = "";
 process.stdin.on("data", (chunk) => {
   inputBuffer += chunk.toString("utf8").replace(/\\r/g, "\\n");
@@ -81,13 +86,13 @@ function snapshotText(snapshot) {
 
 async function readSnapshot(driver) {
   return await invokeTauri(driver, "request_terminal_snapshot", {
-    request: { session_id: SESSION_ID },
+    request: { session_id: wardianSessionId },
   });
 }
 
 async function waitForAgentSessionHost(driver) {
   const selector = `[data-testid="agent-session-surface"]`
-    + `[data-resource-key=${JSON.stringify(SESSION_ID)}] [data-testid="agent-terminal-host"]`;
+    + `[data-resource-key=${JSON.stringify(wardianSessionId)}] [data-testid="agent-terminal-host"]`;
   try {
     const host = await driver.wait(until.elementLocated(By.css(selector)), 20000);
     await driver.wait(until.elementIsVisible(host), 20000);
@@ -214,17 +219,22 @@ test(
         sessionName: SESSION_NAME,
         agentClass: "TestClass",
         folder: harness.repoRoot,
-        resumeSession: SESSION_ID,
+        resumeSession: PROVIDER_SESSION_ID,
         isOff: false,
         configOverride: { provider: "mock" },
       },
     });
-    assert.equal(agent.session_id, SESSION_ID);
+    wardianSessionId = agent.session_id;
+    assert.match(
+      wardianSessionId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    assert.notEqual(wardianSessionId, PROVIDER_SESSION_ID);
 
     await openWorkbenchSurface(driver, "agents-overview");
-    await driver.wait(until.elementLocated(By.id(`agent-card-${SESSION_ID}`)), 20000);
+    await driver.wait(until.elementLocated(By.id(`agent-card-${wardianSessionId}`)), 20000);
     const agentsTerminalHost = await driver.wait(until.elementLocated(By.css(
-      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+      `#agent-card-${wardianSessionId} [data-testid="agent-terminal-host"]`,
     )), 20000);
     await driver.wait(until.elementIsVisible(agentsTerminalHost), 20000);
     await waitForActiveWorkbenchOverlayAlignment(driver, "initial Agents overlay alignment");
@@ -272,7 +282,7 @@ test(
       };
     });
 
-    await invokeTauri(driver, "clear_agent_session", { sessionId: SESSION_ID });
+    await invokeTauri(driver, "clear_agent_session", { sessionId: wardianSessionId });
     await waitFor("replacement runtime output", 30000, async () => {
       const snapshot = await readSnapshot(driver);
       return {
@@ -284,7 +294,7 @@ test(
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     await driver.wait(until.elementLocated(By.css(
-      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+      `#agent-card-${wardianSessionId} [data-testid="agent-terminal-host"]`,
     )), 30000);
     const fatalErrors = await driver.findElements(By.xpath(
       "//h3[contains(normalize-space(.), 'Terminal Initialization Fatal Error')]",
@@ -296,7 +306,7 @@ test(
     );
 
     const recoveredAgentsTerminalHost = await driver.findElement(By.css(
-      `#agent-card-${SESSION_ID} [data-testid="agent-terminal-host"]`,
+      `#agent-card-${wardianSessionId} [data-testid="agent-terminal-host"]`,
     ));
     await waitForActiveWorkbenchOverlayAlignment(driver, "Agents overlay alignment after clear");
     await waitFor("recovered Agents presentation", 10000, async () => (
@@ -376,7 +386,7 @@ test(
       "The pre-clear owner must own the replacement runtime",
     );
 
-    await openWorkbenchSurface(driver, "agent-session", SESSION_ID);
+    await openWorkbenchSurface(driver, "agent-session", wardianSessionId);
     await waitForAgentSessionHost(driver);
 
     const beforeClose = await waitFor("initial runtime output", 30000, async () => {
@@ -388,7 +398,7 @@ test(
       };
     });
 
-    await closeWorkbenchSurface(driver, "agent-session", SESSION_ID);
+    await closeWorkbenchSurface(driver, "agent-session", wardianSessionId);
     await closeWorkbenchSurface(driver, "agents-overview");
     assert.equal(
       (await driver.findElements(By.css('[data-testid="agent-terminal-host"]'))).length,
@@ -407,13 +417,13 @@ test(
     assert.ok(snapshotText(afterClose.snapshot).includes("runtime-start:"));
 
     const agentsAfterClose = await invokeTauri(driver, "list_agents");
-    const liveAgent = agentsAfterClose.find((candidate) => candidate.session_id === SESSION_ID);
+    const liveAgent = agentsAfterClose.find((candidate) => candidate.session_id === wardianSessionId);
     assert.ok(liveAgent, "Closing presentations must not remove the agent runtime");
     assert.equal(liveAgent.is_off, false, "Closing presentations must not turn the agent off");
 
     // Roster Enter now reveals the agent in Agents. Reopening a dedicated
     // Agent Session is an explicit surface action.
-    await openWorkbenchSurface(driver, "agent-session", SESSION_ID);
+    await openWorkbenchSurface(driver, "agent-session", wardianSessionId);
     await waitForAgentSessionHost(driver);
     const afterReopen = await readSnapshot(driver);
     assert.equal(afterReopen.runtime_generation, beforeClose.snapshot.runtime_generation);

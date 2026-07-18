@@ -20,7 +20,7 @@ import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-terminal-wheel-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-terminal-wheel-${RUN_ID}`;
 const SESSION_NAME = `E2E-Terminal-Wheel-${RUN_ID}`;
 const RESTORE_SCROLLBACK_MARKER = `WARDIAN_RESTORE_SCROLLBACK_${RUN_ID}`;
 // Replicates the stream shape captured live from Claude Code 2.1.173: banner
@@ -193,9 +193,13 @@ function createScrollbackMockScript() {
   const scriptPath = path.join(os.tmpdir(), `wardian-wheel-mock-${RUN_ID}.cjs`);
   const script = `
 "use strict";
+const providerSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
+if (!providerSessionId) {
+  throw new Error("WARDIAN_MOCK_SESSION_ID is required");
+}
 const init = JSON.stringify({
   type: "init",
-  session_id: ${JSON.stringify(SESSION_ID)},
+  session_id: providerSessionId,
   timestamp: new Date().toISOString(),
 }) + "\\n";
 process.stdout.write(init);
@@ -331,7 +335,7 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
       sessionName: `${SESSION_NAME}-filler`,
       agentClass: "TestClass",
       folder: harness.repoRoot,
-      resumeSession: `${SESSION_ID}-filler`,
+      resumeSession: `${PROVIDER_SESSION_ID}-filler`,
       isOff: false,
       configOverride: { provider: "mock" },
     },
@@ -343,12 +347,17 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
       sessionName: SESSION_NAME,
       agentClass: "TestClass",
       folder: harness.repoRoot,
-      resumeSession: SESSION_ID,
+      resumeSession: PROVIDER_SESSION_ID,
       isOff: false,
       configOverride: { provider: "mock" },
     },
   });
-  assert.equal(agent.session_id, SESSION_ID);
+  const sessionId = agent.session_id;
+  assert.match(
+    sessionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  assert.notEqual(sessionId, PROVIDER_SESSION_ID);
 
   await openWorkbenchSurface(driver, "agents-overview");
   // The test's fixed two-column layout is an explicit Grid contract. Leaving
@@ -356,7 +365,7 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
   // window narrows, which would test responsive selection instead of wheel IO.
   await selectGridMode(driver);
   const card = await driver.wait(
-    until.elementLocated(By.id(`agent-card-${SESSION_ID}`)),
+    until.elementLocated(By.id(`agent-card-${sessionId}`)),
     20000,
   );
   await driver.wait(until.elementIsVisible(card), 20000);
@@ -369,8 +378,8 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     }
     assert.fail("Expected terminal debug snapshots in the native build");
   }
-  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
-  await focusAgentTerminal(driver, SESSION_ID, presentationId);
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId);
+  await focusAgentTerminal(driver, sessionId, presentationId);
 
   const beforeSnapshot = await waitForScrollback(driver, presentationId);
   console.log("renderer diagnostics:", JSON.stringify({
@@ -379,7 +388,7 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     scrollableElement: beforeSnapshot?.renderer?.scrollableElement,
     webglActive: beforeSnapshot?.renderer?.webglActive,
   }));
-  await assertWheelScrolls(driver, SESSION_ID, presentationId, "initial");
+  await assertWheelScrolls(driver, sessionId, presentationId, "initial");
 
   // The live-Claude audit failed its wheel checks after shrinking the window
   // (content reflow + terminal refit); guard that transition too.
@@ -389,7 +398,7 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     const host = [...(card?.querySelectorAll('[data-testid="agent-terminal-host"]') ?? [])]
       .find((candidate) => candidate.getAttribute("data-terminal-presentation-id") === pid);
     return Boolean(host?.querySelector(".xterm"));
-  }, SESSION_ID, presentationId), 20_000,
+  }, sessionId, presentationId), 20_000,
   "Timed out waiting for the focused terminal presentation after the narrow resize");
   const narrowSnapshot = await readTerminalDebugSnapshot(driver, presentationId);
   console.log("narrow diagnostics:", JSON.stringify({
@@ -400,16 +409,16 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     wheelStats: narrowSnapshot?.wheelStats,
     viewportScrollState: narrowSnapshot?.renderer?.viewportScrollState,
   }));
-  await assertWheelScrolls(driver, SESSION_ID, presentationId, "narrow");
+  await assertWheelScrolls(driver, sessionId, presentationId, "narrow");
 
   await driver.manage().window().setRect({ width: 1920, height: 1080 });
   await new Promise((resolve) => setTimeout(resolve, 2000));
   await sendTerminalPresentationInput(
     driver,
-    SESSION_ID,
+    sessionId,
     presentationId,
     `${RESTORE_SCROLLBACK_MARKER}\r`,
   );
   await waitForScrollback(driver, presentationId, "restored-wheel-80");
-  await assertWheelScrolls(driver, SESSION_ID, presentationId, "restored");
+  await assertWheelScrolls(driver, sessionId, presentationId, "restored");
 });

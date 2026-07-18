@@ -43,9 +43,13 @@ function createQuietMockScript() {
   const scriptPath = path.join(os.tmpdir(), `wardian-first-paint-${RUN_ID}.cjs`);
   const script = `
 "use strict";
+const providerSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
+if (!providerSessionId) {
+  throw new Error("WARDIAN_MOCK_SESSION_ID is required");
+}
 process.stdout.write(JSON.stringify({
   type: "init",
-  session_id: process.env.WARDIAN_SESSION_ID || "mock-session",
+  session_id: providerSessionId,
   timestamp: new Date().toISOString(),
 }) + "\\n");
 for (let line = 1; line <= 8; line += 1) {
@@ -138,8 +142,9 @@ test(
     await waitForAppShell(driver, 20_000);
     await driver.manage().window().setRect({ width: 1400, height: 900 });
 
+    const spawnedAgents = [];
     for (const agent of AGENTS) {
-      await invokeTauri(driver, "spawn_agent", {
+      const spawned = await invokeTauri(driver, "spawn_agent", {
         req: {
           sessionName: agent.sessionName,
           agentClass: "TestClass",
@@ -149,18 +154,20 @@ test(
           configOverride: { provider: "mock" },
         },
       });
+      assert.notEqual(spawned.session_id, agent.sessionId);
+      spawnedAgents.push({ ...agent, sessionId: spawned.session_id });
     }
 
     await openWorkbenchSurface(driver, "agents-overview");
     await selectGridMode(driver);
-    for (const agent of AGENTS) {
+    for (const agent of spawnedAgents) {
       await driver.wait(async () => (
         (await driver.findElements(By.id(`agent-card-${agent.sessionId}`))).length === 1
       ), 20_000, `Timed out locating ${agent.sessionId}`);
     }
 
     const presentations = [];
-    for (const agent of AGENTS) {
+    for (const agent of spawnedAgents) {
       presentations.push([
         agent.sessionId,
         await resolveAgentTerminalPresentationId(driver, agent.sessionId),

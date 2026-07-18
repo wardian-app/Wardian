@@ -878,7 +878,7 @@ fn persisted_resume_session_for_provider(actual_resume: Option<String>) -> Optio
 }
 
 fn provider_uses_manual_session_id(provider_name: &str) -> bool {
-    matches!(provider_name, "claude" | "gemini")
+    matches!(provider_name, "claude" | "gemini" | "mock")
 }
 
 struct NewAgentIdentityPlan {
@@ -6074,10 +6074,17 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn mock_uses_only_a_wardian_session_id() {
+    fn mock_uses_distinct_wardian_and_provider_ids() {
         let identity = super::new_agent_identity_plan("mock");
         assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
-        assert!(identity.fresh_provider_session_id.is_none());
+        assert_ne!(
+            Some(identity.wardian_session_id.as_str()),
+            identity.fresh_provider_session_id.as_deref()
+        );
+        assert!(identity
+            .fresh_provider_session_id
+            .as_deref()
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok()));
         assert!(!identity.bootstrap_provider_session);
     }
 

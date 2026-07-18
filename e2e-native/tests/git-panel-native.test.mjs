@@ -15,7 +15,7 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-git-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-git-${RUN_ID}`;
 const SESSION_NAME = `E2E-Git-${RUN_ID}`;
 
 function normalizeForWardianRecords(workspacePath) {
@@ -72,9 +72,10 @@ async function createOffMockAgent(driver, repoPath) {
       (agent) => done(agent),
       (error) => done({ error: String(error) }),
     );
-  }, SESSION_ID, SESSION_NAME, repoPath);
+  }, PROVIDER_SESSION_ID, SESSION_NAME, repoPath);
 
   assert.equal(result?.error, undefined, `Failed to create E2E agent: ${result?.error}`);
+  return result;
 }
 
 async function invokeTauri(driver, command, args = {}) {
@@ -144,8 +145,9 @@ test("source control panel renders git files and history for a seeded repo", { t
 
   const { driver } = session;
   await waitForAppShell(driver, 20000);
-  await createOffMockAgent(driver, repoPath);
-  const rootPath = await invokeTauri(driver, "get_explorer_root", { sessionId: SESSION_ID });
+  const agent = await createOffMockAgent(driver, repoPath);
+  assert.notEqual(agent.session_id, PROVIDER_SESSION_ID);
+  const rootPath = await invokeTauri(driver, "get_explorer_root", { sessionId: agent.session_id });
   assert.equal(rootPath, normalizeForWardianRecords(repoPath));
   const status = await invokeTauri(driver, "git_status", { cwd: rootPath });
   assert.equal(status.branch, "main");

@@ -21,8 +21,9 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-terminal-broker-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-terminal-broker-${RUN_ID}`;
 const SESSION_NAME = `E2E-Terminal-Broker-${RUN_ID}`;
+let wardianSessionId = null;
 const OWNER_GEOMETRY = Object.freeze({ cols: 101, rows: 31 });
 const MIRROR_GEOMETRY = Object.freeze({ cols: 151, rows: 44 });
 
@@ -63,7 +64,7 @@ const readline = require("node:readline");
 let tick = 0;
 process.stdout.write(JSON.stringify({
   type: "init",
-  session_id: ${JSON.stringify(SESSION_ID)},
+  session_id: ${JSON.stringify(PROVIDER_SESSION_ID)},
   timestamp: new Date().toISOString(),
 }) + "\\n");
 process.stdout.write("BROKER_READY_${RUN_ID}\\r\\n");
@@ -89,7 +90,7 @@ async function updatePresentation(
   return await invokeTauri(driver, "update_terminal_presentation", {
     request: {
       presentation_id: presentationId,
-      session_id: SESSION_ID,
+      session_id: wardianSessionId,
       runtime_generation: runtimeGeneration,
       desired_geometry: desiredGeometry,
       visibility: "visible",
@@ -103,7 +104,7 @@ async function updatePresentation(
 async function beginActivation(driver, presentationId, brokerState) {
   return await invokeTauri(driver, "begin_terminal_activation", {
     request: {
-      session_id: SESSION_ID,
+      session_id: wardianSessionId,
       presentation_id: presentationId,
       runtime_generation: brokerState.runtime_generation,
       observed_lease_epoch: brokerState.lease_epoch,
@@ -114,7 +115,7 @@ async function beginActivation(driver, presentationId, brokerState) {
 async function ackActivation(driver, presentationId, begin) {
   return await invokeTauri(driver, "ack_terminal_activation", {
     request: {
-      session_id: SESSION_ID,
+      session_id: wardianSessionId,
       presentation_id: presentationId,
       runtime_generation: begin.decision.runtime_generation,
       lease_epoch: begin.decision.lease_epoch,
@@ -132,7 +133,7 @@ async function resizePresentation(
 ) {
   return await invokeTauri(driver, "resize_terminal_presentation", {
     request: {
-      session_id: SESSION_ID,
+      session_id: wardianSessionId,
       presentation_id: presentationId,
       runtime_generation: brokerState.runtime_generation,
       lease_epoch: brokerState.lease_epoch,
@@ -146,7 +147,7 @@ async function resizePresentation(
 async function reportPresentationViewport(driver, presentationId, runtimeGeneration, geometry) {
   return await invokeTauri(driver, "report_terminal_presentation_viewport", {
     request: {
-      session_id: SESSION_ID,
+      session_id: wardianSessionId,
       presentation_id: presentationId,
       runtime_generation: runtimeGeneration,
       cols: geometry.cols,
@@ -161,7 +162,7 @@ async function drainBrokerEvents(driver, consumerId, runtimeGeneration, afterSeq
   for (let batchIndex = 0; batchIndex < 32; batchIndex += 1) {
     const batch = await invokeTauri(driver, "read_terminal_events", {
       request: {
-        session_id: SESSION_ID,
+        session_id: wardianSessionId,
         consumer_id: consumerId,
         runtime_generation: runtimeGeneration,
         after_sequence: cursor,
@@ -262,12 +263,17 @@ test(
         sessionName: SESSION_NAME,
         agentClass: "TestClass",
         folder: harness.repoRoot,
-        resumeSession: SESSION_ID,
+        resumeSession: PROVIDER_SESSION_ID,
         isOff: false,
         configOverride: { provider: "mock" },
       },
     });
-    assert.equal(agent.session_id, SESSION_ID);
+    wardianSessionId = agent.session_id;
+    assert.match(
+      wardianSessionId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    assert.notEqual(wardianSessionId, PROVIDER_SESSION_ID);
 
     // Agents intentionally claims an otherwise unowned runtime so its first
     // terminal paint is interactive without a click. Close that presentation
@@ -276,11 +282,11 @@ test(
 
     await openWorkbenchSurface(driver, {
       surface_type: "agent-session",
-      resource_key: SESSION_ID,
+      resource_key: wardianSessionId,
     });
     await openWorkbenchSurface(driver, {
       surface_type: "agent-session",
-      resource_key: SESSION_ID,
+      resource_key: wardianSessionId,
       to_side: true,
     });
 
@@ -289,11 +295,11 @@ test(
       const tabs = snapshot.groups
         .flatMap((group) => group.tabs)
         .filter(
-          (tab) => tab.surface_type === "agent-session" && tab.resource_key === SESSION_ID,
+          (tab) => tab.surface_type === "agent-session" && tab.resource_key === wardianSessionId,
         );
       const panels = snapshot.panels.filter(
         (panel) => panel.surface_type === "agent-session"
-          && panel.resource_key === SESSION_ID
+          && panel.resource_key === wardianSessionId
           && panel.visible,
       );
       return {
@@ -305,11 +311,11 @@ test(
       };
     });
     const [ownerSurface, mirrorSurface] = mountedPresentations.tabs;
-    const ownerPresentationId = `${ownerSurface.surface_id}:agent:${SESSION_ID}`;
-    const mirrorPresentationId = `${mirrorSurface.surface_id}:agent:${SESSION_ID}`;
+    const ownerPresentationId = `${ownerSurface.surface_id}:agent:${wardianSessionId}`;
+    const mirrorPresentationId = `${mirrorSurface.surface_id}:agent:${wardianSessionId}`;
 
     const terminalSnapshot = await invokeTauri(driver, "request_terminal_snapshot", {
-      request: { session_id: SESSION_ID },
+      request: { session_id: wardianSessionId },
     });
     const runtimeGeneration = terminalSnapshot.runtime_generation;
     const registered = await waitFor("both broker registrations", 30000, async () => {
@@ -335,12 +341,12 @@ test(
     assert.equal(registered.mirror.broker_state.owner_presentation_id, null);
     assert.equal(registered.mirror.broker_state.pending_activation, null);
 
-    await focusSurfaceTab(driver, "agent-session", SESSION_ID, { index: 0 });
-    await focusSurfaceTab(driver, "agent-session", SESSION_ID, { index: -1 });
+    await focusSurfaceTab(driver, "agent-session", wardianSessionId, { index: 0 });
+    await focusSurfaceTab(driver, "agent-session", wardianSessionId, { index: -1 });
     const mirrorPanel = await workbenchSurfacePanel(
       driver,
       "agent-session",
-      SESSION_ID,
+      wardianSessionId,
       { index: -1 },
     );
     await driver.executeScript((panel) => {
@@ -355,14 +361,14 @@ test(
     assert.equal(passiveFocusState.broker_state.owner_presentation_id, null);
     assert.equal(passiveFocusState.broker_state.pending_activation, null);
 
-    const consumerId = `desktop:${SESSION_ID}`;
+    const consumerId = `desktop:${wardianSessionId}`;
     const eventStartSnapshot = await invokeTauri(driver, "request_terminal_snapshot", {
-      request: { session_id: SESSION_ID },
+      request: { session_id: wardianSessionId },
     });
     await waitFor("shared desktop broker feed", 30000, async () => {
       const batch = await invokeTauri(driver, "read_terminal_events", {
         request: {
-          session_id: SESSION_ID,
+          session_id: wardianSessionId,
           consumer_id: consumerId,
           runtime_generation: runtimeGeneration,
           after_sequence: eventStartSnapshot.sequence_barrier,
@@ -411,7 +417,7 @@ test(
     };
     const mirrorViewport = await invokeTauri(driver, "report_terminal_presentation_viewport", {
       request: {
-        session_id: SESSION_ID,
+        session_id: wardianSessionId,
         presentation_id: mirrorPresentationId,
         runtime_generation: runtimeGeneration,
         cols: 220,
@@ -421,7 +427,7 @@ test(
     assert.deepEqual(mirrorViewport.desired_geometry, { cols: 220, rows: 70 });
     const mirrorInput = await invokeTauri(driver, "send_terminal_presentation_input", {
       request: {
-        session_id: SESSION_ID,
+        session_id: wardianSessionId,
         presentation_id: mirrorPresentationId,
         runtime_generation: runtimeGeneration,
         lease_epoch: brokerState.lease_epoch,
@@ -452,7 +458,7 @@ test(
     const ownerInputMarker = `OWNER_INPUT_${RUN_ID}`;
     const ownerInput = await invokeTauri(driver, "send_terminal_presentation_input", {
       request: {
-        session_id: SESSION_ID,
+        session_id: wardianSessionId,
         presentation_id: ownerPresentationId,
         runtime_generation: runtimeGeneration,
         lease_epoch: brokerState.lease_epoch,
@@ -522,7 +528,7 @@ test(
     const timeoutExpectedGeometry = timeoutBegin.snapshot.geometry;
     const pendingOwnerInput = await invokeTauri(driver, "send_terminal_presentation_input", {
       request: {
-        session_id: SESSION_ID,
+        session_id: wardianSessionId,
         presentation_id: ownerPresentationId,
         runtime_generation: runtimeGeneration,
         lease_epoch: timeoutBegin.decision.lease_epoch,
@@ -565,7 +571,7 @@ test(
     await closeWorkbenchSurface(
       driver,
       "agent-session",
-      SESSION_ID,
+      wardianSessionId,
       { index: -1 },
     );
     const disconnectFallback = await waitFor("disconnect rollback", 30000, async () => {

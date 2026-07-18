@@ -45,7 +45,7 @@ fn matching_claude_init_confirms_identity_then_captures_timestamp() {
 
 #[test]
 fn conflicting_caller_owned_init_leaves_identity_and_timestamp_unchanged() {
-    for provider in ["claude", "gemini"] {
+    for provider in ["claude", "gemini", "mock"] {
         let config = config(provider, "wardian-id", Some("expected-id"), None);
         let timestamp = Arc::new(Mutex::new(None));
         assert!(handle_provider_init_event(

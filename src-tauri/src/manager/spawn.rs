@@ -17,7 +17,9 @@ use super::codex::{
     codex_provider_session_is_excluded, codex_session_file_path,
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
-use super::session_identity::{apply_provider_identity, ProviderIdentityOutcome};
+use super::session_identity::{
+    apply_provider_identity, expected_caller_owned_identity, ProviderIdentityOutcome,
+};
 use super::{
     apply_agent_event, apply_agent_event_with_policy, apply_agent_status_event,
     apply_agent_status_event_with_policy, apply_terminal_identity_env, debug_preview_bytes,
@@ -449,6 +451,11 @@ pub async fn spawn_agent(
             cmd.env(key, value);
         }
     } else if config.provider == "mock" {
+        let provider_session_id = expected_caller_owned_identity(&config).ok_or_else(|| {
+            "mock provider launch has no caller-owned session identity".to_string()
+        })?;
+        cmd.env("WARDIAN_MOCK_SESSION_ID", provider_session_id);
+
         let mut has_config_scenario = false;
         let mut has_config_delay = false;
         if let ProviderConfig::Mock(mock) = &config.provider_config {

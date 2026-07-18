@@ -13,20 +13,23 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 
-function writeSingleTurnMockScript(harness, { sessionId, markerPath }) {
+function writeSingleTurnMockScript(harness, { markerPath }) {
   const mockScript = path.join(harness.isolatedHome, "single-turn-live-mock.cjs");
   fs.writeFileSync(
     mockScript,
     `
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const sessionId = process.env.WARDIAN_MOCK_SESSION_ID || "mock-session";
+const providerSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
+const wardianSessionId = process.env.WARDIAN_SESSION_ID;
+if (!providerSessionId) throw new Error("WARDIAN_MOCK_SESSION_ID is required");
+if (!wardianSessionId) throw new Error("WARDIAN_SESSION_ID is required");
 const markerPath = process.env.WARDIAN_MOCK_MARKER;
 const cli = process.env.WARDIAN_CLI || "wardian-cli";
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-emit({ type: "init", session_id: sessionId, timestamp: new Date().toISOString() });
+emit({ type: "init", session_id: providerSessionId, timestamp: new Date().toISOString() });
 
 let buffer = "";
 let completed = false;
@@ -44,7 +47,7 @@ process.stdin.on("data", async (chunk) => {
       ? spawnSync(cli, ["reply", requestId, "--status", "done", "--stdin"], {
           input: "workflow output complete",
           encoding: "utf8",
-          env: { ...process.env, WARDIAN_SESSION_ID: sessionId },
+          env: { ...process.env, WARDIAN_SESSION_ID: wardianSessionId },
         })
       : { status: 1, stdout: "", stderr: "request id not found" };
     if (markerPath) {
@@ -226,7 +229,7 @@ test("workflow detects live agent turn completion instead of timing out", { time
 
   const runId = `${process.pid}-${Date.now()}`;
   const workflowId = `wf-agent-completion-${runId}`;
-  const sessionId = `workflow-completion-agent-${runId}`;
+  const providerSessionId = `workflow-completion-agent-${runId}`;
   const sessionName = `Workflow-Completion-Agent-${runId}`;
   const markerPath = path.join(harness.isolatedHome, "agent-turn-completed-marker.json");
 
@@ -257,10 +260,9 @@ test("workflow detects live agent turn completion instead of timing out", { time
   });
 
   process.env.WARDIAN_MOCK_SCRIPT = writeSingleTurnMockScript(harness, {
-    sessionId,
     markerPath,
   });
-  process.env.WARDIAN_MOCK_SESSION_ID = sessionId;
+  process.env.WARDIAN_MOCK_SESSION_ID = providerSessionId;
   process.env.WARDIAN_MOCK_MARKER = markerPath;
 
   const workflowPath = seedWorkflow(harness, { workflowId });
@@ -273,11 +275,13 @@ test("workflow detects live agent turn completion instead of timing out", { time
   }
 
   await waitForAppShell(session.driver, 20000);
-  await spawnMockAgent(session.driver, {
-    sessionId,
+  const agent = await spawnMockAgent(session.driver, {
+    sessionId: providerSessionId,
     sessionName,
     folder: path.join(harness.repoRoot, "e2e-native"),
   });
+  const sessionId = agent.session_id;
+  assert.notEqual(sessionId, providerSessionId);
   await setAgentStatus(session.driver, sessionId, "idle");
 
   await new Promise((resolve) => setTimeout(resolve, 750));

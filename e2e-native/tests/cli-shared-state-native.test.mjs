@@ -15,9 +15,9 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const LIVE_SESSION_ID = `e2e-cli-live-${RUN_ID}`;
+const LIVE_PROVIDER_SESSION_ID = `e2e-cli-live-${RUN_ID}`;
 const LIVE_SESSION_NAME = `E2E-CLI-LIVE-${RUN_ID}`;
-const OFF_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
+const OFF_PROVIDER_SESSION_ID = `e2e-cli-off-${RUN_ID}`;
 const OFF_SESSION_NAME = `E2E-CLI-OFF-${RUN_ID}`;
 const CONTROL_SESSION_NAME = `E2E-CLI-CONTROL-${RUN_ID}`;
 const CONTROL_CLONE_NAME = `E2E-CLI-CONTROL-CLONE-${RUN_ID}`;
@@ -382,12 +382,13 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
 
   await waitForAppShell(session.driver, 20000);
   const agent = await createMockAgent(session.driver, workspacePath, {
-    sessionId: LIVE_SESSION_ID,
+    sessionId: LIVE_PROVIDER_SESSION_ID,
     sessionName: LIVE_SESSION_NAME,
     isOff: false,
   });
 
-  assert.equal(agent.session_id, LIVE_SESSION_ID);
+  const liveSessionId = agent.session_id;
+  assert.notEqual(liveSessionId, LIVE_PROVIDER_SESSION_ID);
   assert.equal(agent.session_name, LIVE_SESSION_NAME);
 
   const fieldResult = runCli(cliPath, harness, [
@@ -397,7 +398,7 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
     "uuid",
   ]);
   assert.equal(fieldResult.status, 0, fieldResult.stderr);
-  assert.equal(fieldResult.stdout, `${LIVE_SESSION_ID}\n`);
+  assert.equal(fieldResult.stdout, `${liveSessionId}\n`);
 
   await waitForCliField(cliPath, harness, LIVE_SESSION_NAME, "status", "idle");
 
@@ -409,7 +410,7 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   ]);
   assert.equal(showResult.status, 0, showResult.stderr);
   assert.deepEqual(JSON.parse(showResult.stdout).agent, {
-    uuid: LIVE_SESSION_ID,
+    uuid: liveSessionId,
     status: "idle",
     status_source: "live",
   });
@@ -425,10 +426,10 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
   assert.equal(listResult.status, 0, listResult.stderr);
 
   const parsed = JSON.parse(listResult.stdout);
-  const cliAgent = parsed.agents.find((entry) => entry.uuid === LIVE_SESSION_ID);
+  const cliAgent = parsed.agents.find((entry) => entry.uuid === liveSessionId);
   assert.deepEqual(cliAgent, {
     name: LIVE_SESSION_NAME,
-    uuid: LIVE_SESSION_ID,
+    uuid: liveSessionId,
     status: "idle",
     status_source: "live",
   });
@@ -466,12 +467,12 @@ test("native app-created off agent is readable through the CLI", { timeout: 1800
 
   await waitForAppShell(session.driver, 20000);
   const agent = await createMockAgent(session.driver, workspacePath, {
-    sessionId: OFF_SESSION_ID,
+    sessionId: OFF_PROVIDER_SESSION_ID,
     sessionName: OFF_SESSION_NAME,
     isOff: true,
   });
 
-  assert.equal(agent.session_id, OFF_SESSION_ID);
+  assert.notEqual(agent.session_id, OFF_PROVIDER_SESSION_ID);
   assert.equal(agent.session_name, OFF_SESSION_NAME);
 
   const statusResult = runCli(cliPath, harness, [

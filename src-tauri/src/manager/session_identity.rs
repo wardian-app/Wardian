@@ -70,7 +70,7 @@ fn validate_config_for_launch_with_environment(
     Ok(())
 }
 
-fn expected_caller_owned_identity(config: &AgentConfig) -> Option<&str> {
+pub(crate) fn expected_caller_owned_identity(config: &AgentConfig) -> Option<&str> {
     config
         .fresh_provider_session_id
         .as_deref()
@@ -106,7 +106,7 @@ fn apply_provider_identity_with_environment(
     }
 
     match provider {
-        "claude" | "gemini" => {
+        "claude" | "gemini" | "mock" => {
             let expected = expected_caller_owned_identity(config).ok_or_else(|| {
                 format!("{provider} session identity has no caller-owned expectation")
             })?;
@@ -130,7 +130,6 @@ fn apply_provider_identity_with_environment(
             capture_or_confirm_provider_identity(provider, config, candidate)
         }
         "antigravity" => capture_or_confirm_provider_identity(provider, config, candidate),
-        "mock" => Ok(ProviderIdentityOutcome::Confirmed),
         _ => Err(format!(
             "{provider} does not define an initialization identity contract"
         )),
@@ -361,6 +360,32 @@ mod tests {
         )
         .is_err());
         assert_eq!(malformed.resume_session, None);
+    }
+
+    #[test]
+    fn mock_confirms_its_caller_owned_provider_session() {
+        let mut fresh = test_config("mock", None, Some("mock-session-001"));
+        assert_eq!(
+            apply_provider_identity_with_environment(
+                "mock",
+                &mut fresh,
+                "mock-session-001",
+                Vec::new(),
+            ),
+            Ok(ProviderIdentityOutcome::Confirmed),
+        );
+        assert_eq!(fresh.resume_session, None);
+
+        let mut resumed = test_config("mock", Some("mock-session-001"), None);
+        assert_eq!(
+            apply_provider_identity_with_environment(
+                "mock",
+                &mut resumed,
+                "mock-session-001",
+                Vec::new(),
+            ),
+            Ok(ProviderIdentityOutcome::Confirmed),
+        );
     }
 
     #[test]

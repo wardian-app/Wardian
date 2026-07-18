@@ -15,11 +15,11 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const ALPHA_SESSION_ID = `e2e-topology-alpha-${RUN_ID}`;
+const ALPHA_PROVIDER_SESSION_ID = `e2e-topology-alpha-${RUN_ID}`;
 const ALPHA_SESSION_NAME = `E2E-TOPOLOGY-ALPHA-${RUN_ID}`;
-const BETA_SESSION_ID = `e2e-topology-beta-${RUN_ID}`;
+const BETA_PROVIDER_SESSION_ID = `e2e-topology-beta-${RUN_ID}`;
 const BETA_SESSION_NAME = `E2E-TOPOLOGY-BETA-${RUN_ID}`;
-const GAMMA_SESSION_ID = `e2e-topology-gamma-${RUN_ID}`;
+const GAMMA_PROVIDER_SESSION_ID = `e2e-topology-gamma-${RUN_ID}`;
 const GAMMA_SESSION_NAME = `E2E-TOPOLOGY-GAMMA-${RUN_ID}`;
 
 function commandName(name) {
@@ -198,37 +198,40 @@ test("native CLI neighbors scoping reads app-written topology", { timeout: 18000
 
   // Spawn three agents: alpha, beta, gamma
   const alphaAgent = await createMockAgent(session.driver, workspacePath, {
-    sessionId: ALPHA_SESSION_ID,
+    sessionId: ALPHA_PROVIDER_SESSION_ID,
     sessionName: ALPHA_SESSION_NAME,
     isOff: false,
   });
-  assert.equal(alphaAgent.session_id, ALPHA_SESSION_ID);
+  const alphaSessionId = alphaAgent.session_id;
+  assert.notEqual(alphaSessionId, ALPHA_PROVIDER_SESSION_ID);
 
   const betaAgent = await createMockAgent(session.driver, workspacePath, {
-    sessionId: BETA_SESSION_ID,
+    sessionId: BETA_PROVIDER_SESSION_ID,
     sessionName: BETA_SESSION_NAME,
     isOff: false,
   });
-  assert.equal(betaAgent.session_id, BETA_SESSION_ID);
+  const betaSessionId = betaAgent.session_id;
+  assert.notEqual(betaSessionId, BETA_PROVIDER_SESSION_ID);
 
   const gammaAgent = await createMockAgent(session.driver, workspacePath, {
-    sessionId: GAMMA_SESSION_ID,
+    sessionId: GAMMA_PROVIDER_SESSION_ID,
     sessionName: GAMMA_SESSION_NAME,
     isOff: false,
   });
-  assert.equal(gammaAgent.session_id, GAMMA_SESSION_ID);
+  const gammaSessionId = gammaAgent.session_id;
+  assert.notEqual(gammaSessionId, GAMMA_PROVIDER_SESSION_ID);
 
   await watchStep(harness, `Created three agents: alpha, beta, gamma`);
 
   // Add a topology edge between alpha and beta
-  await addTopologyEdge(session.driver, ALPHA_SESSION_ID, BETA_SESSION_ID);
+  await addTopologyEdge(session.driver, alphaSessionId, betaSessionId);
   await watchStep(harness, "Added topology edge between alpha and beta");
 
   // Run CLI as alpha (using WARDIAN_SESSION_ID) with default scope.
   // Should see alpha + beta (neighbors), but not gamma. Uses --verbose to
   // prove the spec's "verbose output adds the visibility reason" contract;
   // the post-removal listing covers the explicit --fields path instead.
-  const listAsAlpha = runCliOkAsAgent(cliPath, harness, ALPHA_SESSION_ID, [
+  const listAsAlpha = runCliOkAsAgent(cliPath, harness, alphaSessionId, [
     "agent",
     "list",
     "--verbose",
@@ -237,22 +240,22 @@ test("native CLI neighbors scoping reads app-written topology", { timeout: 18000
   const agentsAsAlpha = parsedAsAlpha.agents;
 
   // Verify alpha is in the list
-  const alphaInList = agentsAsAlpha.find((a) => a.uuid === ALPHA_SESSION_ID);
+  const alphaInList = agentsAsAlpha.find((a) => a.uuid === alphaSessionId);
   assert.ok(alphaInList, "Alpha should be visible to itself");
 
   // Verify beta is in the list with visibility reason
-  const betaInList = agentsAsAlpha.find((a) => a.uuid === BETA_SESSION_ID);
+  const betaInList = agentsAsAlpha.find((a) => a.uuid === betaSessionId);
   assert.ok(betaInList, "Beta should be visible to alpha via topology edge");
   assert.equal(betaInList.visibility, "manual", "Beta should have 'manual' visibility reason");
 
   // Verify gamma is NOT in the list
-  const gammaInList = agentsAsAlpha.find((a) => a.uuid === GAMMA_SESSION_ID);
+  const gammaInList = agentsAsAlpha.find((a) => a.uuid === gammaSessionId);
   assert.equal(gammaInList, undefined, "Gamma should NOT be visible to alpha");
 
   await watchStep(harness, "Verified alpha sees beta (via manual edge) but not gamma");
 
   // Run CLI with --scope all to verify all three appear
-  const listAllScopes = runCliOkAsAgent(cliPath, harness, ALPHA_SESSION_ID, [
+  const listAllScopes = runCliOkAsAgent(cliPath, harness, alphaSessionId, [
     "agent",
     "list",
     "--scope",
@@ -264,27 +267,27 @@ test("native CLI neighbors scoping reads app-written topology", { timeout: 18000
   const agentsAllScopes = parsedAllScopes.agents;
 
   assert.ok(
-    agentsAllScopes.find((a) => a.uuid === ALPHA_SESSION_ID),
+    agentsAllScopes.find((a) => a.uuid === alphaSessionId),
     "Alpha should be in --scope all",
   );
   assert.ok(
-    agentsAllScopes.find((a) => a.uuid === BETA_SESSION_ID),
+    agentsAllScopes.find((a) => a.uuid === betaSessionId),
     "Beta should be in --scope all",
   );
   assert.ok(
-    agentsAllScopes.find((a) => a.uuid === GAMMA_SESSION_ID),
+    agentsAllScopes.find((a) => a.uuid === gammaSessionId),
     "Gamma should be in --scope all",
   );
 
   await watchStep(harness, "Verified --scope all shows all three agents");
 
   // Remove the topology edge
-  await removeTopologyEdge(session.driver, ALPHA_SESSION_ID, BETA_SESSION_ID);
+  await removeTopologyEdge(session.driver, alphaSessionId, betaSessionId);
   await watchStep(harness, "Removed topology edge between alpha and beta");
 
   // Now alpha has no edges and (assuming) no teams, so workspace-fallback applies
   // Since all three agents share the same workspace (e2e-native), alpha should see all three
-  const listAfterRemove = runCliOkAsAgent(cliPath, harness, ALPHA_SESSION_ID, [
+  const listAfterRemove = runCliOkAsAgent(cliPath, harness, alphaSessionId, [
     "agent",
     "list",
     "--fields",
@@ -294,11 +297,11 @@ test("native CLI neighbors scoping reads app-written topology", { timeout: 18000
   const agentsAfterRemove = parsedAfterRemove.agents;
 
   // Alpha should see itself
-  const alphaAfterRemove = agentsAfterRemove.find((a) => a.uuid === ALPHA_SESSION_ID);
+  const alphaAfterRemove = agentsAfterRemove.find((a) => a.uuid === alphaSessionId);
   assert.ok(alphaAfterRemove, "Alpha should see itself");
 
   // Beta and gamma should be visible via workspace-fallback
-  const betaAfterRemove = agentsAfterRemove.find((a) => a.uuid === BETA_SESSION_ID);
+  const betaAfterRemove = agentsAfterRemove.find((a) => a.uuid === betaSessionId);
   assert.ok(betaAfterRemove, "Beta should be visible via workspace-fallback");
   assert.equal(
     betaAfterRemove.visibility,
@@ -306,7 +309,7 @@ test("native CLI neighbors scoping reads app-written topology", { timeout: 18000
     "Beta should have workspace-fallback reason",
   );
 
-  const gammaAfterRemove = agentsAfterRemove.find((a) => a.uuid === GAMMA_SESSION_ID);
+  const gammaAfterRemove = agentsAfterRemove.find((a) => a.uuid === gammaSessionId);
   assert.ok(gammaAfterRemove, "Gamma should be visible via workspace-fallback");
   assert.equal(
     gammaAfterRemove.visibility,
