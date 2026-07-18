@@ -20,7 +20,7 @@
 - Saving is explicit and guarded by the exact authorized target, base revision token, and base content hash.
 - Durable recovery is backend-owned and does not authorize a path by itself.
 - Rendered/editor is a presentation toggle. Changes are inline annotations and an optional comparison lens.
-- Diff layout uses deterministic thresholds: side-by-side at 720 px or wider, unified from 560–719 px, summary below 560 px.
+- Diff layout follows the approved responsive contract: auto side-by-side at 720 px or wider and unified text/stacked binary below it; a forced side-by-side view is honored down to the 560 px hard minimum.
 - The Files overflow control matches the Workbench titlebar ellipsis: Lucide `Ellipsis`, 17 px glyph, 1.75 px stroke, 26×26 px hit area.
 - Do not modify the existing user-owned `package-lock.json` diff.
 - Artifact persistence, the `wardian artifact` CLI, prompt checkpoint indexing, Send/Approve actions, and live HTML/SVG isolation are downstream work and are not silently folded into this plan.
@@ -328,7 +328,7 @@ Prove:
 - inserts, modifications, and deletions map to stable line decorations against the saved-file baseline;
 - editing updates annotations without replacing the editor model;
 - comparison open/close is independent of rendered/editor presentation;
-- auto layout resolves side-by-side at ≥720 px, unified at 560–719 px, and compact summary below 560 px;
+- auto layout resolves side-by-side at ≥720 px and unified text/stacked binary below 720 px; forced side-by-side degrades only below its 560 px hard minimum;
 - explicit layout preferences degrade safely when the pane cannot fit them;
 - stale-file resolution can accept current disk, keep working buffer, or apply a clean merge without writing until Save.
 
