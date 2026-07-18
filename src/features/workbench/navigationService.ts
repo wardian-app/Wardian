@@ -451,11 +451,22 @@ export function createWorkbenchNavigationService(
         const snapshotState = store.getState();
         const snapshot = snapshotState.document;
         const source = snapshot.surfaces[surfaceId];
+        let canonicalRequest = request;
+        if (source) {
+          // Canonical convergence changes identity only. Preserve the exact validated
+          // persisted payload so CAS retries cannot replay render-captured state.
+          if (source.surface_type !== request.surface_type) return "cancel";
+          const resolvedSource = registry.resolve_surface(source);
+          if (resolvedSource.missing_surface_type || !resolvedSource.restore_result.ok) {
+            return "cancel";
+          }
+          canonicalRequest = { ...request, state: source.state };
+        }
         const candidates = orderedSurfaces(snapshotState).filter(
           (candidate) => candidate.surface_id !== surfaceId,
         );
         const existingId = registry.resolve_existing(
-          { ...request, duplicate: false },
+          { ...canonicalRequest, duplicate: false },
           candidates,
         );
 
@@ -473,10 +484,11 @@ export function createWorkbenchNavigationService(
         }
 
         const sourceProvenance = duplicateProvenance(source);
-        const createdReplacement = createSurface(request, surfaceId);
-        const replacement = sourceProvenance === undefined
-          ? createdReplacement
-          : { ...createdReplacement, presentation_provenance: sourceProvenance };
+        const canonicalResourceKey = registry.resource_key(canonicalRequest);
+        const { resource_key: _sourceResourceKey, ...sourceWithoutResourceKey } = source;
+        const replacement: WorkbenchSurfaceV1 = canonicalResourceKey === undefined
+          ? sourceWithoutResourceKey
+          : { ...sourceWithoutResourceKey, resource_key: canonicalResourceKey };
         if (replacement.resource_key === source.resource_key) {
           const cleanupCommands = settledProvenanceCleanupCommands(snapshot, [], surfaceId);
           if (cleanupCommands.length === 0) return "allow";
@@ -505,6 +517,10 @@ export function createWorkbenchNavigationService(
           if (!existing) continue;
           if (transientStatus(source) === false && transientStatus(existing) === true) {
             guardedSurfaceIds = [surfaceId, existingId];
+            const existingReplacement = {
+              ...withoutPresentationProvenance(replacement),
+              surface_id: existingId,
+            };
             commands = [
               {
                 type: "discard_surface",
@@ -514,9 +530,9 @@ export function createWorkbenchNavigationService(
               {
                 type: "replace_surface",
                 surface: existingProvenance === undefined
-                  ? createSurface(request, existingId)
+                  ? existingReplacement
                   : {
-                      ...createSurface(request, existingId),
+                      ...existingReplacement,
                       presentation_provenance: existingProvenance,
                     },
               },

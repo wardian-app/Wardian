@@ -900,6 +900,65 @@ describe("workbench navigation service", () => {
     expect(store.getState().document.groups.right.active_surface_id).toBe("canonical");
   });
 
+  it("preserves a transient pin while canonical resource replacement is in flight", async () => {
+    let notifyGuardStarted: (() => void) | undefined;
+    const guardStarted = new Promise<void>((resolve) => { notifyGuardStarted = resolve; });
+    let releasePrompt: ((choice: "discard") => void) | undefined;
+    const pendingPrompt = new Promise<"discard">((resolve) => { releasePrompt = resolve; });
+    const dirtyPrompt = vi.fn()
+      .mockImplementationOnce(() => {
+        notifyGuardStarted?.();
+        return pendingPrompt;
+      })
+      .mockReturnValue("discard");
+    const registry = createCoreWorkbenchSurfaceRegistry({
+      dirty_surface_prompt: dirtyPrompt,
+    });
+    const provisional = makeSurface("provisional", {
+      surface_type: "files",
+      resource_key: "file:C:/link/report.md",
+      state: filesState(true),
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([provisional]),
+    });
+    useFilesPresentationStore.getState().setPresentation(provisional.surface_id, {
+      resource_key: provisional.resource_key!,
+      descriptor: null,
+      dirty: true,
+      attention: false,
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    try {
+      const canonicalization = navigation.canonicalize_resource(provisional.surface_id, {
+        surface_type: "files",
+        resource_key: "file:C:/real/report.md",
+        state: filesState(true),
+      });
+      await guardStarted;
+
+      navigation.pin_transient(provisional.surface_id);
+      const pinned = structuredClone(
+        store.getState().document.surfaces[provisional.surface_id],
+      );
+      expect(pinned).toMatchObject({
+        state_schema_version: 2,
+        state: { transient_preview: false },
+      });
+      releasePrompt?.("discard");
+
+      await expect(canonicalization).resolves.toBe("allow");
+      expect(store.getState().document.surfaces[provisional.surface_id]).toEqual({
+        ...pinned,
+        resource_key: "file:C:/real/report.md",
+      });
+      expect(dirtyPrompt).toHaveBeenCalledTimes(2);
+    } finally {
+      useFilesPresentationStore.getState().reset();
+    }
+  });
+
   it("re-resolves concurrent restored aliases after a stale canonicalization CAS", async () => {
     const registry = createCoreWorkbenchSurfaceRegistry();
     const firstAlias = makeSurface("alias-first", {

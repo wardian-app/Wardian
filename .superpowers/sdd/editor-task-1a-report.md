@@ -145,3 +145,98 @@ Outcome: passed with exit code 0.
 No remaining Task 1A correctness concerns. Historical baseline providers are still a
 downstream capability; until one reports a conclusive result, their migration remains
 intentionally provisional.
+
+## Independent re-review fix
+
+The independent re-review found one remaining canonical-resource race: a canonical
+replacement rebuilt from render-captured request state could replay stale pre-pin or
+pre-normalization Files state after an asynchronous close guard.
+
+### Resolution
+
+`canonicalize_resource` is now identity-only for a live source surface. On every CAS
+attempt it:
+
+1. reads the current transaction snapshot;
+2. verifies that the source type matches and validates the complete persisted source
+   surface through the registry;
+3. derives the canonical resource key using that current persisted state;
+4. replaces only the resource identity while preserving the validated source's exact
+   schema version, state, and presentation provenance; and
+5. relies on the existing stale-transaction retry to repeat the derivation from a
+   newer pinned/normalized snapshot.
+
+The existing-canonical/transient collision branch now also builds its surviving
+replacement from the current source snapshot rather than the callback request.
+
+### Race regression
+
+The new navigation regression uses the core Files registry and a real asynchronous
+dirty-close prompt. It starts with different provisional and canonical keys, holds
+canonicalization in flight, pins the transient before releasing the guard, proves the
+first CAS becomes stale and retries, then verifies the final canonical surface exactly
+retains the pinned V2 state.
+
+RED command:
+
+```text
+npm run test -- src/features/workbench/navigationService.test.ts -t "preserves a transient pin while canonical resource replacement is in flight"
+```
+
+RED outcome:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 48 skipped (49)
+Expected transient_preview: false; received true after canonical replacement
+Exit code   1
+```
+
+The identical command passed after the fix: 1 passed, 48 skipped, exit code 0.
+
+### Final verification
+
+Requested App/navigation/Files focused command:
+
+```text
+npm run test -- src/views/App.test.tsx src/features/workbench/navigationService.test.ts src/features/files/FilesSurface.test.tsx src/features/files/filesSurfaceState.test.ts
+```
+
+Outcome:
+
+```text
+Test Files  4 passed (4)
+Tests       155 passed (155)
+Exit code   0
+```
+
+Additional gates:
+
+- `npm run test -- src/features/workbench/navigationService.test.ts`: passed, 49/49 tests.
+- `npm run test`: passed, 181 files; 2,162 tests passed and 1 skipped.
+- `npm run lint`: passed; `tsc --noEmit` exited 0.
+- `npm run build`: passed; `tsc && vite build` transformed 3,795 modules and exited 0.
+- `git diff --check -- . ':(exclude)package-lock.json'`: passed.
+
+The full test run printed the existing jsdom `HTMLCanvasElement.getContext()` notices,
+and the build printed the existing large-chunk advisories; both remained non-fatal.
+
+### Re-review self-review
+
+- Confirmed `request.state` is no longer authoritative when the canonicalized source
+  still exists.
+- Confirmed source state is preserved only after full registry validation, including
+  resource identity validation.
+- Confirmed the exact persisted schema/state is retained rather than opportunistically
+  upgrading provisional historical V1 state during identity convergence.
+- Confirmed a stale guard causes a retry that re-reads the newest pinned/normalized
+  source before rebuilding commands.
+- Confirmed collision convergence carries current source state into the surviving
+  existing transient while retaining the existing surface's applicable provenance.
+- Confirmed missing, invalid, or cross-type live sources fail closed instead of using
+  captured request state.
+- Confirmed the fix is in the navigation transaction boundary, not an App-only Files
+  key special case.
+- Confirmed the user-owned `package-lock.json` diff remains untouched and unstaged.
+
+No remaining concerns from the independent re-review finding.
