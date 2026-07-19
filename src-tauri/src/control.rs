@@ -1041,7 +1041,7 @@ async fn build_agent_doctor_response(
                     .iter()
                     .find(|plugin| plugin.selector == allowed.selector)
             });
-            if status.is_none() {
+            if status.is_none_or(|status| !status.installed) {
                 reasons.push("not_installed".to_string());
             }
             if status.and_then(|status| status.error.as_ref()).is_some() {

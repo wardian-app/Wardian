@@ -522,7 +522,11 @@ fn ensure_codex_home_projection(
 
     let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
     let plugin_policy = crate::utils::resolve_codex_plugin_policy(class_name, &runtime_policy);
-    reconcile_codex_plugin_policy(&projected_home, &plugin_policy)?;
+    reconcile_codex_plugin_policy(
+        &projected_home,
+        &plugin_policy,
+        &codex_config_fingerprint(&real_codex_home.join("config.toml")),
+    )?;
 
     if crate::utils::load_codex_runtime_policy()
         .map(|policy| policy.trust_workspaces)
@@ -645,6 +649,7 @@ pub(crate) struct CodexPluginStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct CodexPolicyStatus {
     pub fingerprint: String,
+    pub base_config_fingerprint: String,
     pub allowed_plugins: Vec<crate::utils::AllowedCodexPlugin>,
     pub plugins: Vec<CodexPluginStatus>,
 }
@@ -670,6 +675,7 @@ pub(crate) fn read_codex_policy_status(
 fn reconcile_codex_plugin_policy(
     codex_home: &std::path::Path,
     policy: &crate::utils::CodexPluginPolicy,
+    base_config_fingerprint: &str,
 ) -> Result<(), String> {
     let mut plugins = Vec::with_capacity(policy.allowed_plugins.len());
     for allowed in &policy.allowed_plugins {
@@ -702,12 +708,20 @@ fn reconcile_codex_plugin_policy(
 
     let status = CodexPolicyStatus {
         fingerprint: policy.fingerprint(),
+        base_config_fingerprint: base_config_fingerprint.to_string(),
         allowed_plugins: policy.allowed_plugins.clone(),
         plugins,
     };
     let encoded = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("Could not serialize Codex policy status: {error}"))?;
     std::fs::write(codex_policy_status_path(codex_home), encoded).map_err(|error| error.to_string())
+}
+
+pub(crate) fn codex_config_fingerprint(config_path: &std::path::Path) -> String {
+    use sha2::Digest;
+
+    let content = std::fs::read(config_path).unwrap_or_default();
+    format!("{:x}", sha2::Sha256::digest(content))
 }
 
 fn codex_plugin_is_installed(codex_home: &std::path::Path, selector: &str) -> Result<bool, String> {
