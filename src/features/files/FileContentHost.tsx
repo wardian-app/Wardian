@@ -7,7 +7,11 @@ import {
   type ReactNode,
 } from "react";
 
-import type { FileResourceSnapshotV1, FilesComparisonBaseline } from "../../types";
+import type {
+  FileResourceSnapshotV1,
+  FilesComparisonBaseline,
+  OpenFileResourceRequestV1,
+} from "../../types";
 import type { FileEditorController } from "./fileEditorController";
 import type { FileResourceClient } from "./fileResourceClient";
 import type {
@@ -77,6 +81,7 @@ type PresentationLayerProps = {
   buffer_snapshot: FileEditorBufferSnapshot | null;
   editor_language: string | null;
   comparison_baseline: FilesComparisonBaseline | null;
+  resource_request: OpenFileResourceRequestV1;
   on_reset: () => void;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
@@ -96,6 +101,7 @@ function PresentationLayer({
   buffer_snapshot,
   editor_language,
   comparison_baseline,
+  resource_request,
   on_reset,
   on_open_file,
   on_open_with,
@@ -127,6 +133,7 @@ function PresentationLayer({
             buffer_snapshot={buffer_snapshot}
             editor_language={editor_language}
             comparison_baseline={comparison_baseline}
+            resource_request={resource_request}
             on_open_file={on_open_file}
             on_open_with={on_open_with}
             on_reveal={on_reveal}
@@ -147,6 +154,7 @@ export type FileContentHostProps = {
   editor_controller: FileEditorController | null;
   buffer_snapshot: FileEditorBufferSnapshot | null;
   comparison_baseline?: FilesComparisonBaseline | null;
+  resource_request?: OpenFileResourceRequestV1;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -163,6 +171,7 @@ export function FileContentHost({
   editor_controller,
   buffer_snapshot,
   comparison_baseline = null,
+  resource_request,
   on_open_file,
   on_open_with,
   on_reveal,
@@ -178,6 +187,11 @@ export function FileContentHost({
       ? "rendered"
       : renderer.default_presentation ?? (renderer.editor ? "editor" : "rendered");
   const editorLanguage = renderer.editor_language?.(snapshot.descriptor) ?? null;
+  const rendererResourceRequest = resource_request ?? {
+    path: snapshot.descriptor.canonical_path,
+    agent_id: null,
+    user_file_capability_id: null,
+  };
   const reset = (target: FileContentPresentation) => {
     setResetTokens((current) => ({ ...current, [target]: current[target] + 1 }));
   };
@@ -197,6 +211,7 @@ export function FileContentHost({
           buffer_snapshot={buffer_snapshot}
           editor_language={editorLanguage}
           comparison_baseline={comparison_baseline}
+          resource_request={rendererResourceRequest}
           on_reset={() => reset("rendered")}
           on_open_file={on_open_file}
           on_open_with={on_open_with}
@@ -217,6 +232,7 @@ export function FileContentHost({
           buffer_snapshot={buffer_snapshot}
           editor_language={editorLanguage}
           comparison_baseline={comparison_baseline}
+          resource_request={rendererResourceRequest}
           on_reset={() => reset("editor")}
           on_open_file={on_open_file}
           on_open_with={on_open_with}

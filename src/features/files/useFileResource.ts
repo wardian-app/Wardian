@@ -56,6 +56,7 @@ class FileResourceController {
   #listenerSetup: Promise<void> | null = null;
   #unlisten: (() => void) | null = null;
   #preSnapshotRevisions = new Map<string, FileResourceEventV1>();
+  #loadInProgress = false;
 
   constructor(
     client: FileResourceClient,
@@ -128,7 +129,12 @@ class FileResourceController {
 
   async #load() {
     const generation = ++this.#loadGeneration;
-    this.#publish({ ...this.#state, status: "loading", error: null });
+    this.#loadInProgress = true;
+    if (this.#state.snapshot === null) {
+      this.#publish({ ...this.#state, status: "loading", error: null });
+    } else if (this.#state.error !== null) {
+      this.#publish({ ...this.#state, error: null });
+    }
     try {
       for (let reopenAttempt = 0; ; reopenAttempt += 1) {
         const snapshot = await this.#client.open(this.#request);
@@ -159,13 +165,33 @@ class FileResourceController {
         this.#preSnapshotRevisions.clear();
         this.#fail(error);
       }
+    } finally {
+      if (generation === this.#loadGeneration) {
+        this.#loadInProgress = false;
+        const snapshot = this.#state.snapshot;
+        const pending = snapshot
+          ? this.#preSnapshotRevisions.get(snapshot.resource_id)
+          : undefined;
+        if (
+          this.#state.status === "ready"
+          && snapshot
+          && pending
+          && pending.revision > snapshot.revision
+        ) {
+          queueMicrotask(() => {
+            if (!this.#disposed && !this.#loadInProgress && this.#state.status === "ready") {
+              void this.#load();
+            }
+          });
+        }
+      }
     }
   }
 
   #applyRevision(event: FileResourceEventV1) {
     if (this.#disposed || this.#state.status === "error") return;
     const snapshot = this.#state.snapshot;
-    if (this.#state.status === "loading") {
+    if (this.#loadInProgress) {
       if (
         !snapshot
         || (event.resource_id === snapshot.resource_id && event.revision > snapshot.revision)

@@ -32,6 +32,7 @@ const MANY_CHANGES_EDITED = Array.from(
 ).join("\n");
 
 const ONE_PIXEL_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const MARKDOWN_FIGURE = "/icon.png";
 
 function blankPdfDataUrl(width: number, height: number) {
   const objects = [
@@ -267,6 +268,86 @@ test("renders Windows Explorer and Files paths with stable compact separators", 
       "e2e/screenshots/files-surface/2026-07-18/windows-path-chrome.png",
     ),
     fullPage: true,
+  });
+});
+
+test("renders a complete Markdown document without flashing during revision refresh", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const markdown = [
+    "<div align=\"center\">",
+    "",
+    "# Habitat report",
+    "",
+    '<img src="figure.png" width="128" alt="Wardian figure" />',
+    "",
+    "</div>",
+    "",
+    "> A visible blockquote.",
+    "",
+    "- [x] Render headings",
+    "- [ ] Keep iterating",
+    "",
+    "| Surface | State |",
+    "| --- | --- |",
+    "| Files | Active |",
+    "",
+    "<details open><summary>Details</summary>Sanitized HTML content.</details>",
+  ].join("\n");
+  const ipc = await bootFilesWorkbench(page, {
+    files: [
+      { path: ALPHA_PATH, content: markdown },
+      {
+        path: IMAGE_PATH,
+        content: "image fixture",
+        mime_type: "image/png",
+        renderer_kind: "image",
+        stream_url: MARKDOWN_FIGURE,
+      },
+    ],
+  });
+  await page.getByRole("treeitem", { name: "alpha.md" }).dblclick();
+
+  const surface = page.getByTestId("files-surface");
+  const title = surface.getByRole("heading", { level: 1, name: "Habitat report" });
+  await expect(title).toBeVisible();
+  const figure = surface.getByRole("img", { name: "Wardian figure" });
+  await expect(figure).toBeVisible();
+  await expect(figure).toHaveAttribute("src", MARKDOWN_FIGURE);
+  await expect.poll(async () => figure.evaluate((image) => (image as HTMLImageElement).naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(surface.getByRole("table")).toContainText("Files");
+  await expect(surface.getByText("Sanitized HTML content.")).toBeVisible();
+  const titleStyle = await title.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { fontSize: Number.parseFloat(style.fontSize), fontWeight: Number(style.fontWeight) };
+  });
+  expect(titleStyle.fontSize).toBeGreaterThan(24);
+  expect(titleStyle.fontWeight).toBeGreaterThanOrEqual(600);
+
+  await surface.evaluate((element) => {
+    (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading = false;
+    const observer = new MutationObserver(() => {
+      if (element.textContent?.includes("Loading Markdown")) {
+        (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading = true;
+      }
+    });
+    observer.observe(element, { childList: true, subtree: true, characterData: true });
+    (element as HTMLElement & { __markdownObserver?: MutationObserver }).__markdownObserver = observer;
+  });
+  await ipc.updateFile(ALPHA_PATH, markdown.replace("Habitat report", "Habitat report updated"));
+  await expect(surface.getByRole("heading", { name: "Habitat report updated" })).toBeVisible();
+  const sawLoading = await surface.evaluate((element) => {
+    (element as HTMLElement & { __markdownObserver?: MutationObserver }).__markdownObserver?.disconnect();
+    return (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading;
+  });
+  expect(sawLoading).toBe(false);
+
+  await surface.screenshot({
+    path: path.resolve(
+      "e2e/screenshots/files-surface/2026-07-18/markdown-document-renderer.png",
+    ),
   });
 });
 
@@ -595,6 +676,11 @@ test("keeps inline saved-file changes and responsive comparison independent of p
   await expect(diffControl).toBeVisible();
   await expect(diffControl).toHaveAttribute("aria-pressed", "false");
   await expect(surface.getByRole("group", { name: "Saved file changes" })).toBeVisible();
+
+  await surface.getByRole("button", { name: "View rendered" }).click();
+  await expect(surface.getByRole("heading", { name: "Alpha revised" })).toBeVisible();
+  await expect(surface.getByRole("button", { name: "Edit source" }))
+    .toHaveAttribute("aria-pressed", "false");
 
   await diffControl.click();
   const lens = surface.getByRole("region", { name: "File comparison" });

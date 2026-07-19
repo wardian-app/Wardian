@@ -1105,7 +1105,7 @@ describe("FilesSurface", () => {
     }));
   });
 
-  it("opens and closes saved-file comparison without changing presentation or unmounting content", async () => {
+  it("explicitly enters editor presentation for comparison without unmounting content", async () => {
     const markdownDescriptor = descriptor({
       canonical_path: "C:/work/docs/notes.md",
       display_name: "notes.md",
@@ -1169,12 +1169,14 @@ describe("FilesSurface", () => {
     fireEvent.click(await screen.findByRole("button", { name: /open comparison/i }));
     expect(onStateChange).toHaveBeenCalledWith({
       ...state,
+      presentation: "editor",
       comparison_open: true,
       comparison_baseline: { kind: "saved_file" },
     });
 
     const openState: FilesSurfaceStateV2 = {
       ...state,
+      presentation: "editor",
       comparison_open: true,
       comparison_baseline: { kind: "saved_file" },
     };

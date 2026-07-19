@@ -406,6 +406,42 @@ describe("useFileResource", () => {
     });
   });
 
+  it("keeps the last ready snapshot visible while a revision refresh is pending", async () => {
+    let openCount = 0;
+    let resolveRefresh: ((value: FileResourceSnapshotV1) => void) | undefined;
+    const refresh = new Promise<FileResourceSnapshotV1>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command !== "open_file_resource") return Promise.resolve(undefined);
+      openCount += 1;
+      return openCount === 1 ? Promise.resolve(snapshot) : refresh;
+    });
+    const client = new FileResourceClient();
+    const resource = renderHook(() => useFileResource(request, client));
+    await waitFor(() => expect(resource.result.current.status).toBe("ready"));
+
+    act(() => emitRevision({
+      schema: 1,
+      resource_id: snapshot.resource_id,
+      revision: 2,
+      descriptor: { ...descriptor, content_hash: "event-hash-2" },
+    }));
+    await waitFor(() => expect(openCount).toBe(2));
+    expect(resource.result.current.status).toBe("ready");
+    expect(resource.result.current.snapshot).toEqual(snapshot);
+
+    const refreshed = {
+      ...snapshot,
+      subscription_id: "subscription-2",
+      revision: 2,
+      descriptor: { ...descriptor, content_hash: "authoritative-hash-2" },
+    };
+    await act(async () => resolveRefresh?.(refreshed));
+    await waitFor(() => expect(resource.result.current.snapshot).toEqual(refreshed));
+    resource.unmount();
+  });
+
   it("keeps distinct POSIX paths with literal backslashes in separate controllers", async () => {
     mockInvoke.mockImplementation((command, args) => {
       if (command !== "open_file_resource") return Promise.resolve(undefined);

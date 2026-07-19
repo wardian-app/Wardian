@@ -3,22 +3,52 @@ import {
   isValidElement,
   useCallback,
   useEffect,
+  useId,
+  useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Markdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { markdownUrlTransform, safeMarkdownUrl } from "../../grid/markdown/markdownSafety";
 import { filePathIdentity, isWindowsAbsoluteFilePath } from "../fileResourceKey";
 import type { FileRendererProps } from "../rendererRegistry";
+import { useFileResource } from "../useFileResource";
 
 const MARKDOWN_MAX_SIZE_BYTES = 16 * 1024 * 1024;
 const MARKDOWN_MAX_LINE_COUNT = 200_000;
+const MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [...new Set([...(defaultSchema.tagNames ?? []), "details", "summary"])],
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] ?? []), "className"],
+    div: [...(defaultSchema.attributes?.div ?? []), "align"],
+    details: [...(defaultSchema.attributes?.details ?? []), "open"],
+    p: [...(defaultSchema.attributes?.p ?? []), "align"],
+    img: [
+      ...(defaultSchema.attributes?.img ?? []),
+      "align",
+      "width",
+      "height",
+      "loading",
+      "decoding",
+    ],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...new Set([...(defaultSchema.protocols?.href ?? []), "file"])],
+    src: [...new Set([...(defaultSchema.protocols?.src ?? []), "file"])],
+  },
+};
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -180,7 +210,100 @@ function headingSlug(node: ReactNode) {
 }
 
 function filesMarkdownUrlTransform(rawUrl: string) {
-  return rawUrl.startsWith("#") ? rawUrl : markdownUrlTransform(rawUrl);
+  return rawUrl.startsWith("#") || isLocalTarget(rawUrl)
+    ? rawUrl
+    : markdownUrlTransform(rawUrl);
+}
+
+type MarkdownImageProps = ComponentProps<"img"> & {
+  source_path: string;
+  resource_request: FileRendererProps["resource_request"];
+  client: FileRendererProps["client"];
+  lifecycle: FileRendererProps["lifecycle"];
+};
+
+function LocalMarkdownImage({
+  src,
+  alt,
+  source_path,
+  resource_request,
+  client,
+  lifecycle,
+  ...imageProps
+}: MarkdownImageProps) {
+  const targetPath = useMemo(
+    () => resolveLocalMarkdownTarget(source_path, src ?? ""),
+    [source_path, src],
+  );
+  const request = useMemo(() => ({
+    path: targetPath,
+    agent_id: resource_request?.agent_id ?? null,
+    // Exact picker grants authorize only their selected file, never a sibling image.
+    user_file_capability_id: null,
+  }), [resource_request?.agent_id, targetPath]);
+  const resource = useFileResource(request, client);
+  const leaseId = `markdown-image:${useId()}`;
+  const [ticketUrl, setTicketUrl] = useState<string | null>(null);
+  const [ticketError, setTicketError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!lifecycle.visible || resource.status !== "ready" || !resource.snapshot) return;
+    let active = true;
+    const owner = resource.snapshot;
+    void client.issueTicket(owner, leaseId).then((ticket) => {
+      if (!active) return;
+      setTicketUrl(ticket.url);
+      setTicketError(null);
+    }).catch((cause) => {
+      if (active) setTicketError(errorMessage(cause));
+    });
+    return () => {
+      active = false;
+      void client.closeRendererLease(owner, leaseId).catch(() => undefined);
+    };
+  }, [client, leaseId, lifecycle.visible, resource.snapshot, resource.status]);
+
+  if (resource.status === "error" || ticketError) {
+    return (
+      <span className="files-markdown-image-fallback" role="img" aria-label={alt || "Image unavailable"}>
+        {alt || "Image unavailable"}
+      </span>
+    );
+  }
+  if (!ticketUrl) {
+    return (
+      <span className="files-markdown-image-loading" role="status">
+        {alt ? `Loading ${alt}…` : "Loading image…"}
+      </span>
+    );
+  }
+  return <img {...imageProps} src={ticketUrl} alt={alt ?? ""} loading="lazy" decoding="async" />;
+}
+
+function MarkdownImage(props: MarkdownImageProps) {
+  const { src, alt, source_path, resource_request, client, lifecycle, ...imageProps } = props;
+  const safe = safeMarkdownUrl(src);
+  if (!safe) {
+    return (
+      <span className="files-markdown-image-fallback" role="img" aria-label={alt || "Image unavailable"}>
+        {alt || "Image unavailable"}
+      </span>
+    );
+  }
+  if (src && isLocalTarget(src)) {
+    return (
+      <LocalMarkdownImage
+        {...imageProps}
+        src={src}
+        alt={alt}
+        source_path={source_path}
+        resource_request={resource_request}
+        client={client}
+        lifecycle={lifecycle}
+      />
+    );
+  }
+  return <img {...imageProps} src={safe} alt={alt ?? ""} loading="lazy" decoding="async" />;
 }
 
 export default function MarkdownRenderer({
@@ -188,6 +311,7 @@ export default function MarkdownRenderer({
   client,
   lifecycle,
   buffer_snapshot,
+  resource_request,
   on_open_file,
 }: FileRendererProps) {
   const articleRef = useRef<HTMLElement>(null);
@@ -206,7 +330,6 @@ export default function MarkdownRenderer({
       return;
     }
     let cancelled = false;
-    setText(null);
     setError(null);
     void client.readText(snapshot).then((resource) => {
       if (!cancelled && resource.revision === snapshot.revision) setText(resource.text);
@@ -273,13 +396,20 @@ export default function MarkdownRenderer({
               {children}
             </SafeLink>
           ),
-          img: ({ alt, src }) => {
-            const safe = safeMarkdownUrl(src);
-            return <span className="files-markdown-image-link">{alt || "Image"}{safe ? `: ${safe}` : ""}</span>;
-          },
+          img: ({ alt, src, node: _node, ...imageProps }) => (
+            <MarkdownImage
+              {...imageProps}
+              src={src}
+              alt={alt}
+              source_path={snapshot.descriptor.canonical_path}
+              resource_request={resource_request}
+              client={client}
+              lifecycle={lifecycle}
+            />
+          ),
         }}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}
         remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
-        skipHtml
         urlTransform={filesMarkdownUrlTransform}
       >
         {text}

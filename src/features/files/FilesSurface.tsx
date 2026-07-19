@@ -90,6 +90,7 @@ type ActiveFilesSurfaceProps = Required<Pick<
   "surface_id" | "resource_key" | "state" | "lifecycle" | "client" | "registry"
 >> & {
   resource: UseFileResourceResult;
+  resource_request: OpenFileResourceRequestV1;
   on_open_file: (path: string) => Promise<void> | void;
   on_open_with: (path: string) => Promise<void> | void;
   on_reveal: (path: string) => Promise<void> | void;
@@ -259,6 +260,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
     }
     updateComparisonState({
       comparison_open: true,
+      presentation: renderer?.editor ? "editor" : stateV2.presentation,
       comparison_baseline: props.artifact_resource
         ? {
             kind: "presented_version",
@@ -266,7 +268,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
           }
         : { kind: "saved_file" },
     });
-  }, [activeComparisonOpen, props.artifact_resource, stateV2, updateComparisonState]);
+  }, [activeComparisonOpen, props.artifact_resource, renderer?.editor, stateV2, updateComparisonState]);
 
   useEffect(() => {
     if (!("presentation" in props.state) || !resource.snapshot) return;
@@ -496,6 +498,7 @@ function ActiveFilesSurface(props: ActiveFilesSurfaceProps) {
               editor_controller={props.editor_controller}
               buffer_snapshot={bufferSnapshot}
               comparison_baseline={inlineComparisonBaseline}
+              resource_request={props.resource_request}
               on_open_file={props.on_open_file}
               on_open_with={props.on_open_with}
               on_reveal={props.on_reveal}
@@ -588,11 +591,12 @@ function FileBackedFilesSurface({
   const [canonicalRetryToken, setCanonicalRetryToken] = useState(0);
   const stateCallback = useRef({ state: props.state, on_state_change });
   stateCallback.current = { state: props.state, on_state_change };
-  const resource = useFileResource(resource_request ?? {
+  const resolvedResourceRequest = resource_request ?? {
     path: pathFromResourceKey(props.resource_key),
     agent_id: null,
     user_file_capability_id: null,
-  }, client);
+  };
+  const resource = useFileResource(resolvedResourceRequest, client);
   const recoveryOnlyContext = useRef({
     resource_key: props.resource_key,
     status: resource.status,
@@ -1030,6 +1034,7 @@ function FileBackedFilesSurface({
       client={client}
       registry={registry}
       resource={resource}
+      resource_request={resolvedResourceRequest}
       on_open_file={on_open_file}
       on_open_with={guardedOpenWith}
       on_reveal={guardedReveal}

@@ -61,7 +61,7 @@ describe("MarkdownRenderer", () => {
     expect(client.readText).not.toHaveBeenCalled();
   });
 
-  it("disables raw HTML, rejects unsafe schemes, and routes local links through Wardian", async () => {
+  it("renders safe raw HTML while rejecting active content and unsafe schemes", async () => {
     const onOpenFile = vi.fn();
     const client = {
       readText: vi.fn().mockResolvedValue({
@@ -70,6 +70,7 @@ describe("MarkdownRenderer", () => {
         revision: 1,
         text: [
           "<script>window.__unsafe = true</script>",
+          "<details open><summary>More context</summary><p>Safe details</p></details>",
           "[Sibling](../other.md)",
           "[Web](https://example.test/docs)",
           "[Unsafe](javascript:alert(1))",
@@ -80,6 +81,8 @@ describe("MarkdownRenderer", () => {
 
     const local = await screen.findByRole("link", { name: "Sibling" });
     expect(document.querySelector("script")).toBeNull();
+    expect(screen.getByText("More context").closest("details")).toHaveAttribute("open");
+    expect(screen.getByText("Safe details")).toBeInTheDocument();
     expect(screen.getByText("Unsafe").closest("a")).toBeNull();
     fireEvent.click(local);
     expect(onOpenFile).toHaveBeenCalledWith("C:/work/other.md");
@@ -90,6 +93,100 @@ describe("MarkdownRenderer", () => {
     expect(mockOpenUrl).not.toHaveBeenCalled();
     fireEvent.click(web);
     await waitFor(() => expect(mockOpenUrl).toHaveBeenCalledWith("https://example.test/docs"));
+  });
+
+  it("renders core Markdown and GFM document structure", async () => {
+    const client = { readText: vi.fn().mockResolvedValue({
+      schema: 1,
+      resource_id: snapshot().resource_id,
+      revision: 1,
+      text: [
+        "# Document title",
+        "",
+        "> A quoted note",
+        "",
+        "- [x] Complete",
+        "- [ ] Pending",
+        "",
+        "| Name | State |",
+        "| --- | --- |",
+        "| Wardian | Active |",
+        "",
+        "```ts",
+        "const ready = true;",
+        "```",
+      ].join("\n"),
+    }) } as unknown as FileResourceClient;
+    render(<MarkdownRenderer {...props(client)} />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Document title" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("A quoted note").closest("blockquote")).not.toBeNull();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(2);
+    expect(screen.getByRole("table")).toHaveTextContent("Wardian");
+    expect(screen.getByText("const ready = true;").closest("pre")).not.toBeNull();
+  });
+
+  it("loads relative images through an authorized file resource ticket", async () => {
+    const imageSnapshot = {
+      ...snapshot(2),
+      resource_id: "file:C:/work/docs/public/icon.png",
+      subscription_id: "image-subscription",
+      descriptor: {
+        ...snapshot(2).descriptor,
+        canonical_path: "C:/work/docs/public/icon.png",
+        display_name: "icon.png",
+        extension: "png",
+        mime_type: "image/png",
+        encoding: null,
+        renderer_kind: "image" as const,
+        line_count: null,
+        capabilities: { preview: true, changes: true, draft: false, stream: false },
+      },
+    };
+    const client = {
+      readText: vi.fn().mockResolvedValue({
+        schema: 1,
+        resource_id: snapshot().resource_id,
+        revision: 1,
+        text: "![Wardian icon](public/icon.png)",
+      }),
+      listenForRevisions: vi.fn().mockResolvedValue(vi.fn()),
+      open: vi.fn().mockResolvedValue(imageSnapshot),
+      issueTicket: vi.fn().mockResolvedValue({
+        schema: 1,
+        ticket_id: "ticket-1",
+        url: "wardian-file://ticket-1",
+        resource_id: imageSnapshot.resource_id,
+        revision: imageSnapshot.revision,
+        renderer_lease_id: "lease-1",
+        expires_at_ms: Date.now() + 30_000,
+      }),
+      closeRendererLease: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as FileResourceClient;
+    const view = render(<MarkdownRenderer
+      {...props(client)}
+      resource_request={{
+        path: snapshot().descriptor.canonical_path,
+        agent_id: "agent-1",
+        user_file_capability_id: null,
+      }}
+    />);
+
+    const image = await screen.findByRole("img", { name: "Wardian icon" });
+    expect(image).toHaveAttribute("src", "wardian-file://ticket-1");
+    expect(client.open).toHaveBeenCalledWith({
+      path: "C:/work/docs/public/icon.png",
+      agent_id: "agent-1",
+      user_file_capability_id: null,
+    });
+    expect(client.issueTicket).toHaveBeenCalledWith(
+      imageSnapshot,
+      expect.stringMatching(/^markdown-image:/),
+    );
+    view.unmount();
+    await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalled());
   });
 
   it("ignores a stale revision read that resolves after a newer revision", async () => {
@@ -116,6 +213,35 @@ describe("MarkdownRenderer", () => {
     });
     await Promise.resolve();
     expect(screen.queryByText("Stale revision")).toBeNull();
+  });
+
+  it("retains the previous rendered document while a newer revision read is pending", async () => {
+    let resolveSecond: ((value: object) => void) | undefined;
+    const second = new Promise<object>((resolve) => { resolveSecond = resolve; });
+    const client = {
+      readText: vi.fn()
+        .mockResolvedValueOnce({
+          schema: 1,
+          resource_id: snapshot().resource_id,
+          revision: 1,
+          text: "# Stable title",
+        })
+        .mockReturnValueOnce(second),
+    } as unknown as FileResourceClient;
+    const view = render(<MarkdownRenderer {...props(client)} />);
+    expect(await screen.findByRole("heading", { name: "Stable title" })).toBeInTheDocument();
+
+    view.rerender(<MarkdownRenderer {...props(client, vi.fn(), 2)} />);
+    expect(screen.getByRole("heading", { name: "Stable title" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading Markdown…")).toBeNull();
+
+    resolveSecond?.({
+      schema: 1,
+      resource_id: snapshot(2).resource_id,
+      revision: 2,
+      text: "# Updated title",
+    });
+    expect(await screen.findByRole("heading", { name: "Updated title" })).toBeInTheDocument();
   });
 
   it("does not read unavailable Markdown", () => {

@@ -631,10 +631,119 @@
   line-height: 1.6;
 }
 
+.files-markdown-renderer > :first-child {
+  margin-top: 0;
+}
+
+.files-markdown-renderer > :last-child {
+  margin-bottom: 0;
+}
+
+.files-markdown-renderer h1,
+.files-markdown-renderer h2,
+.files-markdown-renderer h3,
+.files-markdown-renderer h4,
+.files-markdown-renderer h5,
+.files-markdown-renderer h6 {
+  margin: 1.4em 0 0.55em;
+  color: var(--color-wardian-text);
+  font-weight: 650;
+  line-height: 1.22;
+  scroll-margin-top: 12px;
+}
+
+.files-markdown-renderer h1 {
+  padding-bottom: 0.28em;
+  border-bottom: 1px solid var(--color-wardian-border);
+  font-size: clamp(1.8rem, 4cqw, 2.35rem);
+  letter-spacing: -0.025em;
+}
+
+.files-markdown-renderer h2 {
+  padding-bottom: 0.22em;
+  border-bottom: 1px solid var(--color-wardian-border);
+  font-size: clamp(1.42rem, 3cqw, 1.8rem);
+  letter-spacing: -0.015em;
+}
+
+.files-markdown-renderer h3 {
+  font-size: 1.28rem;
+}
+
+.files-markdown-renderer h4 {
+  font-size: 1.08rem;
+}
+
+.files-markdown-renderer h5 {
+  font-size: 0.95rem;
+}
+
+.files-markdown-renderer h6 {
+  color: var(--color-wardian-text-muted-neutral);
+  font-size: 0.88rem;
+  text-transform: none;
+}
+
+.files-markdown-renderer p,
+.files-markdown-renderer blockquote,
+.files-markdown-renderer ul,
+.files-markdown-renderer ol,
+.files-markdown-renderer pre,
+.files-markdown-renderer table,
+.files-markdown-renderer details {
+  margin: 0 0 1em;
+}
+
+.files-markdown-renderer ul,
+.files-markdown-renderer ol {
+  padding-inline-start: 1.65em;
+}
+
+.files-markdown-renderer li + li {
+  margin-top: 0.22em;
+}
+
+.files-markdown-renderer li > ul,
+.files-markdown-renderer li > ol {
+  margin-top: 0.22em;
+  margin-bottom: 0;
+}
+
+.files-markdown-renderer .task-list-item {
+  list-style: none;
+}
+
+.files-markdown-renderer input[type="checkbox"] {
+  margin: 0 0.45em 0 -1.35em;
+  accent-color: var(--color-wardian-accent);
+}
+
+.files-markdown-renderer blockquote {
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--color-wardian-border-heavy);
+  color: var(--color-wardian-text-muted-neutral);
+}
+
+.files-markdown-renderer blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.files-markdown-renderer hr {
+  height: 1px;
+  margin: 1.5em 0;
+  border: 0;
+  background: var(--color-wardian-border);
+}
+
 .files-markdown-renderer a {
   color: var(--color-wardian-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.files-markdown-renderer a:hover,
+.files-markdown-renderer a:focus-visible {
+  text-decoration-thickness: 2px;
 }
 
 .files-markdown-renderer pre,
@@ -647,9 +756,64 @@
   max-width: 100%;
   padding: 12px;
   overflow: auto;
+  border: 1px solid var(--color-wardian-border);
+  line-height: 1.5;
 }
 
-.files-markdown-image-link {
+.files-markdown-renderer :not(pre) > code {
+  padding: 0.12em 0.34em;
+  color: var(--color-wardian-text);
+  font-size: 0.92em;
+}
+
+.files-markdown-renderer table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-spacing: 0;
+  border-collapse: collapse;
+}
+
+.files-markdown-renderer th,
+.files-markdown-renderer td {
+  padding: 0.45em 0.7em;
+  border: 1px solid var(--color-wardian-border);
+  text-align: left;
+}
+
+.files-markdown-renderer th {
+  background: var(--color-wardian-card-bg-muted);
+  font-weight: 650;
+}
+
+.files-markdown-renderer tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--color-wardian-card-bg-muted), transparent 42%);
+}
+
+.files-markdown-renderer img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.75em auto 1em;
+  border-radius: 4px;
+}
+
+.files-markdown-renderer details {
+  padding: 0.65em 0.8em;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 5px;
+  background: var(--color-wardian-card-bg-muted);
+}
+
+.files-markdown-renderer summary {
+  cursor: pointer;
+  color: var(--color-wardian-text);
+  font-weight: 600;
+}
+
+.files-markdown-image-loading,
+.files-markdown-image-fallback {
   display: inline-block;
   max-width: 100%;
   padding: 4px 7px;
@@ -657,6 +821,10 @@
   border-radius: 4px;
   color: var(--color-wardian-text-muted-neutral);
   overflow-wrap: anywhere;
+}
+
+.files-markdown-image-fallback {
+  border-color: var(--color-wardian-warning);
 }
 
 .files-binary-renderer {
