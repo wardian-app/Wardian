@@ -96,6 +96,466 @@ Queue commands persist the frontend Queue projection and preferences for the act
 - `reveal_in_explorer`
 - `read_file_preview`
 
+## Files resources (`commands/files.rs`)
+
+These commands back Explorer-opened Files tabs. The frontend passes one
+snake-case `request` object. Paths below are placeholders; callers must supply
+an absolute local path.
+
+### `open_file_resource`
+
+Use one authorization mode: an `agent_id`, an exact live
+`user_file_capability_id`, or neither for backend-trusted Workbench restore.
+Supplying both is invalid. Trusted restore scans current agent primary and
+additional roots in deterministic agent order, then exact picker paths from the
+backend-owned durable grant registry. A durable match is reauthorized into a
+new live capability and retained handle; persisted frontend state is never
+treated as authority.
+
+The returned subscription retains the exact requested pathname and its own
+authorization claim even when another pathname resolves to the same canonical
+`resource_id`. Reads and tickets revalidate that subscription-local provenance.
+An alias subscription therefore fails after its symlink or junction is removed
+or retargeted, while a direct subscription to the same resource remains valid.
+All subscriptions still share one canonical watcher and revision stream.
+
+Request:
+
+```json
+{
+  "request": {
+    "path": "<absolute-workspace-path>/README.md",
+    "agent_id": "agent-session-id",
+    "user_file_capability_id": null
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "resource_id": "file:<canonical-path>",
+  "subscription_id": "subscription-uuid",
+  "revision": 1,
+  "descriptor": {
+    "schema": 1,
+    "canonical_path": "<absolute-workspace-path>/README.md",
+    "display_name": "README.md",
+    "extension": "md",
+    "mime_type": "text/markdown",
+    "encoding": "utf-8",
+    "renderer_kind": "markdown",
+    "size_bytes": 2048,
+    "line_count": 42,
+    "content_hash": "sha256:<content-hash>",
+    "modified_at_ms": 1784242800000,
+    "capabilities": {
+      "preview": true,
+      "changes": true,
+      "draft": true,
+      "stream": false
+    },
+    "unavailable_reason": null
+  }
+}
+```
+
+`content_hash` is a revision-identity field with an algorithm prefix. A
+`sha256:` value is the exact digest of content scanned completely within its
+renderer limits. A `bounded-sha256:` value is deliberately not a full-content
+hash: it fingerprints the retained file identity, stable size/write metadata,
+and a bounded leading detection probe. Wardian emits the bounded form for every
+metadata-only scan that crosses its detected renderer ceiling. That includes
+supported text/image/PDF resources disabled by byte or decoded image-pixel
+limits and oversized unsupported/binary fallbacks that cross the text scan
+ceiling. This lets watcher refreshes compare stable oversized revisions without
+reading the entire file or mislabeling a partial digest as a content SHA.
+
+Files above the 16 MiB Monaco limit, 64 MiB encoded/64-million-pixel image
+limits, or 256 MiB PDF limit still return a successful metadata snapshot. Their
+capabilities are all false and `unavailable_reason` is respectively
+`monaco_size_limit_exceeded`, `image_limit_exceeded`, or
+`pdf_size_limit_exceeded`. Text reads and stream-ticket issuance reject that
+revision with the same typed reason; the bounded revision token never grants
+content access.
+
+### `read_file_resource_text`
+
+Reads complete validated UTF-8 text only when the subscription and revision are
+still current.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "revision": 1
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "resource_id": "file:<canonical-path>",
+  "revision": 1,
+  "text": "# Project\n"
+}
+```
+
+### `save_file_resource_text`
+
+Saves complete UTF-8 text through the exact live subscription. The revision and
+hash are optimistic-concurrency inputs; the backend-private retained-handle
+revision token remains the write authority and is never serialized.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "expected_revision": 1,
+    "buffer_base_hash": "sha256:<content-hash>",
+    "text": "# Updated project\n",
+    "recovery_cleanup": {
+      "recovery_id": "recovery-uuid",
+      "expected_recovery_revision": 4
+    }
+  }
+}
+```
+
+The tagged response is `saved`, `unchanged`, or `stale_conflict`:
+
+```json
+{
+  "status": "saved",
+  "revision": 2,
+  "content_hash": "sha256:<updated-content-hash>"
+}
+```
+
+A stale conflict returns current metadata only after revalidating the
+subscription. It does not return current file bytes.
+
+`recovery_cleanup` is optional. The command derives recovery scope from the
+calling WebView rather than request JSON. After `saved` or `unchanged`, it
+best-effort removes only that exact recovery generation when its resource,
+WebView, and CAS revision still match. A cleanup race leaves recovery intact
+and does not change a committed save into an error.
+
+### `checkpoint_file_recovery`
+
+Creates or updates a durable dirty editor buffer. Create uses `null` for both
+recovery fields and reauthorizes the exact current file subscription and
+resource key. Update supplies the returned ID and exact current recovery
+revision; that already-scoped recovery CAS remains writable after root
+revocation or subscription closure, but grants no current-file access. Every
+request supplies the exact retained editor `base`; the backend bounds it and
+`buffer` as complete UTF-8 text models and requires the base's SHA-256 digest
+to equal `base_content_hash`. Creation does not require the disk head to equal
+the editor base, so an external change before the first debounced checkpoint
+cannot make the dirty buffer non-durable. An exact update CAS may replace the
+stored base/hash after a guarded Save or accepted rebase; base and buffer become
+visible together in one manifest-last recovery generation. Recovery has no
+`base_revision` field because process-local file revisions do not identify
+durable recovery content.
+
+```json
+{
+  "request": {
+    "recovery_id": null,
+    "expected_recovery_revision": null,
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "base_content_hash": "sha256:<base-content-hash>",
+    "base": "# Saved base\n",
+    "resource_key": "file:<canonical-path>",
+    "buffer": "# Unsaved edit\n"
+  }
+}
+```
+
+The backend derives WebView scope from the Tauri caller. After committing the
+recovery, it probes whether the submitted live subscription still authorizes
+the same resource. The returned metadata contains `recovery_id`,
+`recovery_revision`, base hash/opaque revision, timestamps, and a nullable
+`file_authorization_error`. That error is advisory: it makes the current editor
+owner read-only without rolling back the committed recovery. The private
+retained file revision never crosses IPC.
+
+### `list_file_recoveries`
+
+Discovers durable recovery metadata for one stable resource key under the
+calling WebView, newest first. The WebView label is injected by Tauri and is
+not accepted from request JSON.
+
+```json
+{
+  "request": {
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+The response is an array containing `recovery_id`, resource/display metadata,
+base hash/opaque revision, recovery CAS revision, and timestamps. It never
+contains base or buffer bodies and grants no current-file authority. Discovery
+checks manifest and bounded ordinary blob metadata only; `get_file_recovery`
+performs full UTF-8, size, line-count, and content-hash validation for the
+selected record.
+
+### `get_file_recovery`
+
+Returns only the stored base and editor buffer for the exact recovery ID,
+stable resource key, and calling WebView. It intentionally works after restart
+when current file authorization is unavailable.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+This command cannot read current disk bytes, save, or recreate an expired or
+revoked file capability.
+
+### `discard_file_recovery`
+
+Removes one exact scoped recovery generation after a recovery CAS check.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "expected_recovery_revision": 4,
+    "resource_key": "file:<canonical-path>"
+  }
+}
+```
+
+### `merge_file_recovery`
+
+Requires a newly verified live subscription for the same target, reads the
+current authorized UTF-8 disk head, and runs a three-way merge against the
+stored base and buffer.
+
+```json
+{
+  "request": {
+    "recovery_id": "recovery-uuid",
+    "expected_recovery_revision": 4,
+    "resource_key": "file:<canonical-path>",
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "new-live-subscription-uuid"
+  }
+}
+```
+
+The tagged response is `clean` or `conflicted`. Both contain
+`recovery_revision`, `current_revision`, `current_content_hash`,
+`disk_changed`, and `merged_text`. Conflict text includes explicit markers and
+both sides. The command never writes the file.
+The final clean or conflict-marker `merged_text` must also fit the complete
+Monaco model byte and line limits.
+
+### `pick_file_resource_save_target`
+
+Opens the native save dialog and returns a short-lived one-shot capability for
+the exact selected parent identity and basename. Canceling returns `null`.
+
+```json
+{
+  "request": {
+    "title": "Save As",
+    "default_name": "README-copy.md"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "save_target_grant_id": "save-target-uuid",
+  "selected_path": "<absolute-workspace-path>/README-copy.md"
+}
+```
+
+### `save_file_resource_as_text`
+
+Consumes an exact native save-target grant and atomically creates or replaces
+only that ordinary-file target. The command has no source-resource or artifact
+field, so opening the returned file and closing the source are a separate
+frontend transaction.
+
+```json
+{
+  "request": {
+    "save_target_grant_id": "save-target-uuid",
+    "text": "# Saved copy\n"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "capability_id": "user-file-capability-uuid",
+  "canonical_path": "<absolute-workspace-path>/README-copy.md",
+  "resource_id": "file:<canonical-path>",
+  "content_hash": "sha256:<saved-content-hash>"
+}
+```
+
+### `issue_file_resource_ticket`
+
+Mints a short-lived image/PDF stream ticket bound to the resource,
+subscription, current revision, calling WebView, and caller-owned renderer
+lease.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "revision": 1,
+    "renderer_lease_id": "files-pane-renderer-1"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "ticket_id": "ticket-uuid",
+  "url": "wardian-resource://localhost/ticket-uuid",
+  "resource_id": "file:<canonical-path>",
+  "revision": 1,
+  "renderer_lease_id": "files-pane-renderer-1",
+  "expires_at_ms": 1784242860000
+}
+```
+
+The URL accepts `GET` and `HEAD`, advertises `Accept-Ranges: bytes`, returns
+`206` plus `Content-Range` for a valid single range, and returns `416` plus
+`Content-Range: bytes */<size>` for an unsatisfiable range. Responses are
+`no-store` and `nosniff`; a `HEAD` response never carries a body.
+
+The returned URL is a backend protocol identifier, not a WebView-ready asset
+URL. Frontend consumers pass it through the shared Files resource URL adapter,
+which percent-decodes the ticket path and calls Tauri `convertFileSrc` once
+with the `wardian-resource` protocol. Image and PDF renderers consume only that
+converted client result; already usable HTTP(S), blob, data, and test URLs are
+left unchanged rather than converted twice.
+
+Coverage is intentionally layered: frontend tests assert the adapter call and
+the exact URL consumed by both binary renderers, while native Files E2E reloads
+a persisted Files image surface and waits for the real `ImageRenderer` to
+decode bytes through the converted custom-protocol URL. The same native test
+also probes `GET`, `HEAD`, and range responses directly.
+
+Ticket issuance copies and verifies the requested revision into an immutable,
+backend-owned snapshot before returning the URL. Later source edits, atomic
+file replacement, or deletion do not change bytes served by that ticket. A
+new revision requires a new ticket. Snapshot storage is bounded, and the
+ticket deadline actively removes an abandoned snapshot and its matching
+renderer lease. Expiry cleanup is issuance-aware, so an older timer cannot
+revoke a newer ticket that reused the same renderer lease ID.
+
+### `close_file_renderer_lease`
+
+Revokes only the matching WebView renderer lease and every ticket it owns. The
+file subscription remains open for the pane and other renderers.
+
+```json
+{
+  "request": {
+    "resource_id": "file:<canonical-path>",
+    "subscription_id": "subscription-uuid",
+    "renderer_lease_id": "files-pane-renderer-1"
+  }
+}
+```
+
+Response: `null`.
+
+### `close_file_resource`
+
+Releases one subscription. It is idempotent; the shared watcher is removed only
+after the final subscription closes. Closing does not remove or replace another
+subscription's authorization provenance.
+
+```json
+{
+  "request": {
+    "subscription_id": "subscription-uuid"
+  }
+}
+```
+
+Response: `null`.
+
+### `pick_file_resource`
+
+Opens the native picker and records a backend-owned grant for the exact selected
+canonical file. The grant does not authorize a sibling or parent directory.
+Picker grants are deduplicated by canonical target and bounded to 128 entries;
+dormant least-recently-used grants are evicted before a new grant is rejected.
+Deduplication does not widen an open subscription: each open retains the exact
+picker-selected pathname it used, including an alias spelling.
+
+```json
+{
+  "request": {
+    "title": "Open a file"
+  }
+}
+```
+
+```json
+{
+  "schema": 1,
+  "capability_id": "capability-uuid",
+  "canonical_path": "<absolute-workspace-path>/report.pdf"
+}
+```
+
+Cancel returns `null`. Resource-local failures use the same typed shape for all
+Files commands:
+
+```json
+{
+  "schema": 1,
+  "code": "stale_revision",
+  "message": "requested revision is no longer current"
+}
+```
+
+Stable codes include `invalid_request`, `unauthorized_path`,
+`unavailable_path`, `unstable_file`, `resource_not_found`, `stale_revision`,
+`unsupported_content`, `file_too_large`, `monaco_size_limit_exceeded`,
+`monaco_line_limit_exceeded`, `image_dimensions_unavailable`,
+`image_limit_exceeded`, `pdf_size_limit_exceeded`, `grant_limit_reached`,
+`grant_store_unavailable`, `ticket_capacity_exceeded`, `invalid_ticket`,
+`unauthorized_ticket`,
+`expired_ticket`, `invalid_range`, and `range_not_satisfiable`.
+`grant_limit_reached` means all 128 exact picker grants are currently active;
+closing an unused file makes a live grant evictable. The durable exact-path
+registry is also capped at 128 least-recently-used entries and contains no
+capability identifiers. `ticket_capacity_exceeded`
+means immutable renderer snapshots have reached their bounded storage budget;
+closing the owning renderer lease or waiting for active expiry releases it.
+
+Debug builds additionally register `debug_grant_file_resource_for_e2e` and
+`debug_file_resource_stats` for the native harness. The former delegates to the
+same exact grant function as the native picker; the latter exposes aggregate
+ownership counts only. Both are compiled out of release builds and are not
+frontend application APIs.
+
 ## Workflows (`commands/workflow.rs`)
 
 Current workflow commands:
@@ -240,6 +700,7 @@ Common app-level events:
 - `scheduled-runs-updated`
 - `git-changed`
 - `library-changed` with payload `{ "library_type": "skills" }`
+- `file-resource://revision` with the next stable Files descriptor
 
 For payload semantics, see [IPC and Event Governance](./ipc-events.md) and the workflow engine docs.
 

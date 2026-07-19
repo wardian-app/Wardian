@@ -46,6 +46,14 @@ export interface LibraryEditorCloseActions {
 export interface LibraryEditorResource {
   dirty: boolean;
   actions: LibraryEditorCloseActions | null;
+  /** Monotonic revision for the presentation-owned draft/action/identity tuple. */
+  generation: number;
+  identity: string | null;
+}
+
+export interface LibraryEditorResourceExpectation {
+  generation: number;
+  identity: string | null;
 }
 
 let librarySubscription: LibrarySubscription | null = null;
@@ -102,6 +110,7 @@ interface LibraryState {
   _editorDirty: boolean;
   /** Presentation-keyed bridges keep restored/explicit duplicate panes lossless. */
   _editorResources: Record<string, LibraryEditorResource>;
+  _editorGenerationClock: number;
   setLibraryDetailWidth: (width: number) => void;
   resetLibraryDetailWidth: () => void;
   setActiveSection: (s: LibrarySectionId) => void;
@@ -109,11 +118,21 @@ interface LibraryState {
   /** Cheap way for a future editor to flag dirty state without forcing a
    * redundant `read_library_item` round-trip via `select()`. */
   markEditorDirty: (dirty: boolean) => void;
-  markEditorSurfaceDirty: (surfaceId: string, dirty: boolean) => void;
+  markEditorSurfaceDirty: (
+    surfaceId: string,
+    dirty: boolean,
+    identity?: string | null,
+  ) => void;
   registerEditorCloseActions: (surfaceId: string, actions: LibraryEditorCloseActions) => () => void;
   isEditorSurfaceDirty: (surfaceId: string) => boolean;
-  saveEditorDraft: (surfaceId: string) => Promise<boolean>;
-  discardEditorDraft: (surfaceId: string) => Promise<boolean>;
+  saveEditorDraft: (
+    surfaceId: string,
+    expected?: LibraryEditorResourceExpectation,
+  ) => Promise<boolean>;
+  discardEditorDraft: (
+    surfaceId: string,
+    expected?: LibraryEditorResourceExpectation,
+  ) => Promise<boolean>;
   /** Reverts `selection` back to a previously-tracked entry WITHOUT
    * re-reading its content from disk (unlike `select()`), and marks the
    * editor dirty again. Used when the caller declines a discard-changes
@@ -164,6 +183,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   contentStale: false,
   _editorDirty: false,
   _editorResources: {},
+  _editorGenerationClock: 0,
 
   setLibraryDetailWidth: (libraryDetailWidth) => set({
     libraryDetailWidth: clampLibraryDetailWidth(libraryDetailWidth),
@@ -195,30 +215,44 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   markEditorDirty: (dirty) => set({ _editorDirty: dirty }),
 
-  markEditorSurfaceDirty: (surfaceId, dirty) => {
+  markEditorSurfaceDirty: (surfaceId, dirty, identity) => {
     set((state) => {
       const current = state._editorResources[surfaceId];
+      const generation = state._editorGenerationClock + 1;
       const resources = {
         ...state._editorResources,
-        [surfaceId]: { dirty, actions: current?.actions ?? null },
+        [surfaceId]: {
+          dirty,
+          actions: current?.actions ?? null,
+          generation,
+          identity: identity === undefined ? current?.identity ?? null : identity,
+        },
       };
       return {
         _editorResources: resources,
+        _editorGenerationClock: generation,
         _editorDirty: Object.values(resources).some((resource) => resource.dirty),
       };
     });
   },
 
   registerEditorCloseActions: (surfaceId, actions) => {
-    set((state) => ({
-      _editorResources: {
-        ...state._editorResources,
-        [surfaceId]: {
-          dirty: state._editorResources[surfaceId]?.dirty ?? false,
-          actions,
+    set((state) => {
+      const generation = state._editorGenerationClock + 1;
+      const current = state._editorResources[surfaceId];
+      return {
+        _editorResources: {
+          ...state._editorResources,
+          [surfaceId]: {
+            dirty: current?.dirty ?? false,
+            actions,
+            generation,
+            identity: current?.identity ?? null,
+          },
         },
-      },
-    }));
+        _editorGenerationClock: generation,
+      };
+    });
     return () => {
       set((state) => {
         if (state._editorResources[surfaceId]?.actions !== actions) return {};
@@ -226,6 +260,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         delete resources[surfaceId];
         return {
           _editorResources: resources,
+          _editorGenerationClock: state._editorGenerationClock + 1,
           _editorDirty: Object.values(resources).some((resource) => resource.dirty),
         };
       });
@@ -234,10 +269,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   isEditorSurfaceDirty: (surfaceId) => get()._editorResources[surfaceId]?.dirty ?? false,
 
-  saveEditorDraft: async (surfaceId) => {
+  saveEditorDraft: async (surfaceId, expected) => {
     const before = get();
     const resource = before._editorResources[surfaceId];
-    if (!resource?.dirty) return true;
+    if (!resource) return expected === undefined;
+    if (
+      expected
+      && (
+        resource.generation !== expected.generation
+        || resource.identity !== expected.identity
+      )
+    ) return false;
+    if (!resource.dirty) return true;
     const actions = resource.actions;
     if (!actions) return false;
     try {
@@ -245,15 +288,27 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } catch {
       return false;
     }
-    if (get()._editorResources[surfaceId]?.actions !== actions) return false;
-    get().markEditorSurfaceDirty(surfaceId, false);
+    const after = get()._editorResources[surfaceId];
+    if (
+      after?.actions !== actions
+      || after.identity !== resource.identity
+    ) return false;
+    get().markEditorSurfaceDirty(surfaceId, false, resource.identity);
     return true;
   },
 
-  discardEditorDraft: async (surfaceId) => {
+  discardEditorDraft: async (surfaceId, expected) => {
     const before = get();
     const resource = before._editorResources[surfaceId];
-    if (!resource?.dirty) return true;
+    if (!resource) return expected === undefined;
+    if (
+      expected
+      && (
+        resource.generation !== expected.generation
+        || resource.identity !== expected.identity
+      )
+    ) return false;
+    if (!resource.dirty) return true;
     const actions = resource.actions;
     if (!actions) return false;
     try {
@@ -261,8 +316,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } catch {
       return false;
     }
-    if (get()._editorResources[surfaceId]?.actions !== actions) return false;
-    get().markEditorSurfaceDirty(surfaceId, false);
+    const after = get()._editorResources[surfaceId];
+    if (
+      after?.actions !== actions
+      || after.identity !== resource.identity
+    ) return false;
+    get().markEditorSurfaceDirty(surfaceId, false, resource.identity);
     return true;
   },
 

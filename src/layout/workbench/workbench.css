@@ -86,7 +86,6 @@
   padding: 0 0.125rem;
 }
 
-.wardian-workbench-group-actions .wardian-workbench-header-action,
 .wardian-workbench-new-surface-action .wardian-workbench-header-action {
   display: grid;
   width: 1.625rem;
@@ -100,8 +99,6 @@
   padding: 0;
 }
 
-.wardian-workbench-group-actions .wardian-workbench-header-action:hover,
-.wardian-workbench-group-actions .wardian-workbench-header-action[aria-expanded="true"],
 .wardian-workbench-new-surface-action .wardian-workbench-header-action:hover {
   background: var(--color-wardian-card-bg-muted);
   color: var(--color-wardian-text);
@@ -180,6 +177,29 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.wardian-workbench-tab-badges {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.1875rem;
+}
+
+.wardian-workbench-tab-badge {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  background: var(--color-wardian-text-muted);
+}
+
+.wardian-workbench-tab-badge[data-surface-badge="dirty"] {
+  background: var(--color-wardian-accent);
+}
+
+.wardian-workbench-tab-badge[data-surface-badge="attention"],
+.wardian-workbench-tab-badge[data-surface-badge="recovery"] {
+  background: var(--color-wardian-warning);
 }
 
 .wardian-workbench-tab-icon {

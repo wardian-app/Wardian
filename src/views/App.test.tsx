@@ -505,6 +505,188 @@ beforeEach(() => {
 });
 
 describe("Workbench persistence boot integration", () => {
+  it("renders a restored Files resource through the workbench branch while its launcher stays reserved", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("files-surface", {
+              surface_type: "files",
+              resource_key: "file:C:/work/report.txt",
+              state: {
+                resource_kind: "file",
+                mode: "preview",
+                transient_preview: false,
+                review_drawer_open: false,
+                selected_version_id: null,
+                optional_checkpoint_id: null,
+              },
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "files-durable-zero",
+        });
+      }
+      if (command === "open_file_resource") {
+        return Promise.resolve({
+          resource_id: "file:C:/work/report.txt",
+          subscription_id: "subscription-files-app",
+          revision: 1,
+          descriptor: {
+            schema: 1,
+            canonical_path: "C:/work/report.txt",
+            display_name: "report.txt",
+            extension: "txt",
+            mime_type: "text/plain",
+            encoding: "utf-8",
+            renderer_kind: "text",
+            size_bytes: 12,
+            line_count: 1,
+            content_hash: "sha256:report",
+            modified_at_ms: 1,
+            capabilities: {
+              preview: true,
+              changes: false,
+              draft: false,
+              stream: false,
+            },
+            unavailable_reason: null,
+          },
+        });
+      }
+      if (command === "read_file_resource_text") {
+        return Promise.resolve({
+          schema: 1,
+          resource_id: "file:C:/work/report.txt",
+          revision: 1,
+          text: "restored file",
+        });
+      }
+      if (command === "list_file_recoveries") return Promise.resolve([]);
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    const filesSurface = await screen.findByTestId("files-surface");
+    expect(filesSurface.querySelector(".files-breadcrumb")).toHaveTextContent("report.txt");
+    expect(within(filesSurface).queryByRole("tablist", { name: "File mode" })).toBeNull();
+    expect(mockInvoke).toHaveBeenCalledWith("open_file_resource", {
+      request: {
+        path: "C:/work/report.txt",
+        agent_id: null,
+        user_file_capability_id: null,
+      },
+    });
+
+    expect(await openWorkbenchLauncher()).toBeInTheDocument();
+    expect(document.querySelector('[role="option"][data-surface-type="files"]'))
+      .toBeNull();
+  });
+
+  it("pins an existing transient Files preview when a Markdown link opens it", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    // Keep this fixture on the current schema so the assertion covers link-driven
+    // pinning, not the independent legacy presentation migration lifecycle.
+    const fileState = (transientPreview: boolean) => ({
+      resource_kind: "file" as const,
+      transient_preview: transientPreview,
+      presentation: "rendered" as const,
+      comparison_open: false,
+      comparison_layout_preference: "auto" as const,
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    });
+    const sourcePath = "C:/work/docs/readme.md";
+    const targetPath = "C:/work/linked.md";
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") {
+        return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([
+            makeSurface("linked-preview", {
+              surface_type: "files",
+              resource_key: `file:${targetPath}`,
+              state_schema_version: 2,
+              state: fileState(true),
+            }),
+            makeSurface("markdown-source", {
+              surface_type: "files",
+              resource_key: `file:${sourcePath}`,
+              state_schema_version: 2,
+              state: fileState(false),
+            }),
+          ]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "files-link-durable-zero",
+        });
+      }
+      if (command === "open_file_resource") {
+        const path = (args as { request?: { path?: string } } | undefined)?.request?.path ?? sourcePath;
+        const markdown = path === sourcePath;
+        return Promise.resolve({
+          resource_id: `file:${path}`,
+          subscription_id: `subscription:${path}`,
+          revision: 1,
+          descriptor: {
+            schema: 1,
+            canonical_path: path,
+            display_name: path.split("/").pop(),
+            extension: markdown ? "md" : "txt",
+            mime_type: markdown ? "text/markdown" : "text/plain",
+            encoding: "utf-8",
+            renderer_kind: markdown ? "markdown" : "text",
+            size_bytes: 32,
+            line_count: 1,
+            content_hash: `sha256:${path}`,
+            modified_at_ms: 1,
+            capabilities: { preview: true, changes: false, draft: false, stream: false },
+            unavailable_reason: null,
+          },
+        });
+      }
+      if (command === "read_file_resource_text") {
+        const resourceId = (
+          args as { request?: { resource_id?: string } } | undefined
+        )?.request?.resource_id ?? `file:${sourcePath}`;
+        return Promise.resolve({
+          schema: 1,
+          resource_id: resourceId,
+          revision: 1,
+          text: resourceId === `file:${sourcePath}`
+            ? "[Open linked preview](../linked.md)"
+            : "linked file",
+        });
+      }
+      if (command === "list_file_recoveries") return Promise.resolve([]);
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole(
+      "link",
+      { name: "Open linked preview" },
+      { timeout: 10_000 },
+    ));
+    await waitFor(() => {
+      const saves = mockInvoke.mock.calls.filter(([command]) => command === "save_workbench_state");
+      const latest = saves[saves.length - 1]?.[1] as {
+        document?: ReturnType<typeof makeSingleGroupDocument>;
+      } | undefined;
+      expect(latest?.document?.surfaces["linked-preview"]?.state)
+        .toMatchObject({ transient_preview: false });
+    }, { timeout: 5_000 });
+  }, 20_000);
+
   it("boots the canonical workbench and migrates legacy layout state", async () => {
     setupDefaultMocks([], defaultClasses);
     localStorage.setItem("wardian-layout", "legacy-layout-bytes");

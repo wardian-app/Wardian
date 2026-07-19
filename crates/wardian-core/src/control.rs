@@ -56,6 +56,27 @@ pub enum ControlRequest {
     ConversationShow {
         conversation_id: String,
     },
+    ArtifactPresent {
+        path: String,
+        title: Option<String>,
+        description: Option<String>,
+        artifact_id: Option<String>,
+        #[serde(default)]
+        force_new: bool,
+        #[serde(default)]
+        addressed_comment_ids: Vec<String>,
+        origin: MessageOrigin,
+    },
+    ArtifactShow {
+        artifact_id: String,
+        version_id: Option<String>,
+    },
+    ArtifactReviewShow {
+        artifact_id: String,
+        review_id: Option<String>,
+        #[serde(default)]
+        latest: bool,
+    },
     WatchlistsChanged,
     SendMessage {
         target: String,
@@ -637,6 +658,30 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_present_request_serializes_origin_and_repeated_addresses() {
+        let request = ControlRequest::ArtifactPresent {
+            path: "/workspace/report.md".to_string(),
+            title: Some("Report".to_string()),
+            description: None,
+            artifact_id: None,
+            force_new: false,
+            addressed_comment_ids: vec!["comment-1".to_string(), "comment-2".to_string()],
+            origin: MessageOrigin::WardianAgent {
+                session_id: "session-1".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["command"], "artifact_present");
+        assert_eq!(value["origin"]["kind"], "wardian_agent");
+        assert_eq!(value["addressed_comment_ids"][1], "comment-2");
+        assert_eq!(
+            serde_json::from_value::<ControlRequest>(value).expect("roundtrip"),
+            request
+        );
+    }
 
     #[test]
     fn list_response_uses_current_schema() {

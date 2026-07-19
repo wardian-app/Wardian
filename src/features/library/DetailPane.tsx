@@ -325,8 +325,8 @@ export const DetailPane: React.FC<DetailPaneProps> = ({
     }, [selectedContent, selection?.entryRef]);
 
     useEffect(() => {
-        markEditorSurfaceDirty(surfaceId, dirty);
-    }, [dirty, markEditorSurfaceDirty, surfaceId]);
+        markEditorSurfaceDirty(surfaceId, dirty, trackedEntryRef.current);
+    }, [baseline, dirty, draft, markEditorSurfaceDirty, selection?.entryRef, surfaceId]);
 
     const handleSave = useCallback(async (): Promise<boolean> => {
         // While the conflict bar is showing, a plain save must not silently

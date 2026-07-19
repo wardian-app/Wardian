@@ -244,6 +244,7 @@ export interface AgentWorktreeSummary {
 
 export * from "./workflow";
 export * from "./remote";
+export * from "./files";
 
 export interface AgentOutputPayload {
     session_id: string;
@@ -477,10 +478,18 @@ export type WorkbenchGroupV1 = {
     active_surface_id: string | null;
 };
 
+export type WorkbenchPresentationProvenanceV1 = {
+    kind: "explicit_duplicate";
+    duplicate_surface_id: string;
+    partner_surface_id: string | null;
+    provisional_resource_key: string;
+};
+
 export type WorkbenchSurfaceV1 = {
     surface_id: string;
     surface_type: string;
     resource_key?: string;
+    presentation_provenance?: WorkbenchPresentationProvenanceV1;
     state_schema_version: number;
     state: unknown;
 };
@@ -581,6 +590,12 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly type: SurfaceType;
     readonly title: (surface: WorkbenchSurfaceV1) => string;
     readonly icon: SurfaceIcon;
+    /** Optional surface-aware tab icon. The static icon remains launcher/fallback metadata. */
+    readonly presentation_icon?: (surface: WorkbenchSurfaceV1) => SurfaceIcon;
+    /** Optional runtime source that invalidates tab presentation metadata. */
+    readonly presentation_subscribe?: (listener: () => void) => () => void;
+    /** Synchronizes lightweight metadata for all currently open presentations of this type. */
+    readonly presentation_sync?: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
     readonly render_policy: SurfaceRenderPolicy;
     readonly open_policy: SurfaceOpenPolicy;
     readonly runtime_policy: SurfaceRuntimePolicy;
@@ -595,7 +610,11 @@ export type SurfaceDefinition<TState extends SurfaceState = SurfaceState> = {
     readonly default_state: () => TState;
     readonly serialize_state: (state: TState) => unknown;
     readonly restore_state: (value: unknown, version: number) => SurfaceRestoreResult<TState>;
-    readonly can_close?: (surface: WorkbenchSurfaceV1) => Promise<CloseDecision> | CloseDecision;
+    /** Optional generic contract for surfaces that support replaceable preview tabs. */
+    readonly transient_state?: {
+        readonly is_transient: (state: TState) => boolean;
+        readonly pin: (state: TState) => TState;
+    };
     readonly commands: readonly SurfaceCommandDefinition[];
     readonly badges?: (surface: WorkbenchSurfaceV1) => readonly SurfaceBadge[];
 };

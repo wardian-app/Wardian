@@ -45,6 +45,112 @@ Surfaces respond to the size of their own pane. In compact splits, toolbars wrap
 
 When a move or close removes the last tab from a non-final pane, Wardian collapses that pane automatically and expands its sibling into the released space. The final pane is never removed; if its last tab closes, it remains in place and shows the Home surface chooser.
 
+## Files
+
+Explorer file opens use normal Workbench tabs. A single click opens one
+transient Files preview in the current pane; selecting another file replaces
+that preview. Double-click, `Enter`, the Explorer **Open** action, or opening to
+the side makes the tab permanent. A permanent tab participates in ordinary
+close history and restore. A transient preview does not.
+
+Rendered Markdown can switch to an editable source presentation and back inside
+the same Files tab. The compact control shows the current presentation: Book
+while rendered and Pencil while editing. Its label describes the action,
+**Edit source** or **View rendered**. Source-only text opens directly in Monaco.
+This choice neither opens another tab nor starts another file subscription.
+
+Edits stay in an unsaved buffer until you press `Ctrl+S` on Windows/Linux,
+`Cmd+S` on macOS, or choose **Save** from **File actions**. A dot beside the
+breadcrumb and in the Workbench tab marks unsaved edits. **Save As** writes the
+current buffer to the exact destination selected by the native picker and opens
+that copy in a new ordinary file tab; it does not retarget the original tab or
+an artifact relationship.
+
+Wardian keeps one working buffer for each canonical file, even when that file
+is visible in more than one pane. The buffer has durable recovery: unsaved text
+can be inspected read-only after a restart even when file access has been
+revoked, but the recovery itself cannot read or write the current file. Saving
+or merging requires restoring access to that exact file. Only the final
+presentation of an unsaved file asks **Save**, **Don't Save**, or **Cancel**
+before it closes.
+
+For a text file, changed regions are annotated inline in the editor and the
+header shows a compact change count. Its comparison button opens the full
+Saved-file lens. The lens uses side-by-side columns when its available
+pane width is at least 720 px and a unified layout below that. A saved
+side-by-side preference is honored down to a 560 px hard minimum; below 560 px
+Wardian temporarily uses unified layout without changing the preference. An
+open review drawer is subtracted before Wardian chooses the layout.
+
+If the file changes on disk while the shared buffer is dirty, Wardian marks the
+editor stale and offers **Merge**, **Reload from disk**, or **Cancel**. Merge
+rebases the working text and keeps it dirty until an explicit Save. Reload
+discards the working buffer and its recovery record. Cancel leaves the stale
+state unchanged. Saved-file and presented-artifact comparison are available
+now; prompt checkpoints remain explicit unavailable baselines until their
+adapter is installed. Wardian never substitutes another revision and labels it
+as the requested history.
+
+An agent can present an authorized file as a durable artifact. Wardian opens or
+refreshes its `artifact:<id>` tab in the background, marks it for attention, and
+keeps the user's current tab focused. Opening the artifact attaches its current
+working file to the same editor buffer used by an ordinary Files tab. The
+provenance strip shows the origin agent, presented time, review status, and
+version selector. **Changed since presented** compares the live working hash to
+the selected immutable version; the change-count control opens the usual Monaco
+line comparison. Attention clears only when the artifact is actually visible.
+Closing the tab does not delete the artifact thread, and a restored Workbench
+reauthorizes the canonical file against the origin agent's current primary and
+additional directories.
+
+The foundation renders Markdown, images, and PDFs and edits validated text.
+HTML and SVG are available as inert source only; Wardian never injects them into
+the application DOM. Prompt and presented-version baselines, comments,
+approval, and isolated live HTML/SVG remain downstream capabilities; they do
+not add Preview/Changes/Draft modes or another editing buffer. Unsupported and
+oversized resources stay local to their tab and offer
+metadata, Retry, **Open With**, or Reveal rather than failing the Workbench.
+Ordinary saves and atomic editor saves refresh through the same stable revision
+stream. If a file is temporarily unreadable or keeps changing during a scan,
+its tab shows one local unavailable state and automatically recovers when the
+source stabilizes.
+
+The same metadata state applies when text exceeds 16 MiB or 200,000 lines, an
+image exceeds 64 MiB encoded or 64 million decoded pixels, or a PDF exceeds
+256 MiB. Wardian does not read the oversized content into a renderer merely to
+identify it. The tab can still show its name, type, size, modification time,
+typed limit reason, **Open With**, and Reveal actions. If the file later moves
+back within its limit, the existing tab refreshes into the normal preview.
+
+Files is intentionally absent from the New Surface launcher in this slice.
+
+Browser tests cover the responsive Files UI with mocked native calls. Claims
+about picker authorization, retained handles, real filesystem writes and stale
+conflicts, durable recovery across runtime recreation, and subscription cleanup
+require the native desktop test harness.
+Open files from Explorer; the launcher will become available only when the
+artifact review and isolated active-content contracts are complete. A restored
+file tab is resolved again by the Rust backend against current agent primary
+and additional directory grants, or an exact native-picker grant remembered by
+the backend. Layout state never confers filesystem authority. Picker grants
+survive relaunch by reauthorizing only the same canonical file; the Workbench
+document never stores a capability token. If two spellings resolve to the same
+file, normal opens focus one canonical tab; an explicit **Open to Side** keeps
+the intentional second presentation. Each presentation keeps the pathname that
+authorized it. If a symlink or junction used by one presentation is removed or
+retargeted, that presentation loses access without disrupting another
+presentation opened through the still-valid direct path.
+
+PDF text search is deliberately bounded so a very large document cannot lock
+the Workbench. It searches at most 128 pages or for two seconds per query and
+labels partial results with the number of pages inspected.
+
+Image and PDF previews use short-lived immutable snapshots. A preview therefore
+keeps serving the exact revision it opened even if the source changes or is
+deleted; the next revision opens a new snapshot. Wardian automatically reclaims
+the snapshot and renderer lease at the ticket deadline, including when a pane
+abandons the preview without sending a later request.
+
 ## Reopen and Reset
 
 Closing a surface adds it to the recently closed history. Press `Ctrl+Shift+T` / `Cmd+Shift+T`, choose **Reopen Closed Surface** in the command palette, or use the **Reopen** action on an empty pane's Home state. Wardian restores the most recently closed presentation first.

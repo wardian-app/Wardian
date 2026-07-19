@@ -1,5 +1,7 @@
 use crate::state::active_agent::ActiveAgent;
+use crate::state::artifact_runtime::ArtifactRuntime;
 use crate::state::conversation_archive::ConversationArchiveState;
+use crate::state::file_resources::FileResourceRuntime;
 use crate::state::interactions::InteractionState;
 use crate::state::mailbox::MailboxState;
 use crate::state::terminal_session::TerminalSessionBroker;
@@ -49,6 +51,10 @@ pub struct AppState {
     pub library_watchers: Mutex<HashMap<String, LibraryWatchRegistration>>,
     // Active explorer root watchers keyed by normalized root path
     pub explorer_watchers: Mutex<HashMap<String, ExplorerWatchRegistration>>,
+    // Canonical file subscriptions, stable revisions, exact grants, and read leases.
+    pub file_resources: FileResourceRuntime,
+    // Live acknowledgement rendezvous for durable artifact presentations.
+    pub artifact_runtime: Arc<ArtifactRuntime>,
     // Single standalone terminal session for the human user.
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
@@ -176,6 +182,8 @@ impl Default for AppState {
             git_watchers: Mutex::new(HashMap::new()),
             library_watchers: Mutex::new(HashMap::new()),
             explorer_watchers: Mutex::new(HashMap::new()),
+            file_resources: FileResourceRuntime::default(),
+            artifact_runtime: Arc::new(ArtifactRuntime::default()),
             user_terminal: Mutex::new(None),
             ask_requests: Mutex::new(HashMap::new()),
             interactions: InteractionState::default(),

@@ -26,6 +26,12 @@ npm run setup:e2e:native:windows
 
 Generated driver artifacts belong under `tools/e2e-native/` and are ignored by git.
 
+`e2e-native/tests/artifact-presentation-native.test.mjs` proves the artifact
+control path with real IPC: an isolated mock agent presents an authorized
+Markdown file through the built CLI, Wardian routes a non-focused Files tab,
+the renderer opens the canonical file, and the same artifact restores after a
+native app relaunch.
+
 ## Running
 
 Run the native mock-provider suite:

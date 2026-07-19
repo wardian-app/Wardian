@@ -1,8 +1,11 @@
 pub mod agent;
+pub mod artifacts;
 pub mod chat;
 pub mod class;
 pub mod conversation;
 pub mod debug;
+pub mod file_recovery;
+pub mod files;
 pub mod fs;
 pub mod git;
 pub mod library;
@@ -17,10 +20,13 @@ pub mod workbench;
 pub mod workflow;
 
 pub use agent::*;
+pub use artifacts::*;
 pub use chat::*;
 pub use class::*;
 pub use conversation::*;
 pub use debug::*;
+pub use file_recovery::*;
+pub use files::*;
 pub use fs::*;
 pub use library::*;
 pub use patch::*;

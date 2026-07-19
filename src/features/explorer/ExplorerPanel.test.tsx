@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -8,6 +8,7 @@ import { ExplorerPanel } from './ExplorerPanel';
 import type { AgentConfig } from '../../types';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { ConfirmProvider } from '../../components/ConfirmDialog';
+import type { WorkbenchNavigationService } from '../workbench/navigationService';
 
 const mockListen = vi.mocked(listen);
 
@@ -16,12 +17,14 @@ vi.mock('./FileTree', () => ({
     path,
     onContextMenu,
     onSelect,
+    onOpen,
     refreshToken,
     changedPaths,
   }: {
     path: string;
     onContextMenu?: (event: React.MouseEvent, node: unknown) => void;
     onSelect?: (path: string, isDir: boolean) => void;
+    onOpen?: (path: string, isDir: boolean) => void;
     refreshToken?: number;
     changedPaths?: string[];
   }) => (
@@ -32,6 +35,7 @@ vi.mock('./FileTree', () => ({
         type="button"
         data-testid="mock-file-row"
         onClick={() => onSelect?.('C:\\Users\\test\\repo\\notes.md', false)}
+        onDoubleClick={() => onOpen?.('C:\\Users\\test\\repo\\notes.md', false)}
         onContextMenu={(event) => onContextMenu?.(event, {
           name: 'notes.md',
           path: 'C:\\Users\\test\\repo\\notes.md',
@@ -52,6 +56,15 @@ vi.mock('./FileTree', () => ({
   ),
 }));
 
+function makeNavigation() {
+  return {
+    open: vi.fn(() => 'files-surface'),
+    open_transient: vi.fn(() => 'files-surface'),
+    pin_transient: vi.fn(),
+    open_to_side: vi.fn(() => 'files-side-surface'),
+  } as unknown as WorkbenchNavigationService;
+}
+
 describe('ExplorerPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -68,6 +81,22 @@ describe('ExplorerPanel', () => {
     render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
 
     expect(screen.getByRole('heading', { name: 'Explorer', level: 2 })).toHaveClass('text-sm');
+  });
+
+  it('displays a stable Windows root path without changing its backend identity', async () => {
+    const rootPath = '//?/C:/Users/Test/Repo';
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return rootPath;
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+
+    const displayedRoot = await screen.findByTitle('C:\\Users\\Test\\Repo');
+    expect(displayedRoot).toHaveTextContent('C:\\Users\\Test\\Repo');
+    expect(await screen.findByTestId('file-tree')).toHaveTextContent(rootPath);
+    expect(invoke).toHaveBeenCalledWith('git_status', { cwd: rootPath });
   });
 
   it('opens the current explorer root in the local file system', async () => {
@@ -215,7 +244,113 @@ describe('ExplorerPanel', () => {
     consoleError.mockRestore();
   });
 
-  it('previews a clicked file when Explorer file click action is Preview', async () => {
+  it('surfaces missing Workbench navigation locally and recovers on the next action', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const unhandled = vi.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    const { rerender } = render(
+      <ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={null} />,
+    );
+
+    await userEvent.click(await screen.findByTestId('mock-file-row'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/File preview failed/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/Workbench navigation is unavailable/i);
+    expect(unhandled).not.toHaveBeenCalled();
+
+    const navigation = makeNavigation();
+    rerender(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+    await userEvent.click(await screen.findByTestId('mock-file-row'));
+
+    await waitFor(() => expect(navigation.open_transient).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/File preview failed/i)).not.toBeInTheDocument();
+    expect(unhandled).not.toHaveBeenCalled();
+    window.removeEventListener('unhandledrejection', unhandled);
+  });
+
+  it('contains rejected navigation actions and allows a later action to succeed', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const tabs: string[] = [];
+    const navigation = makeNavigation();
+    vi.mocked(navigation.open_transient)
+      .mockImplementationOnce(() => Promise.reject(new Error('navigation offline')) as never)
+      .mockImplementation(() => {
+        tabs.push('notes');
+        return 'files-surface';
+      });
+    const unhandled = vi.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    const row = await screen.findByTestId('mock-file-row');
+    await userEvent.click(row);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/navigation offline/i);
+    expect(tabs).toEqual([]);
+    expect(unhandled).not.toHaveBeenCalled();
+
+    await userEvent.click(row);
+    await waitFor(() => expect(tabs).toEqual(['notes']));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(unhandled).not.toHaveBeenCalled();
+    window.removeEventListener('unhandledrejection', unhandled);
+  });
+
+  it('contains synchronous navigation failures without mutating tabs', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const tabs: string[] = [];
+    const navigation = makeNavigation();
+    vi.mocked(navigation.open).mockImplementation(() => {
+      throw new Error('navigation not ready');
+    });
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    fireEvent.doubleClick(await screen.findByTestId('mock-file-row'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/navigation not ready/i);
+    expect(tabs).toEqual([]);
+    expect(navigation.pin_transient).not.toHaveBeenCalled();
+  });
+
+  it('clears an external command error after a successful retry', async () => {
+    useSettingsStore.setState({
+      explorerFileClickAction: 'external',
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    let attempts = 0;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      if (command === 'open_in_external_editor' && attempts++ === 0) {
+        throw new Error('program warming up');
+      }
+      return null;
+    });
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={makeNavigation()} />);
+
+    const row = await screen.findByTestId('mock-file-row');
+    await userEvent.click(row);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/program warming up/i);
+
+    await userEvent.click(row);
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(attempts).toBe(2);
+  });
+
+  it('routes an internal single click to one transient Files surface without reading preview bytes', async () => {
     useSettingsStore.setState({
       explorerFileClickAction: 'preview',
       externalEditor: 'system',
@@ -224,20 +359,100 @@ describe('ExplorerPanel', () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
       if (command === 'git_status') return { files: [] };
-      if (command === 'read_file_preview') return '# Notes';
       return null;
     });
+    const navigation = makeNavigation();
 
-    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
 
     await userEvent.click(await screen.findByTestId('mock-file-row'));
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('read_file_preview', {
-        path: 'C:\\Users\\test\\repo\\notes.md',
+      expect(navigation.open_transient).toHaveBeenCalledWith({
+        surface_type: 'files',
+        resource_key: 'file:C:/Users/test/repo/notes.md',
+        state: {
+          resource_kind: 'file',
+          transient_preview: true,
+          presentation: 'rendered',
+          comparison_open: false,
+          comparison_layout_preference: 'auto',
+          comparison_baseline: null,
+          review_drawer_open: false,
+          selected_version_id: null,
+          optional_checkpoint_id: null,
+        },
       });
     });
-    expect(await screen.findByText('# Notes')).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith('read_file_preview', expect.anything());
+  });
+
+  it('pins a matching transient or opens a permanent Files surface on double click', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const navigation = makeNavigation();
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    fireEvent.doubleClick(await screen.findByTestId('mock-file-row'));
+
+    expect(navigation.open).toHaveBeenCalledOnce();
+    expect(navigation.open).toHaveBeenCalledWith(expect.objectContaining({
+      surface_type: 'files',
+      resource_key: 'file:C:/Users/test/repo/notes.md',
+      state: expect.objectContaining({ transient_preview: false }),
+    }));
+    expect(navigation.pin_transient).toHaveBeenCalledWith('files-surface');
+    expect(navigation.open_transient).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith('read_file_preview', expect.anything());
+  });
+
+  it('uses permanent Open and standard horizontal Open to Side context actions', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const navigation = makeNavigation();
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    const tree = await screen.findByTestId('mock-file-row');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    expect(navigation.open).toHaveBeenCalledWith(expect.objectContaining({
+      resource_key: 'file:C:/Users/test/repo/notes.md',
+      state: expect.objectContaining({ transient_preview: false }),
+    }));
+    expect(navigation.pin_transient).toHaveBeenCalledWith('files-surface');
+
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open to Side' }));
+    expect(navigation.open_to_side).toHaveBeenCalledWith(expect.objectContaining({
+      resource_key: 'file:C:/Users/test/repo/notes.md',
+      state: expect.objectContaining({ transient_preview: false }),
+    }), 'horizontal');
+    expect(invoke).not.toHaveBeenCalledWith('read_file_preview', expect.anything());
+  });
+
+  it('reports when Open to Side is rejected because the current pane is too small', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const navigation = makeNavigation();
+    vi.mocked(navigation.open_to_side).mockReturnValue(null);
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    const tree = await screen.findByTestId('mock-file-row');
+    await userEvent.pointer({ keys: '[MouseRight]', target: tree });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open to Side' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Open to Side failed: Error: The current pane is too small to open a file to the side.',
+    );
   });
 
   it('opens a clicked file externally when Explorer file click action is External app', async () => {
@@ -252,7 +467,8 @@ describe('ExplorerPanel', () => {
       return null;
     });
 
-    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} />);
+    const navigation = makeNavigation();
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
 
     await userEvent.click(await screen.findByTestId('mock-file-row'));
 
@@ -265,6 +481,37 @@ describe('ExplorerPanel', () => {
         },
       });
     });
+    expect(navigation.open).not.toHaveBeenCalled();
+    expect(navigation.open_transient).not.toHaveBeenCalled();
+    expect(navigation.open_to_side).not.toHaveBeenCalled();
+  });
+
+  it('opens a double-clicked file externally without creating or pinning a Files tab', async () => {
+    useSettingsStore.setState({
+      explorerFileClickAction: 'external',
+      externalEditor: 'vscode',
+      externalEditorCustomExecutable: '',
+    });
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_explorer_root') return 'C:\\Users\\test\\repo';
+      if (command === 'git_status') return { files: [] };
+      return null;
+    });
+    const navigation = makeNavigation();
+    render(<ExplorerPanel selectedAgentIds={new Set()} agents={[]} navigation={navigation} />);
+
+    fireEvent.doubleClick(await screen.findByTestId('mock-file-row'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('open_in_external_editor', {
+      path: 'C:\\Users\\test\\repo\\notes.md',
+      editor: {
+        external_editor: 'vscode',
+        external_editor_custom_executable: null,
+      },
+    }));
+    expect(navigation.open).not.toHaveBeenCalled();
+    expect(navigation.open_transient).not.toHaveBeenCalled();
+    expect(navigation.pin_transient).not.toHaveBeenCalled();
   });
 
   it('does not preview or externally open clicked folders', async () => {

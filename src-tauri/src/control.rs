@@ -13,12 +13,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
-    AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary,
-    ApprovalAction, AskResponse, ControlRequest, ConversationListResponse,
-    ConversationShowResponse, DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind,
-    InteractionBodyRef, MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness,
-    ProviderReadyEvidence, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
-    StructuredReply, WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
+    AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
+    AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
+    DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
+    QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
+    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
 };
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
@@ -32,12 +32,9 @@ async fn rollback_agent_update(
     session_id: &str,
     previous_config: wardian_core::models::AgentConfig,
 ) -> Result<(), String> {
-    let snapshot = crate::commands::agent::restore_agent_config_in_state(
-        state,
-        session_id,
-        previous_config,
-    )
-    .await?;
+    let snapshot =
+        crate::commands::agent::restore_agent_config_in_state(state, session_id, previous_config)
+            .await?;
     manager::try_save_state_snapshot(&snapshot)
 }
 
@@ -293,15 +290,12 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             .await
             .map_err(ControlError::bad_request)?;
             if let Err(error) = manager::try_save_state_snapshot(&outcome.state_snapshot) {
-                let rollback_error = rollback_agent_update(
-                    state.inner(),
-                    &uuid,
-                    outcome.previous_config.clone(),
-                )
-                .await
-                .err()
-                .map(|rollback| format!("; rollback also failed: {rollback}"))
-                .unwrap_or_default();
+                let rollback_error =
+                    rollback_agent_update(state.inner(), &uuid, outcome.previous_config.clone())
+                        .await
+                        .err()
+                        .map(|rollback| format!("; rollback also failed: {rollback}"))
+                        .unwrap_or_default();
                 return Err(ControlError::request_failed(format!(
                     "Failed to persist agent update: {error}{rollback_error}"
                 )));
@@ -324,15 +318,12 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             .err()
             .map(|error| error.to_string());
             if let Some(error) = metadata_error {
-                let rollback_error = rollback_agent_update(
-                    state.inner(),
-                    &uuid,
-                    outcome.previous_config.clone(),
-                )
-                .await
-                .err()
-                .map(|rollback| format!("; rollback also failed: {rollback}"))
-                .unwrap_or_default();
+                let rollback_error =
+                    rollback_agent_update(state.inner(), &uuid, outcome.previous_config.clone())
+                        .await
+                        .err()
+                        .map(|rollback| format!("; rollback also failed: {rollback}"))
+                        .unwrap_or_default();
                 return Err(ControlError::request_failed(format!(
                     "Failed to persist agent metadata: {error}{rollback_error}"
                 )));
@@ -402,6 +393,86 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 .map_err(ControlError::request_failed)?;
             ok_json(&response)
         }
+
+        ControlRequest::ArtifactPresent {
+            path,
+            title,
+            description,
+            artifact_id,
+            force_new,
+            addressed_comment_ids,
+            origin,
+        } => {
+            let MessageOrigin::WardianAgent { session_id } = origin;
+            let state = app.state::<AppState>();
+            let config = {
+                let agents = state.agents.lock().await;
+                agents
+                    .get(&session_id)
+                    .map(|agent| agent.config.clone())
+                    .ok_or_else(|| {
+                        ControlError::coded(
+                            "invalid_origin",
+                            "artifact origin is not a live Wardian agent session",
+                        )
+                    })?
+            };
+            let config = config
+                .lock()
+                .map_err(|_| {
+                    ControlError::request_failed("agent configuration lock is unavailable")
+                })?
+                .clone();
+            let store = artifact_store()?;
+            let emit_app = app.clone();
+            let service = crate::artifact_service::ArtifactService::new(
+                store,
+                state.artifact_runtime.clone(),
+                move |event| {
+                    emit_app
+                        .emit(crate::artifact_service::ARTIFACT_PRESENTED_EVENT, event)
+                        .map_err(|error| error.to_string())
+                },
+            );
+            let response = service
+                .present(
+                    config,
+                    crate::artifact_service::ArtifactPresentationRequestV1 {
+                        origin_session_id: session_id,
+                        path,
+                        title,
+                        description,
+                        artifact_id,
+                        force_new,
+                        addressed_comment_ids,
+                    },
+                )
+                .await
+                .map_err(artifact_service_control_error)?;
+            ok_json(&response)
+        }
+
+        ControlRequest::ArtifactShow {
+            artifact_id,
+            version_id,
+        } => {
+            let state = app.state::<AppState>();
+            let service = crate::artifact_service::ArtifactService::new(
+                artifact_store()?,
+                state.artifact_runtime.clone(),
+                |_| Ok(()),
+            );
+            let response = service
+                .show(artifact_id, version_id)
+                .await
+                .map_err(artifact_service_control_error)?;
+            ok_json(&response)
+        }
+
+        ControlRequest::ArtifactReviewShow { .. } => Err(ControlError::coded(
+            "review_not_found",
+            "artifact reviews are not available for this thread",
+        )),
 
         ControlRequest::WatchlistsChanged => {
             let _ = app.emit("watchlists-updated", ());
@@ -936,13 +1007,23 @@ async fn resolve_send_targets_scoped(
     let allowed = neighbors.member_uuids();
 
     if target == "all" || target.starts_with("class:") {
-        return global.into_iter().filter(|id| allowed.contains(id)).collect();
+        return global
+            .into_iter()
+            .filter(|id| allowed.contains(id))
+            .collect();
     }
 
     // Bare name: prefer neighbors match; fall back to global exact match.
-    let neighbors_matches: Vec<String> =
-        global.iter().filter(|id| allowed.contains(*id)).cloned().collect();
-    if neighbors_matches.is_empty() { global } else { neighbors_matches }
+    let neighbors_matches: Vec<String> = global
+        .iter()
+        .filter(|id| allowed.contains(*id))
+        .cloned()
+        .collect();
+    if neighbors_matches.is_empty() {
+        global
+    } else {
+        neighbors_matches
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -959,9 +1040,11 @@ async fn deliver_message_to_target(
     scope_all: bool,
 ) -> Result<Vec<DeliveryDetail>, ControlError> {
     validate_send_message_options(target, thread, input_mode)?;
-    let sender_session_id =
-        origin.as_ref().map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
-    let session_ids = resolve_send_targets_scoped(state, target, sender_session_id, scope_all).await;
+    let sender_session_id = origin
+        .as_ref()
+        .map(|MessageOrigin::WardianAgent { session_id }| session_id.as_str());
+    let session_ids =
+        resolve_send_targets_scoped(state, target, sender_session_id, scope_all).await;
     if session_ids.is_empty() {
         return Err(ControlError::not_found(format!(
             "no agents matched target: {target}"
@@ -2943,10 +3026,8 @@ async fn record_conversation_delivery(
     };
 
     for (context, agent_conversation_logging) in target_settings {
-        if effective_conversation_logging(
-            global_conversation_logging,
-            agent_conversation_logging,
-        ) != ConversationLoggingSetting::Enabled
+        if effective_conversation_logging(global_conversation_logging, agent_conversation_logging)
+            != ConversationLoggingSetting::Enabled
         {
             continue;
         }
@@ -3235,6 +3316,35 @@ async fn agent_config_to_identity(
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ControlError> {
     serde_json::to_string(value).map_err(ControlError::request_failed)
+}
+
+fn artifact_store() -> Result<wardian_core::artifacts::ArtifactStore, ControlError> {
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| ControlError::request_failed("Could not locate Wardian home"))?;
+    wardian_core::artifacts::ArtifactStore::open(home.join("artifacts"))
+        .map_err(ControlError::request_failed)
+}
+
+fn artifact_service_control_error(
+    error: crate::artifact_service::ArtifactServiceError,
+) -> ControlError {
+    let code = match error.code.as_str() {
+        "invalid_origin" => "invalid_origin",
+        "unauthorized_path" => "unauthorized_path",
+        "unreadable_file" => "unreadable_file",
+        "unstable_file_timeout" => "unstable_file_timeout",
+        "artifact_not_found" => "artifact_not_found",
+        "review_not_found" => "review_not_found",
+        "ui_delivery_failed" => "ui_delivery_failed",
+        "invalid_request" => "bad_request",
+        _ => "request_failed",
+    };
+    let persisted = error.persisted;
+    let mut control = ControlError::coded(code, error.message);
+    if let Some(persisted) = persisted {
+        control = control.with_details(serde_json::json!({ "persisted": persisted }));
+    }
+    control
 }
 
 fn error_payload(error: &ControlError) -> Result<String, std::io::Error> {
@@ -3576,10 +3686,7 @@ mod tests {
             .terminal_sessions
             .start_or_replace_runtime(
                 session_id,
-                crate::state::terminal_session::TerminalRuntimeHandles::new(
-                    input_tx,
-                    |_| Ok(()),
-                ),
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
                 wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
             )
             .await
@@ -4299,16 +4406,31 @@ mod tests {
         let global = resolve_send_targets_scoped(&state, "all", Some("sender-1"), true).await;
         let mut global = global;
         global.sort();
-        assert_eq!(global, vec!["peer-1".to_string(), "sender-1".to_string(), "stranger-1".to_string()]);
+        assert_eq!(
+            global,
+            vec![
+                "peer-1".to_string(),
+                "sender-1".to_string(),
+                "stranger-1".to_string()
+            ]
+        );
 
         // No sender (human origin): same as scope_all=true (all agents)
         let human_send = resolve_send_targets_scoped(&state, "all", None, false).await;
         let mut human_send = human_send;
         human_send.sort();
-        assert_eq!(human_send, vec!["peer-1".to_string(), "sender-1".to_string(), "stranger-1".to_string()]);
+        assert_eq!(
+            human_send,
+            vec![
+                "peer-1".to_string(),
+                "sender-1".to_string(),
+                "stranger-1".to_string()
+            ]
+        );
 
         // Exact UUID targeting always works (soft boundary)
-        let exact_uuid = resolve_send_targets_scoped(&state, "stranger-1", Some("sender-1"), false).await;
+        let exact_uuid =
+            resolve_send_targets_scoped(&state, "stranger-1", Some("sender-1"), false).await;
         assert_eq!(exact_uuid, vec!["stranger-1".to_string()]);
     }
 
@@ -5904,9 +6026,16 @@ mod tests {
             let state = AppState::new();
             insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
             let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-            submit_structured_reply(&state, &request_id, status.clone(), "cannot continue", None, None)
-                .await
-                .unwrap();
+            submit_structured_reply(
+                &state,
+                &request_id,
+                status.clone(),
+                "cannot continue",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
             let reply =
                 wait_for_structured_reply(&state, &request_id, std::time::Duration::from_secs(1))

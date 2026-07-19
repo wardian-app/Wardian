@@ -73,6 +73,17 @@ import type { WorkbenchSurfaceRenderer } from "../layout/workbench/DockviewLayou
 import { LibrarySurface } from "../features/workbench/surfaces/LibrarySurface";
 import { WorkflowsSurface } from "../features/workbench/surfaces/WorkflowsSurface";
 import { useDirtySurfacePrompt } from "../features/workbench/surfaces/DirtySurfacePromptDialog";
+import { FilesSurface } from "../features/files/FilesSurface";
+import { FileEditorControllerRegistry } from "../features/files/fileEditorController";
+import { createFilesCloseAdapter } from "../features/files/filesCloseAdapter";
+import { fileResourceClient } from "../features/files/fileResourceClient";
+import { openPermanentFileSurface } from "../features/files/fileSurfaceNavigation";
+import { useArtifactEvents } from "../features/files/useArtifactEvents";
+import {
+  filesSurfaceMigrationCommands,
+  isFilesSurfaceStateV1,
+} from "../features/files/filesSurfaceState";
+import type { FilesSurfaceStateV2 } from "../types";
 
 declare global {
   interface Window {
@@ -253,9 +264,30 @@ function AppBody() {
   });
   const workbenchResetPending = workbenchPersistence.store.getState().reset_pending;
   const dirtySurfacePrompt = useDirtySurfacePrompt();
+  const filesEditorRegistry = useMemo(
+    () => new FileEditorControllerRegistry(fileResourceClient),
+    [],
+  );
   const workbenchRegistry = useMemo(() => createCoreWorkbenchSurfaceRegistry({
     dirty_surface_prompt: dirtySurfacePrompt.prompt,
-  }), [dirtySurfacePrompt.prompt]);
+    files_close_adapter: createFilesCloseAdapter(
+      filesEditorRegistry,
+      dirtySurfacePrompt.prompt,
+    ),
+  }), [dirtySurfacePrompt.prompt, filesEditorRegistry]);
+  useEffect(() => {
+    if (workbenchPersistence.status !== "ready") return;
+    const commands = filesSurfaceMigrationCommands(
+      workbenchPersistence.store.getState().document,
+    );
+    if (commands.length === 0) return;
+    const result = workbenchPersistence.store.getState().apply_commands(commands);
+    if (result.accepted) void workbenchPersistence.flush();
+  }, [
+    workbenchPersistence.flush,
+    workbenchPersistence.status,
+    workbenchPersistence.store,
+  ]);
   const [, setSurfaceRecoveryAttempt] = useState(0);
   const workbenchNavigation = useMemo(
     () => createWorkbenchNavigationService({
@@ -270,6 +302,7 @@ function AppBody() {
     }),
     [workbenchPersistence.reset, workbenchPersistence.store, workbenchRegistry],
   );
+  useArtifactEvents(workbenchNavigation, workbenchPersistence.status === "ready");
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
@@ -1112,6 +1145,59 @@ function AppBody() {
     }
 
     const visibility = lifecycle?.visible === false ? "hidden" : "visible";
+    if (surface.surface_type === "files") {
+      const filesState = restoredSurface.state as FilesSurfaceStateV2;
+      const filesStateSnapshot = JSON.stringify(filesState);
+      const legacyPresentationIntent = surface.state_schema_version === 1
+        && isFilesSurfaceStateV1(surface.state)
+        && surface.state.mode === "preview"
+        ? "renderer_default"
+        : undefined;
+      return (
+        <FilesSurface
+          surface_id={surface.surface_id}
+          resource_key={surface.resource_key ?? ""}
+          state={filesState}
+          lifecycle={{ visible: lifecycle?.visible !== false }}
+          client={fileResourceClient}
+          editor_registry={filesEditorRegistry}
+          legacy_presentation_intent={legacyPresentationIntent}
+          on_canonical_resource={async (resourceKey) => {
+            return await workbenchNavigation.canonicalize_resource(surface.surface_id, {
+              surface_type: "files",
+              resource_key: resourceKey,
+              state: filesState,
+            });
+          }}
+          on_open_file={(path) => {
+            openPermanentFileSurface(workbenchNavigation, path);
+          }}
+          on_state_change={(state) => {
+            const store = workbenchPersistence.store.getState();
+            const currentSurface = store.document.surfaces[surface.surface_id];
+            if (
+              currentSurface === undefined
+              || (
+                legacyPresentationIntent !== undefined
+                && currentSurface.state_schema_version !== 1
+              )
+            ) return;
+            const currentRestore = workbenchRegistry.resolve_surface(currentSurface).restore_result;
+            if (!currentRestore.ok || JSON.stringify(currentRestore.state) !== filesStateSnapshot) return;
+            const result = store.apply_commands([{
+              type: "update_surface_state",
+              surface_id: surface.surface_id,
+              state_schema_version: 2,
+              state,
+            }]);
+            if (result.accepted && legacyPresentationIntent !== undefined) {
+              void workbenchPersistence.flush();
+            }
+          }}
+        />
+      );
+    }
+
     if (surface.surface_type === "dashboard") {
       return (
         <DashboardSurface
@@ -1309,6 +1395,7 @@ function AppBody() {
     <AgentResourceContext.Provider value={agentResources}>
       <RosterProvider value={roster}>
         <AppShell
+          navigation={workbenchNavigation}
           contentBusy={workbenchResetPending}
           titlebar={<CustomTitleBar
         workbenchBusy={workbenchResetPending}

@@ -1,4 +1,12 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
+import type { WorkbenchNavigationService } from "../features/workbench/navigationService";
+
+const AppShellWorkbenchNavigationContext = createContext<WorkbenchNavigationService | null>(null);
+
+/** Workbench navigation available to auxiliary chrome rendered inside AppShell. */
+export function useAppShellWorkbenchNavigation(): WorkbenchNavigationService | null {
+  return useContext(AppShellWorkbenchNavigationContext);
+}
 
 export type AppShellProps = {
   titlebar: ReactNode;
@@ -10,6 +18,7 @@ export type AppShellProps = {
   mainOverlays?: ReactNode;
   roster: ReactNode;
   contentBusy?: boolean;
+  navigation: WorkbenchNavigationService;
 };
 
 /**
@@ -28,38 +37,41 @@ export function AppShell({
   mainOverlays,
   roster,
   contentBusy = false,
+  navigation,
 }: AppShellProps) {
   return (
-    <div
-      data-testid="app-shell"
-      className="app-shell relative flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
-      style={{
-        width: "var(--wardian-native-window-width, 100vw)",
-        height: "var(--wardian-native-window-height, 100dvh)",
-      }}
-    >
-      <div className="app-shell-titlebar" data-testid="app-shell-titlebar">
-        {titlebar}
-      </div>
-      {status}
-      {conflictDialog}
+    <AppShellWorkbenchNavigationContext.Provider value={navigation}>
       <div
-        aria-busy={contentBusy}
-        className="app-shell-content flex flex-1 overflow-hidden"
-        data-testid="app-shell-content"
-        inert={contentBusy ? true : undefined}
+        data-testid="app-shell"
+        className="app-shell relative flex flex-col bg-[var(--color-wardian-bg)] text-[var(--color-wardian-text)] overflow-hidden font-sans select-none"
+        style={{
+          width: "var(--wardian-native-window-width, 100vw)",
+          height: "var(--wardian-native-window-height, 100dvh)",
+        }}
       >
-        {leftRail}
-        {leftPane}
-        <main
-          className="app-shell-workbench flex-1 min-w-0 h-full flex flex-col overflow-hidden relative"
-          data-testid="app-shell-main"
+        <div className="app-shell-titlebar" data-testid="app-shell-titlebar">
+          {titlebar}
+        </div>
+        {status}
+        {conflictDialog}
+        <div
+          aria-busy={contentBusy}
+          className="app-shell-content flex flex-1 overflow-hidden"
+          data-testid="app-shell-content"
+          inert={contentBusy ? true : undefined}
         >
-          {mainContent}
-          {mainOverlays}
-        </main>
-        {roster}
+          {leftRail}
+          {leftPane}
+          <main
+            className="app-shell-workbench flex-1 min-w-0 h-full flex flex-col overflow-hidden relative"
+            data-testid="app-shell-main"
+          >
+            {mainContent}
+            {mainOverlays}
+          </main>
+          {roster}
+        </div>
       </div>
-    </div>
+    </AppShellWorkbenchNavigationContext.Provider>
   );
 }

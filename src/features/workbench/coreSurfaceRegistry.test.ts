@@ -2,17 +2,237 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useBuilderStore } from "../../store/useBuilderStore";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import { createCoreWorkbenchSurfaceRegistry } from "./coreSurfaceRegistry";
+import type {
+  FileContentDescriptorV1,
+  FilesSurfaceStateV1,
+  FilesSurfaceStateV2,
+} from "../../types";
+import { artifactResourceKey, fileResourceKey } from "../files/fileResourceKey";
+import { useFilesPresentationStore } from "../files/filesPresentationStore";
+import {
+  CORE_SURFACE_CONTRIBUTIONS,
+  createCoreWorkbenchSurfaceRegistry,
+} from "./coreSurfaceRegistry";
 import type { DirtySurfacePrompt } from "./surfaces/dirtySurfaceGuards";
-import { makeSurface } from "./workbenchTestUtils";
+import { makeSingleGroupDocument, makeSurface } from "./workbenchTestUtils";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 describe("core workbench surface registry", () => {
   beforeEach(() => {
-    useLibraryStore.setState({ _editorDirty: false, _editorResources: {} });
+    useLibraryStore.setState({
+      _editorDirty: false,
+      _editorResources: {},
+      _editorGenerationClock: 0,
+    });
     useBuilderStore.getState().reset();
+    useFilesPresentationStore.getState().reset();
+  });
+
+  it("registers a strict reserved Files resource surface", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const files = registry.require("files");
+    const state: FilesSurfaceStateV1 = {
+      resource_kind: "file",
+      mode: "preview",
+      transient_preview: true,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+
+    expect(files).toMatchObject({
+      render_policy: "suspend_when_hidden",
+      open_policy: "focus_resource",
+      runtime_policy: "view_only",
+      close_policy: "confirm_if_dirty",
+      state_schema_version: 2,
+    });
+    expect(CORE_SURFACE_CONTRIBUTIONS).toContainEqual({
+      surface_type: "files",
+      title: "Files",
+      description: "Inspect files and agent artifacts.",
+      group: "Reserved",
+      reserved: true,
+      requires_resource: true,
+    });
+    expect(CORE_SURFACE_CONTRIBUTIONS.some(({ surface_type }) => (
+      surface_type === "file-editor"
+    ))).toBe(false);
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: fileResourceKey("C:\\work\\notes.md"),
+      state,
+    })).toBe("file:C:/work/notes.md");
+    expect(fileResourceKey("/work/report.md"))
+      .not.toBe(artifactResourceKey("artifact-123"));
+    expect(() => registry.resource_key({
+      surface_type: "files",
+      resource_key: "https://example.test/report.md",
+      state,
+    })).toThrow(/file:.*artifact:/i);
+    expect(() => registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:",
+      state,
+    })).toThrow(/file:.*artifact:/i);
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:C:\\work\\notes.md",
+      state,
+    })).toBe("file:C:/work/notes.md");
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: "file:/tmp/a\\b.md",
+      state,
+    })).toBe("file:/tmp/a\\b.md");
+    const artifactState = { ...state, resource_kind: "artifact" } as const;
+    expect(registry.resource_key({
+      surface_type: "files",
+      resource_key: "artifact:opaque\\artifact-id",
+      state: artifactState,
+    })).toBe("artifact:opaque\\artifact-id");
+    expect(registry.resolve_surface(makeSurface("opaque-artifact", {
+      surface_type: "files",
+      resource_key: "artifact:opaque\\artifact-id",
+      state: artifactState,
+    })).restore_result).toEqual({
+      ok: true,
+      state: {
+        resource_kind: "artifact",
+        transient_preview: true,
+        presentation: "rendered",
+        comparison_open: false,
+        comparison_layout_preference: "auto",
+        comparison_baseline: null,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      } satisfies FilesSurfaceStateV2,
+    });
+
+    expect(files.restore_state(state, 1)).toMatchObject({
+      ok: true,
+      state: { presentation: "rendered", comparison_open: false },
+    });
+    expect(files.restore_state({ ...state, extra: true }, 1)).toEqual({
+      ok: false,
+      error: "files state is malformed",
+    });
+    expect(files.restore_state({ ...state, mode: "edit" }, 1)).toEqual({
+      ok: false,
+      error: "files state is malformed",
+    });
+    expect(files.restore_state(registry.default_state("files"), 2)).toEqual({
+      ok: true,
+      state: registry.default_state("files"),
+    });
+
+    for (const persisted of [
+      makeSurface("missing-key", { surface_type: "files", state }),
+      makeSurface("wrong-scheme", {
+        surface_type: "files",
+        resource_key: "https://example.test/report.md",
+        state,
+      }),
+      makeSurface("kind-mismatch", {
+        surface_type: "files",
+        resource_key: "artifact:artifact-1",
+        state,
+      }),
+    ]) {
+      const restored = registry.resolve_surface(persisted).restore_result;
+      expect(restored.ok).toBe(false);
+      expect(registry.presentation(persisted).badges).toEqual([
+        { badge_id: "recovery", label: "Recovery needed" },
+      ]);
+    }
+  });
+
+  it("derives Files tab metadata from the descriptor with safe resource fallbacks", () => {
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const state: FilesSurfaceStateV1 = {
+      resource_kind: "file",
+      mode: "preview",
+      transient_preview: false,
+      review_drawer_open: false,
+      selected_version_id: null,
+      optional_checkpoint_id: null,
+    };
+    const surface = makeSurface("files-1", {
+      surface_type: "files",
+      resource_key: fileResourceKey("C:\\work\\notes\\readme.md"),
+      state,
+    });
+
+    expect(registry.presentation(surface)).toMatchObject({
+      title: "readme.md",
+      icon: "files-markdown",
+      badges: [],
+    });
+
+    const descriptor: FileContentDescriptorV1 = {
+      schema: 1,
+      canonical_path: "C:/work/notes/readme.md",
+      display_name: "Project notes.md",
+      extension: "md",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+      renderer_kind: "image",
+      size_bytes: 42,
+      line_count: null,
+      content_hash: "hash",
+      modified_at_ms: 1,
+      capabilities: { preview: true, changes: false, draft: false, stream: true },
+      unavailable_reason: null,
+    };
+    useFilesPresentationStore.getState().setPresentation("files-1", {
+      resource_key: surface.resource_key!,
+      descriptor,
+      dirty: true,
+      attention: true,
+    });
+
+    expect(registry.presentation(surface)).toEqual({
+      title: "Project notes.md",
+      icon: "files-image",
+      commands: [],
+      badges: [
+        { badge_id: "dirty", label: "Unsaved changes" },
+        { badge_id: "attention", label: "Attention requested" },
+      ],
+    });
+  });
+
+  it("keeps the Task 1B Files close adapter clean until the editor controller is injected", () => {
+    const prompt = vi.fn<DirtySurfacePrompt>(() => "cancel");
+    const registry = createCoreWorkbenchSurfaceRegistry({ dirty_surface_prompt: prompt });
+    const surface = makeSurface("files-1", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+      state: {
+        resource_kind: "file",
+        mode: "preview",
+        transient_preview: false,
+        review_drawer_open: false,
+        selected_version_id: null,
+        optional_checkpoint_id: null,
+      } satisfies FilesSurfaceStateV1,
+    });
+
+    const document = makeSingleGroupDocument([surface]);
+    expect(registry.observe_close_resources(document, [surface.surface_id])).toEqual([]);
+    expect(prompt).not.toHaveBeenCalled();
+
+    useFilesPresentationStore.getState().setPresentation("files-1", {
+      resource_key: surface.resource_key!,
+      descriptor: null,
+      dirty: true,
+      attention: false,
+    });
+    expect(registry.observe_close_resources(document, [surface.surface_id])).toEqual([]);
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("registers the exact migration policies and open commands", () => {
@@ -92,13 +312,26 @@ describe("core workbench surface registry", () => {
             save: vi.fn().mockResolvedValue(true),
             discard: vi.fn().mockResolvedValue(true),
           },
+          generation: 1,
+          identity: "skills/library-1",
         },
       },
+      _editorGenerationClock: 1,
     });
     expect(registry.presentation(library).badges).toEqual([
       { badge_id: "dirty", label: "Unsaved changes" },
     ]);
-    await expect(registry.can_close(library)).resolves.toBe("cancel");
+    const document = makeSingleGroupDocument([library]);
+    const [resource] = registry.observe_close_resources(document, [library.surface_id]) ?? [];
+    expect(resource).toBeDefined();
+    await expect(registry.prepare_close_resource({
+      context: {
+        snapshot: document,
+        transaction_version: 1,
+        closing_surface_ids: [library.surface_id],
+      },
+      resource: resource!,
+    })).resolves.toMatchObject({ choice: "cancel" });
     expect(prompt).toHaveBeenCalledWith(expect.objectContaining({ surface_type: "library" }));
 
     const baseline = { schema: 2 as const, id: "wf", name: "Saved", nodes: [], edges: [] };

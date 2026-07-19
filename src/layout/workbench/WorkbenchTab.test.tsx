@@ -5,6 +5,28 @@ import { makeSurface } from "../../features/workbench/workbenchTestUtils";
 import { WorkbenchTab } from "./WorkbenchTab";
 
 describe("WorkbenchTab", () => {
+  it("renders generic live presentation badges as dots without mutating the title", () => {
+    const surface = makeSurface("surface-files", {
+      surface_type: "files",
+      resource_key: "file:C:/work/report.md",
+    });
+    const view = render(
+      <div role="tab" aria-label="report.md">
+        <WorkbenchTab
+          surface={surface}
+          title="report.md"
+          group_id="group-1"
+          badges={[{ badge_id: "dirty", label: "Unsaved changes" }]}
+        />
+      </div>,
+    );
+
+    expect(screen.getByRole("tab", { name: "report.md" })).toHaveTextContent("report.md");
+    expect(screen.getByRole("tab", { name: "report.md" })).not.toHaveTextContent("*");
+    expect(view.container.querySelector('[data-surface-badge="dirty"]'))
+      .toHaveAttribute("title", "Unsaved changes");
+  });
+
   it("ends a scoped pointer drag only for its originating pointer id", () => {
     const onPointerDragStart = vi.fn();
     const onPointerDragEnd = vi.fn();

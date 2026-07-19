@@ -1,0 +1,193 @@
+import { lazy } from "react";
+import { describe, expect, it } from "vitest";
+
+import type { FileContentDescriptorV1 } from "../../types";
+import {
+  defaultRendererRegistry,
+  RendererRegistry,
+  type FileRendererDefinition,
+} from "./rendererRegistry";
+
+const EmptyRenderer = lazy(async () => ({ default: () => null }));
+
+function renderer(
+  renderer_id: string,
+  matches: FileRendererDefinition["matches"] = () => false,
+): FileRendererDefinition {
+  return {
+    renderer_id,
+    matches,
+    capabilities: {
+      preview: true,
+      changes: "none",
+      draft: false,
+      annotations: "general",
+    },
+    render: EmptyRenderer,
+    create_renderer: () => EmptyRenderer,
+  };
+}
+
+function descriptor(
+  overrides: Partial<FileContentDescriptorV1> = {},
+): FileContentDescriptorV1 {
+  return {
+    schema: 1,
+    canonical_path: "C:/work/report.txt",
+    display_name: "report.txt",
+    extension: "txt",
+    mime_type: "application/pdf",
+    encoding: null,
+    renderer_kind: "pdf",
+    size_bytes: 42,
+    line_count: null,
+    content_hash: "sha256:report",
+    modified_at_ms: 1,
+    capabilities: { preview: true, changes: false, draft: false, stream: true },
+    unavailable_reason: null,
+    ...overrides,
+  };
+}
+
+function htmlDescriptor(): FileContentDescriptorV1 {
+  return descriptor({
+    renderer_kind: "text",
+    mime_type: "text/html",
+    encoding: "utf-8",
+  });
+}
+
+function svgDescriptor(): FileContentDescriptorV1 {
+  return descriptor({
+    renderer_kind: "text",
+    mime_type: "image/svg+xml",
+    encoding: "utf-8",
+  });
+}
+
+describe("RendererRegistry", () => {
+  it("uses the backend renderer kind before a misleading extension", () => {
+    const registry = new RendererRegistry([
+      renderer("text", ({ extension }) => extension === "txt"),
+      renderer("pdf", ({ mime_type }) => mime_type === "application/pdf"),
+      renderer("unsupported", () => true),
+    ]);
+
+    expect(registry.resolve(descriptor()).renderer_id).toBe("pdf");
+  });
+
+  it("uses only a validated MIME family as fallback and unsupported last", () => {
+    const registry = new RendererRegistry([
+      renderer("text", ({ mime_type }) => mime_type.startsWith("text/")),
+      renderer("pdf", ({ mime_type }) => mime_type === "application/pdf"),
+      renderer("unsupported", () => true),
+    ]);
+
+    expect(registry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    })).renderer_id).toBe("text");
+    expect(registry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "application/octet-stream",
+    })).renderer_id).toBe("unsupported");
+  });
+
+  it("routes active HTML and SVG to the inert source editor only", () => {
+    const html = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "text/html",
+      encoding: "utf-8",
+    }));
+    const svg = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "image/svg+xml",
+      encoding: "utf-8",
+    }));
+
+    expect(html).toMatchObject({
+      renderer_id: "text",
+      default_presentation: "editor",
+    });
+    expect(svg).toMatchObject({
+      renderer_id: "text",
+      default_presentation: "editor",
+    });
+    expect(html.rendered).toBeUndefined();
+    expect(svg.rendered).toBeUndefined();
+    expect(html.editor).toBeDefined();
+    expect(svg.editor).toBeDefined();
+    expect(html.editor_language?.(htmlDescriptor())).toBe("html");
+    expect(svg.editor_language?.(svgDescriptor())).toBe("xml");
+  });
+
+  it("uses validated MIME fallback in the real production registry", () => {
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "application/pdf",
+    })).renderer_id).toBe("pdf");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    })).renderer_id).toBe("text");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "unsupported",
+      mime_type: "application/octet-stream",
+    })).renderer_id).toBe("unsupported");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "pdf",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    })).renderer_id).toBe("pdf");
+    expect(defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "pdf",
+      unavailable_reason: "file_too_large",
+    })).renderer_id).toBe("unsupported");
+  });
+
+  it("advertises conventional rendered/editor presentations", () => {
+    const markdown = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "markdown",
+      mime_type: "text/markdown",
+      encoding: "utf-8",
+    }));
+    const text = defaultRendererRegistry.resolve(descriptor({
+      renderer_kind: "text",
+      mime_type: "text/plain",
+      encoding: "utf-8",
+    }));
+    const pdf = defaultRendererRegistry.resolve(descriptor());
+
+    expect(markdown).toMatchObject({ default_presentation: "rendered" });
+    expect(markdown.rendered?.create_renderer).toBeTypeOf("function");
+    expect(markdown.editor?.create_renderer).toBeTypeOf("function");
+    expect(text).toMatchObject({ default_presentation: "editor" });
+    expect(text.rendered).toBeUndefined();
+    expect(text.editor?.create_renderer).toBeTypeOf("function");
+    expect(pdf).toMatchObject({ default_presentation: "rendered" });
+    expect(pdf.rendered?.create_renderer).toBeTypeOf("function");
+    expect(pdf.editor).toBeUndefined();
+  });
+
+  it("rejects source presentations without a retry factory", () => {
+    const invalidSource = {
+      ...renderer("markdown"),
+      source: { render: EmptyRenderer },
+    } as unknown as FileRendererDefinition;
+
+    expect(() => new RendererRegistry([
+      invalidSource,
+      renderer("unsupported"),
+    ])).toThrow(/markdown.*source.*create_renderer/i);
+  });
+
+  it("rejects duplicate renderer identifiers", () => {
+    expect(() => new RendererRegistry([
+      renderer("pdf"),
+      renderer("pdf"),
+      renderer("unsupported"),
+    ])).toThrow(/duplicate renderer_id.*pdf/i);
+  });
+});

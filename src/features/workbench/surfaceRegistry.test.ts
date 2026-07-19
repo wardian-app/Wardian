@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { SurfaceDefinition, WorkbenchSurfaceV1 } from "../../types";
 import { createSurfaceRegistry } from "./surfaceRegistry";
+import { makeSingleGroupDocument } from "./workbenchTestUtils";
 
 type TestState = { label: string };
 
@@ -52,6 +53,31 @@ describe("surface registry", () => {
 
     expect(registry.list().map((entry) => entry.type)).toEqual(["zeta", "alpha"]);
     expect(() => registry.register(definition("zeta"))).toThrow(/already registered/i);
+  });
+
+  it("synchronizes validated open presentations by registered surface type", () => {
+    const syncAlpha = vi.fn<(surfaces: readonly WorkbenchSurfaceV1[]) => void>();
+    const syncBeta = vi.fn<(surfaces: readonly WorkbenchSurfaceV1[]) => void>();
+    const registry = createSurfaceRegistry([
+      definition("alpha", { presentation_sync: syncAlpha }),
+      definition("beta", { presentation_sync: syncBeta }),
+    ]);
+    const alpha = surface("alpha-1", "alpha", "resource:alpha");
+    const invalidAlpha = { ...surface("alpha-invalid", "alpha"), state: null };
+    const beta = surface("beta-1", "beta");
+
+    registry.sync_presentations([alpha, invalidAlpha, beta]);
+
+    expect(syncAlpha).toHaveBeenCalledWith([alpha]);
+    expect(syncBeta).toHaveBeenCalledWith([beta]);
+    expect(Object.isFrozen(syncAlpha.mock.calls[0]![0])).toBe(true);
+    expect(registry.get("alpha")).not.toHaveProperty("presentation_sync");
+    expect(registry.require("alpha")).not.toHaveProperty("presentation_sync");
+    expect(registry.list()[0]).not.toHaveProperty("presentation_sync");
+
+    registry.sync_presentations([]);
+    expect(syncAlpha).toHaveBeenLastCalledWith([]);
+    expect(syncBeta).toHaveBeenLastCalledWith([]);
   });
 
   it("canonicalizes serialized state and enforces UTF-8 byte bounds", () => {
@@ -187,6 +213,10 @@ describe("surface registry", () => {
         commands: [command],
         badges: (entry) => [{ badge_id: "dirty", label: `Dirty ${entry.surface_id}` }],
       }),
+      definition("dynamic-icon", {
+        icon: "fallback-icon",
+        presentation_icon: (entry) => `icon-${entry.state_schema_version}`,
+      }),
     ]);
     const entry = surface("surface-7", "metadata");
 
@@ -196,29 +226,55 @@ describe("surface registry", () => {
       commands: [command],
       badges: [{ badge_id: "dirty", label: "Dirty surface-7" }],
     });
+    expect(registry.presentation(surface("surface-8", "dynamic-icon"))).toMatchObject({
+      icon: "icon-1",
+    });
+    expect(registry.require("metadata").icon).toBe("refresh");
+    expect(registry.require("dynamic-icon").icon).toBe("fallback-icon");
   });
 
-  it("awaits dirty close guards, fails closed, and keeps missing surfaces closeable", async () => {
-    const can_close = vi.fn<NonNullable<SurfaceDefinition<TestState>["can_close"]>>(
-      async (): Promise<"cancel"> => "cancel",
-    );
+  it("observes canonical dirty resources with exact presentation membership and generation", () => {
     const registry = createSurfaceRegistry([
-      definition("dirty", {
-        close_policy: "confirm_if_dirty",
-        can_close,
-      }),
-      definition("broken", {
-        close_policy: "confirm_if_dirty",
-        can_close: async () => {
-          throw new Error("save failed");
-        },
-      }),
+      definition("dirty", { close_policy: "confirm_if_dirty" }),
     ]);
+    let generation = 7;
+    registry.register_close_adapter("dirty", {
+      observe: (entry) => ({
+        resource_id: `dirty:${entry.resource_key}`,
+        resource_generation: generation,
+        dirty: true,
+      }),
+      prepare: async ({ resource }) => ({
+        ...resource,
+        choice: "discard",
+        discard: async () => undefined,
+      }),
+    });
+    const first = surface("first", "dirty", "resource:a");
+    const duplicate = surface("duplicate", "dirty", "resource:a");
+    const document = makeSingleGroupDocument([first, duplicate]);
 
-    await expect(registry.can_close(surface("dirty-1", "dirty"))).resolves.toBe("cancel");
-    expect(can_close).toHaveBeenCalledOnce();
-    await expect(registry.can_close(surface("broken-1", "broken"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("unknown-1", "unknown"))).resolves.toBe("allow");
+    expect(registry.observe_close_resources(document)).toEqual([{
+      resource_id: "dirty:resource:a",
+      resource_generation: 7,
+      presentation_ids: ["first", "duplicate"],
+    }]);
+    const revalidation = {
+      context: {
+        snapshot: document,
+        transaction_version: 1,
+        closing_surface_ids: ["first", "duplicate"],
+      },
+      resources: [{
+        resource_id: "dirty:resource:a",
+        resource_generation: 7,
+        presentation_ids: ["first", "duplicate"],
+      }],
+    };
+    expect(registry.revalidate_close_resources(document, revalidation)).toBe(true);
+
+    generation = 8;
+    expect(registry.revalidate_close_resources(document, revalidation)).toBe(false);
   });
 
   it("copies and freezes definitions, commands, and returned registration order", () => {
@@ -310,15 +366,6 @@ describe("surface registry", () => {
           }
           return [];
         },
-        close_policy: "confirm_if_dirty",
-        can_close: (entry) => {
-          try {
-            (entry.state as TestState).label = "mutated";
-          } catch {
-            mutationBlocked.push("close");
-          }
-          return "allow";
-        },
       }),
     ]);
     const request = { surface_type: "immutable", resource_key: "resource-1" };
@@ -332,7 +379,6 @@ describe("surface registry", () => {
     const resolved = registry.resolve_surface({ ...candidate, state });
     expect(resolved.restore_result).toEqual({ ok: true, state: { label: "original" } });
     registry.presentation({ ...candidate, state });
-    await expect(registry.can_close({ ...candidate, state })).resolves.toBe("allow");
 
     expect(request.resource_key).toBe("resource-1");
     expect(candidate.surface_id).toBe("surface-1");
@@ -340,50 +386,37 @@ describe("surface registry", () => {
     expect(mutationBlocked).toEqual([
       "request",
       "serialize",
+      "restore",
+      "serialize",
+      "request",
       "candidate",
       "serialize",
       "restore",
       "serialize",
+      "request",
       "restore",
       "serialize",
+      "request",
       "title",
       "badges",
-      "close",
     ]);
   });
 
-  it("enforces close_policy and validates guard results exactly", async () => {
-    const ignored = vi.fn(async (): Promise<"cancel"> => "cancel");
-    const registry = createSurfaceRegistry();
-    registry.register(definition("close-view", { close_policy: "close_view", can_close: ignored }));
-    registry.register(definition("missing-guard", { close_policy: "confirm_if_dirty" }));
-    registry.register(definition("allow", {
-      close_policy: "confirm_if_dirty",
-      can_close: async (): Promise<"allow"> => "allow",
-    }));
-    registry.register(definition("cancel", {
-      close_policy: "confirm_if_dirty",
-      can_close: async (): Promise<"cancel"> => "cancel",
-    }));
-    registry.register(definition("throws", {
-      close_policy: "confirm_if_dirty",
-      can_close: async () => { throw new Error("failed save"); },
-    }));
-    registry.register(definition("malformed", {
-      close_policy: "confirm_if_dirty",
-      can_close: (async () => "malformed") as unknown as NonNullable<
-        SurfaceDefinition<TestState>["can_close"]
-      >,
-    }));
+  it("allows close adapters only for registered confirm-if-dirty surfaces", () => {
+    const registry = createSurfaceRegistry([
+      definition("close-view"),
+      definition("dirty", { close_policy: "confirm_if_dirty" }),
+    ]);
+    const adapter = {
+      observe: () => ({ resource_id: "dirty:one", resource_generation: 1, dirty: false }),
+      prepare: async () => null,
+    };
 
-    await expect(registry.can_close(surface("one", "close-view"))).resolves.toBe("allow");
-    expect(ignored).not.toHaveBeenCalled();
-    await expect(registry.can_close(surface("two", "missing-guard"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("three", "allow"))).resolves.toBe("allow");
-    await expect(registry.can_close(surface("four", "cancel"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("five", "throws"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("six", "malformed"))).resolves.toBe("cancel");
-    await expect(registry.can_close(surface("seven", "unknown"))).resolves.toBe("allow");
+    expect(() => registry.register_close_adapter("missing", adapter)).toThrow(/not registered/i);
+    expect(() => registry.register_close_adapter("close-view", adapter))
+      .toThrow(/confirm_if_dirty/i);
+    registry.register_close_adapter("dirty", adapter);
+    expect(() => registry.register_close_adapter("dirty", adapter)).toThrow(/already/i);
   });
 
   it("turns malformed or unserializable restore results into safe failures", () => {
@@ -406,7 +439,61 @@ describe("surface registry", () => {
     }
   });
 
-  it("exposes only validated safe callback wrappers from list/get/require", async () => {
+  it("wraps transient callbacks with detached state and exact validated results", () => {
+    const mutationBlocked: string[] = [];
+    const registry = createSurfaceRegistry([
+      definition("transient", {
+        transient_state: {
+          is_transient: (state) => {
+            try {
+              state.label = "mutated";
+            } catch {
+              mutationBlocked.push("is_transient");
+            }
+            return true;
+          },
+          pin: (state) => {
+            try {
+              state.label = "mutated";
+            } catch {
+              mutationBlocked.push("pin");
+            }
+            return { label: "pinned" };
+          },
+        },
+      }),
+      definition("malformed-transient", {
+        transient_state: {
+          is_transient: (() => 1) as unknown as NonNullable<
+            SurfaceDefinition<TestState>["transient_state"]
+          >["is_transient"],
+          pin: () => ({ label: "pinned" }),
+        },
+      }),
+      definition("invalid-pin", {
+        restore_state: (value) => (value as TestState).label === "invalid"
+          ? { ok: false, error: "invalid pinned state" }
+          : { ok: true, state: value as TestState },
+        transient_state: {
+          is_transient: () => true,
+          pin: () => ({ label: "invalid" }),
+        },
+      }),
+    ]);
+    const original = { label: "original" };
+    const transient = registry.require("transient").transient_state!;
+
+    expect(transient.is_transient(original)).toBe(true);
+    expect(transient.pin(original)).toEqual({ label: "pinned" });
+    expect(original).toEqual({ label: "original" });
+    expect(mutationBlocked).toEqual(["is_transient", "pin"]);
+    expect(() => registry.require("malformed-transient").transient_state!
+      .is_transient(original)).toThrow(/boolean/i);
+    expect(() => registry.require("invalid-pin").transient_state!.pin(original))
+      .toThrow(/invalid pinned state/i);
+  });
+
+  it("exposes only validated safe callback wrappers from list/get/require", () => {
     const serialize = vi.fn((state: TestState) => state);
     const restore = vi.fn((value: unknown) => ({ ok: true as const, state: value as TestState }));
     const resource = vi.fn((request: { resource_key?: string }) => request.resource_key);
@@ -417,7 +504,6 @@ describe("surface registry", () => {
         serialize_state: serialize,
         restore_state: restore,
         resource_key: resource,
-        can_close: async (): Promise<"allow"> => "allow",
       }),
     ]);
     const exposed = registry.require("wrapped");
@@ -433,10 +519,6 @@ describe("surface registry", () => {
       surface_type: "wrapped",
       resource_key: "resource-1",
     })).toBe("resource-1");
-    await expect(exposed.can_close?.({
-      ...surface("surface-1", "wrapped"),
-      state: { label: "ok" },
-    })).resolves.toBe("allow");
   });
 
   it("rejects noncanonical/oversize persisted state before restore and validates policy enums", () => {

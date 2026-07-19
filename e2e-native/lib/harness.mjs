@@ -655,3 +655,117 @@ export async function waitForAppShell(driver, timeoutMs = 15000) {
     throw new Error(`${formatAppShellTimeoutMessage({ timeoutMs, ...diagnostics })}\n${error}`);
   }
 }
+
+/**
+ * Invokes a Tauri command through the native WebView without converting a
+ * structured backend rejection into the unhelpful string "[object Object]".
+ */
+export async function invokeTauriResult(driver, command, args = {}) {
+  return driver.executeAsyncScript((commandName, payload, done) => {
+    window.__TAURI_INTERNALS__.invoke(commandName, payload).then(
+      (value) => done({ ok: true, value }),
+      (error) => done({
+        ok: false,
+        error: error && typeof error === "object"
+          ? error
+          : { message: String(error) },
+      }),
+    );
+  }, command, args);
+}
+
+/** Invoke a Tauri command through the native WebView and fail on rejection. */
+export async function invokeTauri(driver, command, args = {}) {
+  const result = await invokeTauriResult(driver, command, args);
+  if (!result?.ok) {
+    const detail = result?.error?.message ?? JSON.stringify(result?.error ?? null);
+    throw new Error(`${command} failed: ${detail}`);
+  }
+  return result.value;
+}
+
+/**
+ * Starts a native Tauri event capture owned by the current WebView. The caller
+ * must release it with `stopTauriEventCapture` before closing the session.
+ */
+export async function startTauriEventCapture(driver, eventName) {
+  const captureId = `native-event-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const result = await driver.executeAsyncScript((name, id, done) => {
+    const captures = window.__WARDIAN_NATIVE_EVENT_CAPTURES__ ??= {};
+    const capture = { events: [], callbackId: null, eventId: null };
+    captures[id] = capture;
+    capture.callbackId = window.__TAURI_INTERNALS__.transformCallback((event) => {
+      capture.events.push(event?.payload ?? event);
+    });
+    window.__TAURI_INTERNALS__.invoke("plugin:event|listen", {
+      event: name,
+      target: { kind: "Any" },
+      handler: capture.callbackId,
+    }).then(
+      (eventId) => {
+        capture.eventId = eventId;
+        done({ ok: true });
+      },
+      (error) => {
+        delete captures[id];
+        done({ ok: false, error: String(error) });
+      },
+    );
+  }, eventName, captureId);
+  if (!result?.ok) {
+    throw new Error(`Failed to listen for ${eventName}: ${result?.error}`);
+  }
+  return { captureId, eventName };
+}
+
+/** Returns the payloads observed by a native event capture. */
+export async function readTauriEventCapture(driver, capture) {
+  return driver.executeScript((id) => (
+    window.__WARDIAN_NATIVE_EVENT_CAPTURES__?.[id]?.events ?? []
+  ), capture.captureId);
+}
+
+/** Waits until a matching payload is observed without mocking the event bus. */
+export async function waitForTauriEvent(
+  driver,
+  capture,
+  predicate,
+  timeoutMs = 10_000,
+) {
+  const startedAt = Date.now();
+  let events = [];
+  while (Date.now() - startedAt < timeoutMs) {
+    events = await readTauriEventCapture(driver, capture);
+    const match = events.find(predicate);
+    if (match) return match;
+    await sleep(25);
+  }
+  throw new Error(
+    `Timed out waiting for ${capture.eventName}. Observed: ${JSON.stringify(events)}`,
+  );
+}
+
+/** Releases a native event capture and its WebView callback. */
+export async function stopTauriEventCapture(driver, capture) {
+  const result = await driver.executeAsyncScript((name, id, done) => {
+    const captures = window.__WARDIAN_NATIVE_EVENT_CAPTURES__;
+    const current = captures?.[id];
+    if (!current) {
+      done({ ok: true });
+      return;
+    }
+    const finish = () => {
+      window.__TAURI_INTERNALS__.unregisterCallback(current.callbackId);
+      delete captures[id];
+      done({ ok: true });
+    };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener(name, current.eventId);
+    window.__TAURI_INTERNALS__.invoke("plugin:event|unlisten", {
+      event: name,
+      eventId: current.eventId,
+    }).then(finish, (error) => done({ ok: false, error: String(error) }));
+  }, capture.eventName, capture.captureId);
+  if (!result?.ok) {
+    throw new Error(`Failed to unlisten from ${capture.eventName}: ${result?.error}`);
+  }
+}

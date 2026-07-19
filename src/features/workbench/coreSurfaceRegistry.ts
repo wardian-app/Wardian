@@ -1,5 +1,7 @@
 import type {
   AgentsOverviewSurfaceState,
+  FileResourceKey,
+  FilesSurfaceStateV2,
   OpenSurfaceRequest,
   SurfaceDefinition,
   SurfaceClosePolicy,
@@ -10,14 +12,30 @@ import type {
 } from "../../types";
 import { useBuilderStore } from "../../store/useBuilderStore";
 import { useLibraryStore } from "../../store/useLibraryStore";
-import { createSurfaceRegistry, type WorkbenchSurfaceRegistry } from "./surfaceRegistry";
+import {
+  filesPresentationBadges,
+  filesPresentationIcon,
+  filesPresentationTitle,
+  useFilesPresentationStore,
+} from "../files/filesPresentationStore";
+import { decodeFileResourceKey } from "../files/fileResourceKey";
+import {
+  isFilesSurfaceStateV1,
+  isFilesSurfaceStateV2,
+  restoreFilesSurfaceState,
+} from "../files/filesSurfaceState";
+import {
+  createSurfaceRegistry,
+  type SurfaceCloseResourceAdapter,
+  type WorkbenchSurfaceRegistry,
+} from "./surfaceRegistry";
 import {
   CORE_VIEW_SURFACE_DEFINITIONS,
   CORE_VIEW_SURFACE_MAX_STATE_BYTES,
 } from "./surfaces/coreSurfaceMetadata";
 import {
-  createLibrarySurfaceCloseGuard,
-  createWorkflowsSurfaceCloseGuard,
+  createLibrarySurfaceCloseAdapter,
+  createWorkflowsSurfaceCloseAdapter,
   type DirtySurfacePrompt,
 } from "./surfaces/dirtySurfaceGuards";
 
@@ -41,7 +59,7 @@ export const CORE_SURFACE_CONTRIBUTIONS: readonly CoreSurfaceContribution[] = Ob
   { surface_type: "library", title: "Library", description: "Browse reusable assets.", group: "Core views" },
   { surface_type: "workflows", title: "Workflows", description: "Build and monitor workflows.", group: "Core views" },
   { surface_type: "agent-session", title: "Agent Session", description: "Open a specific agent session.", group: "Sessions", requires_resource: true },
-  { surface_type: "file-editor", title: "File Editor", description: "Reserved for a future editor contribution.", group: "Reserved", reserved: true },
+  { surface_type: "files", title: "Files", description: "Inspect files and agent artifacts.", group: "Reserved", reserved: true, requires_resource: true },
   { surface_type: "browser", title: "Browser", description: "Reserved for a future browser contribution.", group: "Reserved", reserved: true },
 ]);
 
@@ -52,28 +70,40 @@ type DefinitionOptions = {
   open_policy: SurfaceOpenPolicy;
   runtime_policy?: SurfaceRuntimePolicy;
   close_policy?: SurfaceClosePolicy;
+  state_schema_version?: number;
   max_state_bytes?: number;
   default_state?: () => unknown;
+  presentation_title?: (surface: WorkbenchSurfaceV1) => string;
+  presentation_icon?: (surface: WorkbenchSurfaceV1) => string;
+  presentation_subscribe?: (listener: () => void) => () => void;
+  presentation_sync?: (surfaces: readonly WorkbenchSurfaceV1[]) => void;
   resource_key?: (request: OpenSurfaceRequest) => string | undefined;
-  can_close?: SurfaceDefinition["can_close"];
   commands?: SurfaceDefinition["commands"];
   badges?: SurfaceDefinition["badges"];
   serialize_state?: SurfaceDefinition["serialize_state"];
   restore_state?: SurfaceDefinition["restore_state"];
+  transient_state?: SurfaceDefinition["transient_state"];
 };
 
 function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
   return {
     type: options.type,
-    title: (surface: WorkbenchSurfaceV1) => options.type === "agent-session" && surface.resource_key
-      ? `${options.title}: ${surface.resource_key}`
-      : options.title,
+    title: options.presentation_title ?? ((surface: WorkbenchSurfaceV1) => (
+      options.type === "agent-session" && surface.resource_key
+        ? `${options.title}: ${surface.resource_key}`
+        : options.title
+    )),
     icon: options.type,
+    ...(options.presentation_icon ? { presentation_icon: options.presentation_icon } : {}),
+    ...(options.presentation_subscribe
+      ? { presentation_subscribe: options.presentation_subscribe }
+      : {}),
+    ...(options.presentation_sync ? { presentation_sync: options.presentation_sync } : {}),
     render_policy: options.render_policy,
     open_policy: options.open_policy,
     runtime_policy: options.runtime_policy ?? "view_only",
     close_policy: options.close_policy ?? "close_view",
-    state_schema_version: 1,
+    state_schema_version: options.state_schema_version ?? 1,
     max_state_bytes: options.max_state_bytes ?? 64 * 1024,
     ...(options.resource_key ? { resource_key: options.resource_key } : {}),
     default_state: options.default_state ?? (() => ({})),
@@ -81,7 +111,7 @@ function surfaceDefinition(options: DefinitionOptions): SurfaceDefinition {
     restore_state: options.restore_state ?? ((value, version) => version === 1
       ? { ok: true, state: value }
       : { ok: false, error: `unsupported ${options.type} state version ${version}` }),
-    ...(options.can_close ? { can_close: options.can_close } : {}),
+    ...(options.transient_state ? { transient_state: options.transient_state } : {}),
     commands: options.commands ?? [],
     ...(options.badges ? { badges: options.badges } : {}),
   };
@@ -97,9 +127,14 @@ function dirtySurfaceCommand(type: "library" | "workflows", title: string) {
 
 export type CoreWorkbenchSurfaceRegistryOptions = {
   dirty_surface_prompt?: DirtySurfacePrompt;
+  files_close_adapter?: SurfaceCloseResourceAdapter;
 };
 
 const failClosedDirtyPrompt: DirtySurfacePrompt = () => "cancel";
+const inertFilesCloseAdapter: SurfaceCloseResourceAdapter = {
+  observe: () => null,
+  prepare: async () => null,
+};
 
 const DEFAULT_AGENTS_OVERVIEW_STATE: AgentsOverviewSurfaceState = {
   mode: "auto",
@@ -108,6 +143,38 @@ const DEFAULT_AGENTS_OVERVIEW_STATE: AgentsOverviewSurfaceState = {
   search_query: "",
   status_filter: [],
 };
+
+const DEFAULT_FILES_SURFACE_STATE: FilesSurfaceStateV2 = {
+  resource_kind: "file",
+  transient_preview: false,
+  presentation: "rendered",
+  comparison_open: false,
+  comparison_layout_preference: "auto",
+  comparison_baseline: null,
+  review_drawer_open: false,
+  selected_version_id: null,
+  optional_checkpoint_id: null,
+};
+
+function filesResourceKey(request: OpenSurfaceRequest): FileResourceKey {
+  const decoded = decodeFileResourceKey(request.resource_key ?? "");
+  const expectedKind = decoded.resource_kind;
+  if (request.state !== undefined) {
+    const version = isFilesSurfaceStateV2(request.state)
+      ? 2
+      : isFilesSurfaceStateV1(request.state)
+        ? 1
+        : 2;
+    const restored = restoreFilesSurfaceState(request.state, version);
+    if (!restored.ok) throw new Error(restored.error);
+    if (restored.state.resource_kind !== expectedKind) {
+      throw new Error(`Files ${expectedKind}: resource requires ${expectedKind} state`);
+    }
+  } else if (expectedKind === "artifact") {
+    throw new Error("Files artifact: resources require artifact state");
+  }
+  return decoded.resource_key;
+}
 
 function restoreAgentsOverviewState(value: unknown, version: number) {
   if (version !== 1) {
@@ -150,9 +217,7 @@ function restoreEmptySurfaceState(type: string, value: unknown, version: number)
   return { ok: true as const, state: {} };
 }
 
-function coreSurfaceDefinitions(
-  dirtySurfacePrompt: DirtySurfacePrompt,
-): readonly SurfaceDefinition[] {
+function coreSurfaceDefinitions(): readonly SurfaceDefinition[] {
   return [
     surfaceDefinition({
       type: "new-tab",
@@ -178,7 +243,6 @@ function coreSurfaceDefinitions(
       open_policy: "singleton",
       close_policy: "confirm_if_dirty",
       max_state_bytes: CORE_VIEW_SURFACE_MAX_STATE_BYTES,
-      can_close: createLibrarySurfaceCloseGuard(dirtySurfacePrompt),
       commands: [dirtySurfaceCommand("library", "Library")],
       badges: (surface) => useLibraryStore.getState().isEditorSurfaceDirty(surface.surface_id)
         ? [{ badge_id: "dirty", label: "Unsaved changes" }]
@@ -193,7 +257,6 @@ function coreSurfaceDefinitions(
       open_policy: "singleton",
       close_policy: "confirm_if_dirty",
       max_state_bytes: CORE_VIEW_SURFACE_MAX_STATE_BYTES,
-      can_close: createWorkflowsSurfaceCloseGuard(dirtySurfacePrompt),
       commands: [dirtySurfaceCommand("workflows", "Workflows")],
       badges: () => useBuilderStore.getState().dirty
         ? [{ badge_id: "dirty", label: "Unsaved changes" }]
@@ -213,13 +276,66 @@ function coreSurfaceDefinitions(
         return resourceKey;
       },
     }),
+    surfaceDefinition({
+      type: "files",
+      title: "Files",
+      render_policy: "suspend_when_hidden",
+      open_policy: "focus_resource",
+      runtime_policy: "view_only",
+      close_policy: "confirm_if_dirty",
+      state_schema_version: 2,
+      default_state: (): FilesSurfaceStateV2 => ({ ...DEFAULT_FILES_SURFACE_STATE }),
+      resource_key: filesResourceKey,
+      presentation_title: (surface) => filesPresentationTitle(
+        surface.surface_id,
+        surface.resource_key,
+      ),
+      presentation_icon: (surface) => filesPresentationIcon(
+        surface.surface_id,
+        surface.resource_key,
+      ),
+      presentation_subscribe: (listener) => useFilesPresentationStore.subscribe(listener),
+      presentation_sync: (surfaces) => {
+        useFilesPresentationStore.getState().syncPresentations(surfaces);
+      },
+      badges: (surface) => filesPresentationBadges(
+        surface.surface_id,
+        surface.resource_key,
+      ),
+      serialize_state: (state) => {
+        const restored = restoreFilesSurfaceState(
+          state,
+          isFilesSurfaceStateV1(state) ? 1 : 2,
+        );
+        if (!restored.ok) throw new Error(restored.error);
+        return restored.state;
+      },
+      restore_state: restoreFilesSurfaceState,
+      transient_state: {
+        is_transient: (state) => (
+          restoreFilesSurfaceState(state, 2).ok
+          && (state as FilesSurfaceStateV2).transient_preview
+        ),
+        pin: (state) => {
+          const restored = restoreFilesSurfaceState(state, 2);
+          if (!restored.ok) throw new Error(restored.error);
+          return { ...restored.state, transient_preview: false };
+        },
+      },
+    }),
   ];
 }
 
 export function createCoreWorkbenchSurfaceRegistry(
   options: CoreWorkbenchSurfaceRegistryOptions = {},
 ): WorkbenchSurfaceRegistry {
-  return createSurfaceRegistry(coreSurfaceDefinitions(
-    options.dirty_surface_prompt ?? failClosedDirtyPrompt,
-  ));
+  const prompt = options.dirty_surface_prompt ?? failClosedDirtyPrompt;
+  const registry = createSurfaceRegistry(coreSurfaceDefinitions());
+  registry.register_close_adapter("library", createLibrarySurfaceCloseAdapter(prompt));
+  registry.register_close_adapter("workflows", createWorkflowsSurfaceCloseAdapter(prompt));
+  registry.register_close_adapter(
+    "files",
+    options.files_close_adapter ?? inertFilesCloseAdapter,
+  );
+  return registry;
 }

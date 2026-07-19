@@ -2,11 +2,16 @@ import type {
   CloseDecision,
   OpenSurfaceRequest,
   WorkbenchNodeV1,
+  WorkbenchPresentationProvenanceV1,
   WorkbenchSurfaceV1,
 } from "../../types";
 import type { WorkbenchCommand } from "./workbenchModel";
 import type { WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import type { WorkbenchStore } from "./useWorkbenchStore";
+import {
+  coordinateSurfaceClose,
+  type SurfaceCloseContext,
+} from "./closeTransactionCoordinator";
 
 export type WorkbenchIdKind = "surface" | "group" | "node";
 
@@ -24,6 +29,12 @@ export type WorkbenchNavigationOptions = {
 
 export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
+  /** Opens or refreshes a resource without changing the active surface or pane. */
+  open_background(request: OpenSurfaceRequest): string;
+  /** Opens one replaceable preview in the target group without disturbing other groups. */
+  open_transient(request: OpenSurfaceRequest): string;
+  /** Converts a replaceable preview into a permanent surface in place. */
+  pin_transient(surface_id: string): void;
   /** Converts an inline New Tab in place, or discards it before focusing a matching singleton. */
   open_from_placeholder(surface_id: string, request: OpenSurfaceRequest): string;
   /** Atomically consumes an inline New Tab before reopening the latest closed surface. */
@@ -33,12 +44,21 @@ export interface WorkbenchNavigationService {
     direction?: "horizontal" | "vertical",
   ): string | null;
   focus(surface_id: string): void;
+  /** Converges a provisional resource key after the backend returns canonical identity. */
+  canonicalize_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   rebind_resource(surface_id: string, request: OpenSurfaceRequest): Promise<CloseDecision>;
   reset_surface(surface_id: string): Promise<CloseDecision>;
   close(surface_id: string): Promise<CloseDecision>;
   close_group(group_id: string): Promise<CloseDecision>;
   reset_workbench(): Promise<CloseDecision>;
 }
+
+type CoordinatedCloseResult = {
+  decision: CloseDecision;
+  stale_before_effects: boolean;
+  stale_commit: boolean;
+};
+const MAX_CANONICALIZE_ATTEMPTS = 8;
 
 function defaultCreateId(kind: WorkbenchIdKind): string {
   return `${kind}-${globalThis.crypto.randomUUID()}`;
@@ -58,11 +78,99 @@ function commandFailure(errors: readonly { path: string; message: string }[]): E
   );
 }
 
+function withoutPresentationProvenance(
+  surface: WorkbenchSurfaceV1,
+): WorkbenchSurfaceV1 {
+  const { presentation_provenance: _presentationProvenance, ...replacement } = surface;
+  return replacement;
+}
+
+function duplicateProvenance(
+  surface: WorkbenchSurfaceV1 | undefined,
+): WorkbenchPresentationProvenanceV1 | undefined {
+  const provenance = surface?.presentation_provenance;
+  return provenance?.kind === "explicit_duplicate" ? provenance : undefined;
+}
+
 export function createWorkbenchNavigationService(
   options: WorkbenchNavigationOptions,
 ): WorkbenchNavigationService {
   const { registry, store } = options;
   const createId = options.create_id ?? defaultCreateId;
+
+  const provenanceDetachCommands = (
+    document: ReturnType<WorkbenchStore["getState"]>["document"],
+    affectedSurfaceIds: ReadonlySet<string>,
+    replacedOrRemovedSurfaceIds: ReadonlySet<string> = new Set(),
+  ): WorkbenchCommand[] => Object.values(document.surfaces).flatMap((surface) => {
+    if (replacedOrRemovedSurfaceIds.has(surface.surface_id)) return [];
+    const provenance = duplicateProvenance(surface);
+    if (
+      !provenance
+      || (
+        !affectedSurfaceIds.has(surface.surface_id)
+        && (
+          provenance.partner_surface_id === null
+          || !affectedSurfaceIds.has(provenance.partner_surface_id)
+        )
+      )
+    ) return [];
+    return [{
+      type: "replace_surface" as const,
+      surface: withoutPresentationProvenance(surface),
+    }];
+  });
+
+  const projectedCanonicalSurfaces = (
+    document: ReturnType<WorkbenchStore["getState"]>["document"],
+    commands: readonly WorkbenchCommand[],
+  ): Map<string, WorkbenchSurfaceV1> => {
+    const projected = new Map(
+      Object.values(document.surfaces).map((surface) => [surface.surface_id, surface]),
+    );
+    for (const command of commands) {
+      if (command.type === "replace_surface" || command.type === "open_surface") {
+        projected.set(command.surface.surface_id, command.surface);
+      } else if (
+        command.type === "discard_surface"
+        || command.type === "close_surface"
+      ) {
+        projected.delete(command.surface_id);
+      }
+    }
+    return projected;
+  };
+
+  const settledProvenanceCleanupCommands = (
+    document: ReturnType<WorkbenchStore["getState"]>["document"],
+    commands: readonly WorkbenchCommand[],
+    relatedSurfaceId: string,
+  ): WorkbenchCommand[] => {
+    const projected = projectedCanonicalSurfaces(document, commands);
+    return [...projected.values()].flatMap((surface) => {
+      const provenance = duplicateProvenance(surface);
+      if (
+        !provenance
+        || (
+          surface.surface_id !== relatedSurfaceId
+          && provenance.partner_surface_id !== relatedSurfaceId
+        )
+      ) return [];
+      const duplicate = projected.get(provenance.duplicate_surface_id);
+      const partner = provenance.partner_surface_id === null
+        ? undefined
+        : projected.get(provenance.partner_surface_id);
+      const duplicateIsProvisional = duplicate?.resource_key
+        === provenance.provisional_resource_key;
+      const partnerIsProvisional = partner?.resource_key
+        === provenance.provisional_resource_key;
+      if (duplicate && partner && duplicateIsProvisional !== partnerIsProvisional) return [];
+      return [{
+        type: "replace_surface" as const,
+        surface: withoutPresentationProvenance(surface),
+      }];
+    });
+  };
 
   const apply = (commands: readonly WorkbenchCommand[]): void => {
     const result = store.getState().apply_commands(commands);
@@ -87,42 +195,84 @@ export function createWorkbenchNavigationService(
     };
   };
 
-  const guardSurfaces = async (
-    snapshot: ReturnType<WorkbenchStore["getState"]>["document"],
-    expectedTransactionVersion: number,
-    surfaceIds: readonly string[],
-  ): Promise<CloseDecision> => {
-    for (const surfaceId of surfaceIds) {
-      if (store.getState().transaction_version !== expectedTransactionVersion) return "cancel";
-      const surface = snapshot.surfaces[surfaceId];
-      if (!surface) return "cancel";
-      if (await registry.can_close(surface) === "cancel") return "cancel";
-      if (store.getState().transaction_version !== expectedTransactionVersion) return "cancel";
+  const transientStatus = (surface: WorkbenchSurfaceV1): boolean | undefined => {
+    const resolved = registry.resolve_surface(surface);
+    if (!resolved.restore_result.ok || !resolved.definition.transient_state) return undefined;
+    try {
+      return resolved.definition.transient_state.is_transient(
+        resolved.restore_result.state,
+      ) === true;
+    } catch {
+      return undefined;
     }
-    return "allow";
   };
 
-  const closeResult = (
-    result: ReturnType<ReturnType<WorkbenchStore["getState"]>["compare_and_apply_commands"]>,
-  ): CloseDecision => {
-    if (result.accepted) return "allow";
-    if (result.stale) return "cancel";
-    throw commandFailure(result.errors);
+  const orderedSurfaces = (
+    state: ReturnType<WorkbenchStore["getState"]>,
+  ): WorkbenchSurfaceV1[] => {
+    const candidates = state.surface_mru
+      .map((surfaceId) => state.document.surfaces[surfaceId])
+      .filter((surface): surface is WorkbenchSurfaceV1 => surface !== undefined);
+    for (const surface of Object.values(state.document.surfaces)) {
+      if (!candidates.some((candidate) => candidate.surface_id === surface.surface_id)) {
+        candidates.push(surface);
+      }
+    }
+    return candidates;
+  };
+
+  const coordinateClose = async (
+    snapshotState: ReturnType<WorkbenchStore["getState"]>,
+    closingSurfaceIds: readonly string[],
+    commitLayout: (context: SurfaceCloseContext) => boolean | Promise<boolean>,
+  ): Promise<CoordinatedCloseResult> => {
+    const resources = registry.observe_close_resources(
+      snapshotState.document,
+      closingSurfaceIds,
+    );
+    if (resources === null) {
+      return { decision: "cancel", stale_before_effects: false, stale_commit: false };
+    }
+    let staleBeforeEffects = false;
+    let staleCommit = false;
+    const decision = await coordinateSurfaceClose({
+      context: {
+        snapshot: snapshotState.document,
+        transaction_version: snapshotState.transaction_version,
+        closing_surface_ids: closingSurfaceIds,
+      },
+      resources,
+      prepare_resource: (request) => registry.prepare_close_resource(request),
+      revalidate: (request) => {
+        const liveState = store.getState();
+        if (liveState.transaction_version !== request.context.transaction_version) {
+          staleBeforeEffects = true;
+          return false;
+        }
+        const valid = registry.revalidate_close_resources(liveState.document, request);
+        if (!valid) staleBeforeEffects = true;
+        return valid;
+      },
+      commit_layout: async (context) => {
+        const accepted = await commitLayout(context);
+        if (!accepted && store.getState().transaction_version !== context.transaction_version) {
+          staleCommit = true;
+        }
+        return accepted;
+      },
+    });
+    return {
+      decision,
+      stale_before_effects: staleBeforeEffects,
+      stale_commit: staleCommit,
+    };
   };
 
   return {
     open: (request) => {
       const definition = registry.require(request.surface_type);
       const state = store.getState();
-      const document = state.document;
-      const candidates = state.surface_mru
-        .map((surfaceId) => document.surfaces[surfaceId])
-        .filter((surface): surface is WorkbenchSurfaceV1 => surface !== undefined);
-      for (const surface of Object.values(document.surfaces)) {
-        if (!candidates.some((candidate) => candidate.surface_id === surface.surface_id)) {
-          candidates.push(surface);
-        }
-      }
+      const candidates = orderedSurfaces(state);
       const existingId = registry.resolve_existing(
         definition.open_policy === "singleton"
           ? { ...request, duplicate: false }
@@ -142,6 +292,111 @@ export function createWorkbenchNavigationService(
         ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
       }]);
       return surfaceId;
+    },
+
+    open_background: (request) => {
+      const definition = registry.require(request.surface_type);
+      const state = store.getState();
+      const existingId = registry.resolve_existing(
+        definition.open_policy === "singleton"
+          ? { ...request, duplicate: false }
+          : request,
+        orderedSurfaces(state),
+      );
+      if (existingId) {
+        if (request.state !== undefined) {
+          const replacement = createSurface(request, existingId);
+          apply([{ type: "replace_surface", surface: replacement }]);
+        }
+        return existingId;
+      }
+
+      const surfaceId = createId("surface");
+      const surface = createSurface(request, surfaceId);
+      apply([{
+        type: "open_surface",
+        surface,
+        activate: false,
+        ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
+      }]);
+      return surfaceId;
+    },
+
+    open_transient: (request) => {
+      const definition = registry.require(request.surface_type);
+      if (!definition.transient_state) {
+        throw new Error(`surface type ${request.surface_type} does not support transient previews`);
+      }
+      const state = store.getState();
+      const document = state.document;
+      const targetGroupId = request.group_id ?? document.active_group_id;
+      const targetGroup = document.groups[targetGroupId];
+      if (!targetGroup) throw new Error(`group ${targetGroupId} does not exist`);
+
+      const permanentCandidates = orderedSurfaces(state).filter((surface) => (
+        surface.surface_type === definition.type && transientStatus(surface) === false
+      ));
+      const existingPermanent = registry.resolve_existing(
+        { ...request, duplicate: false },
+        permanentCandidates,
+      );
+      if (existingPermanent) {
+        apply([{ type: "focus_surface", surface_id: existingPermanent }]);
+        return existingPermanent;
+      }
+
+      const targetSurfaceIds = [
+        ...(targetGroup.active_surface_id ? [targetGroup.active_surface_id] : []),
+        ...[...targetGroup.surface_ids].reverse().filter(
+          (surfaceId) => surfaceId !== targetGroup.active_surface_id,
+        ),
+      ];
+      const replaceId = targetSurfaceIds.find((surfaceId) => {
+        const surface = document.surfaces[surfaceId];
+        return surface?.surface_type === definition.type && transientStatus(surface) === true;
+      });
+      if (replaceId) {
+        const replacement = createSurface(request, replaceId);
+        if (transientStatus(replacement) !== true) {
+          throw new Error("open_transient requires transient surface state");
+        }
+        apply([
+          { type: "replace_surface", surface: replacement },
+          { type: "focus_surface", surface_id: replaceId },
+        ]);
+        return replaceId;
+      }
+
+      const surfaceId = createId("surface");
+      const surface = createSurface(request, surfaceId);
+      if (transientStatus(surface) !== true) {
+        throw new Error("open_transient requires transient surface state");
+      }
+      apply([{ type: "open_surface", surface, group_id: targetGroupId }]);
+      return surfaceId;
+    },
+
+    pin_transient: (surfaceId) => {
+      const surface = store.getState().document.surfaces[surfaceId];
+      if (!surface) throw new Error(`surface ${surfaceId} does not exist`);
+      const resolved = registry.resolve_surface(surface);
+      if (!resolved.restore_result.ok) {
+        throw new Error(`surface ${surfaceId} has invalid state: ${resolved.restore_result.error}`);
+      }
+      const transientState = resolved.definition.transient_state;
+      if (!transientState) {
+        throw new Error(`surface type ${surface.surface_type} does not support transient previews`);
+      }
+      if (!transientState.is_transient(resolved.restore_result.state)) return;
+      const serialized = registry.serialize_state(
+        surface.surface_type,
+        transientState.pin(resolved.restore_result.state),
+      );
+      apply([{
+        type: "update_surface_state",
+        surface_id: surfaceId,
+        ...serialized,
+      }]);
     },
 
     open_from_placeholder: (surfaceId, request) => {
@@ -194,19 +449,20 @@ export function createWorkbenchNavigationService(
     open_to_side: (request, direction = "horizontal") => {
       const definition = registry.require(request.surface_type);
       const document = store.getState().document;
-      if (definition.open_policy === "singleton") {
-        const existingId = registry.resolve_existing(
-          { ...request, duplicate: false },
-          Object.values(document.surfaces),
-        );
-        if (existingId) {
-          apply([{ type: "focus_surface", surface_id: existingId }]);
-          return existingId;
-        }
-      }
       const sourceGroupId = request.group_id ?? document.active_group_id;
-      if (!(sourceGroupId in document.groups)) {
+      const sourceGroup = document.groups[sourceGroupId];
+      if (!sourceGroup) {
         throw new Error(`group ${sourceGroupId} does not exist`);
+      }
+      const duplicatePartnerId = registry.resolve_existing(
+        { ...request, duplicate: false },
+        Object.values(document.surfaces),
+      );
+      if (definition.open_policy === "singleton") {
+        if (duplicatePartnerId) {
+          apply([{ type: "focus_surface", surface_id: duplicatePartnerId }]);
+          return duplicatePartnerId;
+        }
       }
       if (options.can_split_group && !options.can_split_group(sourceGroupId, direction)) {
         return null;
@@ -214,7 +470,27 @@ export function createWorkbenchNavigationService(
       const groupId = createId("group");
       const nodeId = createId("node");
       const surfaceId = createId("surface");
-      const surface = createSurface({ ...request, duplicate: true }, surfaceId);
+      const createdSurface = createSurface({ ...request, duplicate: true }, surfaceId);
+      const activePartner = sourceGroup.active_surface_id
+        ? document.surfaces[sourceGroup.active_surface_id]
+        : undefined;
+      const partnerSurfaceId = duplicatePartnerId
+        ?? (
+          activePartner?.surface_type === createdSurface.surface_type
+            ? activePartner.surface_id
+            : null
+        );
+      const surface = createdSurface.resource_key === undefined
+        ? createdSurface
+        : {
+            ...createdSurface,
+            presentation_provenance: {
+              kind: "explicit_duplicate" as const,
+              duplicate_surface_id: surfaceId,
+              partner_surface_id: partnerSurfaceId,
+              provisional_resource_key: createdSurface.resource_key,
+            },
+          };
       apply([
         {
           type: "split_group",
@@ -231,6 +507,129 @@ export function createWorkbenchNavigationService(
 
     focus: (surfaceId) => apply([{ type: "focus_surface", surface_id: surfaceId }]),
 
+    canonicalize_resource: async (surfaceId, request) => {
+      registry.require(request.surface_type);
+      for (let attempt = 0; attempt < MAX_CANONICALIZE_ATTEMPTS; attempt += 1) {
+        const snapshotState = store.getState();
+        const snapshot = snapshotState.document;
+        const source = snapshot.surfaces[surfaceId];
+        let canonicalRequest = request;
+        if (source) {
+          // Canonical convergence changes identity only. Preserve the exact validated
+          // persisted payload so CAS retries cannot replay render-captured state.
+          if (source.surface_type !== request.surface_type) return "cancel";
+          const resolvedSource = registry.resolve_surface(source);
+          if (resolvedSource.missing_surface_type || !resolvedSource.restore_result.ok) {
+            return "cancel";
+          }
+          canonicalRequest = { ...request, state: source.state };
+        }
+        const candidates = orderedSurfaces(snapshotState).filter(
+          (candidate) => candidate.surface_id !== surfaceId,
+        );
+        const existingId = registry.resolve_existing(
+          { ...canonicalRequest, duplicate: false },
+          candidates,
+        );
+
+        if (!source) {
+          const commands = provenanceDetachCommands(snapshot, new Set([surfaceId]));
+          if (existingId) commands.push({ type: "focus_surface", surface_id: existingId });
+          if (commands.length === 0) return "allow";
+          const focusResult = store.getState().compare_and_apply_commands(
+            snapshotState.transaction_version,
+            commands,
+          );
+          if (focusResult.accepted) return "allow";
+          if (focusResult.stale) continue;
+          throw commandFailure(focusResult.errors);
+        }
+
+        const sourceProvenance = duplicateProvenance(source);
+        const canonicalResourceKey = registry.resource_key(canonicalRequest);
+        const { resource_key: _sourceResourceKey, ...sourceWithoutResourceKey } = source;
+        const replacement: WorkbenchSurfaceV1 = canonicalResourceKey === undefined
+          ? sourceWithoutResourceKey
+          : { ...sourceWithoutResourceKey, resource_key: canonicalResourceKey };
+        if (replacement.resource_key === source.resource_key) {
+          const cleanupCommands = settledProvenanceCleanupCommands(snapshot, [], surfaceId);
+          if (cleanupCommands.length === 0) return "allow";
+          const cleanupResult = store.getState().compare_and_apply_commands(
+            snapshotState.transaction_version,
+            cleanupCommands,
+          );
+          if (cleanupResult.accepted) return "allow";
+          if (cleanupResult.stale) continue;
+          throw commandFailure(cleanupResult.errors);
+        }
+
+        const existingProvenance = existingId
+          ? duplicateProvenance(snapshot.surfaces[existingId])
+          : undefined;
+        const completesExplicitDuplicate = existingProvenance !== undefined
+          && existingProvenance.partner_surface_id === surfaceId
+          && existingProvenance.provisional_resource_key === source.resource_key;
+        const preserveExplicitDuplicate = sourceProvenance !== undefined
+          || completesExplicitDuplicate;
+        let commands: WorkbenchCommand[];
+        let guardedSurfaceIds = [surfaceId];
+
+        if (existingId && !preserveExplicitDuplicate) {
+          const existing = snapshot.surfaces[existingId];
+          if (!existing) continue;
+          if (transientStatus(source) === false && transientStatus(existing) === true) {
+            guardedSurfaceIds = [surfaceId, existingId];
+            const existingReplacement = {
+              ...withoutPresentationProvenance(replacement),
+              surface_id: existingId,
+            };
+            commands = [
+              {
+                type: "discard_surface",
+                surface_id: surfaceId,
+                provisional_identity: true,
+              },
+              {
+                type: "replace_surface",
+                surface: existingProvenance === undefined
+                  ? existingReplacement
+                  : {
+                      ...existingReplacement,
+                      presentation_provenance: existingProvenance,
+                    },
+              },
+              { type: "focus_surface", surface_id: existingId },
+            ];
+          } else {
+            commands = [
+              {
+                type: "discard_surface",
+                surface_id: surfaceId,
+                provisional_identity: true,
+              },
+              { type: "focus_surface", surface_id: existingId },
+            ];
+          }
+        } else {
+          commands = [{ type: "replace_surface", surface: replacement }];
+        }
+
+        commands.push(...settledProvenanceCleanupCommands(snapshot, commands, surfaceId));
+        const close = await coordinateClose(
+          snapshotState,
+          guardedSurfaceIds,
+          () => store.getState().compare_and_apply_commands(
+            snapshotState.transaction_version,
+            commands,
+          ).accepted,
+        );
+        if (close.decision === "allow") return "allow";
+        if (close.stale_commit && !close.stale_before_effects) continue;
+        return "cancel";
+      }
+      return "cancel";
+    },
+
     rebind_resource: async (surfaceId, request) => {
       registry.require(request.surface_type);
       const snapshotState = store.getState();
@@ -239,13 +638,20 @@ export function createWorkbenchNavigationService(
         throw new Error(`surface ${surfaceId} does not exist`);
       }
       const replacement = createSurface(request, surfaceId);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) === "cancel"
-      ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        [{ type: "replace_surface", surface: replacement }],
+      const commands: WorkbenchCommand[] = [{ type: "replace_surface", surface: replacement }];
+      commands.push(...provenanceDetachCommands(
+        snapshot,
+        new Set([surfaceId]),
+        new Set([surfaceId]),
       ));
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     reset_surface: async (surfaceId) => {
@@ -253,22 +659,34 @@ export function createWorkbenchNavigationService(
       const snapshot = snapshotState.document;
       const surface = snapshot.surfaces[surfaceId];
       if (!surface) throw new Error(`surface ${surfaceId} does not exist`);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) === "cancel"
-      ) return "cancel";
-
       const definition = registry.get(surface.surface_type);
       const resetState = definition
         ? registry.serialize_state(surface.surface_type, registry.default_state(surface.surface_type))
         : { state_schema_version: surface.state_schema_version, state: {} };
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        [{
-          type: "update_surface_state",
-          surface_id: surfaceId,
-          ...resetState,
-        }],
+      const commands: WorkbenchCommand[] = duplicateProvenance(surface)
+        ? [{
+            type: "replace_surface",
+            surface: withoutPresentationProvenance(surface),
+          }]
+        : [];
+      commands.push(...provenanceDetachCommands(
+        snapshot,
+        new Set([surfaceId]),
+        new Set([surfaceId]),
       ));
+      commands.push({
+        type: "update_surface_state",
+        surface_id: surfaceId,
+        ...resetState,
+      });
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     close: async (surfaceId) => {
@@ -277,13 +695,27 @@ export function createWorkbenchNavigationService(
       if (!(surfaceId in snapshot.surfaces)) {
         throw new Error(`surface ${surfaceId} does not exist`);
       }
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, [surfaceId]) === "cancel"
-      ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        [{ type: "close_surface", surface_id: surfaceId }],
+      const surface = snapshot.surfaces[surfaceId];
+      const commands: WorkbenchCommand[] = duplicateProvenance(surface)
+        ? [{
+            type: "replace_surface",
+            surface: withoutPresentationProvenance(surface),
+          }]
+        : [];
+      commands.push({ type: "close_surface", surface_id: surfaceId });
+      commands.push(...provenanceDetachCommands(
+        snapshot,
+        new Set([surfaceId]),
+        new Set([surfaceId]),
       ));
+      return (await coordinateClose(
+        snapshotState,
+        [surfaceId],
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     close_group: async (groupId) => {
@@ -291,14 +723,30 @@ export function createWorkbenchNavigationService(
       const snapshot = snapshotState.document;
       const group = snapshot.groups[groupId];
       if (!group) throw new Error(`group ${groupId} does not exist`);
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, group.surface_ids)
-          === "cancel"
-      ) return "cancel";
-      return closeResult(store.getState().compare_and_apply_commands(
-        snapshotState.transaction_version,
-        [{ type: "close_group", group_id: groupId }],
+      const affectedSurfaceIds = new Set(group.surface_ids);
+      const commands: WorkbenchCommand[] = group.surface_ids.flatMap((surfaceId) => {
+        const surface = snapshot.surfaces[surfaceId];
+        return duplicateProvenance(surface)
+          ? [{
+              type: "replace_surface" as const,
+              surface: withoutPresentationProvenance(surface),
+            }]
+          : [];
+      });
+      commands.push({ type: "close_group", group_id: groupId });
+      commands.push(...provenanceDetachCommands(
+        snapshot,
+        affectedSurfaceIds,
+        affectedSurfaceIds,
       ));
+      return (await coordinateClose(
+        snapshotState,
+        group.surface_ids,
+        () => store.getState().compare_and_apply_commands(
+          snapshotState.transaction_version,
+          commands,
+        ).accepted,
+      )).decision;
     },
 
     reset_workbench: async () => {
@@ -307,21 +755,15 @@ export function createWorkbenchNavigationService(
       const surfaceIds = groupIdsDepthFirst(snapshot.root).flatMap(
         (groupId) => snapshot.groups[groupId]?.surface_ids ?? [],
       );
-      if (
-        await guardSurfaces(snapshot, snapshotState.transaction_version, surfaceIds) === "cancel"
-      ) return "cancel";
-      if (options.reset_document) {
-        if (store.getState().transaction_version !== snapshotState.transaction_version) {
-          return "cancel";
-        }
-        return await options.reset_document(snapshotState.transaction_version) ? "allow" : "cancel";
-      }
-      const result = store.getState().compare_and_reset_document(
-        snapshotState.transaction_version,
-      );
-      if (!result.accepted && result.stale) return "cancel";
-      if (!result.accepted) throw commandFailure(result.errors);
-      return "allow";
+      return (await coordinateClose(
+        snapshotState,
+        surfaceIds,
+        () => options.reset_document
+          ? options.reset_document(snapshotState.transaction_version)
+          : store.getState().compare_and_reset_document(
+              snapshotState.transaction_version,
+            ).accepted,
+      )).decision;
     },
   };
 }

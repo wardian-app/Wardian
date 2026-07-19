@@ -1,3 +1,4 @@
+pub mod artifact_service;
 pub mod commands;
 pub mod control;
 pub mod delivery;
@@ -227,15 +228,33 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_notification::init());
+        .plugin(tauri_plugin_notification::init())
+        .register_asynchronous_uri_scheme_protocol(
+            "wardian-resource",
+            |context, request, responder| {
+                let app_handle = context.app_handle().clone();
+                let webview_label = context.webview_label().to_string();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<AppState>();
+                    let response = crate::commands::files::file_resource_protocol_response(
+                        &state.file_resources,
+                        &webview_label,
+                        request,
+                    )
+                    .await;
+                    responder.respond(response);
+                });
+            },
+        );
 
     let builder = register_update_plugins(builder);
 
-    builder
+    let app = builder
         .manage(AppState::new())
         .setup(|app| {
             {
                 let state = app.state::<AppState>();
+                state.file_resources.attach_app_handle(app.handle().clone());
                 tauri::async_runtime::block_on(async {
                     state.interactions.hydrate_from_persistence().await;
                 });
@@ -502,6 +521,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::artifacts::ack_artifact_presentation,
+            commands::artifacts::get_artifact_resource,
+            commands::artifacts::mark_artifact_attention_read,
             commands::workbench::get_workbench_boot_config,
             commands::workbench::load_workbench_state,
             commands::workbench::save_workbench_state,
@@ -531,6 +553,24 @@ pub fn run() {
             commands::debug::debug_remove_agent_input_sender,
             commands::debug::debug_push_agent_watch_output,
             commands::debug::debug_set_agent_status,
+            #[cfg(debug_assertions)]
+            commands::debug::debug_grant_file_resource_for_e2e,
+            #[cfg(debug_assertions)]
+            commands::debug::debug_file_resource_stats,
+            commands::files::open_file_resource,
+            commands::files::close_file_resource,
+            commands::files::read_file_resource_text,
+            commands::files::save_file_resource_text,
+            commands::files::issue_file_resource_ticket,
+            commands::files::close_file_renderer_lease,
+            commands::files::pick_file_resource,
+            commands::files::pick_file_resource_save_target,
+            commands::files::save_file_resource_as_text,
+            commands::file_recovery::checkpoint_file_recovery,
+            commands::file_recovery::list_file_recoveries,
+            commands::file_recovery::get_file_recovery,
+            commands::file_recovery::discard_file_recovery,
+            commands::file_recovery::merge_file_recovery,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,
@@ -710,8 +750,18 @@ pub fn run() {
             commands::settings::load_onboarding_hints,
             commands::settings::dismiss_onboarding_hint,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            let state = app_handle.state::<AppState>();
+            tauri::async_runtime::block_on(state.file_resources.close_all());
+        }
+    });
 }
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]

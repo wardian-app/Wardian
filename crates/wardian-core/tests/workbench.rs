@@ -202,6 +202,135 @@ fn workbench_unknown_surface_state_round_trips_opaquely() {
 }
 
 #[test]
+fn workbench_presentation_provenance_is_strict_and_semantically_validated() {
+    let provenance = json!({
+        "kind": "explicit_duplicate",
+        "duplicate_surface_id": "surface-overview",
+        "partner_surface_id": "surface-missing-plugin",
+        "provisional_resource_key": "file:C:/link/report.md",
+    });
+    let mut valid = fixture_value();
+    valid["surfaces"]["surface-overview"]["presentation_provenance"] = provenance.clone();
+    valid["recently_closed"][0]["surface"]["presentation_provenance"] = json!({
+        "kind": "explicit_duplicate",
+        "duplicate_surface_id": "surface-dashboard",
+        "partner_surface_id": null,
+        "provisional_resource_key": "artifact:artifact-123",
+    });
+    let document: WorkbenchDocumentV1 = serde_json::from_value(valid).unwrap();
+    document.validate().unwrap();
+    let round_trip = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+        round_trip["surfaces"]["surface-overview"]["presentation_provenance"],
+        provenance
+    );
+    assert!(round_trip["recently_closed"][0]["surface"]["presentation_provenance"].is_object());
+
+    let mut unknown_field = fixture_value();
+    unknown_field["surfaces"]["surface-overview"]["presentation_provenance"] = json!({
+        "kind": "explicit_duplicate",
+        "duplicate_surface_id": "surface-overview",
+        "partner_surface_id": null,
+        "provisional_resource_key": "file:C:/link/report.md",
+        "unexpected": true,
+    });
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(unknown_field).is_err());
+
+    let mut missing_partner = fixture_value();
+    missing_partner["surfaces"]["surface-overview"]["presentation_provenance"] = json!({
+        "kind": "explicit_duplicate",
+        "duplicate_surface_id": "surface-overview",
+        "provisional_resource_key": "file:C:/link/report.md",
+    });
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(missing_partner).is_err());
+
+    let mut null_provenance = fixture_value();
+    null_provenance["surfaces"]["surface-overview"]["presentation_provenance"] = Value::Null;
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(null_provenance).is_err());
+
+    let mut null_recent_provenance = fixture_value();
+    null_recent_provenance["recently_closed"][0]["surface"]["presentation_provenance"] =
+        Value::Null;
+    assert!(serde_json::from_value::<WorkbenchDocumentV1>(null_recent_provenance).is_err());
+
+    for invalid in [
+        json!({
+            "kind": "explicit_duplicate",
+            "duplicate_surface_id": "another-surface",
+            "partner_surface_id": null,
+            "provisional_resource_key": "file:C:/link/report.md",
+        }),
+        json!({
+            "kind": "explicit_duplicate",
+            "duplicate_surface_id": "surface-overview",
+            "partner_surface_id": "surface-overview",
+            "provisional_resource_key": "file:C:/link/report.md",
+        }),
+        json!({
+            "kind": "explicit_duplicate",
+            "duplicate_surface_id": "surface-overview",
+            "partner_surface_id": "",
+            "provisional_resource_key": "file:C:/link/report.md",
+        }),
+        json!({
+            "kind": "explicit_duplicate",
+            "duplicate_surface_id": "surface-overview",
+            "partner_surface_id": null,
+            "provisional_resource_key": "",
+        }),
+    ] {
+        let mut value = fixture_value();
+        value["surfaces"]["surface-overview"]["presentation_provenance"] = invalid;
+        assert!(serde_json::from_value::<WorkbenchDocumentV1>(value)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+}
+
+#[test]
+fn workbench_save_load_round_trips_presentation_provenance() {
+    let home = tempfile::tempdir().unwrap();
+    let primary_path = workbench_path_for_home(home.path());
+    std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
+    std::fs::write(&primary_path, include_bytes!("fixtures/workbench-v1.json")).unwrap();
+    let loaded = load_workbench_for_home(home.path()).unwrap();
+    let mut document = loaded.document.unwrap();
+    document.revision = 1;
+    document.saved_at = "2026-07-10T12:34:56.789Z".to_string();
+    let value = json!({
+        "kind": "explicit_duplicate",
+        "duplicate_surface_id": "surface-overview",
+        "partner_surface_id": "surface-missing-plugin",
+        "provisional_resource_key": "file:C:/link/report.md",
+    });
+    document
+        .surfaces
+        .get_mut("surface-overview")
+        .unwrap()
+        .presentation_provenance = Some(serde_json::from_value(value.clone()).unwrap());
+
+    let saved = save_workbench_for_home(
+        home.path(),
+        WorkbenchSaveRequest {
+            document,
+            expected_revision: 0,
+            expected_token: loaded.durable_token.unwrap(),
+            request_id: "request-provenance-save".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(saved.outcome, WorkbenchPersistenceOutcome::Saved);
+
+    let reloaded = load_workbench_for_home(home.path()).unwrap();
+    let encoded = serde_json::to_value(reloaded.document.unwrap()).unwrap();
+    assert_eq!(
+        encoded["surfaces"]["surface-overview"]["presentation_provenance"],
+        value
+    );
+}
+
+#[test]
 fn workbench_validation_rejects_non_v1_unsafe_integer_and_explicit_null_resource_key() {
     let mut future = fixture_value();
     future["schema_version"] = json!(2);

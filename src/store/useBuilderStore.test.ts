@@ -15,6 +15,27 @@ describe('useBuilderStore', () => {
     expect(useBuilderStore.getState().blueprint?.id).toBe('wf');
   });
 
+  it('keeps resourceRevision monotonic across load, initialize, edit, and reset ABA', async () => {
+    const first = { schema: 2 as const, id: 'first', name: 'First', nodes: [], edges: [] };
+    const second = { schema: 2 as const, id: 'second', name: 'Second', nodes: [], edges: [] };
+    invokeMock.mockResolvedValueOnce({ blueprint: first, diagnostics: [] });
+    const initialRevision = useBuilderStore.getState().resourceRevision;
+
+    await useBuilderStore.getState().load('/x/first.md');
+    const loadedRevision = useBuilderStore.getState().resourceRevision;
+    useBuilderStore.getState().setBlueprint({ ...first, name: 'Draft' });
+    const editedRevision = useBuilderStore.getState().resourceRevision;
+    useBuilderStore.getState().reset();
+    const resetRevision = useBuilderStore.getState().resourceRevision;
+    useBuilderStore.getState().initialize(second);
+    const initializedRevision = useBuilderStore.getState().resourceRevision;
+
+    expect(loadedRevision).toBeGreaterThan(initialRevision);
+    expect(editedRevision).toBeGreaterThan(loadedRevision);
+    expect(resetRevision).toBeGreaterThan(editedRevision);
+    expect(initializedRevision).toBeGreaterThan(resetRevision);
+  });
+
   it('stores diagnostics from validate and blocks save when invalid', async () => {
     useBuilderStore.setState({ blueprint: { schema: 2, id: 'wf', name: 'WF', nodes: [], edges: [] } });
     invokeMock.mockResolvedValueOnce({ ok: false, diagnostics: [{ severity: 'error', code: 'x', message: 'bad', node: 'n1' }] });

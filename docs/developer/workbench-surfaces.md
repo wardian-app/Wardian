@@ -24,7 +24,8 @@ DockviewLayoutAdapter <---------------+
 - `NavigationService` is the mutation boundary for opening, focusing, closing,
   closing groups, and resetting. Structural commands such as split, move,
   join, ratio, and active-tab changes use the store's validated command API.
-  Destructive navigation runs close guards before committing changes.
+  Destructive navigation uses one two-phase resource close transaction before
+  committing changes.
 - `DockviewLayoutAdapter` projects Wardian's document through Dockview's public
   API. Dockview is not a source of truth and its JSON is never persisted.
 - Surface instances own bounded presentation state only. They must reference
@@ -79,8 +80,13 @@ immutable records. A definition supplies:
 - `open_policy`, `render_policy`, `runtime_policy`, and `close_policy`;
 - `state_schema_version`, `max_state_bytes`, a default state, and strict
   serialize/restore functions;
-- optional resource-key resolution, existing-instance resolution, and an
-  asynchronous close guard.
+- optional resource-key and existing-instance resolution.
+
+`confirm_if_dirty` definitions register a separate resource adapter. The
+adapter reports canonical resource identity, monotonic generation, dirty state,
+and deferred Save/Discard work. Keeping this outside `SurfaceDefinition`
+prevents render components and presentation metadata from becoming close-time
+authorities.
 
 Registration rejects duplicate or reserved types, invalid policies, unsafe
 state versions, and state limits outside `1..65536` bytes. Serialized state must
@@ -97,6 +103,37 @@ non-JSON values fail validation.
 
 Normal Agent Session opens use `focus_resource`. The agent runtime is shared;
 duplicate surfaces are independent presentations of it.
+
+Files also uses `focus_resource`. Its durable navigation key is either
+`file:<canonical-path>` or `artifact:<artifact-id>`. Syntactic Windows absolute drive, UNC, and
+extended-length paths normalize separators for identity; POSIX paths preserve
+literal backslashes. Opaque artifact IDs remain verbatim. File and artifact
+identities never collapse into each other even when an artifact is backed by
+the same file.
+
+An Explorer or restored path is provisional until `open_file_resource` returns
+its backend-owned `resource_id`. The visible Files surface then applies
+`canonicalize_resource` as one Workbench transaction. A normal alias open
+focuses and removes itself in favor of an existing canonical presentation,
+even when that presentation is in another pane. Only `open_to_side` carries
+strictly validated `presentation_provenance` through the rekey of both it and
+its matching source presentation. This generic Workbench record is persisted
+with the surface, so restoring the app between either backend response does not
+collapse an intentional duplicate. The pair converges to the same canonical
+key and remains in separate panes regardless of which response publishes first.
+Repeated same-key acknowledgements do not consume this provenance while the
+matching presentation still has its provisional key.
+Once both endpoints settle, the record is removed atomically without removing
+the duplicate. An accepted explicit resource rebind, close, group close, reset,
+or missing endpoint detaches the affected pair; cancelled or stale operations
+leave the original provenance intact. Legacy documents without the optional
+field remain valid, while unknown record keys and cross-surface owner IDs are
+rejected.
+The frontend never resolves symlinks, junctions, or filesystem authority.
+Canonicalization re-resolves the current Workbench document after a stale
+layout compare-and-swap. A cancellation remains a user veto. A transaction or
+resource membership change while a dirty-resource choice is pending cancels
+before Save/Discard effects, rather than replaying a choice against new state.
 
 ### Render policies
 
@@ -118,11 +155,25 @@ policy; mount behavior alone must not become a lifecycle contract.
 `runtime_backed` means the surface displays a separately owned runtime; it does
 not give the surface authority to stop that runtime.
 
-`close_view` can close immediately. `confirm_if_dirty` uses `can_close` to
-return `allow` or `cancel`; Library and Workflows use dirty-state guards. Group
-close and workbench reset evaluate every affected guard in deterministic visual
-order, await required saves, and commit once. A cancel or failed save leaves the
-document and durable revision unchanged.
+`close_view` can close immediately. `confirm_if_dirty` participates in a batch
+resource transaction. Navigation captures an immutable document, transaction
+version, and complete closing-surface set; the registry groups exact
+presentations by canonical resource and prepares each final-closing dirty
+resource once. It collects every choice before effects, revalidates transaction,
+membership, identity, and generation, runs all requested Saves, commits layout
+once, then runs Discard/release cleanup. A cancel, stale preparation, or failed
+save performs no layout commit and no discard.
+
+Library resources remain presentation-keyed because their editor bridges are
+presentation-owned. The Library store publishes a monotonic generation for
+every draft, baseline, and entry-identity change, even when the dirty boolean
+does not change. Workflows uses one shared builder resource across every
+presentation and advances a monotonic resource revision on load, initialize,
+edit, save, discard, and reset. Prepared Save and Discard effects recheck their
+observed identity and generation immediately before invoking the resource
+action; stale effects fail closed. Files registers its shared editor-controller
+adapter. The adapter snapshots buffer generation and canonical resource
+identity so close-time Save or Discard cannot act on a replaced editor session.
 
 Closing an Agent Session or every presentation of an agent never pauses,
 kills, clears, or removes the agent. Runtime lifecycle actions remain explicit
@@ -151,6 +202,170 @@ sequential and tested there. A restore failure yields a recoverable placeholder
 instead of silently discarding the tab. Unknown surface types are retained as
 inert opaque JSON within the same size limit; Wardian does not execute or merge
 that state until a matching definition is installed and validates it.
+
+### Files foundation state and runtime
+
+`FilesSurfaceStateV2` serializes resource kind, transient-preview state,
+rendered/editor presentation, comparison preferences, and review identifiers.
+Restored V1 state is normalized at the surface boundary. File bytes, editor
+buffers, dirty state, canonical authorization, subscriptions, watchers,
+renderer tickets, and renderer leases remain outside the Workbench document.
+
+Each tab persists its rendered/editor choice, but presentation never changes
+subscription ownership. Text panes that share a canonical resource use one
+`FileEditorController` and one Monaco model URI keyed by backend `resource_id`.
+Every pane receives its own editor view over that model; revision refreshes do
+not recreate the model or discard undo history. The controller registry owns
+model lifetime and disposes it only after the final presentation and durable
+recovery hold are released.
+
+The Files contribution is reachable from Explorer, artifact presentations, and
+restoration but requires a concrete resource. Ordinary file
+single-click uses `open_transient`; double-click, keyboard open, context
+**Open**, and **Open to Side** create or pin permanent presentations. The first
+buffer mutation also pins a transient source-only file. The shipped comparison
+surface uses the Saved-file baseline for ordinary files and the exact selected
+immutable version for artifacts. Prompt-checkpoint baselines remain unavailable
+until their provider supplies exact historical content. Files never falls back
+to a nearby revision or adds top-level Preview/Changes/Draft modes.
+
+The Files header contains a current-state Book/Pencil presentation control only
+when both rendered and editor presentations exist. Source-only resources open
+directly in Monaco. Dirty state appears as generic presentation badges in both
+Dockview and safe-layout tabs and as a dot beside the Explorer-safe breadcrumb;
+the title string is never changed with `*`. Save is explicit through
+Ctrl/Cmd+S or the overflow menu. Save As consumes a one-shot exact native picker
+grant, writes the working buffer, then opens the returned canonical path as a
+new ordinary file. It never retargets the source controller or artifact identity.
+
+The controller persists a recovery record outside the Workbench document for
+each dirty canonical resource. A restart may reconstruct dirty, stale, or
+read-only recovery state. The same Wardian app webview may read the exact saved
+recovery base and buffer without current file authorization so the user can
+inspect or discard them, but that recovery grants no access to current disk
+bytes. Restoring write access, merging against disk, or saving still requires a
+newly authorized live subscription for the exact target. The final presentation
+close uses the ordinary shared-resource **Save** / **Don't Save** / **Cancel**
+transaction. There is no review-owned draft model or second editor buffer.
+
+`FileComparisonLens` keeps comparison presentation separate from the working
+buffer. The editor controller keeps `buffer_base_hash` and `disk_head_hash`
+independent; Saved-file comparison uses the former. Downstream historical
+baseline adapters must supply a separate immutable `review_base_hash` without
+changing either editor hash. Saved-file changes are annotated inline and
+summarized with a compact changed-region count. The lens selects side-by-side
+layout at 720 px of available pane width and unified layout below it. An
+explicit side-by-side preference remains effective to a 560 px hard minimum;
+narrower panes receive a temporary unified override without mutating that
+preference. Review-drawer width is removed before applying either threshold.
+
+When a watcher publishes a new disk head while the controller is dirty, the
+controller enters stale state. **Merge** rebases the shared buffer and leaves it
+dirty until explicit Save, **Reload from disk** discards the buffer and recovery
+record and adopts the new disk head, and **Cancel** preserves the stale state.
+All three actions validate the same canonical controller identity and observed
+generation before taking effect.
+
+Artifact integration keeps `artifact:<id>` as its durable provenance/navigation
+identity. `get_artifact_resource` returns one selected immutable version plus
+the currently authorized working-file identity; it never returns every
+version's bytes. The Files surface opens that working path under the origin
+agent's current authorization and attaches through the ordinary file resource
+and editor-controller registries. Duplicate file and artifact presentations
+therefore share one editor model when they resolve to the same canonical file;
+artifacts do not own a second buffer. The immutable selected text supplies the
+presented-version comparison baseline without replacing the editable working
+model. **Save As** always creates an ordinary file presentation and never
+retargets the artifact thread.
+
+`artifact://presented` is handled once at App scope. Navigation applies an
+`open_surface` transaction with `activate: false`, or refreshes an existing
+artifact surface's selected version, before acknowledging the exact
+presentation ID. The presentation service does not roll back durable storage
+when UI delivery fails. Attention is held in both the artifact index and Files
+presentation metadata until the surface lifecycle reports actual visibility;
+mounting or receiving the event alone is not sufficient.
+
+The Rust lifecycle is:
+
+1. `open_file_resource` canonicalizes and authorizes the path, creates a
+   subscription, and shares one watcher per canonical file. Each subscription
+   retains its own access claim and exact requested-path authorization; the
+   shared resource never lends one subscriber's provenance to another. Joining
+   an existing resource schedules availability reconciliation even when no file
+   event occurred.
+2. A stable content change is debounced for 150 ms, becomes the next monotonic
+   revision, and emits `file-resource://revision`. An unchanged hash emits
+   nothing. Atomic replacement is accepted only when the original requested
+   path still resolves to the same canonical target under the same authorized
+   root. Refresh tries active subscription authorizations in deterministic
+   requested-path and subscription-ID order. A failed alias candidate cannot
+   poison a valid direct candidate, and a typed unavailable revision is
+   published only when every active candidate fails. Persistent unreadable or
+   unstable scans recover through the same revision stream. Before any content
+   scan, agent candidates resolve their live configuration from backend
+   `AppState`, picker candidates prove their exact capability is still live,
+   and both revalidate the subscription's original requested pathname.
+3. Text reads are bound to the subscription and current revision. Image/PDF
+   streams require a short-lived ticket bound to the subscription, WebView,
+   renderer lease, and revision. Renderer calls carry the exact owning
+   snapshot's `subscription_id`; the client never selects a newer subscription
+   merely because another pane opened the same resource. Each issued ticket
+   serves a verified immutable snapshot of that revision, so range reads do not
+   reopen or rehash a changing source file.
+4. `close_file_renderer_lease` revokes that renderer's tickets without closing
+   another pane's subscription. `close_file_resource` releases one
+   subscription; the watcher disappears only after the last subscriber closes.
+   A close that leaves subscribers schedules reconciliation so removing the
+   last valid candidate cannot leave an invalid-only resource marked available.
+   Ticket deadlines proactively reclaim abandoned snapshot storage and the
+   matching lease. Issuance IDs prevent an older expiry task from revoking a
+   newer ticket that reused the same renderer lease ID.
+
+Every open and read rechecks current backend authority. A trusted restore with
+no frontend capability selects a current matching agent primary workspace or
+`include_directories`, in deterministic agent order, then an exact picker path
+from the backend-owned durable registry. A durable path match mints a fresh
+live capability and retained handle. `system_include_directories`, sibling
+paths, and canonical symlink or
+junction escapes are denied. A saved Workbench document cannot restore access
+that the backend no longer grants. If an alias and a direct pathname share one
+canonical resource, removing or retargeting the alias revokes only subscriptions
+opened through that alias; direct subscriptions retain reads, tickets, refresh,
+and the shared watcher. Picker-grant eviction uses grant-local in-flight and
+active-subscription counts under one mutex, so a concurrent open cannot become
+evictable between a stale membership snapshot and grant selection.
+
+Current renderer limits are 16 MiB/200,000 lines for complete Monaco models,
+5 MiB/100,000 lines per diff side, 64 MiB/64 million decoded pixels for
+images, and 256 MiB for PDFs. HTML and SVG are editor-only inert source in
+Monaco. They are never injected into Wardian's DOM; a future active artifact
+host must provide the zero-Tauri-capability, networkless isolation contract
+before either type can render live.
+PDF search is debounced and stops after 128 pages or two seconds, whichever
+comes first. Partial results state exactly how many pages were searched. The
+PDF renderer mounts a dynamic bounded window whose radius adapts to the
+viewport from one to 12 pages on either side of the center page, for an exact
+maximum of 25 mounted page slots.
+
+A byte- or decoded-pixel-limit violation is a stable metadata revision, not an
+open failure. Its descriptor keeps the canonical name, type, byte size, and
+modified time but disables content rendering, comparison, editing, and stream
+capabilities.
+Exact readable scans use `sha256:<full-content-digest>` as their revision
+identity. Metadata-only scans use `bounded-sha256:<revision-fingerprint>`,
+derived from retained file identity, stable write metadata, and a bounded
+leading probe. The bounded form is never presented as a full-content hash and
+its opaque token cannot authorize reads or tickets. Watcher refresh compares
+the bounded identity, suppresses unchanged oversized scans, and advances when
+the oversized revision changes or recovers within its renderer limit.
+
+Browser E2E proves Files rendering, controls, annotations, comparison layout,
+and stale-choice wiring only against mocked IPC. Native E2E is the authority
+for picker and root authorization, retained file handles, atomic filesystem
+writes, real watcher conflicts, durable recovery after runtime recreation, and
+subscription or renderer-lease cleanup. Browser evidence must not be used to
+claim those native properties.
 
 ## Persistence and Migration
 

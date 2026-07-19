@@ -180,7 +180,7 @@ function reconcileSurfaceMru(
   for (const command of commands) {
     switch (command.type) {
       case "open_surface":
-        touch(command.surface.surface_id);
+        if (command.activate !== false) touch(command.surface.surface_id);
         break;
       case "focus_surface":
       case "move_surface":

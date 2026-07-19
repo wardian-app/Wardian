@@ -45,10 +45,19 @@ export default defineConfig(async () => ({
     minify: "terser",
     rollupOptions: {
       output: {
+        onlyExplicitManualChunks: true,
         manualChunks(id) {
           const normalized = id.replace(/\\/g, "/");
           if (!normalized.includes("/node_modules/")) {
             return undefined;
+          }
+          if (normalized.includes("/node_modules/monaco-editor/")) {
+            if (normalized.includes("?worker")) return undefined;
+            return "vendor-files-monaco";
+          }
+          if (normalized.includes("/node_modules/pdfjs-dist/")) {
+            if (normalized.includes("?worker")) return undefined;
+            return "vendor-files-pdf";
           }
           if (normalized.includes("/node_modules/@xterm/addon-webgl/")) {
             return "vendor-terminal-webgl";

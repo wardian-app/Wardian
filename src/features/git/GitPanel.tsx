@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, MoreHorizontal, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Archive, Check, ChevronDown, Download, GitBranch, List, ListTree, Plus, RefreshCw, RotateCcw, Trash2, Upload, X } from "lucide-react";
 import {
   AgentConfig,
   AgentWorktreeSummary,
@@ -16,6 +16,7 @@ import { GitHistoryGraph, loadRefFilter, saveRefFilter, type GraphRefFilter } fr
 import { useConfirm } from "../../components/ConfirmDialog";
 import { formatGitStatusError, type SelectedAgentGitStatus } from "./useSelectedAgentGitStatus";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
+import { CompactOverflowButton } from "../../components/CompactOverflowButton";
 import { useSettingsStore } from "../../store/useSettingsStore";
 
 const DEFAULT_GIT_ERROR = "Unable to load git status.";
@@ -2038,16 +2039,12 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
         >
           <RefreshCw className={`h-3.5 w-3.5 ${manualRefreshing ? "animate-spin" : ""}`} aria-hidden="true" />
         </button>
-        <button
-          type="button"
+        <CompactOverflowButton
           onClick={openSourceControlActionMenu}
           disabled={syncing}
           aria-label="More Source Control Actions"
           title="More Source Control Actions"
-          className="p-1 rounded hover:bg-wardian-card-bg-muted text-[var(--color-wardian-text-muted)] hover:text-primary transition-colors disabled:opacity-40"
-        >
-          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
+        />
       </div>
       {progressMessage && (
         <div

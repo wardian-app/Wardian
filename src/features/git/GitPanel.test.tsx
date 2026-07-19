@@ -290,7 +290,8 @@ describe("GitPanel", () => {
 
     expect(await screen.findByRole("heading", { name: "Source Control", level: 2 })).toBeInTheDocument();
     expect(screen.getByTitle("Refresh Source Control")).toBeInTheDocument();
-    expect(screen.getByTitle("More Source Control Actions")).toBeInTheDocument();
+    expect(screen.getByTitle("More Source Control Actions"))
+      .toHaveClass("wardian-compact-overflow-trigger");
 
     expect(screen.queryByTitle("Use source control tree view")).not.toBeInTheDocument();
     expect(screen.queryByTitle("Use source control list view")).not.toBeInTheDocument();

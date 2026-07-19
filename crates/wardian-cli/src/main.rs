@@ -1,4 +1,5 @@
 mod args;
+mod artifact;
 mod disk;
 mod errors;
 mod graph;
@@ -47,6 +48,7 @@ fn run() -> i32 {
     };
     let result = match cli.command {
         Command::Agent(args) => handle_agent(args),
+        Command::Artifact(args) => artifact::handle_artifact(args),
         Command::Conversation(args) => handle_conversation(args),
         Command::Library(args) => library::handle_library(args),
         Command::Workflow(args) => handle_workflow(args),
@@ -1264,6 +1266,13 @@ fn control_error(e: std::io::Error) -> CliError {
             "cursor_expired" => backend_error(ExitCode::Generic, "cursor_expired"),
             "gap_detected" => backend_error(ExitCode::Generic, "gap_detected"),
             "invalid_cursor" => backend_error(ExitCode::Generic, "invalid_cursor"),
+            "invalid_origin" => backend_error(ExitCode::NotInSession, "invalid_origin"),
+            "unauthorized_path" => backend_error(ExitCode::Generic, "unauthorized_path"),
+            "unreadable_file" => backend_error(ExitCode::Generic, "unreadable_file"),
+            "unstable_file_timeout" => backend_error(ExitCode::Generic, "unstable_file_timeout"),
+            "artifact_not_found" => backend_error(ExitCode::NotFound, "artifact_not_found"),
+            "review_not_found" => backend_error(ExitCode::NotFound, "review_not_found"),
+            "ui_delivery_failed" => backend_error(ExitCode::Generic, "ui_delivery_failed"),
             _ => endpoint_error.details().cloned().map_or_else(
                 || CliError::generic(endpoint_error.to_string()),
                 |details| {

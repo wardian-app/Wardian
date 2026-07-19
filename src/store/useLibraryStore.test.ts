@@ -41,6 +41,7 @@ describe('useLibraryStore', () => {
       error: null,
       _editorDirty: false,
       _editorResources: {},
+      _editorGenerationClock: 0,
       libraryDetailWidth: 480,
     });
   });
@@ -189,6 +190,24 @@ describe('useLibraryStore', () => {
     releaseFirst();
     expect(useLibraryStore.getState()._editorResources['library-1']).toBeUndefined();
     expect(useLibraryStore.getState()._editorResources['library-2']).toBeDefined();
+  });
+
+  it('advances a resource-owned generation for every draft and identity publication', () => {
+    useLibraryStore.getState().registerEditorCloseActions('library-1', {
+      save: vi.fn(),
+      discard: vi.fn(),
+    });
+    useLibraryStore.getState().markEditorSurfaceDirty('library-1', true, 'skills/alpha');
+    const first = useLibraryStore.getState()._editorResources['library-1'];
+
+    useLibraryStore.getState().markEditorSurfaceDirty('library-1', true, 'skills/alpha');
+    const alreadyDirtyEdit = useLibraryStore.getState()._editorResources['library-1'];
+    useLibraryStore.getState().markEditorSurfaceDirty('library-1', true, 'skills/beta');
+    const identitySwitch = useLibraryStore.getState()._editorResources['library-1'];
+
+    expect(alreadyDirtyEdit.generation).toBeGreaterThan(first.generation);
+    expect(identitySwitch.generation).toBeGreaterThan(alreadyDirtyEdit.generation);
+    expect(identitySwitch.identity).toBe('skills/beta');
   });
 
   describe('mutation error handling', () => {

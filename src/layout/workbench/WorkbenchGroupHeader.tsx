@@ -9,8 +9,10 @@ import {
   type MouseEvent,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
-import { Ellipsis, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import { CompactOverflowButton } from "../../components/CompactOverflowButton";
 
 export type WorkbenchPaneTarget = {
   group_id: string;
@@ -232,17 +234,14 @@ export function WorkbenchGroupHeader({
 
   return (
     <div className="wardian-workbench-group-actions">
-      <button
-        type="button"
+      <CompactOverflowButton
         className="wardian-workbench-header-action"
         aria-label="Pane actions"
         aria-haspopup="menu"
         aria-expanded={menuState !== null}
         title="Pane actions"
         onClick={openMenu}
-      >
-        <Ellipsis aria-hidden="true" size={17} strokeWidth={1.75} />
-      </button>
+      />
       {menuState && (
         <WorkbenchContextMenu
           aria_label="Pane actions"

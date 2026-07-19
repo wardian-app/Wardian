@@ -14,10 +14,16 @@ export const MAX_WORKBENCH_TREE_DEPTH = 64;
 export const MAX_RECENTLY_CLOSED_SURFACES = 20;
 
 export type WorkbenchCommand =
-  | { type: "open_surface"; surface: WorkbenchSurfaceV1; group_id?: string; index?: number }
+  | {
+      type: "open_surface";
+      surface: WorkbenchSurfaceV1;
+      group_id?: string;
+      index?: number;
+      activate?: boolean;
+    }
   | { type: "focus_surface"; surface_id: string }
   | { type: "close_surface"; surface_id: string }
-  | { type: "discard_surface"; surface_id: string }
+  | { type: "discard_surface"; surface_id: string; provisional_identity?: boolean }
   | { type: "replace_surface"; surface: WorkbenchSurfaceV1 }
   | { type: "reopen_closed_surface" }
   | { type: "reopen_closed_in_placeholder"; surface_id: string }
@@ -227,7 +233,7 @@ function validateSurface(
   if (!hasExactKeys(
     value,
     ["surface_id", "surface_type", "state_schema_version", "state"],
-    ["resource_key"],
+    ["resource_key", "presentation_provenance"],
   )) {
     addError(errors, path, "must contain only V1 surface fields");
   }
@@ -243,6 +249,58 @@ function validateSurface(
     typeof value.resource_key !== "string"
   ) {
     addError(errors, `${path}.resource_key`, "must be a string when present");
+  }
+  if (hasOwn(value, "presentation_provenance")) {
+    const provenancePath = `${path}.presentation_provenance`;
+    const provenance = value.presentation_provenance;
+    if (validatePlainRecordContainer(provenance, provenancePath, errors)) {
+      if (!hasExactKeys(provenance, [
+        "kind",
+        "duplicate_surface_id",
+        "partner_surface_id",
+        "provisional_resource_key",
+      ])) {
+        addError(errors, provenancePath, "must contain exactly the V1 provenance fields");
+      }
+      if (provenance.kind !== "explicit_duplicate") {
+        addError(errors, `${provenancePath}.kind`, "must equal explicit_duplicate");
+      }
+      if (provenance.duplicate_surface_id !== surfaceId) {
+        addError(
+          errors,
+          `${provenancePath}.duplicate_surface_id`,
+          "must match the owning surface_id",
+        );
+      }
+      if (
+        provenance.partner_surface_id !== null
+        && (typeof provenance.partner_surface_id !== "string"
+          || provenance.partner_surface_id.length === 0)
+      ) {
+        addError(
+          errors,
+          `${provenancePath}.partner_surface_id`,
+          "must be a non-empty string or null",
+        );
+      }
+      if (provenance.partner_surface_id === surfaceId) {
+        addError(
+          errors,
+          `${provenancePath}.partner_surface_id`,
+          "must not reference the duplicate surface itself",
+        );
+      }
+      if (
+        typeof provenance.provisional_resource_key !== "string"
+        || provenance.provisional_resource_key.length === 0
+      ) {
+        addError(
+          errors,
+          `${provenancePath}.provisional_resource_key`,
+          "must be a non-empty string",
+        );
+      }
+    }
   }
   if (!Number.isSafeInteger(value.state_schema_version) || (value.state_schema_version as number) < 0) {
     addError(errors, `${path}.state_schema_version`, "must be a non-negative safe integer");
@@ -596,6 +654,15 @@ function reopenedSurfaceId(document: WorkbenchDocumentV1, closedId: string): str
   return `${base}-${suffix}`;
 }
 
+/** Recently-closed history is presentation-neutral and cannot carry pair lifecycle intent. */
+function inertHistorySurface(
+  surface: WorkbenchSurfaceV1,
+  surfaceId = surface.surface_id,
+): WorkbenchSurfaceV1 {
+  const { presentation_provenance: _presentationProvenance, ...inert } = surface;
+  return surfaceId === surface.surface_id ? inert : { ...inert, surface_id: surfaceId };
+}
+
 function splitNodeExists(node: WorkbenchNodeV1, nodeId: string): boolean {
   if (node.kind === "group") return false;
   return node.node_id === nodeId || splitNodeExists(node.first, nodeId) || splitNodeExists(node.second, nodeId);
@@ -828,7 +895,11 @@ function closeGroupSurfaces(
     const surface = document.surfaces[surfaceId];
     delete surfaces[surfaceId];
     recentlyClosed = [
-      { surface, previous_group_id: groupId, previous_index: index },
+      {
+        surface: inertHistorySurface(surface),
+        previous_group_id: groupId,
+        previous_index: index,
+      },
       ...recentlyClosed,
     ].slice(0, MAX_RECENTLY_CLOSED_SURFACES);
   });
@@ -852,7 +923,7 @@ function removeWorkbenchSurface(
   const recentlyClosed = trackInHistory
     ? [
         {
-          surface,
+          surface: inertHistorySurface(surface),
           previous_group_id: location.groupId,
           previous_index: location.index,
         },
@@ -921,6 +992,7 @@ export function applyWorkbenchCommand(
       }
       const surfaceIds = [...group.surface_ids];
       surfaceIds.splice(index, 0, command.surface.surface_id);
+      const activate = command.activate !== false;
       return acceptedCandidate(document, {
         ...document,
         groups: {
@@ -928,14 +1000,14 @@ export function applyWorkbenchCommand(
           [groupId]: {
             ...group,
             surface_ids: surfaceIds,
-            active_surface_id: command.surface.surface_id,
+            active_surface_id: activate ? command.surface.surface_id : group.active_surface_id,
           },
         },
         surfaces: {
           ...document.surfaces,
           [command.surface.surface_id]: command.surface,
         },
-        active_group_id: groupId,
+        active_group_id: activate ? groupId : document.active_group_id,
       });
     }
 
@@ -960,7 +1032,11 @@ export function applyWorkbenchCommand(
 
     case "discard_surface": {
       const surface = document.surfaces[command.surface_id];
-      if (surface && surface.surface_type !== "new-tab") {
+      if (
+        surface
+        && surface.surface_type !== "new-tab"
+        && command.provisional_identity !== true
+      ) {
         return commandRejected(
           document,
           "only New Tab surfaces can be discarded",
@@ -980,9 +1056,7 @@ export function applyWorkbenchCommand(
       const surfaceId = hasOwn(document.surfaces, closed.surface.surface_id)
         ? reopenedSurfaceId(document, closed.surface.surface_id)
         : closed.surface.surface_id;
-      const surface = surfaceId === closed.surface.surface_id
-        ? closed.surface
-        : { ...closed.surface, surface_id: surfaceId };
+      const surface = inertHistorySurface(closed.surface, surfaceId);
       const index = Math.min(closed.previous_index, group.surface_ids.length);
       const surfaceIds = [...group.surface_ids];
       surfaceIds.splice(index, 0, surfaceId);
@@ -1021,9 +1095,7 @@ export function applyWorkbenchCommand(
       const reopenedId = hasOwn(document.surfaces, closed.surface.surface_id)
         ? reopenedSurfaceId(document, closed.surface.surface_id)
         : closed.surface.surface_id;
-      const reopenedSurface = reopenedId === closed.surface.surface_id
-        ? closed.surface
-        : { ...closed.surface, surface_id: reopenedId };
+      const reopenedSurface = inertHistorySurface(closed.surface, reopenedId);
       const group = document.groups[location.groupId];
       const surfaceIds = [...group.surface_ids];
       surfaceIds[location.index] = reopenedId;

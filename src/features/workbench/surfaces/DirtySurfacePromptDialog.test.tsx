@@ -60,4 +60,26 @@ describe("useDirtySurfacePrompt", () => {
     await act(async () => Promise.resolve());
     expect(second).toHaveBeenCalledWith("cancel");
   });
+
+  it("labels Files discard as Don't Save without changing Library or Workflows", async () => {
+    let prompt: DirtySurfacePrompt = () => "cancel";
+    render(<Harness expose={(next) => { prompt = next; }} />);
+
+    await act(async () => {
+      void prompt({
+        ...request,
+        surface_type: "files",
+        title: "Files",
+        discard_label: "Don't Save",
+      });
+    });
+    expect(screen.getByRole("button", { name: "Don't Save" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await act(async () => Promise.resolve());
+
+    await act(async () => { void prompt(request); });
+    expect(screen.getByRole("button", { name: "Discard" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Don't Save" })).toBeNull();
+  });
 });

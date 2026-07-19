@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ChevronRight, ChevronDown, File, FileText, Image, Code } from 'lucide-react';
 import { normalizeExplorerPathForCompare } from './pathUtils';
@@ -13,6 +13,7 @@ export interface FileNode {
 export interface FileTreeProps {
   path: string;
   onSelect?: (path: string, is_dir: boolean) => void;
+  onOpen?: (path: string, is_dir: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
   depth?: number;
   gitStatusMap?: Record<string, string>;
@@ -56,9 +57,28 @@ const getFileIcon = (extension: string | null) => {
   return <FileText className="w-4 h-4 text-wardian-text-muted shrink-0" />;
 }
 
-export const FileTree: React.FC<FileTreeProps> = ({
+interface FileTreeInteractionController {
+  activePath: string | null;
+  setActivePath: React.Dispatch<React.SetStateAction<string | null>>;
+  treeRef: React.RefObject<HTMLDivElement | null>;
+  cancelPendingSelection: () => void;
+  scheduleSelection: (path: string, select: () => void) => void;
+}
+
+const FileTreeInteractionContext = createContext<FileTreeInteractionController | null>(null);
+
+function useFileTreeInteraction(): FileTreeInteractionController {
+  const controller = useContext(FileTreeInteractionContext);
+  if (!controller) throw new Error('FileTree branches require a shared interaction controller');
+  return controller;
+}
+
+type FileTreeBranchProps = Omit<FileTreeProps, 'depth'> & { depth: number };
+
+const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
   path,
   onSelect,
+  onOpen,
   onContextMenu,
   depth = 0,
   gitStatusMap,
@@ -67,6 +87,7 @@ export const FileTree: React.FC<FileTreeProps> = ({
   refreshToken = 0,
   changedPaths = [],
 }) => {
+  const interaction = useFileTreeInteraction();
   const [nodes, setNodes] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -109,17 +130,118 @@ export const FileTree: React.FC<FileTreeProps> = ({
     return () => { isMounted = false; };
   }, [changedPaths, fetchTree, path, refreshToken]);
 
+  useLayoutEffect(() => {
+    const visibleItems = Array.from(
+      interaction.treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [],
+    );
+    const activeIsVisible = interaction.activePath !== null && visibleItems.some(
+      (item) => item.dataset.fileTreePath === interaction.activePath,
+    );
+    const nextActivePath = activeIsVisible
+      ? interaction.activePath
+      : visibleItems[0]?.dataset.fileTreePath ?? null;
+    if (nextActivePath !== interaction.activePath) {
+      interaction.setActivePath(nextActivePath);
+    }
+  }, [error, expanded, interaction, loading, nodes]);
+
   const toggleFolder = (nodePath: string) => {
     setExpanded(prev => ({ ...prev, [nodePath]: !prev[nodePath] }));
   };
 
-  const handleClick = (e: React.MouseEvent, node: FileNode) => {
+  const focusNode = (nodePath: string, target: Element) => {
+    const treeItem = target.closest<HTMLElement>('[role="treeitem"]');
+    interaction.setActivePath(nodePath);
+    treeItem?.focus();
+  };
+
+  const handleClick = (e: React.MouseEvent<HTMLDivElement>, node: FileNode) => {
     e.stopPropagation();
+    focusNode(node.path, e.currentTarget);
     if (node.is_dir) {
+      if (e.detail > 1) return;
+      interaction.cancelPendingSelection();
       toggleFolder(node.path);
+      onSelect?.(node.path, true);
+      return;
     }
-    if (onSelect) {
-      onSelect(node.path, node.is_dir);
+    if (e.detail > 1) return;
+    interaction.scheduleSelection(node.path, () => onSelect?.(node.path, false));
+  };
+
+  const handleOpen = (e: React.SyntheticEvent, node: FileNode) => {
+    e.stopPropagation();
+    if (node.is_dir) return;
+    interaction.cancelPendingSelection();
+    interaction.setActivePath(node.path);
+    onOpen?.(node.path, false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, node: FileNode) => {
+    e.stopPropagation();
+    const treeItems = Array.from(
+      interaction.treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [],
+    );
+    const currentIndex = treeItems.indexOf(e.currentTarget);
+    const focusItem = (item: HTMLElement | undefined) => {
+      if (!item) return;
+      interaction.setActivePath(item.dataset.fileTreePath ?? null);
+      item.focus();
+    };
+
+    switch (e.key) {
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        interaction.cancelPendingSelection();
+        if (node.is_dir) {
+          toggleFolder(node.path);
+          onSelect?.(node.path, true);
+        } else {
+          onOpen?.(node.path, false);
+        }
+        return;
+      case 'ArrowDown':
+        e.preventDefault();
+        focusItem(treeItems[currentIndex + 1]);
+        return;
+      case 'ArrowUp':
+        e.preventDefault();
+        focusItem(treeItems[currentIndex - 1]);
+        return;
+      case 'Home':
+        e.preventDefault();
+        focusItem(treeItems[0]);
+        return;
+      case 'End':
+        e.preventDefault();
+        focusItem(treeItems[treeItems.length - 1]);
+        return;
+      case 'ArrowRight':
+        if (!node.is_dir) return;
+        e.preventDefault();
+        if (!expanded[node.path]) {
+          interaction.cancelPendingSelection();
+          toggleFolder(node.path);
+          onSelect?.(node.path, true);
+        } else {
+          focusItem(e.currentTarget.querySelector<HTMLElement>('[role="group"] [role="treeitem"]') ?? undefined);
+        }
+        return;
+      case 'ArrowLeft': {
+        e.preventDefault();
+        if (node.is_dir && expanded[node.path]) {
+          toggleFolder(node.path);
+          return;
+        }
+        const parentGroup = e.currentTarget.parentElement;
+        focusItem(parentGroup?.getAttribute('role') === 'group'
+          ? parentGroup.parentElement ?? undefined
+          : undefined);
+        return;
+      }
+      default:
+        return;
     }
   };
 
@@ -128,11 +250,11 @@ export const FileTree: React.FC<FileTreeProps> = ({
   }
 
   if (error && depth === 0) {
-    return <div className="text-sm text-red-400 p-2 break-words">Error: {error}</div>;
+    return <div className="p-2 text-sm text-wardian-error break-words">Error: {error}</div>;
   }
 
   return (
-    <div className={`flex flex-col ${depth === 0 ? 'w-full h-full' : ''}`}>
+    <>
       {nodes.map(node => {
         const relPath = explorerRoot ? toRelativePath(node.path, explorerRoot) : '';
         const fileStatus = gitStatusMap?.[relPath];
@@ -142,15 +264,49 @@ export const FileTree: React.FC<FileTreeProps> = ({
           : dirHasChanges ? GIT_STATUS_COLORS['M'] : undefined;
 
         return (
-          <React.Fragment key={node.path}>
+          <div
+            key={node.path}
+            role="treeitem"
+            aria-label={node.name}
+            aria-expanded={node.is_dir ? Boolean(expanded[node.path]) : undefined}
+            data-file-tree-path={node.path}
+            tabIndex={(
+              interaction.activePath ?? (depth === 0 ? nodes[0]?.path : null)
+            ) === node.path ? 0 : -1}
+            onClick={(e) => {
+              if ((e.target as Element).closest('[role="treeitem"]') === e.currentTarget) {
+                handleClick(e, node);
+              }
+            }}
+            onDoubleClick={(e) => {
+              if ((e.target as Element).closest('[role="treeitem"]') === e.currentTarget) {
+                handleOpen(e, node);
+              }
+            }}
+            onContextMenu={(e) => {
+              if ((e.target as Element).closest('[role="treeitem"]') === e.currentTarget) {
+                onContextMenu?.(e, node);
+              }
+            }}
+            onFocus={(e) => {
+              if (e.currentTarget === e.target) interaction.setActivePath(node.path);
+            }}
+            onKeyDown={(e) => handleKeyDown(e, node)}
+          >
             <div
               className="flex items-center shrink-0 gap-1.5 py-[2px] pr-2 hover:bg-wardian-card-bg-muted cursor-pointer rounded-md text-[13px] whitespace-nowrap overflow-hidden select-none group w-full"
               style={{ paddingLeft: `${(depth * 14) + 2}px` }}
-              onClick={(e) => handleClick(e, node)}
-              onContextMenu={(e) => onContextMenu && onContextMenu(e, node)}
             >
               {node.is_dir ? (
-                <span className="text-wardian-text-muted cursor-pointer hover:text-wardian-text shrink-0 flex items-center justify-center w-4 h-4" onClick={(e) => { e.stopPropagation(); toggleFolder(node.path); }}>
+                <span
+                  className="text-wardian-text-muted cursor-pointer hover:text-wardian-text shrink-0 flex items-center justify-center w-4 h-4"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    interaction.cancelPendingSelection();
+                    focusNode(node.path, e.currentTarget);
+                    toggleFolder(node.path);
+                  }}
+                >
                   {expanded[node.path] ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                 </span>
               ) : (
@@ -178,21 +334,73 @@ export const FileTree: React.FC<FileTreeProps> = ({
             </div>
 
             {node.is_dir && expanded[node.path] && (
-              <FileTree
-                path={node.path}
-                depth={depth + 1}
-                onSelect={onSelect}
-                onContextMenu={onContextMenu}
-                gitStatusMap={gitStatusMap}
-                changedDirectories={changedDirectories}
-                explorerRoot={explorerRoot}
-                refreshToken={refreshToken}
-                changedPaths={changedPaths}
-              />
+              <div role="group">
+                <FileTreeBranch
+                  path={node.path}
+                  depth={depth + 1}
+                  onSelect={onSelect}
+                  onOpen={onOpen}
+                  onContextMenu={onContextMenu}
+                  gitStatusMap={gitStatusMap}
+                  changedDirectories={changedDirectories}
+                  explorerRoot={explorerRoot}
+                  refreshToken={refreshToken}
+                  changedPaths={changedPaths}
+                />
+              </div>
             )}
-          </React.Fragment>
+          </div>
         );
       })}
-    </div>
+    </>
+  );
+};
+
+export const FileTree: React.FC<FileTreeProps> = ({ depth: _depth, ...props }) => {
+  const treeRef = useRef<HTMLDivElement>(null);
+  const pendingSelection = useRef<{ path: string; timer: number } | null>(null);
+  const [activePath, setActivePath] = useState<string | null>(null);
+
+  const cancelPendingSelection = useCallback(() => {
+    if (!pendingSelection.current) return;
+    window.clearTimeout(pendingSelection.current.timer);
+    pendingSelection.current = null;
+  }, []);
+
+  const scheduleSelection = useCallback((path: string, select: () => void) => {
+    cancelPendingSelection();
+    const timer = window.setTimeout(() => {
+      if (pendingSelection.current?.timer !== timer) return;
+      pendingSelection.current = null;
+      select();
+    }, 200);
+    pendingSelection.current = { path, timer };
+  }, [cancelPendingSelection]);
+
+  useEffect(() => {
+    cancelPendingSelection();
+    setActivePath(null);
+    return cancelPendingSelection;
+  }, [cancelPendingSelection, props.explorerRoot, props.path]);
+
+  const interaction = React.useMemo<FileTreeInteractionController>(() => ({
+    activePath,
+    setActivePath,
+    treeRef,
+    cancelPendingSelection,
+    scheduleSelection,
+  }), [activePath, cancelPendingSelection, scheduleSelection]);
+
+  return (
+    <FileTreeInteractionContext.Provider value={interaction}>
+      <div
+        ref={treeRef}
+        className="flex h-full w-full flex-col"
+        role="tree"
+        aria-label="Workspace files"
+      >
+        <FileTreeBranch key={props.path} {...props} depth={0} />
+      </div>
+    </FileTreeInteractionContext.Provider>
   );
 };

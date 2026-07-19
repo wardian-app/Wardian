@@ -1,10 +1,12 @@
 mod atomic_file;
+pub mod artifacts;
 pub mod classes;
 pub mod control;
 pub mod conversation_lease;
 pub mod conversations;
 pub mod db;
 pub mod engine;
+pub mod files;
 pub mod identity;
 pub mod library;
 pub mod models;
