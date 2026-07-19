@@ -119,7 +119,7 @@ pub fn prepare_provider_habitat(
 
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
-        ensure_codex_home_projection(&habitat_root, workspace_root)?;
+        ensure_codex_home_projection(&habitat_root, workspace_root, class_name)?;
     }
 
     Ok(Some(habitat_root))
@@ -511,6 +511,7 @@ fn projected_link_matches_target(link: &std::path::Path, target: &std::path::Pat
 fn ensure_codex_home_projection(
     habitat_root: &std::path::Path,
     workspace_root: &std::path::Path,
+    class_name: &str,
 ) -> Result<(), String> {
     let real_codex_home = dirs::home_dir()
         .ok_or("Could not find user home directory")?
@@ -518,6 +519,10 @@ fn ensure_codex_home_projection(
     let projected_home = habitat_codex_home(habitat_root);
     let wardian_skills = habitat_root.join(".agents").join("skills");
     sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
+
+    let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+    let plugin_policy = crate::utils::resolve_codex_plugin_policy(class_name, &runtime_policy);
+    reconcile_codex_plugin_policy(&projected_home, &plugin_policy)?;
 
     if crate::utils::load_codex_runtime_policy()
         .map(|policy| policy.trust_workspaces)
@@ -542,10 +547,13 @@ pub(crate) fn sync_codex_agent_home(
         let target = projected_home.join(shared_name);
         if source.exists() && source.is_file() {
             project_file(&source, &target)?;
-        } else if *shared_name == "config.toml" {
-            remove_existing_projection_path(&target)?;
         }
     }
+
+    reconcile_codex_config(
+        &real_codex_home.join("config.toml"),
+        &projected_home.join("config.toml"),
+    )?;
 
     sync_codex_windows_sandbox_support(real_codex_home, projected_home)?;
 
@@ -572,7 +580,170 @@ pub(crate) fn sync_codex_agent_home(
     Ok(())
 }
 
-const CODEX_SHARED_HOME_FILES: &[&str] = &["auth.json", "config.toml", "cap_sid"];
+const CODEX_SHARED_HOME_FILES: &[&str] = &["auth.json", "cap_sid"];
+
+/// Compose the shared Codex configuration into an agent-local overlay without
+/// replacing agent-owned keys such as projects and local overrides.
+fn reconcile_codex_config(
+    base_config_path: &std::path::Path,
+    agent_config_path: &std::path::Path,
+) -> Result<(), String> {
+    let base_content = match std::fs::read_to_string(base_config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let agent_content = match std::fs::read_to_string(agent_config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    if base_content.is_empty() && agent_content.is_empty() {
+        return Ok(());
+    }
+
+    let base = base_content
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("Could not parse shared Codex config.toml: {error}"))?;
+    let mut agent = agent_content
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| format!("Could not parse agent Codex config.toml: {error}"))?;
+
+    merge_codex_config_items(base.as_item(), agent.as_item_mut());
+    std::fs::write(agent_config_path, agent.to_string()).map_err(|error| error.to_string())
+}
+
+fn merge_codex_config_items(base: &toml_edit::Item, agent: &mut toml_edit::Item) {
+    let (Some(base_table), Some(agent_table)) = (base.as_table(), agent.as_table_mut()) else {
+        if agent.is_none() {
+            *agent = base.clone();
+        }
+        return;
+    };
+
+    for (key, base_value) in base_table.iter() {
+        // Workspace trust and every other project entry are agent-local state.
+        if key == "projects" || key == "wardian" {
+            continue;
+        }
+        merge_codex_config_items(base_value, &mut agent_table[key]);
+    }
+}
+
+const CODEX_POLICY_STATUS_FILE: &str = "wardian-codex-policy.json";
+
+/// Non-secret reconciliation result retained in an agent-local Codex home.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexPluginStatus {
+    pub selector: String,
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexPolicyStatus {
+    pub fingerprint: String,
+    pub allowed_plugins: Vec<crate::utils::AllowedCodexPlugin>,
+    pub plugins: Vec<CodexPluginStatus>,
+}
+
+pub(crate) fn codex_policy_status_path(codex_home: &std::path::Path) -> std::path::PathBuf {
+    codex_home.join(CODEX_POLICY_STATUS_FILE)
+}
+
+pub(crate) fn read_codex_policy_status(
+    codex_home: &std::path::Path,
+) -> Result<Option<CodexPolicyStatus>, String> {
+    let path = codex_policy_status_path(codex_home);
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|error| format!("Could not parse Codex policy status: {error}"))
+}
+
+fn reconcile_codex_plugin_policy(
+    codex_home: &std::path::Path,
+    policy: &crate::utils::CodexPluginPolicy,
+) -> Result<(), String> {
+    let mut plugins = Vec::with_capacity(policy.allowed_plugins.len());
+    for allowed in &policy.allowed_plugins {
+        let status = match codex_plugin_is_installed(codex_home, &allowed.selector) {
+            Ok(true) => CodexPluginStatus {
+                selector: allowed.selector.clone(),
+                installed: true,
+                error: None,
+            },
+            Ok(false) => match install_codex_plugin(codex_home, &allowed.selector) {
+                Ok(()) => CodexPluginStatus {
+                    selector: allowed.selector.clone(),
+                    installed: true,
+                    error: None,
+                },
+                Err(error) => CodexPluginStatus {
+                    selector: allowed.selector.clone(),
+                    installed: false,
+                    error: Some(error),
+                },
+            },
+            Err(error) => CodexPluginStatus {
+                selector: allowed.selector.clone(),
+                installed: false,
+                error: Some(error),
+            },
+        };
+        plugins.push(status);
+    }
+
+    let status = CodexPolicyStatus {
+        fingerprint: policy.fingerprint(),
+        allowed_plugins: policy.allowed_plugins.clone(),
+        plugins,
+    };
+    let encoded = serde_json::to_vec_pretty(&status)
+        .map_err(|error| format!("Could not serialize Codex policy status: {error}"))?;
+    std::fs::write(codex_policy_status_path(codex_home), encoded).map_err(|error| error.to_string())
+}
+
+fn codex_plugin_is_installed(codex_home: &std::path::Path, selector: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("codex")
+        .args(["plugin", "list"])
+        .env("CODEX_HOME", codex_home)
+        .output()
+        .map_err(|error| format!("Could not inspect Codex plugins: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not inspect Codex plugins: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Ok(listing.lines().any(|line| {
+        line.contains(selector) && !line.to_ascii_lowercase().contains("not installed")
+    }))
+}
+
+fn install_codex_plugin(codex_home: &std::path::Path, selector: &str) -> Result<(), String> {
+    let output = std::process::Command::new("codex")
+        .args(["plugin", "add", selector, "--json"])
+        .env("CODEX_HOME", codex_home)
+        .output()
+        .map_err(|error| format!("Could not install {selector}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not install {selector}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
 
 pub(crate) fn trust_codex_workspace_in_home(
     codex_home: &std::path::Path,
@@ -1186,7 +1357,8 @@ mod tests {
         std::fs::create_dir_all(&wardian_skills).expect("create wardian skills");
 
         std::fs::write(real_home.join("auth.json"), "auth").expect("write auth");
-        std::fs::write(real_home.join("config.toml"), "config").expect("write config");
+        std::fs::write(real_home.join("config.toml"), "model = \"gpt-5\"\n")
+            .expect("write config");
         std::fs::write(real_home.join("cap_sid"), "cap").expect("write cap sid");
         std::fs::write(real_home.join("history.jsonl"), "history").expect("write unrelated file");
         std::fs::write(real_home.join("session_index.jsonl"), "index")
@@ -1210,6 +1382,49 @@ mod tests {
         assert!(!projected_home.join("logs_2.sqlite-wal").exists());
         assert!(!projected_home.join("sandbox.log").exists());
         assert!(!projected_home.join("sessions").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_home_projection_merges_base_config_without_overwriting_agent_overlay_or_state() {
+        let root = unique_temp_dir("codex-home-merge-config");
+        let real_home = root.join("real-codex-home");
+        let projected_home = root.join("projected-home");
+
+        std::fs::create_dir_all(&real_home).expect("create real codex home");
+        std::fs::create_dir_all(&projected_home).expect("create projected codex home");
+        std::fs::write(
+            real_home.join("config.toml"),
+            "model = \"gpt-5\"\n[mcp_servers.shared]\ncommand = \"shared\"\n",
+        )
+        .expect("write base config");
+        std::fs::write(
+            projected_home.join("config.toml"),
+            "model = \"agent-model\"\n[projects.\"/agent\"]\ntrust_level = \"trusted\"\n",
+        )
+        .expect("write agent config");
+        std::fs::write(projected_home.join("history.jsonl"), "agent history")
+            .expect("write history");
+        std::fs::write(projected_home.join("state_5.sqlite"), "agent state")
+            .expect("write state");
+
+        sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
+            .expect("sync codex home");
+
+        let config = std::fs::read_to_string(projected_home.join("config.toml"))
+            .expect("read reconciled config");
+        assert!(config.contains("model = \"agent-model\""), "{config}");
+        assert!(config.contains("[mcp_servers.shared]"), "{config}");
+        assert!(config.contains("trust_level = \"trusted\""), "{config}");
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join("history.jsonl")).expect("read history"),
+            "agent history"
+        );
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join("state_5.sqlite")).expect("read state"),
+            "agent state"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1422,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_home_projection_removes_stale_projected_config_when_real_config_is_absent() {
+    fn codex_home_projection_preserves_agent_config_when_shared_config_is_absent() {
         let root = unique_temp_dir("codex-home-stale-config");
         let real_home = root.join("real-codex-home");
         let projected_home = root.join("projected-home");
@@ -1438,7 +1653,11 @@ mod tests {
         sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
             .expect("sync codex agent home");
 
-        assert!(!projected_home.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(projected_home.join("config.toml"))
+                .expect("agent config should be preserved"),
+            "[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
