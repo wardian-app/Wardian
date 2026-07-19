@@ -577,6 +577,7 @@ export type SurfaceCommandDefinition = {
 export type SurfaceBadge = {
     readonly badge_id: string;
     readonly label: string;
+    readonly value?: string;
 };
 
 export type SurfacePresentationMetadata = {
