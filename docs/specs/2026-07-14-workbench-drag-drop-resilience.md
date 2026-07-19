@@ -61,4 +61,4 @@ The field participates in frontend defaults, app-setting overrides, Rust seriali
 - Registry mismatch coverage verifies that tabs and the Home chooser render the declared presentation icon token even when a contributed surface type has a different name.
 - Real-pointer browser coverage verifies in-strip reorder, center moves, sole-tab source collapse, and edge splitting. It polls canonical DOM and saved topology, rejects empty non-final groups, and records page and fatal console errors.
 - The edge-preview test compares Dockview's visible selection with the live content target after both rectangles stabilize across animation frames. It passed three consecutive runs and produced `e2e/screenshots/workbench-drag-drop/2026-07-14/edge-preview.png`.
-- Scoped delivery evidence is recorded in `.superpowers/sdd/workbench-e2e-docs-report.md` for commits `502f483a`, `44dd76e4`, and `a9e972a1`.
+- Scoped delivery evidence is recorded in commits `502f483a`, `44dd76e4`, and `a9e972a1`.
