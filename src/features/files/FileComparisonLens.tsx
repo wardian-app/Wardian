@@ -70,6 +70,45 @@ function baselineLabel(baseline: FilesComparisonBaseline): string {
   }
 }
 
+type ComparisonRuntime = {
+  monaco: typeof Monaco;
+  editor: Monaco.editor.IStandaloneDiffEditor;
+  modified: Monaco.editor.ITextModel;
+  original: Monaco.editor.ITextModel | null;
+  original_key: string | null;
+};
+
+type ComparisonBaselineState = {
+  key: string;
+  text: string;
+} | null;
+
+function installComparisonBaseline(
+  runtime: ComparisonRuntime,
+  baseline: ComparisonBaselineState,
+  language: string,
+) {
+  if (!baseline) return;
+  if (runtime.original_key === baseline.key) {
+    if (runtime.original && runtime.original.getValue() !== baseline.text) {
+      runtime.original.setValue(baseline.text);
+    }
+    return;
+  }
+  const next = acquireFileBaselineModel(
+    runtime.monaco,
+    baseline.key,
+    baseline.text,
+    language,
+  );
+  const previous = runtime.original;
+  const previousKey = runtime.original_key;
+  runtime.editor.setModel({ original: next, modified: runtime.modified });
+  runtime.original = next;
+  runtime.original_key = baseline.key;
+  if (previous && previousKey) releaseFileBaselineModel(previousKey, previous);
+}
+
 /** Full source comparison that preserves the underlying file presentation. */
 export function FileComparisonLens({
   controller,
@@ -88,6 +127,7 @@ export function FileComparisonLens({
   const rootRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const diffEditorRef = useRef<Monaco.editor.IStandaloneDiffEditor | null>(null);
+  const runtimeRef = useRef<ComparisonRuntime | null>(null);
   const [contentWidth, setContentWidth] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -124,6 +164,18 @@ export function FileComparisonLens({
     ? null
     : resolveFilesComparisonLayout(layout_preference, contentWidth, "text");
   const measured = contentWidth !== null;
+  const comparisonBaseline = available
+    ? {
+        // A lens owns one stable original model. Baseline revisions update its
+        // bytes in place so Monaco retains DOM, layout, and scroll state.
+        key: `${snapshot.resource_id}\0surface:${surface_id}`,
+        text: originalText!,
+      }
+    : null;
+  const comparisonBaselineRef = useRef<ComparisonBaselineState>(comparisonBaseline);
+  comparisonBaselineRef.current = comparisonBaseline;
+  const effectiveLayoutRef = useRef(effectiveLayout);
+  effectiveLayoutRef.current = effectiveLayout;
 
   useEffect(() => {
     const root = rootRef.current;
@@ -143,24 +195,15 @@ export function FileComparisonLens({
     if (!host) return;
     let cancelled = false;
     let diffEditor: Monaco.editor.IStandaloneDiffEditor | null = null;
-    let original: Monaco.editor.ITextModel | null = null;
     let modified: Monaco.editor.ITextModel | null = null;
+    let runtime: ComparisonRuntime | null = null;
     let observer: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
     const resourceId = snapshot.resource_id!;
-    const baselineKey = `${resourceId}\0${baseline.kind}\0${
-      "version_id" in baseline ? baseline.version_id : snapshot.buffer_base_hash
-    }`;
     setLoadError(null);
 
     void loadFileMonaco().then((monaco) => {
       if (cancelled) return;
-      original = acquireFileBaselineModel(
-        monaco,
-        baselineKey,
-        originalText!,
-        language,
-      );
       modified = acquireCanonicalFileModel(monaco, resourceId, controller, language);
       diffEditor = monaco.editor.createDiffEditor(host, {
         automaticLayout: false,
@@ -168,11 +211,7 @@ export function FileComparisonLens({
         minimap: { enabled: false },
         originalEditable: false,
         readOnly: authorizationUnavailableRef.current,
-        renderSideBySide: resolveFilesComparisonLayout(
-          layout_preference,
-          contentWidth!,
-          "text",
-        ) === "side_by_side",
+        renderSideBySide: effectiveLayoutRef.current === "side_by_side",
         useInlineViewWhenSpaceIsLimited: false,
         renderValidationDecorations: "off",
         scrollBeyondLastLine: false,
@@ -180,7 +219,15 @@ export function FileComparisonLens({
         wordWrap: "off",
       });
       diffEditorRef.current = diffEditor;
-      diffEditor.setModel({ original, modified });
+      runtime = {
+        monaco,
+        editor: diffEditor,
+        modified,
+        original: null,
+        original_key: null,
+      };
+      runtimeRef.current = runtime;
+      installComparisonBaseline(runtime, comparisonBaselineRef.current, language);
       diffEditor.getModifiedEditor().addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
         async () => {
@@ -222,8 +269,11 @@ export function FileComparisonLens({
       themeObserver?.disconnect();
       diffEditor?.dispose();
       if (diffEditorRef.current === diffEditor) diffEditorRef.current = null;
+      if (runtimeRef.current === runtime) runtimeRef.current = null;
       if (modified) releaseCanonicalFileModel(resourceId, modified);
-      if (original) releaseFileBaselineModel(baselineKey, original);
+      if (runtime?.original && runtime.original_key) {
+        releaseFileBaselineModel(runtime.original_key, runtime.original);
+      }
     };
   }, [
     available,
@@ -231,13 +281,20 @@ export function FileComparisonLens({
     language,
     lifecycle.visible,
     measured,
-    snapshot.buffer_base_hash,
     snapshot.resource_id,
-    snapshot.saved_text,
-    originalText,
-    baseline,
     surface_id,
   ]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    try {
+      installComparisonBaseline(runtime, comparisonBaseline, language);
+      setLoadError(null);
+    } catch (error) {
+      setLoadError(errorMessage(error));
+    }
+  }, [comparisonBaseline?.key, comparisonBaseline?.text, language]);
 
   useEffect(() => {
     if (effectiveLayout === null) return;

@@ -250,6 +250,46 @@ describe("FileComparisonLens", () => {
     expect(createModel).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the diff editor mounted across equivalent state and saved-file revisions", async () => {
+    const { controller, props } = await harness();
+    act(() => controller.mutate("saved\ntext\n"));
+    const view = render(<FileComparisonLens {...props} />);
+    await waitFor(() => expect(createDiffEditor).toHaveBeenCalledOnce());
+    const host = view.getByTestId("file-comparison-editor");
+    const editorDom = document.createElement("div");
+    editorDom.dataset.diffIdentity = "preserved";
+    host.appendChild(editorDom);
+    const editor = createDiffEditor.mock.results[0]?.value as {
+      setModel: ReturnType<typeof vi.fn>;
+    };
+    const firstOriginal = editor.setModel.mock.calls[0]?.[0]?.original as FakeModel;
+
+    view.rerender(
+      <FileComparisonLens
+        {...props}
+        baseline={{ kind: "saved_file" }}
+        lifecycle={{ visible: true }}
+      />,
+    );
+    await act(async () => Promise.resolve());
+    expect(createDiffEditor).toHaveBeenCalledOnce();
+    expect(host).toContainElement(editorDom);
+
+    act(() => {
+      controller.applyAuthoritative(
+        controllerOwner(5, "hash-next"),
+        "next saved\ntext\n",
+      );
+    });
+    await waitFor(() => expect(firstOriginal.getValue()).toBe("next saved\ntext\n"));
+    expect(createDiffEditor).toHaveBeenCalledOnce();
+    expect(createModel).toHaveBeenCalledTimes(2);
+    expect(editor.setModel).toHaveBeenCalledOnce();
+    expect(view.getByTestId("file-comparison-editor")).toBe(host);
+    expect(host).toContainElement(editorDom);
+    expect(firstOriginal.dispose).not.toHaveBeenCalled();
+  });
+
   it("contains modified-editor Save failures without replacing the lens host", async () => {
     const { controller, props } = await harness();
     vi.spyOn(controller, "save").mockRejectedValueOnce(new Error("write denied"));

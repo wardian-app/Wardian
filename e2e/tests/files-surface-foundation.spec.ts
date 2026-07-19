@@ -317,6 +317,8 @@ test("renders a complete Markdown document without flashing during revision refr
   await expect(figure).toHaveAttribute("src", MARKDOWN_FIGURE);
   await expect.poll(async () => figure.evaluate((image) => (image as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
+  await title.evaluate((element) => { element.setAttribute("data-render-identity", "heading"); });
+  await figure.evaluate((element) => { element.setAttribute("data-render-identity", "image"); });
   await expect(surface.getByRole("table")).toContainText("Files");
   await expect(surface.getByText("Sanitized HTML content.")).toBeVisible();
   const titleStyle = await title.evaluate((element) => {
@@ -332,12 +334,19 @@ test("renders a complete Markdown document without flashing during revision refr
       if (element.textContent?.includes("Loading Markdown")) {
         (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading = true;
       }
+      if (element.querySelector(".files-markdown-image-loading")) {
+        (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading = true;
+      }
     });
     observer.observe(element, { childList: true, subtree: true, characterData: true });
     (element as HTMLElement & { __markdownObserver?: MutationObserver }).__markdownObserver = observer;
   });
   await ipc.updateFile(ALPHA_PATH, markdown.replace("Habitat report", "Habitat report updated"));
-  await expect(surface.getByRole("heading", { name: "Habitat report updated" })).toBeVisible();
+  const updatedTitle = surface.getByRole("heading", { name: "Habitat report updated" });
+  await expect(updatedTitle).toBeVisible();
+  await expect(updatedTitle).toHaveAttribute("data-render-identity", "heading");
+  await expect(surface.getByRole("img", { name: "Wardian figure" }))
+    .toHaveAttribute("data-render-identity", "image");
   const sawLoading = await surface.evaluate((element) => {
     (element as HTMLElement & { __markdownObserver?: MutationObserver }).__markdownObserver?.disconnect();
     return (window as Window & { __markdownSawLoading?: boolean }).__markdownSawLoading;
@@ -699,6 +708,9 @@ test("keeps inline saved-file changes and responsive comparison independent of p
   await expect(comparisonBody).toHaveAttribute("data-layout", "side_by_side");
   const monacoDiff = lens.locator(".monaco-diff-editor");
   await expect(monacoDiff).toHaveClass(/side-by-side/);
+  await monacoDiff.evaluate((element) => {
+    element.setAttribute("data-diff-identity", "preserved");
+  });
 
   const screenshotPath = path.resolve(
     "e2e/screenshots/files-editor/2026-07-18/saved-file-comparison-lens.png",
@@ -718,6 +730,7 @@ test("keeps inline saved-file changes and responsive comparison independent of p
   await expect(layout).toHaveValue("side_by_side");
   await expect(comparisonBody).toHaveAttribute("data-layout", "side_by_side");
   await expect(monacoDiff).toHaveClass(/side-by-side/);
+  await expect(monacoDiff).toHaveAttribute("data-diff-identity", "preserved");
 
   await surface.evaluate((element) => {
     element.style.width = "520px";

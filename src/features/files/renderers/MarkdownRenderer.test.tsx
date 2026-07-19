@@ -145,12 +145,19 @@ describe("MarkdownRenderer", () => {
       },
     };
     const client = {
-      readText: vi.fn().mockResolvedValue({
-        schema: 1,
-        resource_id: snapshot().resource_id,
-        revision: 1,
-        text: "![Wardian icon](public/icon.png)",
-      }),
+      readText: vi.fn()
+        .mockResolvedValueOnce({
+          schema: 1,
+          resource_id: snapshot().resource_id,
+          revision: 1,
+          text: "![Wardian icon](public/icon.png)",
+        })
+        .mockResolvedValueOnce({
+          schema: 1,
+          resource_id: snapshot(2).resource_id,
+          revision: 2,
+          text: "![Wardian icon](public/icon.png)",
+        }),
       listenForRevisions: vi.fn().mockResolvedValue(vi.fn()),
       open: vi.fn().mockResolvedValue(imageSnapshot),
       issueTicket: vi.fn().mockResolvedValue({
@@ -165,14 +172,12 @@ describe("MarkdownRenderer", () => {
       closeRendererLease: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as FileResourceClient;
-    const view = render(<MarkdownRenderer
-      {...props(client)}
-      resource_request={{
-        path: snapshot().descriptor.canonical_path,
-        agent_id: "agent-1",
-        user_file_capability_id: null,
-      }}
-    />);
+    const resourceRequest = {
+      path: snapshot().descriptor.canonical_path,
+      agent_id: "agent-1",
+      user_file_capability_id: null,
+    };
+    const view = render(<MarkdownRenderer {...props(client)} resource_request={resourceRequest} />);
 
     const image = await screen.findByRole("img", { name: "Wardian icon" });
     expect(image).toHaveAttribute("src", "wardian-file://ticket-1");
@@ -185,6 +190,17 @@ describe("MarkdownRenderer", () => {
       imageSnapshot,
       expect.stringMatching(/^markdown-image:/),
     );
+    view.rerender(
+      <MarkdownRenderer
+        {...props(client, vi.fn(), 2)}
+        resource_request={{ ...resourceRequest }}
+      />,
+    );
+    await waitFor(() => expect(client.readText).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("img", { name: "Wardian icon" })).toBe(image);
+    expect(client.open).toHaveBeenCalledTimes(1);
+    expect(client.issueTicket).toHaveBeenCalledTimes(1);
+    expect(client.closeRendererLease).not.toHaveBeenCalled();
     view.unmount();
     await waitFor(() => expect(client.closeRendererLease).toHaveBeenCalled());
   });
@@ -229,10 +245,12 @@ describe("MarkdownRenderer", () => {
         .mockReturnValueOnce(second),
     } as unknown as FileResourceClient;
     const view = render(<MarkdownRenderer {...props(client)} />);
-    expect(await screen.findByRole("heading", { name: "Stable title" })).toBeInTheDocument();
+    const stableHeading = await screen.findByRole("heading", { name: "Stable title" });
+    stableHeading.setAttribute("data-render-identity", "preserved");
 
     view.rerender(<MarkdownRenderer {...props(client, vi.fn(), 2)} />);
-    expect(screen.getByRole("heading", { name: "Stable title" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Stable title" }))
+      .toHaveAttribute("data-render-identity", "preserved");
     expect(screen.queryByText("Loading Markdown…")).toBeNull();
 
     resolveSecond?.({
@@ -241,7 +259,8 @@ describe("MarkdownRenderer", () => {
       revision: 2,
       text: "# Updated title",
     });
-    expect(await screen.findByRole("heading", { name: "Updated title" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Updated title" }))
+      .toHaveAttribute("data-render-identity", "preserved");
   });
 
   it("does not read unavailable Markdown", () => {

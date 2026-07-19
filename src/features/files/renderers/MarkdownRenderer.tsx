@@ -1,5 +1,4 @@
 import {
-  createElement,
   isValidElement,
   useCallback,
   useEffect,
@@ -13,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -49,6 +48,40 @@ const MARKDOWN_SANITIZE_SCHEMA = {
     src: [...new Set([...(defaultSchema.protocols?.src ?? []), "file"])],
   },
 };
+
+type MarkdownAstNode = {
+  type?: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: MarkdownAstNode[];
+};
+
+function markdownAstText(node: MarkdownAstNode): string {
+  if (node.type === "text") return node.value ?? "";
+  return node.children?.map(markdownAstText).join("") ?? "";
+}
+
+/** Adds deterministic heading anchors during the Markdown transform itself. */
+function rehypeMarkdownHeadingIds() {
+  return (root: MarkdownAstNode) => {
+    const counts = new Map<string, number>();
+    const visit = (node: MarkdownAstNode) => {
+      if (/^h[1-6]$/.test(node.tagName ?? "")) {
+        const base = headingSlug(markdownAstText(node));
+        const count = (counts.get(base) ?? 0) + 1;
+        counts.set(base, count);
+        node.properties = {
+          ...node.properties,
+          id: count === 1 ? base : `${base}-${count}`,
+          tabIndex: -1,
+        };
+      }
+      node.children?.forEach(visit);
+    };
+    visit(root);
+  };
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -319,6 +352,54 @@ export default function MarkdownRenderer({
   const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
   const retry = useCallback(() => setRetryToken((value) => value + 1), []);
+  const sourcePath = snapshot.descriptor.canonical_path;
+  const onOpenFileRef = useRef(on_open_file);
+  onOpenFileRef.current = on_open_file;
+  const embeddedResourceRequest = useMemo<NonNullable<FileRendererProps["resource_request"]>>(
+    () => ({
+      path: resource_request?.path ?? sourcePath,
+      agent_id: resource_request?.agent_id ?? null,
+      user_file_capability_id: resource_request?.user_file_capability_id ?? null,
+    }),
+    [
+      resource_request?.agent_id,
+      resource_request?.path,
+      resource_request?.user_file_capability_id,
+      sourcePath,
+    ],
+  );
+  const openFragment = useCallback((fragment: string) => {
+    let id: string;
+    try { id = decodeURIComponent(fragment); } catch { id = fragment; }
+    const candidate = document.getElementById(id);
+    const heading = candidate && articleRef.current?.contains(candidate) ? candidate : null;
+    heading?.scrollIntoView({ block: "start" });
+    heading?.focus({ preventScroll: true });
+  }, []);
+  const components = useMemo<Components>(() => ({
+    a: ({ href, children }) => (
+      <SafeLink
+        href={href}
+        sourcePath={sourcePath}
+        onOpenFile={(path) => onOpenFileRef.current(path)}
+        onOpenFragment={openFragment}
+        onError={setError}
+      >
+        {children}
+      </SafeLink>
+    ),
+    img: ({ alt, src, node: _node, ...imageProps }) => (
+      <MarkdownImage
+        {...imageProps}
+        src={src}
+        alt={alt}
+        source_path={sourcePath}
+        resource_request={embeddedResourceRequest}
+        client={client}
+        lifecycle={{ visible: lifecycle.visible }}
+      />
+    ),
+  }), [client, embeddedResourceRequest, lifecycle.visible, openFragment, sourcePath]);
 
   useEffect(() => {
     if (!lifecycle.visible) return;
@@ -359,56 +440,15 @@ export default function MarkdownRenderer({
     );
   }
   if (text === null) return <div className="files-resource-state" role="status">Loading Markdown…</div>;
-  const headingCounts = new Map<string, number>();
-  const renderHeading = (tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6", children: ReactNode) => {
-    const base = headingSlug(children);
-    const count = (headingCounts.get(base) ?? 0) + 1;
-    headingCounts.set(base, count);
-    const id = count === 1 ? base : `${base}-${count}`;
-    return createElement(tag, { id, tabIndex: -1 }, children);
-  };
-  const openFragment = (fragment: string) => {
-    let id: string;
-    try { id = decodeURIComponent(fragment); } catch { id = fragment; }
-    const candidate = document.getElementById(id);
-    const heading = candidate && articleRef.current?.contains(candidate) ? candidate : null;
-    heading?.scrollIntoView({ block: "start" });
-    heading?.focus({ preventScroll: true });
-  };
   return (
     <article ref={articleRef} className="files-markdown-renderer">
       <Markdown
-        components={{
-          h1: ({ children }) => renderHeading("h1", children),
-          h2: ({ children }) => renderHeading("h2", children),
-          h3: ({ children }) => renderHeading("h3", children),
-          h4: ({ children }) => renderHeading("h4", children),
-          h5: ({ children }) => renderHeading("h5", children),
-          h6: ({ children }) => renderHeading("h6", children),
-          a: ({ href, children }) => (
-            <SafeLink
-              href={href}
-              sourcePath={snapshot.descriptor.canonical_path}
-              onOpenFile={on_open_file}
-              onOpenFragment={openFragment}
-              onError={setError}
-            >
-              {children}
-            </SafeLink>
-          ),
-          img: ({ alt, src, node: _node, ...imageProps }) => (
-            <MarkdownImage
-              {...imageProps}
-              src={src}
-              alt={alt}
-              source_path={snapshot.descriptor.canonical_path}
-              resource_request={resource_request}
-              client={client}
-              lifecycle={lifecycle}
-            />
-          ),
-        }}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}
+        components={components}
+        rehypePlugins={[
+          rehypeRaw,
+          [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
+          rehypeMarkdownHeadingIds,
+        ]}
         remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         urlTransform={filesMarkdownUrlTransform}
       >
