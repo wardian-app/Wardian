@@ -1289,7 +1289,8 @@ select option {
 
 @container wardian-surface (max-width: 760px) {
   .workflow-monitor__stats {
-    grid-template-columns: repeat(auto-fit, minmax(min(8rem, 100%), 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.375rem;
   }
 
   .workflow-monitor__toolbar {

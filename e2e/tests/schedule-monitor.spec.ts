@@ -255,6 +255,13 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   const monitor = page.getByTestId("workflow-monitor");
   await expect(monitor).toBeVisible();
 
+  const stats = monitor.getByTestId("workflow-monitor-stats");
+  const statRowCount = await stats.locator(":scope > div").evaluateAll((nodes) => (
+    new Set(nodes.map((node) => Math.round(node.getBoundingClientRect().top))).size
+  ));
+  expect(statRowCount).toBe(1);
+  await stats.screenshot({ path: `${adaptiveCardScreenshotDirectory}/monitor-stats-row.png` });
+
   const scheduledCard = monitor.getByTestId("workflow-activity-row-wf");
   await expect(scheduledCard).toHaveAttribute("data-mode", "scheduled");
   await expect(scheduledCard).toContainText("Next run");

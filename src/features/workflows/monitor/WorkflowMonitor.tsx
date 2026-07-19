@@ -454,8 +454,8 @@ function MonitorStat({
   }[tone];
 
   return (
-    <div className="min-w-0 rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-3 py-2">
-      <div className={`text-sm font-bold ${statToneClass}`}>{value} {label}</div>
+    <div className="min-w-0 rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-2">
+      <div className={`truncate whitespace-nowrap text-xs font-bold ${statToneClass}`}>{value} {label}</div>
     </div>
   );
 }
