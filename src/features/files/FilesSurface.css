@@ -44,7 +44,9 @@
   flex: 1 1 auto;
   overflow: hidden;
   color: var(--color-wardian-text);
+  cursor: text;
   text-overflow: ellipsis;
+  user-select: text;
 }
 
 .files-breadcrumb-dirty {

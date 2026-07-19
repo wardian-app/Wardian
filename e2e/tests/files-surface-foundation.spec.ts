@@ -361,6 +361,7 @@ test("renders Windows Explorer and Files paths with stable compact separators", 
   const breadcrumb = page.getByRole("navigation", { name: "File location" });
   await expect(breadcrumb).toHaveAttribute("title", "C:\\work\\project\\alpha.md");
   await expect(breadcrumb).toHaveText("C:\\work\\project\\alpha.md");
+  await expect(breadcrumb.locator(".files-breadcrumb-path")).toHaveCSS("user-select", "text");
   await expect(page.getByRole("heading", { name: "Windows path" })).toBeVisible();
 
   await page.screenshot({
