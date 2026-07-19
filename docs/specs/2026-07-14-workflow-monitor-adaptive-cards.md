@@ -12,7 +12,7 @@ actions receive similar visual weight even though their importance changes by
 operator task. Assigned agents are especially difficult to scan because they
 appear as muted metadata near the far edge of the row.
 
-The workflow sidebar compresses schedule state, cadence, and the next-run time
+The workflow sidebar compresses schedule state, recurrence, and the next-run time
 into one truncated metadata line. This makes the most important planning
 information unreadable at normal sidebar widths and omits the assigned agents
 entirely.
@@ -32,7 +32,7 @@ section will use a card variant suited to the question that section answers:
   the appropriate card variant rather than forcing one universal column order.
 
 The workflow sidebar will use a compact Scheduled-style card so upcoming time,
-cadence, assigned agents, and previous execution remain readable in the narrow
+recurrence, assigned agents, and previous execution remain readable in the narrow
 pane.
 
 This is a frontend presentation change. Existing workflow DTOs, persisted
@@ -49,11 +49,11 @@ Every card keeps the following information available:
 2. Assigned agents or temporary providers, labeled by workflow role
 3. Semantic status and any actionable failure
 4. Relevant execution times
-5. Blueprint and run identifiers as secondary detail
-6. Applicable workflow actions
+5. Applicable workflow actions
 
 Raw identifiers must not occupy the primary scan line. They remain available
-as secondary text, accessible labels, or expanded detail.
+through action labels, test identifiers, or expanded diagnostic detail where
+needed.
 
 ### Scheduled cards
 
@@ -62,7 +62,7 @@ Scheduled cards emphasize:
 1. Workflow name
 2. Assigned agents
 3. Next execution time
-4. Recurring cadence
+4. Recurring schedule
 5. Previous execution time
 
 Pause, resume, run-now, and edit actions remain directly available. A schedule
@@ -78,9 +78,8 @@ History cards emphasize:
 3. Run timestamp
 4. Outcome and duration when available
 
-The run identifier and schedule cadence are supporting details. Opening the run
-remains directly available. A failed run presents its failure summary in the
-semantic error tone.
+Opening the run remains directly available. A failed run presents its failure
+summary in the semantic error tone.
 
 ### Running and needs-attention cards
 
@@ -95,7 +94,7 @@ The sidebar card shows:
 - Workflow name
 - Up to two role-aware agent summaries
 - Next execution time
-- Cadence
+- Schedule
 - Previous execution time
 - Pause or resume and run-now actions
 
@@ -222,7 +221,7 @@ evidence in the pull request description.
 The design is complete when:
 
 1. Assigned agents are primary, readable content in the Monitor and sidebar.
-2. Scheduled cards emphasize next execution and cadence.
+2. Scheduled cards emphasize next execution and recurrence.
 3. History cards emphasize run time and outcome.
 4. Running and Needs-attention cards emphasize live state and ownership.
 5. More than two assignments are discoverable through an accessible inline

@@ -233,8 +233,8 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
   return (
     <div data-testid="workflows-view" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)] text-primary">
-      <div className="workflows-toolbar flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3">
-        <div className="workflows-toolbar__primary flex min-w-0 flex-1 items-center gap-2">
+      <div className={`workflows-toolbar ${mode === 'monitor' ? 'workflows-toolbar--monitor' : ''} flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3`}>
+        <div className={`workflows-toolbar__primary flex min-w-0 flex-1 items-center gap-2 ${mode === 'monitor' ? 'flex-nowrap' : ''}`}>
           <BlueprintSelector selectedPath={blueprintPath} onOpen={(path) => void openBlueprint(path)} onNew={newBlueprint} />
           <div className="flex rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-0.5" aria-label="Workflow mode">
             {(['edit', 'observe', 'monitor'] as const).map((value) => (
@@ -266,7 +266,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
             </div>
           )}
         </div>
-        <div className="workflows-toolbar__actions flex shrink-0 items-center gap-2">
+        <div className={`workflows-toolbar__actions flex shrink-0 items-center gap-2 ${mode === 'monitor' ? 'flex-nowrap' : ''}`}>
           {mode === 'edit' ? (
             <button
               type="button"
@@ -288,7 +288,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           {mode !== 'edit' ? (
             <button
               type="button"
-              className="inline-flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
+              className={`${mode === 'monitor' ? 'h-7 w-7' : 'h-8 w-8'} inline-flex cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]`}
               onClick={() => void refreshCurrentMode()}
               aria-label="Refresh workflow view"
               title="Refresh"
@@ -298,7 +298,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           ) : null}
           <button
             type="button"
-            className="cursor-pointer select-none rounded bg-[var(--color-wardian-accent)] px-4 py-1.5 text-xs font-bold text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+            className={`${mode === 'monitor' ? 'h-7 px-3 py-1' : 'px-4 py-1.5'} cursor-pointer select-none rounded bg-[var(--color-wardian-accent)] text-xs font-bold text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-40`}
             disabled={runDisabled}
             onClick={() => setLaunchOpen(true)}
           >

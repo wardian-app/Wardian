@@ -5,7 +5,7 @@ import type { RunStatusKind, RunSummary } from '../run/runTypes';
 import { formatRunStatus } from '../run/statusLabels';
 import { WorkflowAssignmentSummary } from './WorkflowAssignmentSummary';
 import { workflowAssignmentItems } from './assignmentPresentation';
-import { cadenceLabel, scheduleStatusColor, scheduleStatusLabel } from './scheduleStatus';
+import { scheduleStatusColor, scheduleStatusLabel, scheduleSummaryLabel } from './scheduleStatus';
 import { formatWorkflowTime } from './workflowTime';
 
 interface GlanceCardCommonProps {
@@ -49,7 +49,7 @@ function timeLabel(value: string | number | null | undefined, emptyLabel: string
 function CompactDetail({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[9px] font-bold uppercase tracking-wide text-muted">{label}</dt>
+      <dt className="text-[10px] font-bold text-muted">{label}</dt>
       <dd className="mt-0.5 truncate text-[10px] text-[var(--color-wardian-text)]">{children}</dd>
     </div>
   );
@@ -94,7 +94,7 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
                 {statusLabel}
               </span>
               <span aria-hidden>·</span>
-              <span className="shrink-0 font-bold uppercase tracking-wide">Next run</span>
+              <span className="shrink-0 font-bold">Next run</span>
               <span className="min-w-0 truncate text-[var(--color-wardian-text)]">
                 {schedule.is_paused ? 'Paused' : timeLabel(nextRun, 'Not scheduled', now)}
               </span>
@@ -121,7 +121,7 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
         </div>
 
         <dl className="mt-2 grid grid-cols-2 gap-2 border-t border-wardian-border pt-2">
-          <CompactDetail label="Cadence">{cadenceLabel(schedule.schedule)}</CompactDetail>
+          <CompactDetail label="Schedule">{scheduleSummaryLabel(schedule.schedule)}</CompactDetail>
           <CompactDetail label="Last run">{timeLabel(schedule.last_run_epoch_ms, 'Never run', now)}</CompactDetail>
         </dl>
 

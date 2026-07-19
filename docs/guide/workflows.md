@@ -81,7 +81,7 @@ scheduled work, and history.
 
 Each section uses a card hierarchy suited to the operator's question:
 
-- **Scheduled** leads with assigned agents, then **Next run**, **Cadence**, and
+- **Scheduled** leads with assigned agents, then **Next run**, **Schedule**, and
   **Last run**.
 - **History** leads with assigned agents, then **Ran**, **Outcome**, and the run
   duration when available. Historical cards do not show a future next-run time.
@@ -110,7 +110,7 @@ In a narrow or restored Workflows pane, the responsive card grid stays within
 the pane while its summary and filters remain fixed. The card list scrolls
 independently without widening or collapsing the surrounding workbench layout.
 
-- **Pause** or **Resume** changes whether the schedule fires on its cadence.
+- **Pause** or **Resume** changes whether the schedule fires on its saved recurrence.
 - **Run now** launches the scheduled invoker immediately.
 - **Edit** reopens the schedule form.
 
@@ -120,7 +120,7 @@ paged 10 entries at a time so you can move through earlier activity.
 
 The left workflow rail uses a compact Scheduled-style card at normal sidebar
 widths. It keeps the workflow name, next run, two assigned agents with the same
-**+N agents** expansion, cadence, previous run, and pause or resume and run-now
+**+N agents** expansion, schedule, previous run, and pause or resume and run-now
 actions readable without repeating raw blueprint ids in the primary layout.
 Sidebar search also matches resolved agent names so you can find the workflow
 owned by a particular agent.

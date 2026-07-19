@@ -4,7 +4,7 @@ import type { WorkflowSchedule } from '../../../types/workflow';
 import { WorkflowAssignmentSummary } from './WorkflowAssignmentSummary';
 import { workflowAssignmentItems } from './assignmentPresentation';
 import type { ActivityTone, WorkflowActivity } from './monitorModel';
-import { cadenceLabel } from './scheduleStatus';
+import { scheduleSummaryLabel } from './scheduleStatus';
 import { formatRunDuration, formatWorkflowTime, runTimestampValue } from './workflowTime';
 
 export interface WorkflowActivityCardProps {
@@ -61,7 +61,7 @@ function timeValue(
 function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[9px] font-bold uppercase tracking-wide text-muted">{label}</dt>
+      <dt className="text-[10px] font-bold text-muted">{label}</dt>
       <dd className="workflow-activity-card__detail-value mt-0.5 truncate text-[10px] text-[var(--color-wardian-text)]">{children}</dd>
     </div>
   );
@@ -81,7 +81,7 @@ function ModeDetails({ activity, schedule, now, compact = false }: {
     return (
       <dl className={detailsClass}>
         <Detail label="Next run">{timeValue(nextRun, now, 'Not scheduled')}</Detail>
-        <Detail label="Cadence">{schedule ? cadenceLabel(schedule.schedule) : 'Manual only'}</Detail>
+        <Detail label="Schedule">{schedule ? scheduleSummaryLabel(schedule.schedule) : 'Manual only'}</Detail>
         <Detail label="Last run">{timeValue(lastRun, now, 'Never run')}</Detail>
       </dl>
     );
@@ -211,21 +211,15 @@ export function WorkflowActivityCard({
         <ModeDetails activity={activity} schedule={schedule} now={now} compact={compactHistory} />
       </div>
 
-      {compactHistory ? (
+      {compactHistory && activity.issue ? (
         <div data-virtual-meta className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden">
-          {activity.issue ? (
-            <p
-              role="alert"
-              title={activity.issue}
-              className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-wardian-error)]"
-            >
-              {activity.issue}
-            </p>
-          ) : null}
-          <footer className="flex min-w-0 flex-1 flex-nowrap gap-x-3 overflow-hidden whitespace-nowrap font-mono text-[9px] text-muted">
-            <span className="min-w-0 truncate" title={activity.blueprintId}>Blueprint {activity.blueprintId}</span>
-            {run ? <span className="min-w-0 truncate" title={run.run_id}>{run.run_id}</span> : null}
-          </footer>
+          <p
+            role="alert"
+            title={activity.issue}
+            className="min-w-0 flex-1 truncate text-[10px] text-[var(--color-wardian-error)]"
+          >
+            {activity.issue}
+          </p>
         </div>
       ) : (
         <>
@@ -234,10 +228,6 @@ export function WorkflowActivityCard({
               {activity.issue}
             </p>
           ) : null}
-          <footer className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 font-mono text-[9px] text-muted">
-            <span className="min-w-0 truncate" title={activity.blueprintId}>Blueprint {activity.blueprintId}</span>
-            {run ? <span className="min-w-0 truncate" title={run.run_id}>{run.run_id}</span> : null}
-          </footer>
         </>
       )}
     </article>

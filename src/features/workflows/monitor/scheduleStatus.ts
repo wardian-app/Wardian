@@ -1,7 +1,7 @@
 import type { ScheduleDefinition, WorkflowSchedule } from '../../../types/workflow';
 
-/** Human cadence summary, e.g. "Every 60m", "Weekly Mon,Fri 09:35". */
-export function cadenceLabel(schedule: ScheduleDefinition): string {
+/** Human schedule summary, e.g. "Every 60m", "Weekly Mon,Fri 09:35". */
+export function scheduleSummaryLabel(schedule: ScheduleDefinition): string {
   switch (schedule.schedule_type) {
     case 'interval': {
       const minutes = schedule.interval_minutes ?? 0;

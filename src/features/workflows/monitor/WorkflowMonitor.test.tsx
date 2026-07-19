@@ -347,7 +347,7 @@ describe('WorkflowMonitor', () => {
     expect(scheduledCard).toHaveTextContent('Routine Check');
     expect(scheduledCard).toHaveAttribute('data-mode', 'scheduled');
     expect(scheduledCard).toHaveTextContent('Next run');
-    expect(scheduledCard).toHaveTextContent('Cadence');
+    expect(scheduledCard).toHaveTextContent('Schedule');
     expect(scheduledCard).toHaveTextContent('Last run');
     expect(screen.getByText('Nightly Review')).toBeInTheDocument();
   });
@@ -375,8 +375,9 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
 
     expect(screen.getByRole('heading', { name: /running now/i })).toBeInTheDocument();
-    expect(screen.getByText('run-active-1')).toBeInTheDocument();
-    expect(screen.getByText('run-active-2')).toBeInTheDocument();
+    expect(screen.getAllByTestId('workflow-activity-row-shared-workflow')).toHaveLength(2);
+    expect(screen.queryByText('run-active-1')).toBeNull();
+    expect(screen.queryByText('run-active-2')).toBeNull();
   });
 
   it('does not collapse multiple schedules for the same workflow', () => {
@@ -489,10 +490,10 @@ describe('WorkflowMonitor', () => {
     expect(secondaryRow).toBeDefined();
     expect(primaryRow).toHaveTextContent('Primary Schedule');
     expect(primaryRow).toHaveTextContent('Running');
-    expect(primaryRow).toHaveTextContent('run-primary');
     expect(secondaryRow).toHaveTextContent('Secondary Schedule');
     expect(secondaryRow).toHaveTextContent('Scheduled');
     expect(secondaryRow).toHaveTextContent('Never run');
+    expect(primaryRow).not.toHaveTextContent('run-primary');
   });
 
   it('renders activity actions inside cards instead of a fixed actions table', () => {
@@ -546,8 +547,10 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByTestId('workflow-monitor-stats')).toHaveTextContent('1 failed');
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
-    expect(screen.getByText('run-current-failed')).toBeInTheDocument();
-    expect(screen.getByText('run-old-failed')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-current-failed')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-old-failed')).toBeInTheDocument();
+    expect(screen.queryByText('run-current-failed')).toBeNull();
+    expect(screen.queryByText('run-old-failed')).toBeNull();
   });
 
   it('shows short history runs without requiring expansion', () => {
@@ -574,10 +577,10 @@ describe('WorkflowMonitor', () => {
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
     expect(screen.getByRole('heading', { name: /^history$/i })).toBeInTheDocument();
-    const latestRunId = screen.getByText('run-new');
+    const latestRunCard = screen.getByTestId('workflow-history-run-run-new');
     const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
-    expect(latestRunId.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(olderRunRow).toHaveTextContent('run-old');
+    expect(latestRunCard.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(olderRunRow).not.toHaveTextContent('run-old');
     expect(olderRunRow).toHaveTextContent('Default');
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
   });
@@ -639,9 +642,9 @@ describe('WorkflowMonitor', () => {
     render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: /history/i }));
 
-    expect(screen.getByText('run-old-01')).toBeInTheDocument();
-    expect(screen.getByText('run-old-09')).toBeInTheDocument();
-    expect(screen.queryByText('run-old-10')).toBeNull();
+    expect(screen.getByTestId('workflow-history-run-run-old-01')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-old-09')).toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-history-run-run-old-10')).toBeNull();
     expect(screen.getByRole('button', { name: /show 3 older/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /show 3 older/i }));
@@ -650,9 +653,9 @@ describe('WorkflowMonitor', () => {
       target: { scrollTop: 10 * 132 },
     });
 
-    await waitFor(() => expect(screen.getByText('run-old-10')).toBeInTheDocument());
-    expect(screen.getByText('run-old-11')).toBeInTheDocument();
-    expect(screen.getByText('run-old-12')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('workflow-history-run-run-old-10')).toBeInTheDocument());
+    expect(screen.getByTestId('workflow-history-run-run-old-11')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-old-12')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
   });
@@ -698,9 +701,10 @@ describe('WorkflowMonitor', () => {
     expect({
       layout: card.getAttribute('data-virtual-layout'),
       details: card.querySelector('dl')?.className,
+      label: card.querySelector('dt')?.className,
       failure: screen.getByRole('alert').className,
       failureTitle: screen.getByRole('alert').getAttribute('title'),
-      footer: card.querySelector('footer')?.className,
+      footer: card.querySelector('footer'),
       compactMeta: card.querySelector('[data-virtual-meta]')?.className,
       assignments: compactAssignments?.getAttribute('data-virtual-assignments'),
       assignmentClass: compactAssignments?.className,
@@ -708,9 +712,10 @@ describe('WorkflowMonitor', () => {
     }).toEqual({
       layout: 'compact',
       details: expect.stringContaining('workflow-activity-card__details'),
+      label: expect.not.stringContaining('uppercase'),
       failure: expect.stringContaining('truncate'),
       failureTitle: failure,
-      footer: expect.stringContaining('flex-nowrap'),
+      footer: null,
       compactMeta: expect.stringContaining('items-center'),
       assignments: 'single-line',
       assignmentClass: expect.stringContaining('flex-nowrap'),
@@ -722,6 +727,8 @@ describe('WorkflowMonitor', () => {
     expect(card).toHaveTextContent('Outcome');
     expect(card).toHaveTextContent('Duration');
     expect(card).toHaveTextContent('1m');
+    expect(card).not.toHaveTextContent('Blueprint audit');
+    expect(card).not.toHaveTextContent('run-contained');
   });
 
   it('keeps expanded history rendering bounded', async () => {
@@ -756,7 +763,7 @@ describe('WorkflowMonitor', () => {
       fireEvent.click(screen.getByRole('button', { name: /show .*older/i }));
     }
 
-    expect(screen.getByText('run-001')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-history-run-run-001')).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: /show 1 more agents/i })[0]);
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
 
@@ -764,7 +771,7 @@ describe('WorkflowMonitor', () => {
       target: { scrollTop: 40 * 132 + 140 },
     });
 
-    await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('workflow-history-run-run-041')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
   });
 
@@ -788,8 +795,8 @@ describe('WorkflowMonitor', () => {
     const scroller = screen.getByTestId('workflow-history-scroll');
     fireEvent.scroll(scroller, { target: { scrollTop: 40 * 132 } });
 
-    expect(screen.queryByText('run-041')).toBeNull();
-    await waitFor(() => expect(screen.getByText('run-041')).toBeInTheDocument());
+    expect(screen.queryByTestId('workflow-history-run-run-041')).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('workflow-history-run-run-041')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
   });
 
@@ -808,6 +815,7 @@ describe('WorkflowMonitor', () => {
 
     expect(screen.getByRole('region', { name: 'Workflow activity' }))
       .toHaveClass('flex-1', 'min-h-0', 'overflow-auto');
+    expect(screen.getByTestId('workflow-history-card-list')).not.toHaveClass('space-y-2');
     expect(screen.getByTestId('workflow-history-run-run-scroll')).toHaveAttribute('data-mode', 'history');
     expect(screen.queryByTestId('workflow-activity-table')).toBeNull();
   });

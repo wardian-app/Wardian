@@ -243,11 +243,13 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   const scheduledCard = monitor.getByTestId("workflow-activity-row-wf");
   await expect(scheduledCard).toHaveAttribute("data-mode", "scheduled");
   await expect(scheduledCard).toContainText("Next run");
-  await expect(scheduledCard).toContainText("Cadence");
+  await expect(scheduledCard).toContainText("Schedule");
   await expect(scheduledCard).toContainText("Tomorrow, 9:30 AM");
   await expect(scheduledCard).toContainText("Wed, Jul 15 · 12:32 PM");
   await expect(scheduledCard).toContainText("Analyst Ada");
   await expect(scheduledCard).toContainText("Reviewer Rui");
+  await expect(scheduledCard).not.toContainText("Blueprint wf");
+  await expect(scheduledCard).not.toContainText("run-completed");
   await expect(scheduledCard.getByRole("button", { name: "Show 1 more agents for E2E Nightly" })).toHaveText("+1 agents");
   await scheduledCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/monitor-adaptive-cards.png` });
 
@@ -257,6 +259,8 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(historyCard).toContainText("Outcome");
   await expect(historyCard).toContainText("Wed, Jul 15 · 12:32 PM");
   await expect(historyCard).not.toContainText("Next run");
+  await expect(historyCard).not.toContainText("Blueprint wf");
+  await expect(historyCard).not.toContainText("run-completed");
 
   await page.getByTestId("sidebar-tab-workflows").click();
   const sidebarCard = page.getByTestId("workflow-glance-row-schedule-1");

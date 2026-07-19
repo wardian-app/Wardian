@@ -40,6 +40,8 @@ const SECTION_LABELS: Record<ActivitySection, string> = {
 const HISTORY_PAGE_SIZE = 10;
 const HISTORY_COLLAPSED_CARD_HEIGHT_PX = 132;
 const HISTORY_EXPANDED_CARD_HEIGHT_PX = 272;
+const HISTORY_CARD_GAP_PX = 8;
+const HISTORY_ROW_STRIDE_PX = HISTORY_COLLAPSED_CARD_HEIGHT_PX + HISTORY_CARD_GAP_PX;
 const HISTORY_OVERSCAN_CARDS = 4;
 const HISTORY_MAX_RENDERED_ROWS = 32;
 const HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX = 720;
@@ -236,7 +238,10 @@ function ActivitySection({
         <h4 className="text-xs font-bold text-muted">{title}</h4>
         <span className="font-mono text-[10px] text-muted">{visibleCount}</span>
       </div>
-      <div className={section === 'history' ? 'select-text space-y-2' : 'workflow-monitor__activity-grid grid select-text gap-2'}>
+      <div
+        data-testid={section === 'history' ? 'workflow-history-card-list' : undefined}
+        className={section === 'history' ? 'select-text' : 'workflow-monitor__activity-grid grid select-text gap-2'}
+      >
         {activities.map((activity) => (
           <WorkflowActivityCard
             key={activity.activityId}
@@ -366,11 +371,11 @@ function VirtualHistoryRows({
   const expandedHeightDelta = HISTORY_EXPANDED_CARD_HEIGHT_PX - HISTORY_COLLAPSED_CARD_HEIGHT_PX;
   const relativeScrollTop = Math.max(0, viewportState.scrollTop - viewportState.listTop);
   const indexAtOffset = (offset: number) => {
-    if (expandedIndex < 0) return Math.floor(offset / HISTORY_COLLAPSED_CARD_HEIGHT_PX);
-    const expandedTop = expandedIndex * HISTORY_COLLAPSED_CARD_HEIGHT_PX;
-    if (offset < expandedTop) return Math.floor(offset / HISTORY_COLLAPSED_CARD_HEIGHT_PX);
-    if (offset < expandedTop + HISTORY_EXPANDED_CARD_HEIGHT_PX) return expandedIndex;
-    return Math.floor((offset - expandedHeightDelta) / HISTORY_COLLAPSED_CARD_HEIGHT_PX);
+    if (expandedIndex < 0) return Math.floor(offset / HISTORY_ROW_STRIDE_PX);
+    const expandedTop = expandedIndex * HISTORY_ROW_STRIDE_PX;
+    if (offset < expandedTop) return Math.floor(offset / HISTORY_ROW_STRIDE_PX);
+    if (offset < expandedTop + HISTORY_EXPANDED_CARD_HEIGHT_PX + HISTORY_CARD_GAP_PX) return expandedIndex;
+    return Math.floor((offset - expandedHeightDelta) / HISTORY_ROW_STRIDE_PX);
   };
   const viewportFirstIndex = Math.max(0, Math.min(runs.length - 1, indexAtOffset(relativeScrollTop)));
   const viewportLastIndex = Math.max(
@@ -384,7 +389,7 @@ function VirtualHistoryRows({
     firstIndex + HISTORY_MAX_RENDERED_ROWS,
   );
   const visibleRuns = runs.slice(firstIndex, lastIndex).slice(0, HISTORY_MAX_RENDERED_ROWS);
-  const totalHeight = runs.length * HISTORY_COLLAPSED_CARD_HEIGHT_PX
+  const totalHeight = Math.max(0, runs.length * HISTORY_ROW_STRIDE_PX - HISTORY_CARD_GAP_PX)
     + (expandedIndex >= 0 ? expandedHeightDelta : 0);
 
   return (
@@ -399,7 +404,7 @@ function VirtualHistoryRows({
         const runIndex = firstIndex + index;
         const schedule = run.schedule_id ? schedulesById.get(run.schedule_id) ?? null : null;
         const expanded = run.run_id === expandedRunId;
-        const top = runIndex * HISTORY_COLLAPSED_CARD_HEIGHT_PX
+        const top = runIndex * HISTORY_ROW_STRIDE_PX
           + (expandedIndex >= 0 && runIndex > expandedIndex ? expandedHeightDelta : 0);
         return (
           <div
