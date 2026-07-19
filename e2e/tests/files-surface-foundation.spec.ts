@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import type { AppSettings } from "../../src/types/settings";
-import type { WorkbenchDocumentV1 } from "../../src/types";
+import type { ArtifactResourceV1, WorkbenchDocumentV1 } from "../../src/types";
 import {
   installWorkbenchIpcMock,
   makeWorkbenchDocument,
@@ -92,10 +92,12 @@ interface RecoveryCheckpoint {
 
 async function bootFilesWorkbench(
   page: Page,
-  options: Pick<WorkbenchIpcMockOptions, "explorer_root" | "files"> = {},
+  options: Pick<WorkbenchIpcMockOptions, "explorer_root" | "files" | "responses"> & {
+    document?: WorkbenchDocumentV1;
+  } = {},
 ): Promise<WorkbenchIpcMockController> {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const document: WorkbenchDocumentV1 = makeWorkbenchDocument({ surfaces: [dashboard] });
+  const document = options.document ?? makeWorkbenchDocument({ surfaces: [dashboard] });
   const explorerRoot = options.explorer_root ?? ROOT;
   const settings: AppSettings = {
     theme: "light",
@@ -154,6 +156,7 @@ async function bootFilesWorkbench(
         overrides: {},
         persisted: true,
       },
+      ...options.responses,
     },
   });
   await page.goto("/");
@@ -162,6 +165,103 @@ async function bootFilesWorkbench(
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
   return ipc;
 }
+
+test("keeps artifact details limited to actionable provenance and history", async ({ page }) => {
+  const artifactPath = `${ROOT}/Wardian-README.md`;
+  const surface = makeWorkbenchSurface("artifact-surface", "files", {
+    resource_key: "artifact:artifact-1",
+    state_schema_version: 2,
+    state: {
+      resource_kind: "artifact",
+      transient_preview: false,
+      presentation: "rendered",
+      comparison_open: false,
+      comparison_layout_preference: "auto",
+      comparison_baseline: null,
+      review_drawer_open: false,
+      selected_version_id: "version-2",
+      optional_checkpoint_id: null,
+    },
+  });
+  const document = makeWorkbenchDocument({ surfaces: [surface] });
+  const artifact: ArtifactResourceV1 = {
+    schema: 1,
+    manifest: {
+      schema: 1,
+      artifact_id: "artifact-1",
+      canonical_path: artifactPath,
+      title: "Wardian README",
+      description: null,
+      origin: {
+        session_id: "agent-files",
+        agent_id: "agent-files",
+        agent_name: "Wardian-Arch",
+        provider: "codex",
+      },
+      status: "presented",
+      active: true,
+      created_at_ms: Date.UTC(2026, 6, 18, 20, 2, 3),
+      updated_at_ms: Date.UTC(2026, 6, 18, 20, 2, 3),
+      versions: [
+        {
+          version_id: "version-1",
+          sequence: 1,
+          content_hash: "sha256:version-one",
+          size_bytes: 12,
+          presented_at_ms: Date.UTC(2026, 6, 18, 19, 2, 3),
+          addressed_comment_ids: [],
+        },
+        {
+          version_id: "version-2",
+          sequence: 2,
+          content_hash: "sha256:version-two",
+          size_bytes: 12,
+          presented_at_ms: Date.UTC(2026, 6, 18, 20, 2, 3),
+          addressed_comment_ids: [],
+        },
+      ],
+      latest_review_id: null,
+    },
+    selected_version: {
+      version_id: "version-2",
+      sequence: 2,
+      content_hash: "sha256:version-two",
+      size_bytes: 12,
+      presented_at_ms: Date.UTC(2026, 6, 18, 20, 2, 3),
+      addressed_comment_ids: [],
+    },
+    selected_text: "# Wardian\n",
+    working: {
+      canonical_path: artifactPath,
+      agent_id: "agent-files",
+      content_hash: "sha256:working-copy",
+      unavailable_reason: null,
+    },
+    attention: false,
+  };
+
+  await bootFilesWorkbench(page, {
+    document,
+    files: [{ path: artifactPath, content: "# Wardian\n\nWorking copy." }],
+    responses: { get_artifact_resource: artifact },
+  });
+
+  const details = page.getByRole("complementary", { name: "Artifact details" });
+  await expect(details.locator(".artifact-details-primary")).toHaveText(
+    /^\s*Presented by Wardian-Arch\s*Changed since presented\s*$/,
+  );
+  await expect(details.getByRole("combobox", { name: "Artifact version" })).toHaveValue("version-2");
+  await expect(details.getByRole("option", { name: "2 / 2" })).toBeAttached();
+
+  const screenshotPath = path.join(
+    "e2e",
+    "screenshots",
+    "files-artifact-details",
+    "2026-07-19",
+    "compact-artifact-details.png",
+  );
+  await details.screenshot({ path: screenshotPath });
+});
 
 async function persistedDocument(ipc: WorkbenchIpcMockController) {
   return (await ipc.snapshot()).load_result.document;

@@ -65,12 +65,12 @@
 .artifact-details {
   display: flex;
   min-width: 0;
-  min-height: 32px;
+  min-height: 28px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 4px 10px;
+  gap: 8px;
+  padding: 2px 8px;
   border-bottom: 1px solid var(--color-wardian-border);
   background: var(--color-wardian-card-bg-muted);
   color: var(--color-wardian-text-muted-neutral);
@@ -81,18 +81,21 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   overflow: hidden;
   white-space: nowrap;
 }
 
-.artifact-details-primary strong {
+.artifact-details-origin {
+  min-width: 0;
   overflow: hidden;
-  color: var(--color-wardian-text);
   text-overflow: ellipsis;
 }
 
-.artifact-details-status,
+.artifact-details-origin strong {
+  color: var(--color-wardian-text);
+}
+
 .artifact-details-changed {
   padding: 2px 5px;
   border-radius: 3px;
@@ -111,18 +114,14 @@
 }
 
 .artifact-version-select select {
-  min-height: 24px;
+  min-width: 42px;
+  min-height: 22px;
+  padding: 0 2px;
   border: 1px solid var(--color-wardian-border);
   border-radius: 3px;
   background: var(--color-wardian-card);
   color: var(--color-wardian-text);
   font: inherit;
-}
-
-@container (max-width: 560px) {
-  .artifact-details-primary > span:not(.artifact-details-changed) {
-    display: none;
-  }
 }
 
 .files-presentation-toggle,

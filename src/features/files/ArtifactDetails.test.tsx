@@ -40,12 +40,33 @@ describe("ArtifactDetails", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Artifact details")).toHaveTextContent("Report");
-    expect(screen.getByLabelText("Artifact details")).toHaveTextContent("from Writer");
+    expect(screen.getByLabelText("Artifact details")).toHaveTextContent("Presented by Writer");
+    expect(screen.getByLabelText("Artifact details")).not.toHaveTextContent("Report");
+    expect(screen.getByLabelText("Artifact details")).not.toHaveTextContent("updated");
     expect(screen.getByText("Changed since presented")).toBeInTheDocument();
-    fireEvent.change(screen.getByRole("combobox", { name: "Version" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Artifact version" }), {
       target: { value: "v1" },
     });
     expect(onSelect).toHaveBeenCalledWith("v1");
+  });
+
+  it("omits version chrome when there is nothing to choose", () => {
+    render(
+      <ArtifactDetails
+        resource={{
+          ...resource,
+          manifest: {
+            ...resource.manifest,
+            versions: [resource.manifest.versions[0]],
+          },
+          selected_version: resource.manifest.versions[0],
+        }}
+        current_content_hash="sha256:one"
+        on_select_version={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("combobox", { name: "Artifact version" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Changed since presented")).not.toBeInTheDocument();
   });
 });
