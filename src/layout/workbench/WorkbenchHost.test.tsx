@@ -6,6 +6,7 @@ import { createCoreWorkbenchSurfaceRegistry } from "../../features/workbench/cor
 import type { WorkbenchNavigationService } from "../../features/workbench/navigationService";
 import { createWorkbenchStore } from "../../features/workbench/useWorkbenchStore";
 import { makeSingleGroupDocument, makeSurface } from "../../features/workbench/workbenchTestUtils";
+import { useQueueStore } from "../../store/useQueueStore";
 import {
   canSplitWorkbenchGroup,
   WorkbenchHost,
@@ -146,6 +147,39 @@ describe("WorkbenchHost", () => {
 
     view.unmount();
     expect(listeners).toHaveLength(0);
+  });
+
+  it("refreshes the Queue tab unread badge when queue items change", async () => {
+    useQueueStore.setState({ items: [] });
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const store = createWorkbenchStore({
+      initial_document: makeSingleGroupDocument([
+        makeSurface("queue-1", { surface_type: "queue", state: {} }),
+      ]),
+    });
+
+    render(
+      <WorkbenchHost
+        store={store}
+        registry={registry}
+        navigation={makeNavigation()}
+      />,
+    );
+
+    const queueTab = await screen.findByRole("tab", { name: "Queue" });
+    expect(queueTab.querySelector('[data-surface-badge="unread"]')).toBeNull();
+
+    act(() => {
+      useQueueStore.setState({ items: [{
+        id: "unread-1",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+      }] });
+    });
+
+    await waitFor(() => expect(queueTab.querySelector('[data-surface-badge="unread"]'))
+      .toHaveTextContent("1"));
   });
 
   it("keeps hidden Files title metadata synchronized and prunes it when a tab closes", async () => {

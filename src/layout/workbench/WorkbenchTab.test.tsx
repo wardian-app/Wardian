@@ -41,9 +41,10 @@ describe("WorkbenchTab", () => {
     );
 
     expect(screen.getByRole("tab", { name: "Queue" })).toHaveTextContent("Queue");
-    expect(view.container.querySelector('[data-surface-badge="unread"]'))
-      .toHaveTextContent("3")
-      .toHaveAttribute("title", "3 unread queue items");
+    const badge = view.container.querySelector<HTMLElement>('[data-surface-badge="unread"]');
+    if (!badge) throw new Error("Queue unread badge was not rendered");
+    expect(badge).toHaveTextContent("3");
+    expect(badge).toHaveAttribute("title", "3 unread queue items");
   });
 
   it("ends a scoped pointer drag only for its originating pointer id", () => {
