@@ -363,6 +363,7 @@ struct FileRefreshCandidate {
 enum FileAccessClaim {
     Agent { agent_id: String },
     User { capability_id: String },
+    Local,
 }
 
 #[derive(Clone)]
@@ -851,6 +852,23 @@ impl FileResourceRuntime {
             },
         )
         .await
+    }
+
+    /// Opens an existing local file for the Workbench without coupling the
+    /// subscription lifetime to an agent process or native-picker capability.
+    /// The exact path binding and retained file handle are still revalidated
+    /// for every read, refresh, ticket, and save.
+    pub async fn open_local_file(
+        &self,
+        path: &Path,
+        app_handle: Option<tauri::AppHandle>,
+    ) -> Result<FileResourceSnapshotV1, FileResourceErrorV1> {
+        if let Some(app_handle) = app_handle {
+            self.attach_app_handle(app_handle);
+        }
+        let authorized = authorize_user_file_path(path)?;
+        self.open_authorized(authorized, FileAccessClaim::Local)
+            .await
     }
 
     pub async fn record_user_file(
@@ -1695,7 +1713,7 @@ impl FileResourceRuntime {
                             FileAccessClaim::User { capability_id } => {
                                 Some((capability_id.clone(), authorized.clone()))
                             }
-                            FileAccessClaim::Agent { .. } => None,
+                            FileAccessClaim::Agent { .. } | FileAccessClaim::Local => None,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1748,6 +1766,7 @@ impl FileResourceRuntime {
     ) -> Result<AuthorizedPath, FileResourceErrorV1> {
         let rebound = access.authorized.reauthorize_same_target()?;
         match &access.claim {
+            FileAccessClaim::Local => Ok(rebound),
             FileAccessClaim::Agent { agent_id } => {
                 let config = self
                     .current_agent_config_resolver()
@@ -2008,7 +2027,7 @@ impl FileResourceRuntime {
             })?;
         Ok(match &access.claim {
             FileAccessClaim::Agent { agent_id } => Some(agent_id.clone()),
-            FileAccessClaim::User { .. } => None,
+            FileAccessClaim::User { .. } | FileAccessClaim::Local => None,
         })
     }
 
@@ -2070,6 +2089,16 @@ impl FileResourceRuntime {
         };
 
         let authorized = match &access.claim {
+            FileAccessClaim::Local => {
+                let current = access.authorized.reauthorize_same_target()?;
+                if current.canonical_path != Path::new(&expected.canonical_path) {
+                    return Err(error(
+                        "unavailable_path",
+                        "local file subscription resolves to another file",
+                    ));
+                }
+                current
+            }
             FileAccessClaim::Agent { agent_id } => {
                 let config = current_agent_config.ok_or_else(|| {
                     error(
@@ -2641,7 +2670,7 @@ impl FileResourceRuntime {
                 FileAccessClaim::User { capability_id } => {
                     Some((capability_id.clone(), authorized))
                 }
-                FileAccessClaim::Agent { .. } => None,
+                FileAccessClaim::Agent { .. } | FileAccessClaim::Local => None,
             };
             entry.revision_token = current_token;
             let changed = entry.descriptor.content_hash != current_descriptor.content_hash
@@ -2900,7 +2929,7 @@ impl FileResourceRuntime {
                         FileAccessClaim::User { capability_id } => {
                             Some((capability_id.clone(), authorized))
                         }
-                        FileAccessClaim::Agent { .. } => None,
+                        FileAccessClaim::Agent { .. } | FileAccessClaim::Local => None,
                     };
                     entry.revision_token = revision_token;
                     let changed = entry.descriptor.content_hash != descriptor.content_hash
@@ -2980,7 +3009,7 @@ impl FileResourceRuntime {
                         FileAccessClaim::User { capability_id } => {
                             Some((capability_id.clone(), authorized.clone()))
                         }
-                        FileAccessClaim::Agent { .. } => None,
+                        FileAccessClaim::Agent { .. } | FileAccessClaim::Local => None,
                     }
                 })
                 .collect::<Vec<_>>();

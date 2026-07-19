@@ -51,6 +51,16 @@ async function spawnArtifactAgent(driver, sessionId, folder) {
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
 }
 
+async function deleteArtifactAgent(driver, sessionId) {
+  const result = await driver.executeAsyncScript((id, done) => {
+    window.__TAURI_INTERNALS__.invoke("kill_agent", { sessionId: id }).then(
+      () => done({ ok: true }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, sessionId);
+  assert.equal(result.ok, true, `kill_agent failed: ${result.error}`);
+}
+
 function present(cli, harness, sessionId, file) {
   const result = spawnSync(cli, ["artifact", "present", file, "--title", "Native Artifact"], {
     cwd: harness.repoRoot,
@@ -124,7 +134,7 @@ async function assertArtifactCanOpen(session, artifactId, phase, expectBackgroun
   );
 }
 
-test("artifact CLI opens an authorized file and restores it after relaunch", { timeout: 300_000 }, async (t) => {
+test("artifact CLI restores a local file after its origin agent is deleted", { timeout: 300_000 }, async (t) => {
   const harness = await createNativeHarness();
   assert.ok(harness.appPath);
   try {
@@ -159,6 +169,7 @@ test("artifact CLI opens an authorized file and restores it after relaunch", { t
   fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
   fs.writeFileSync(screenshotPath, await session.driver.takeScreenshot(), "base64");
   await waitForArtifactPersistence(harness, presented.artifact_id);
+  await deleteArtifactAgent(session.driver, sessionId);
 
   await session.close();
   session = await startNativeSession(harness);

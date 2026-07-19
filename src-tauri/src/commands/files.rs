@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri_plugin_dialog::DialogExt as _;
-use wardian_core::files::{AuthorizedRootService, FileResourceErrorV1};
+use wardian_core::files::FileResourceErrorV1;
 use wardian_core::models::AgentConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,79 +95,21 @@ async fn open_file_resource_for_app(
     state: &AppState,
     app: Option<tauri::AppHandle>,
 ) -> Result<FileResourceSnapshotV1, FileResourceErrorV1> {
-    match (
-        request.agent_id.as_deref(),
-        request.user_file_capability_id.as_deref(),
-    ) {
-        (Some(agent_id), None) => {
-            let config = current_agent_config(state, agent_id).await?;
-            state
-                .file_resources
-                .open_agent_file(agent_id, &config, Path::new(&request.path), app)
-                .await
-        }
-        (None, Some(capability_id)) => {
-            state
-                .file_resources
-                .open_user_file(capability_id, Path::new(&request.path), app)
-                .await
-        }
-        (None, None) => open_trusted_workbench_file(state, Path::new(&request.path), app).await,
-        (Some(_), Some(_)) => Err(resource_error(
-            "invalid_request",
-            "agent and user file authorization capabilities are mutually exclusive",
-        )),
-    }
+    // Authorization fields remain in the v1 DTO for persisted-state and CLI
+    // compatibility, but Workbench file access is owned by the user and does
+    // not expire with an agent process or picker capability.
+    open_trusted_workbench_file(state, Path::new(&request.path), app).await
 }
 
-/// Resolves durable Workbench file identity against current backend-owned
-/// authorization. No authority is inferred or persisted by the frontend.
+/// Opens any existing local file selected or restored by the Workbench.
+/// Exact path binding, retained-handle verification, renderer isolation, and
+/// resource limits remain enforced independently of agent lifetime.
 async fn open_trusted_workbench_file(
     state: &AppState,
     path: &Path,
     app: Option<tauri::AppHandle>,
 ) -> Result<FileResourceSnapshotV1, FileResourceErrorV1> {
-    let mut agent_configs = {
-        let agents = state.agents.lock().await;
-        agents
-            .iter()
-            .filter_map(|(agent_id, agent)| {
-                agent
-                    .config
-                    .lock()
-                    .ok()
-                    .map(|config| (agent_id.clone(), config.clone()))
-            })
-            .collect::<Vec<_>>()
-    };
-    agent_configs.sort_by(|left, right| left.0.cmp(&right.0));
-
-    for (agent_id, config) in agent_configs {
-        if config.session_id != agent_id {
-            continue;
-        }
-        let authorized = AuthorizedRootService::from_agent_config(&config)
-            .and_then(|roots| roots.authorize_existing_file(path));
-        if authorized.is_err() {
-            continue;
-        }
-        return state
-            .file_resources
-            .open_agent_file(&agent_id, &config, path, app.clone())
-            .await;
-    }
-
-    if let Some(snapshot) = state
-        .file_resources
-        .open_matching_user_file(path, app)
-        .await?
-    {
-        return Ok(snapshot);
-    }
-    Err(resource_error(
-        "unauthorized_path",
-        "file is outside every current agent root and remembered exact picker grant",
-    ))
+    state.file_resources.open_local_file(path, app).await
 }
 
 #[tauri::command]
@@ -541,14 +483,6 @@ mod tests {
     use std::fs;
     use wardian_core::models::AgentConfig;
 
-    async fn install_test_agent(state: &AppState, config: AgentConfig) {
-        let session_id = config.session_id.clone();
-        state.agents.lock().await.insert(
-            session_id,
-            crate::restored_agent_without_process(config, "idle", String::new(), None, None),
-        );
-    }
-
     async fn open_trusted(
         state: &AppState,
         path: &Path,
@@ -656,162 +590,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trusted_workbench_open_resolves_primary_and_additional_but_not_system_roots() {
+    async fn trusted_workbench_open_accepts_any_existing_local_file() {
         let temp = tempfile::tempdir().expect("temp root");
-        let primary = temp.path().join("primary");
-        let additional = temp.path().join("additional");
-        let system = temp.path().join("system");
-        fs::create_dir_all(&primary).expect("primary");
-        fs::create_dir_all(&additional).expect("additional");
-        fs::create_dir_all(&system).expect("system");
-        let primary_file = primary.join("primary.txt");
-        let additional_file = additional.join("additional.txt");
-        let system_file = system.join("secret.txt");
-        fs::write(&primary_file, "primary\n").expect("primary fixture");
-        fs::write(&additional_file, "additional\n").expect("additional fixture");
-        fs::write(&system_file, "system\n").expect("system fixture");
+        let path = temp.path().join("unclaimed.txt");
+        fs::write(&path, "local\n").expect("fixture");
         let state = AppState::new();
-        install_test_agent(
-            &state,
-            AgentConfig {
-                session_id: "agent-a".to_string(),
-                folder: primary.to_string_lossy().into_owned(),
-                include_directories: Some(vec![additional.to_string_lossy().into_owned()]),
-                system_include_directories: Some(vec![system.to_string_lossy().into_owned()]),
-                ..AgentConfig::default()
-            },
-        )
-        .await;
-
-        let primary_open = open_trusted(&state, &primary_file)
-            .await
-            .expect("primary open");
-        let additional_open = open_trusted(&state, &additional_file)
-            .await
-            .expect("additional open");
+        let opened = open_trusted(&state, &path).await.expect("local open");
         assert_eq!(
-            open_trusted(&state, &system_file)
-                .await
-                .expect_err("system include must not authorize publication")
-                .code(),
-            "unauthorized_path"
+            Path::new(&opened.descriptor.canonical_path).file_name(),
+            path.file_name()
         );
-
-        state
-            .file_resources
-            .close(&primary_open.subscription_id)
-            .await
-            .expect("close primary");
-        state
-            .file_resources
-            .close(&additional_open.subscription_id)
-            .await
-            .expect("close additional");
-    }
-
-    #[tokio::test]
-    async fn trusted_workbench_open_chooses_matching_agents_deterministically() {
-        let temp = tempfile::tempdir().expect("temp root");
-        let path = temp.path().join("shared.txt");
-        fs::write(&path, "shared\n").expect("fixture");
-        let state = AppState::new();
-        for agent_id in ["agent-z", "agent-a"] {
-            install_test_agent(
-                &state,
-                AgentConfig {
-                    session_id: agent_id.to_string(),
-                    folder: temp.path().to_string_lossy().into_owned(),
-                    ..AgentConfig::default()
-                },
-            )
-            .await;
-        }
-
-        let opened = open_trusted(&state, &path).await.expect("trusted open");
         assert_eq!(
             state
                 .file_resources
-                .authorization_agent_id(&opened.resource_id, &opened.subscription_id,)
+                .authorization_agent_id(&opened.resource_id, &opened.subscription_id)
                 .await
-                .expect("claim")
-                .as_deref(),
-            Some("agent-a")
+                .expect("claim"),
+            None
         );
-        state
-            .file_resources
-            .close(&opened.subscription_id)
-            .await
-            .expect("close");
     }
 
     #[tokio::test]
-    async fn trusted_workbench_open_uses_only_an_exact_live_picker_grant() {
+    async fn trusted_workbench_open_ignores_stale_agent_attribution() {
         let temp = tempfile::tempdir().expect("temp root");
-        let selected = temp.path().join("selected.txt");
-        let sibling = temp.path().join("sibling.txt");
-        fs::write(&selected, "selected\n").expect("selected fixture");
-        fs::write(&sibling, "sibling\n").expect("sibling fixture");
+        let path = temp.path().join("restored.md");
+        fs::write(&path, "# Restored\n").expect("fixture");
         let state = AppState::new();
-        state
-            .file_resources
-            .record_user_file(&selected)
-            .await
-            .expect("picker grant");
-
-        let opened = open_trusted(&state, &selected)
-            .await
-            .expect("exact picker restore");
+        let opened = open_file_resource_for_app(
+            OpenFileResourceRequestV1 {
+                path: path.to_string_lossy().into_owned(),
+                agent_id: Some("agent-that-is-not-running".to_string()),
+                user_file_capability_id: None,
+            },
+            &state,
+            None,
+        )
+        .await
+        .expect("restored open");
         assert_eq!(
-            open_trusted(&state, &sibling)
+            state
+                .file_resources
+                .authorization_agent_id(&opened.resource_id, &opened.subscription_id)
                 .await
-                .expect_err("picker sibling must stay unauthorized")
-                .code(),
-            "unauthorized_path"
+                .expect("claim"),
+            None
         );
+        let text = state
+            .file_resources
+            .read_text(
+                &opened.resource_id,
+                &opened.subscription_id,
+                opened.revision,
+                None,
+            )
+            .await
+            .expect("read restored file");
+        assert_eq!(text.text, "# Restored\n");
+    }
+
+    #[tokio::test]
+    async fn trusted_workbench_open_does_not_require_a_picker_grant() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let path = temp.path().join("restored.txt");
+        fs::write(&path, "restored\n").expect("fixture");
+        let state = AppState::new();
+        let opened = open_trusted(&state, &path).await.expect("first open");
         state
             .file_resources
             .close(&opened.subscription_id)
             .await
             .expect("close");
-
         state.file_resources.close_all().await;
-        assert_eq!(
-            open_trusted(&state, &selected)
-                .await
-                .expect_err("cleared picker grant must be revoked")
-                .code(),
-            "unauthorized_path"
-        );
+        open_trusted(&state, &path)
+            .await
+            .expect("reopen without persisted grant");
     }
 
     #[tokio::test]
-    async fn trusted_workbench_open_rejects_missing_or_ambiguous_explicit_authorization() {
+    async fn trusted_workbench_open_rejects_only_unavailable_paths() {
         let temp = tempfile::tempdir().expect("temp root");
-        let path = temp.path().join("unclaimed.txt");
-        fs::write(&path, "unclaimed\n").expect("fixture");
+        let path = temp.path().join("missing.txt");
         let state = AppState::new();
 
         assert_eq!(
             open_trusted(&state, &path)
                 .await
-                .expect_err("missing auth")
+                .expect_err("missing file")
                 .code(),
-            "unauthorized_path"
-        );
-        assert_eq!(
-            open_file_resource_for_app(
-                OpenFileResourceRequestV1 {
-                    path: path.to_string_lossy().into_owned(),
-                    agent_id: Some("agent-a".to_string()),
-                    user_file_capability_id: Some("capability-a".to_string()),
-                },
-                &state,
-                None,
-            )
-            .await
-            .expect_err("two explicit auth fields are invalid")
-            .code(),
-            "invalid_request"
+            "unavailable_path"
         );
     }
 
