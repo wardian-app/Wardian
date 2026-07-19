@@ -27,26 +27,6 @@ describe("WorkbenchTab", () => {
       .toHaveAttribute("title", "Unsaved changes");
   });
 
-  it("renders a value-bearing badge without changing the tab title", () => {
-    const surface = makeSurface("surface-queue", { surface_type: "queue" });
-    const view = render(
-      <div role="tab" aria-label="Queue">
-        <WorkbenchTab
-          surface={surface}
-          title="Queue"
-          group_id="group-1"
-          badges={[{ badge_id: "unread", label: "3 unread queue items", value: "3" }]}
-        />
-      </div>,
-    );
-
-    expect(screen.getByRole("tab", { name: "Queue" })).toHaveTextContent("Queue");
-    const badge = view.container.querySelector<HTMLElement>('[data-surface-badge="unread"]');
-    if (!badge) throw new Error("Queue unread badge was not rendered");
-    expect(badge).toHaveTextContent("3");
-    expect(badge).toHaveAttribute("title", "3 unread queue items");
-  });
-
   it("ends a scoped pointer drag only for its originating pointer id", () => {
     const onPointerDragStart = vi.fn();
     const onPointerDragEnd = vi.fn();

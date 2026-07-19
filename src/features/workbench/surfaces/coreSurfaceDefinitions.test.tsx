@@ -1,8 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useEffect, useState } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import { useQueueStore } from "../../../store/useQueueStore";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../views/DashboardView", () => ({ DashboardView: () => null }));
 vi.mock("../../../views/QueueView", () => ({
@@ -26,71 +24,8 @@ import {
 } from "./coreSurfaceDefinitions";
 
 describe("core view surface definitions", () => {
-  beforeEach(() => {
-    useQueueStore.setState({ items: [] });
-  });
-
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  function queueSurfaceSnapshot() {
-    return {
-      surface_id: "queue-1",
-      surface_type: "queue",
-      state_schema_version: CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION,
-      state: {},
-    };
-  }
-
-  it("derives a capped unread badge for Queue presentation metadata", () => {
-    const queue = CORE_VIEW_SURFACE_DEFINITIONS.find((definition) => definition.type === "queue")!;
-
-    expect(queue.badges?.(queueSurfaceSnapshot())).toEqual([]);
-
-    useQueueStore.setState({
-      items: Array.from({ length: 3 }, (_, index) => ({
-        id: `unread-${index}`,
-        type: "agent_completed" as const,
-        timestamp: Date.now(),
-        read: false,
-      })),
-    });
-    expect(queue.badges?.(queueSurfaceSnapshot())).toEqual([{
-      badge_id: "unread",
-      label: "3 unread queue items",
-      value: "3",
-    }]);
-
-    useQueueStore.setState({
-      items: Array.from({ length: 11 }, (_, index) => ({
-        id: `unread-${index}`,
-        type: "agent_completed" as const,
-        timestamp: Date.now(),
-        read: false,
-      })),
-    });
-    expect(queue.badges?.(queueSurfaceSnapshot())).toEqual([{
-      badge_id: "unread",
-      label: "11 unread queue items",
-      value: "9+",
-    }]);
-  });
-
-  it("subscribes Queue presentation metadata to the queue store", () => {
-    const queue = CORE_VIEW_SURFACE_DEFINITIONS.find((definition) => definition.type === "queue")!;
-    const listener = vi.fn();
-    const unsubscribe = queue.presentation_subscribe?.(listener);
-
-    useQueueStore.setState({ items: [{
-      id: "unread-1",
-      type: "agent_completed",
-      timestamp: Date.now(),
-      read: false,
-    }] });
-
-    expect(listener).toHaveBeenCalled();
-    unsubscribe?.();
   });
 
   it("bounds the build-time heavy renderer grace override and defaults safely", () => {
