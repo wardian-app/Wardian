@@ -108,8 +108,7 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
      * the prop is a snapshot that only advances after a full `onApply` →
      * `setSkillDeployments` → `invoke` → `fetchIndex` round trip, so two
      * rapid ops closing over the same stale prop would otherwise silently
-     * undo each other (see `.superpowers/sdd/deploy-redesign-review.md`,
-     * finding C1). Re-synced from `deployments` in the effect below
+      * undo each other. Re-synced from `deployments` in the effect below
      * whenever a fresh index lands and nothing is in flight, so queued ops
      * compound instead of reverting one another.
      */
