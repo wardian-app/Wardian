@@ -19,7 +19,7 @@ import { openWorkbenchSurface } from "../lib/workbench.mjs";
 const runGeometrySweep = process.env.WARDIAN_E2E_TERMINAL_GEOMETRY_SWEEP === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = new Date().toISOString().replace(/[:.]/g, "-");
-const SESSION_ID = `e2e-terminal-geometry-${process.pid}-${Date.now()}`;
+const PROVIDER_SESSION_ID = `e2e-terminal-geometry-${process.pid}-${Date.now()}`;
 const SESSION_NAME = `E2E-Terminal-Geometry-${process.pid}`;
 const TERMINAL_HOST_SELECTOR = '[data-testid="agent-terminal-host"]';
 const RENDER_LINES = Array.from(
@@ -57,12 +57,12 @@ async function invokeTauri(driver, command, args = {}) {
 }
 
 function createGeometryMockScript() {
-  const scriptPath = path.join(os.tmpdir(), `wardian-geometry-mock-${SESSION_ID}.cjs`);
+  const scriptPath = path.join(os.tmpdir(), `wardian-geometry-mock-${PROVIDER_SESSION_ID}.cjs`);
   const script = `
 "use strict";
 const init = JSON.stringify({
   type: "init",
-  session_id: ${JSON.stringify(SESSION_ID)},
+  session_id: ${JSON.stringify(PROVIDER_SESSION_ID)},
   timestamp: new Date().toISOString(),
 }) + "\\n";
 process.stdout.write(init);
@@ -272,15 +272,20 @@ test("Wardian terminal geometry sweep records renderer metrics across window wid
       sessionName: SESSION_NAME,
       agentClass: "GeometryAudit",
       folder: harness.repoRoot,
-      resumeSession: SESSION_ID,
+      resumeSession: PROVIDER_SESSION_ID,
       isOff: false,
       configOverride: { provider: "mock" },
     },
   });
-  assert.equal(agent.session_id, SESSION_ID);
+  const sessionId = agent.session_id;
+  assert.match(
+    sessionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  assert.notEqual(sessionId, PROVIDER_SESSION_ID);
 
   await openWorkbenchSurface(driver, "agents-overview");
-  await waitForAgentTerminal(driver, SESSION_ID);
+  await waitForAgentTerminal(driver, sessionId);
   const debugAvailable = await driver.executeScript(() => Boolean(window.__wardianTerminalDebug?.snapshot));
   if (!debugAvailable) {
     if (skipNativeBuild) {
@@ -289,19 +294,19 @@ test("Wardian terminal geometry sweep records renderer metrics across window wid
     }
     assert.fail("Expected terminal debug snapshots in the geometry sweep build");
   }
-  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
-  await waitForRenderedFrame(driver, SESSION_ID, presentationId);
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId);
+  await waitForRenderedFrame(driver, sessionId, presentationId);
 
   for (const width of sweepWidths) {
     await driver.manage().window().setRect({ width, height: sweepHeight });
     await new Promise((resolve) => setTimeout(resolve, 750));
-    const capture = await waitForRenderedFrame(driver, SESSION_ID, presentationId);
+    const capture = await waitForRenderedFrame(driver, sessionId, presentationId);
     const name = `width-${String(width).padStart(4, "0")}`;
     const artifact = path.join(evidenceDir, `${name}.json`);
     const screenshot = path.join(evidenceDir, `${name}.png`);
     const cardScreenshot = path.join(evidenceDir, `${name}-card.png`);
     await writeScreenshot(driver, screenshot);
-    await writeCardScreenshot(driver, SESSION_ID, cardScreenshot);
+    await writeCardScreenshot(driver, sessionId, cardScreenshot);
     const record = {
       width,
       height: sweepHeight,

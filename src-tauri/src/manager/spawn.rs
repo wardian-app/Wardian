@@ -14,9 +14,12 @@ use wardian_core::models::{AgentConfig, AgentEvent, ProviderConfig};
 
 use super::claude::{claude_permission_hook_matches_session, claude_project_dir_name};
 use super::codex::{
-    codex_provider_session_is_excluded, codex_session_file_path, latest_codex_session_index_entry,
+    codex_provider_session_is_excluded, codex_session_file_path,
 };
 use super::opencode::{opencode_interactive_env, opencode_status_from_title};
+use super::session_identity::{
+    apply_provider_identity, expected_caller_owned_identity, ProviderIdentityOutcome,
+};
 use super::{
     apply_agent_event, apply_agent_event_with_policy, apply_agent_status_event,
     apply_agent_status_event_with_policy, apply_terminal_identity_env, debug_preview_bytes,
@@ -182,16 +185,6 @@ fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
     config.codex_config().cleared_provider_sessions
 }
 
-fn clear_codex_cleared_provider_sessions(config: &mut AgentConfig) {
-    if config.provider == "codex" || matches!(config.provider_config, ProviderConfig::Codex(_)) {
-        config
-            .codex_config_mut_preserve_encoding()
-            .cleared_provider_sessions
-            .clear();
-    }
-    config.codex_cleared_provider_sessions.clear();
-}
-
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
 #[cfg(windows)]
@@ -200,77 +193,66 @@ use super::{
     create_kill_on_close_job,
 };
 
-pub(super) fn capture_codex_init_resume_session(
-    provider_name: &str,
-    session_id: &str,
-    config: &mut AgentConfig,
-) -> bool {
-    let session_id = session_id.trim();
-    if provider_name != "codex"
-        || session_id.is_empty()
-        || config
-            .resume_session
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || codex_provider_session_is_excluded(session_id, &codex_cleared_provider_sessions(config))
-    {
-        return false;
+pub(super) fn capture_init_timestamp(
+    event: &AgentEvent,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let AgentEvent::Init { timestamp, .. } = event else {
+        return;
+    };
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    if let Ok(mut current) = init_timestamp.lock() {
+        if current.is_none() {
+            *current = Some(timestamp.clone());
+        }
     }
-
-    config.resume_session = Some(session_id.to_string());
-    clear_codex_cleared_provider_sessions(config);
-    true
 }
 
-fn codex_status_log_session(
-    config: &mut AgentConfig,
-    latest_session: Option<String>,
-) -> Option<String> {
-    let mut cleared_provider_sessions = codex_cleared_provider_sessions(config);
-    if config
-        .resume_session
-        .as_deref()
-        .is_some_and(|value| codex_provider_session_is_excluded(value, &cleared_provider_sessions))
-    {
-        config.resume_session = None;
-    }
+pub(super) fn handle_provider_init_event(
+    provider: &str,
+    event: &AgentEvent,
+    config: &std::sync::Arc<std::sync::Mutex<AgentConfig>>,
+    init_timestamp: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<ProviderIdentityOutcome, String> {
+    let AgentEvent::Init { session_id, .. } = event else {
+        return Err(format!(
+            "{provider} identity validation requires an initialization event"
+        ));
+    };
 
+    let outcome = {
+        let mut config = config
+            .lock()
+            .map_err(|_| format!("{provider} session configuration is unavailable"))?;
+        if matches!(provider, "codex" | "opencode" | "antigravity")
+            && config
+                .resume_session
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "{provider} initialization has no pre-bound provider identity"
+            ));
+        }
+        apply_provider_identity(provider, &mut config, session_id)?
+    };
+    capture_init_timestamp(event, init_timestamp);
+    Ok(outcome)
+}
+
+fn codex_status_log_session(config: &AgentConfig) -> Option<String> {
+    let cleared_provider_sessions = codex_cleared_provider_sessions(config);
     let candidate = config
         .resume_session
         .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| latest_session.filter(|value| !value.trim().is_empty()));
-
-    let candidate = candidate?;
+        .filter(|value| !value.trim().is_empty())?;
 
     if codex_provider_session_is_excluded(&candidate, &cleared_provider_sessions) {
-        return Some(candidate);
+        return None;
     }
-
-    if config
-        .resume_session
-        .as_deref()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        config.resume_session = Some(candidate.clone());
-        clear_codex_cleared_provider_sessions(config);
-        cleared_provider_sessions.clear();
-    } else if config.resume_session.as_deref() == Some(candidate.as_str())
-        && !cleared_provider_sessions.is_empty()
-    {
-        clear_codex_cleared_provider_sessions(config);
-    }
-
     Some(candidate)
-}
-
-fn save_agent_state_after_session_capture(app: &AppHandle) {
-    use tauri::Manager;
-
-    let app_state = app.state::<crate::state::app_state::AppState>();
-    let agents = app_state.agents.blocking_lock();
-    let order = app_state.agent_order.blocking_lock();
-    crate::manager::save_state(app, &agents, &order);
 }
 
 fn should_cleanup_stale_session_processes_before_spawn(is_restored: bool) -> bool {
@@ -297,26 +279,16 @@ fn line_event_status_for_pty_provider(
     )
 }
 
-fn filter_ignored_conversation_id(
-    detected: Option<String>,
-    ignored: Option<&str>,
-) -> Option<String> {
-    if let Some(ref detected_id) = detected {
-        if let Some(ignored_id) = ignored {
-            if detected_id == ignored_id {
-                return None;
-            }
-        }
-    }
-    detected
-}
-
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
     initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
+    super::validate_session_values_for_launch(
+        &config.session_id,
+        config.resume_session.as_deref(),
+    )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
 
@@ -386,18 +358,6 @@ pub async fn spawn_agent(
 
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
-    let initial_ignored_conversation_id = if config.provider == "antigravity" && !is_restored {
-        let home = AntigravityProvider::antigravity_home();
-        home.as_ref()
-            .and_then(|home| AntigravityProvider::conversation_for_workspace(home, &cwd))
-            .or_else(|| {
-                home.as_ref()
-                    .and_then(|home| AntigravityProvider::latest_conversation_id(home))
-            })
-    } else {
-        None
-    };
-
     #[cfg(windows)]
     if should_cleanup_stale_session_processes_before_spawn(is_restored) {
         cleanup_stale_session_processes(&config.session_id, &config.provider);
@@ -463,10 +423,10 @@ pub async fn spawn_agent(
 
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
-        "[Wardian] PTY spawn: provider={} exe={} args={:?} cwd={}",
+        "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
         config.provider,
         launch_spec.executable,
-        launch_spec.args,
+        launch_spec.args.len(),
         provider_cwd.display()
     ));
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
@@ -491,6 +451,11 @@ pub async fn spawn_agent(
             cmd.env(key, value);
         }
     } else if config.provider == "mock" {
+        let provider_session_id = expected_caller_owned_identity(&config).ok_or_else(|| {
+            "mock provider launch has no caller-owned session identity".to_string()
+        })?;
+        cmd.env("WARDIAN_MOCK_SESSION_ID", provider_session_id);
+
         let mut has_config_scenario = false;
         let mut has_config_delay = false;
         if let ProviderConfig::Mock(mock) = &config.provider_config {
@@ -521,12 +486,14 @@ pub async fn spawn_agent(
     #[cfg(target_os = "macos")]
     cmd.env("PATH", macos_extended_path());
 
-    let resume_id = config.resume_session.as_deref().unwrap_or("");
     log_debug(&format!(
-        "[Wardian] Spawning {} agent. Session: {}, Resume ID: {}, Restored: {}",
+        "[Wardian] Spawning {} agent. Session: {}, Resume: {}, Restored: {}",
         provider.name(),
         config.session_id,
-        resume_id,
+        config
+            .resume_session
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
         is_restored
     ));
 
@@ -632,9 +599,9 @@ pub async fn spawn_agent(
     let sid_for_pty = sid_out.clone();
     let pty_emit_app = app.clone();
     let terminal_theme_for_pty = app_state.terminal_theme();
-    let config_lock_clone = config_lock.clone();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
+    let pty_config = config_lock.clone();
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -731,44 +698,27 @@ pub async fn spawn_agent(
                     // Use a simple line-based approach for stream-json events
                     for line in text.lines() {
                         if let Some(event) = pty_provider.parse_output(line) {
-                            if provider_name_for_pty == "claude" {
-                                if let AgentEvent::Init {
-                                    session_id,
-                                    timestamp,
-                                } = &event
-                                {
-                                    if let Some(ts) = timestamp {
-                                        let mut it = init_timestamp_clone.lock().unwrap();
-                                        if it.is_none() {
-                                            *it = Some(ts.clone());
-                                        }
-                                    }
-                                    if !session_id.trim().is_empty() {
-                                        let needs_save = {
-                                            let mut config = config_lock_clone.lock().unwrap();
-                                            if config.resume_session.as_deref()
-                                                != Some(session_id.as_str())
-                                            {
-                                                config.resume_session = Some(session_id.clone());
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        if needs_save {
-                                            log_debug(&format!(
-                                                "[Wardian] Session ID mapped for {}: {}",
-                                                sid_for_pty, session_id
-                                            ));
-                                            let _ = pty_emit_app.emit("agents-updated", ());
-                                            let _ = pty_emit_app.emit(
-                                                "agent-pty-output-ready",
-                                                serde_json::json!({ "session_id": sid_for_pty }),
-                                            );
-                                            save_agent_state_after_session_capture(&pty_emit_app);
-                                        }
-                                    }
+                            if matches!(&event, AgentEvent::Init { .. }) {
+                                if let Err(error) = handle_provider_init_event(
+                                    &provider_name_for_pty,
+                                    &event,
+                                    &pty_config,
+                                    &init_timestamp_clone,
+                                ) {
+                                    log_debug(&format!(
+                                        "[WARDIAN] Rejected {} initialization identity: {}",
+                                        provider_name_for_pty, error
+                                    ));
+                                    set_agent_status(
+                                        &pty_app,
+                                        &sid_for_pty,
+                                        &current_status_clone,
+                                        "Error",
+                                    );
+                                    return;
                                 }
+                            }
+                            if provider_name_for_pty == "claude" {
                                 apply_agent_status_event_with_policy(
                                     &pty_app,
                                     &sid_for_pty,
@@ -777,53 +727,6 @@ pub async fn spawn_agent(
                                     ProviderStatusEventPolicy::PreserveActionRequired,
                                 );
                                 continue;
-                            }
-
-                            if let AgentEvent::Init {
-                                session_id,
-                                timestamp,
-                            } = &event
-                            {
-                                if let Some(ts) = timestamp {
-                                    let mut it = init_timestamp_clone.lock().unwrap();
-                                    if it.is_none() {
-                                        *it = Some(ts.clone());
-                                    }
-                                }
-                                if !session_id.trim().is_empty() {
-                                    let needs_save = {
-                                        let mut config = config_lock_clone.lock().unwrap();
-                                        if capture_codex_init_resume_session(
-                                            &provider_name_for_pty,
-                                            session_id,
-                                            &mut config,
-                                        ) {
-                                            true
-                                        } else if provider_name_for_pty != "codex"
-                                            && config.resume_session.as_deref()
-                                                != Some(session_id.as_str())
-                                        {
-                                            config.resume_session = Some(session_id.clone());
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if needs_save {
-                                        log_debug(&format!(
-                                            "[Wardian] Session ID mapped for {}: {}",
-                                            sid_for_pty, session_id
-                                        ));
-
-                                        // Notify UI that metadata (resume_session ID) has changed
-                                        let _ = pty_emit_app.emit("agents-updated", ());
-                                        let _ = pty_emit_app.emit(
-                                            "agent-pty-output-ready",
-                                            serde_json::json!({ "session_id": sid_for_pty }),
-                                        );
-                                        save_agent_state_after_session_capture(&pty_emit_app);
-                                    }
-                                }
                             }
                             let current = current_status_clone
                                 .lock()
@@ -930,54 +833,24 @@ pub async fn spawn_agent(
                                         }
                                     }
                                     if let Some(event) = pty_provider.parse_output(&raw_line) {
-                                        if let AgentEvent::Init {
-                                            ref session_id,
-                                            ref timestamp,
-                                        } = event
-                                        {
-                                            if let Some(ts) = timestamp {
-                                                let mut it = init_timestamp_clone.lock().unwrap();
-                                                if it.is_none() {
-                                                    *it = Some(ts.clone());
-                                                }
-                                            }
-                                            if !session_id.trim().is_empty() {
-                                                let needs_save = {
-                                                    let mut config =
-                                                        config_lock_clone.lock().unwrap();
-                                                    if capture_codex_init_resume_session(
-                                                        &provider_name_for_pty,
-                                                        session_id,
-                                                        &mut config,
-                                                    ) {
-                                                        true
-                                                    } else if provider_name_for_pty != "codex"
-                                                        && config.resume_session.as_deref()
-                                                            != Some(session_id.as_str())
-                                                    {
-                                                        config.resume_session =
-                                                            Some(session_id.clone());
-                                                        true
-                                                    } else {
-                                                        false
-                                                    }
-                                                };
-
-                                                if needs_save {
-                                                    log_debug(&format!(
-                                                        "[Wardian] Session ID mapped for {}: {}",
-                                                        sid_for_pty, session_id
-                                                    ));
-                                                    // Notify UI that metadata (resume_session ID) has changed
-                                                    let _ = pty_emit_app.emit("agents-updated", ());
-                                                    let _ = pty_emit_app.emit(
-                                                        "agent-pty-output-ready",
-                                                        serde_json::json!({ "session_id": sid_for_pty }),
-                                                    );
-                                                    save_agent_state_after_session_capture(
-                                                        &pty_emit_app,
-                                                    );
-                                                }
+                                        if matches!(&event, AgentEvent::Init { .. }) {
+                                            if let Err(error) = handle_provider_init_event(
+                                                &provider_name_for_pty,
+                                                &event,
+                                                &pty_config,
+                                                &init_timestamp_clone,
+                                            ) {
+                                                log_debug(&format!(
+                                                    "[WARDIAN] Rejected {} initialization identity: {}",
+                                                    provider_name_for_pty, error
+                                                ));
+                                                set_agent_status(
+                                                    &pty_app,
+                                                    &sid_for_pty,
+                                                    &current_status_clone,
+                                                    "Error",
+                                                );
+                                                return;
                                             }
                                         }
 
@@ -1043,16 +916,9 @@ pub async fn spawn_agent(
             .map(|path| path.to_string_lossy().to_string());
 
         std::thread::spawn(move || {
-            // Tail-follow the resolved session log every iteration, but run
-            // session discovery (which walks and samples every rollout file in
-            // the agent's codex home) only on this interval.
-            const CODEX_SESSION_DISCOVERY_INTERVAL: std::time::Duration =
-                std::time::Duration::from_secs(5);
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
             let mut positioned_initial_log = !watcher_skip_existing_log;
-            let mut cached_latest_session: Option<String> = None;
-            let mut last_discovery: Option<std::time::Instant> = None;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -1063,27 +929,10 @@ pub async fn spawn_agent(
                 }
 
                 let path = {
-                    let discovery_due = last_discovery
-                        .is_none_or(|at| at.elapsed() >= CODEX_SESSION_DISCOVERY_INTERVAL);
-                    if discovery_due {
-                        cached_latest_session = latest_codex_session_index_entry(&watcher_session)
-                            .ok()
-                            .flatten()
-                            .map(|(session_id, _updated_at)| session_id);
-                        last_discovery = Some(std::time::Instant::now());
-                    }
-                    let latest_session = cached_latest_session.clone();
-                    let lookup_session = watcher_config.lock().ok().and_then(|mut cfg| {
-                        let previous_resume = cfg.resume_session.clone();
-                        let previous_cleared = codex_cleared_provider_sessions(&cfg);
-                        let lookup = codex_status_log_session(&mut cfg, latest_session);
-                        if cfg.resume_session != previous_resume
-                            || codex_cleared_provider_sessions(&cfg) != previous_cleared
-                        {
-                            let _ = watcher_app.emit("agents-updated", ());
-                        }
-                        lookup
-                    });
+                    let lookup_session = watcher_config
+                        .lock()
+                        .ok()
+                        .and_then(|cfg| codex_status_log_session(&cfg));
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(lookup_session) = lookup_session {
                         if last_lookup_session != lookup_session {
@@ -1422,8 +1271,6 @@ pub async fn spawn_agent(
         let watcher_config = config_lock.clone();
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
-        let watcher_workspace = cwd.clone();
-        let initial_ignored = initial_ignored_conversation_id.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
@@ -1440,29 +1287,11 @@ pub async fn spawn_agent(
 
                 let home = AntigravityProvider::antigravity_home();
                 let conversation_id = {
-                    let configured = {
-                        let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
-                        cfg.resume_session
-                            .as_ref()
-                            .map(|value| value.trim().to_string())
-                            .filter(|value| !value.is_empty())
-                    };
-                    configured.or_else(|| {
-                        let detected = home
-                            .as_ref()
-                            .and_then(|home| {
-                                AntigravityProvider::conversation_for_workspace(
-                                    home,
-                                    &watcher_workspace,
-                                )
-                            })
-                            .or_else(|| {
-                                home.as_ref().and_then(|home| {
-                                    AntigravityProvider::latest_conversation_id(home)
-                                })
-                            });
-                        filter_ignored_conversation_id(detected, initial_ignored.as_deref())
-                    })
+                    let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
+                    cfg.resume_session
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
                 };
 
                 let path = home
@@ -1478,20 +1307,6 @@ pub async fn spawn_agent(
                         offset = 0;
                         positioned_initial_log = !watcher_skip_existing_log;
                         last_conversation_id = conversation_id.clone();
-                    }
-
-                    let needs_save = {
-                        let mut cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
-                        if cfg.resume_session.as_deref() != Some(conversation_id.as_str()) {
-                            cfg.resume_session = Some(conversation_id.clone());
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if needs_save {
-                        let _ = watcher_app.emit("agents-updated", ());
-                        save_agent_state_after_session_capture(&watcher_app);
                     }
 
                     if let Ok(mut out) = watcher_log_path.lock() {
@@ -1636,8 +1451,8 @@ mod tests {
     use wardian_core::models::{CodexProviderConfig, ProviderConfig};
 
     #[test]
-    fn codex_status_log_session_tracks_excluded_latest_without_adopting_resume() {
-        let mut config = AgentConfig {
+    fn codex_status_log_session_does_not_use_latest_fallback() {
+        let config = AgentConfig {
             provider: "codex".to_string(),
             resume_session: None,
             provider_config: ProviderConfig::Codex(CodexProviderConfig {
@@ -1647,10 +1462,9 @@ mod tests {
             ..Default::default()
         };
 
-        let log_session =
-            codex_status_log_session(&mut config, Some("provider-session-1".to_string()));
+        let log_session = codex_status_log_session(&config);
 
-        assert_eq!(log_session.as_deref(), Some("provider-session-1"));
+        assert_eq!(log_session, None);
         assert_eq!(config.resume_session, None);
         assert_eq!(
             config.codex_config().cleared_provider_sessions,
@@ -1823,20 +1637,4 @@ mod tests {
         assert!(responses.is_empty());
     }
 
-    #[test]
-    fn test_filter_ignored_conversation_id() {
-        assert_eq!(
-            filter_ignored_conversation_id(Some("conv_abc".to_string()), Some("conv_abc")),
-            None
-        );
-        assert_eq!(
-            filter_ignored_conversation_id(Some("conv_xyz".to_string()), Some("conv_abc")),
-            Some("conv_xyz".to_string())
-        );
-        assert_eq!(
-            filter_ignored_conversation_id(Some("conv_abc".to_string()), None),
-            Some("conv_abc".to_string())
-        );
-        assert_eq!(filter_ignored_conversation_id(None, Some("conv_abc")), None);
-    }
 }

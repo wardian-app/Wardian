@@ -14,7 +14,7 @@ import {
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-worktree-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-worktree-${RUN_ID}`;
 const SESSION_NAME = `E2E-Worktree-${RUN_ID}`;
 const WORKTREE_NAME = `review-${RUN_ID}`;
 
@@ -111,7 +111,7 @@ async function spawnOffMockAgent(driver, repoPath) {
       (agent) => done({ ok: true, agent }),
       (error) => done({ ok: false, error: String(error) }),
     );
-  }, SESSION_ID, SESSION_NAME, repoPath);
+  }, PROVIDER_SESSION_ID, SESSION_NAME, repoPath);
 
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
   assert.equal(result.agent.folder, normalizeForWardianRecords(repoPath));
@@ -156,7 +156,9 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
   });
 
   await waitForAppShell(session.driver, 20000);
-  await spawnOffMockAgent(session.driver, repoPath);
+  const spawnedAgent = await spawnOffMockAgent(session.driver, repoPath);
+  const sessionId = spawnedAgent.session_id;
+  assert.notEqual(sessionId, PROVIDER_SESSION_ID);
 
   const enabled = runCli(cliPath, harness, [
     "agent",
@@ -167,29 +169,29 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
     WORKTREE_NAME,
   ]);
   assert.equal(enabled.ok, true);
-  assert.equal(enabled.agent?.uuid, SESSION_ID);
+  assert.equal(enabled.agent?.uuid, sessionId);
   assert.equal(enabled.agent?.name, SESSION_NAME);
   assert.ok(enabled.worktree?.worktree_folder, `missing worktree in response: ${JSON.stringify(enabled)}`);
-  assert.equal(enabled.worktree.member_agent_ids.includes(SESSION_ID), true);
+  assert.equal(enabled.worktree.member_agent_ids.includes(sessionId), true);
 
   const worktreeFolder = enabled.worktree.worktree_folder;
   assert.equal(fs.existsSync(worktreeFolder), true, `worktree folder should exist: ${worktreeFolder}`);
   assert.equal(fs.existsSync(path.join(worktreeFolder, ".git")), true, "created worktree should have git metadata");
 
   const listed = runCli(cliPath, harness, ["agent", "worktree", "list"]);
-  const listedWorktree = listed.worktrees.find((entry) => entry.member_agent_ids.includes(SESSION_ID));
+  const listedWorktree = listed.worktrees.find((entry) => entry.member_agent_ids.includes(sessionId));
   assert.ok(listedWorktree, `enabled worktree missing from CLI list: ${JSON.stringify(listed)}`);
   assert.equal(listedWorktree.worktree_folder, normalizeForWardianRecords(worktreeFolder));
 
   const disabled = runCli(cliPath, harness, ["agent", "worktree", "disable", SESSION_NAME]);
   assert.equal(disabled.ok, true);
-  assert.equal(disabled.agent?.uuid, SESSION_ID);
+  assert.equal(disabled.agent?.uuid, sessionId);
   assert.equal(disabled.agent?.name, SESSION_NAME);
   assert.equal(disabled.worktree ?? null, null);
   assert.equal(disabled.previous_worktree?.worktree_folder, normalizeForWardianRecords(worktreeFolder));
   assert.equal(fs.existsSync(worktreeFolder), true, "disable should not delete the physical worktree");
 
   const agent = runCli(cliPath, harness, ["agent", SESSION_NAME]);
-  assert.equal(agent.agent.uuid, SESSION_ID);
+  assert.equal(agent.agent.uuid, sessionId);
   assert.equal(agent.agent.workspace, normalizeForWardianRecords(repoPath));
 });

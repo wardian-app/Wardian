@@ -21,7 +21,7 @@ import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const RUN_ID = `${process.pid}-${Date.now()}`;
-const SESSION_ID = `e2e-terminal-rendering-${RUN_ID}`;
+const PROVIDER_SESSION_ID = `e2e-terminal-rendering-${RUN_ID}`;
 const SESSION_NAME = `E2E-Terminal-Rendering-${RUN_ID}`;
 const { Terminal: HeadlessTerminal } = xtermHeadless;
 const RENDER_LINES = Array.from(
@@ -117,7 +117,7 @@ function createRenderingMockScript() {
 "use strict";
 const init = JSON.stringify({
   type: "init",
-  session_id: ${JSON.stringify(SESSION_ID)},
+  session_id: ${JSON.stringify(PROVIDER_SESSION_ID)},
   timestamp: new Date().toISOString(),
 }) + "\\n";
 const frame = ${JSON.stringify(RAW_FRAME)};
@@ -144,7 +144,7 @@ async function spawnRenderingMockAgent(driver, workspacePath) {
       sessionName: SESSION_NAME,
       agentClass: "TestClass",
       folder: workspacePath,
-      resumeSession: SESSION_ID,
+      resumeSession: PROVIDER_SESSION_ID,
       isOff: false,
       configOverride: { provider: "mock" },
     },
@@ -276,9 +276,14 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
   await driver.manage().window().setRect({ width: 1280, height: 900 });
 
   const agent = await spawnRenderingMockAgent(driver, harness.repoRoot);
-  assert.equal(agent.session_id, SESSION_ID);
+  const sessionId = agent.session_id;
+  assert.match(
+    sessionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  assert.notEqual(sessionId, PROVIDER_SESSION_ID);
   await openWorkbenchSurface(driver, "agents-overview");
-  await activateAgentCard(driver, SESSION_ID);
+  await activateAgentCard(driver, sessionId);
   await waitForTerminalHost(driver);
   if (!(await terminalDebugAvailable(driver))) {
     if (skipNativeBuild) {
@@ -287,7 +292,7 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
     }
     assert.fail("Expected terminal debug snapshots to be exposed in the native rendering build");
   }
-  const presentationId = await resolveAgentTerminalPresentationId(driver, SESSION_ID);
+  const presentationId = await resolveAgentTerminalPresentationId(driver, sessionId);
   await waitForRenderedGlyphs(driver, presentationId);
   await assertInsideMatchesOutside(driver, presentationId);
   await writeScreenshot(driver, harness, "initial");
@@ -306,7 +311,7 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
   await assertInsideMatchesOutside(driver, presentationId);
   await writeScreenshot(driver, harness, "scrolled-top");
 
-  await invokeTauri(driver, "pause_agent", { sessionId: SESSION_ID });
+  await invokeTauri(driver, "pause_agent", { sessionId });
   const afterPause = await readRenderedText(driver, presentationId);
   assert.ok(
     afterPause.text.includes("▐ glyph"),
@@ -314,7 +319,7 @@ test("agent terminal rendering matches outside xterm after split UTF-8, resize, 
   );
   await writeScreenshot(driver, harness, "paused");
 
-  await invokeTauri(driver, "resume_agent", { sessionId: SESSION_ID });
+  await invokeTauri(driver, "resume_agent", { sessionId });
   const afterResume = await waitForRenderedGlyphs(driver, presentationId, 3);
   assert.ok(
     afterResume.text.includes("▐ glyph"),

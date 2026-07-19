@@ -12,6 +12,14 @@ pub struct AntigravityTranscriptSummary {
 
 pub struct AntigravityProvider;
 
+pub(crate) fn changed_workspace_conversation(
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Option<String> {
+    let after = after.map(str::trim).filter(|value| !value.is_empty())?;
+    (before.map(str::trim) != Some(after)).then(|| after.to_string())
+}
+
 impl Default for AntigravityProvider {
     fn default() -> Self {
         Self::new()
@@ -46,21 +54,6 @@ impl AntigravityProvider {
                 .then(|| value.as_str().map(str::to_string))
                 .flatten()
         })
-    }
-
-    pub fn latest_conversation_id(home: &Path) -> Option<String> {
-        let brain = home.join("brain");
-        let entries = std::fs::read_dir(brain).ok()?;
-        entries
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| {
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                Some((modified, name))
-            })
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, name)| name)
     }
 
     pub fn summarize_conversation(
@@ -262,6 +255,19 @@ fn normalize_path_text(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_requires_a_changed_workspace_mapping() {
+        assert_eq!(
+            changed_workspace_conversation(Some("old"), Some("new")).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            changed_workspace_conversation(Some("same"), Some("same")),
+            None
+        );
+        assert_eq!(changed_workspace_conversation(None, None), None);
+    }
     use wardian_core::models::{AntigravityProviderConfig, ProviderConfig};
 
     fn make_provider() -> AntigravityProvider {

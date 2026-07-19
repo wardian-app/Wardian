@@ -339,9 +339,9 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   const baseUrl = `http://127.0.0.1:${gatewayPort}`;
   const canonicalOrigin = `https://127.0.0.1:${gatewayPort}`;
   const workspacePath = path.join(harness.repoRoot, "e2e-native");
-  const sessionId = `e2e-remote-gateway-${RUN_ID}`;
+  const providerSessionId = `e2e-remote-gateway-${RUN_ID}`;
   const sessionName = `E2E-REMOTE-GATEWAY-${RUN_ID}`;
-  const mockScript = writePersistentRemoteMockScript(harness, sessionId);
+  const mockScript = writePersistentRemoteMockScript(harness, providerSessionId);
   const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
   process.env.WARDIAN_MOCK_SCRIPT = mockScript;
 
@@ -387,13 +387,18 @@ test("remote gateway authenticates broker ownership transitions across desktop a
         (error) => done({ ok: false, error: String(error) }),
       );
     },
-    sessionId,
+    providerSessionId,
     sessionName,
     workspacePath,
   );
 
   assert.equal(result.ok, true, `spawn_agent failed: ${result.error}`);
-  assert.equal(result.agent.session_id, sessionId);
+  const sessionId = result.agent.session_id;
+  assert.match(
+    sessionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  assert.notEqual(sessionId, providerSessionId);
   assert.equal(result.agent.session_name, sessionName);
 
   await waitForWorkbenchReady(session.driver);
