@@ -1,4 +1,4 @@
-use crate::utils::CodexRuntimePolicy;
+use crate::utils::{resolve_codex_plugin_policy, CodexRuntimePolicy};
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::{AgentConfig, CodexProviderConfig};
 
@@ -186,13 +186,13 @@ impl CodexProvider {
             // scrollback. Wardian embeds the TUI inside xterm, so interactive
             // sessions should prefer scrollback-friendly output.
             args.push("--no-alt-screen".into());
-            // Wardian supplies its own local skills/app surface. Disabling
-            // Codex's plugin/app startup sync prevents large provider-owned
-            // downloads from being triggered just by opening an agent terminal.
-            args.push("--disable".into());
-            args.push("plugins".into());
-            args.push("--disable".into());
-            args.push("apps".into());
+            // Preserve the default-deny plugin surface, but let class-scoped
+            // plugins opt into only the Codex features they require.
+            let plugin_policy = resolve_codex_plugin_policy(&config.agent_class, runtime_policy);
+            for feature in plugin_policy.launch_feature_disables() {
+                args.push("--disable".into());
+                args.push(feature.into());
+            }
         }
 
         let mut explicit_includes = Vec::new();
@@ -607,6 +607,45 @@ mod tests {
             .windows(2)
             .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
         assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
+    }
+
+    #[test]
+    fn electrical_engineer_does_not_disable_plugins_or_apps() {
+        let p = make_provider();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            agent_class: "Electrical Engineer".into(),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
+    }
+
+    #[test]
+    fn mechanical_engineer_does_not_disable_plugins_or_apps() {
+        let p = make_provider();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            agent_class: "Mechanical Engineer".into(),
+            ..Default::default()
+        };
+
+        let args = p.get_spawn_args(&config, false);
+
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
+        assert!(!args
             .windows(2)
             .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
     }
