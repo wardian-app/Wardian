@@ -118,10 +118,12 @@ Codex does not treat `--add-dir` as a skill-discovery mechanism. Wardian therefo
 
 Current model:
 
-- shared Codex files projected into each agent home:
+- shared Codex files copied into each agent home:
   - `auth.json`
-  - `config.toml`
   - `cap_sid`
+- the user's `config.toml` is a managed base, not a shared home. Wardian
+  reconciles missing base policy values into the agent's own `config.toml` and
+  preserves agent model choices, project trust, and local overrides.
 - Codex session and history files such as `history.jsonl`,
   `session_index.jsonl`, and `sessions/**` remain per-agent so Wardian can
   resume and read logs from the agent habitat without merging independent
@@ -144,6 +146,30 @@ Current model:
 - Wardian-assigned skills are projected into `CODEX_HOME/skills/<skill-name>`
 
 This preserves per-agent skill scope without forcing the project repo itself to hold agent-specific skill directories.
+
+### Plugin policy and diagnostics
+
+Codex plugins are default-deny per agent class. Electrical Engineer and
+Mechanical Engineer may use `computer-use@openai-bundled`; all other classes
+launch with both `plugins` and `apps` disabled. When an allowed plugin needs an
+app surface, Wardian omits the corresponding global disable flag, but preserves
+normal Codex approvals and the plugin's own confirmation/interrupt controls.
+
+Plugin installation and enablement remain in the agent's `CODEX_HOME`. A future
+implementation may deduplicate immutable plugin implementation files, but must
+not share installed or enabled state between agent homes. Policy/config changes
+need a new Codex session because an existing session has a fixed tool list.
+
+Use the provider-neutral control surface to inspect effective state without
+reading sensitive Codex files:
+
+```bash
+wardian agent doctor <agent-name-or-uuid>
+```
+
+The response includes the effective home path, allowed and installed plugins,
+launch feature flags, `restart_required`, and concise reasons for a missing
+expected plugin.
 
 ### Session identity and bootstrap
 
