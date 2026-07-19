@@ -279,7 +279,7 @@ describe('WorkflowsView', () => {
     expect(screen.getByTestId('workflow-inspector')).toHaveClass('workflow-node-inspector');
   });
 
-  it('keeps monitor toolbar controls on one compact row', async () => {
+  it('keeps monitor toolbar controls on one row without shrinking standard buttons', async () => {
     seedBuilderWithConnectedBlueprint();
     useWorkflowsView.setState({ mode: 'monitor' });
     const { container } = render(<WorkflowsView theme="dark" />);
@@ -291,8 +291,9 @@ describe('WorkflowsView', () => {
     expect(toolbar).toHaveClass('workflows-toolbar--monitor');
     expect(primary).toHaveClass('flex-nowrap');
     expect(actions).toHaveClass('flex-nowrap');
-    expect(screen.getByRole('button', { name: /refresh workflow view/i })).toHaveClass('h-7', 'w-7');
-    expect(screen.getByRole('button', { name: /^Run$/ })).toHaveClass('h-7');
+    expect(screen.getByRole('button', { name: /refresh workflow view/i })).toHaveClass('h-8', 'w-8');
+    expect(screen.getByRole('button', { name: /^Run$/ })).toHaveClass('px-4', 'py-1.5');
+    expect(screen.getByRole('button', { name: /^Run$/ })).not.toHaveClass('h-7');
   });
 
 

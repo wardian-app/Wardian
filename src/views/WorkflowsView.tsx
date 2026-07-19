@@ -288,7 +288,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           {mode !== 'edit' ? (
             <button
               type="button"
-              className={`${mode === 'monitor' ? 'h-7 w-7' : 'h-8 w-8'} inline-flex cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]`}
+              className="inline-flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded border border-wardian-border text-muted transition-colors hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
               onClick={() => void refreshCurrentMode()}
               aria-label="Refresh workflow view"
               title="Refresh"
@@ -298,7 +298,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           ) : null}
           <button
             type="button"
-            className={`${mode === 'monitor' ? 'h-7 px-3 py-1' : 'px-4 py-1.5'} cursor-pointer select-none rounded bg-[var(--color-wardian-accent)] text-xs font-bold text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-40`}
+            className="cursor-pointer select-none rounded bg-[var(--color-wardian-accent)] px-4 py-1.5 text-xs font-bold text-[var(--color-wardian-bg)] transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
             disabled={runDisabled}
             onClick={() => setLaunchOpen(true)}
           >
