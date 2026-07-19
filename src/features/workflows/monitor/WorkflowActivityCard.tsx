@@ -194,18 +194,20 @@ export function WorkflowActivityCard({
         </div>
       </header>
 
-      <div
-        data-virtual-assignments={compactCollapsedAssignments ? 'single-line' : undefined}
-        className={`${virtualized ? 'mt-2' : 'mt-3'} ${compactCollapsedAssignments ? '[&>div>div]:h-5 [&>div>div]:flex-nowrap [&>div>div>span]:min-w-0 [&>div>div>button]:shrink-0' : ''}`}
-      >
-        <WorkflowAssignmentSummary
-          workflowName={activity.name}
-          items={assignments}
-          compact={virtualized}
-          expanded={expandedAssignments}
-          onExpandedChange={onExpandedAssignmentsChange}
-        />
-      </div>
+      {assignments.length > 0 ? (
+        <div
+          data-virtual-assignments={compactCollapsedAssignments ? 'single-line' : undefined}
+          className={`${virtualized ? 'mt-2' : 'mt-3'} ${compactCollapsedAssignments ? '[&>div>div]:h-5 [&>div>div]:flex-nowrap [&>div>div>span]:min-w-0 [&>div>div>button]:shrink-0' : ''}`}
+        >
+          <WorkflowAssignmentSummary
+            workflowName={activity.name}
+            items={assignments}
+            compact={virtualized}
+            expanded={expandedAssignments}
+            onExpandedChange={onExpandedAssignmentsChange}
+          />
+        </div>
+      ) : null}
 
       <div className={`workflow-activity-card__details-shell ${virtualized ? 'mt-2 pt-1' : 'mt-3 pt-2'} border-t border-wardian-border`}>
         <ModeDetails activity={activity} schedule={schedule} now={now} compact={compactHistory} />

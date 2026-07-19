@@ -34,4 +34,10 @@ describe('monitor presentation', () => {
     expect(screen.getByText('writer · missing')).toBeVisible();
     expect(screen.getAllByText(/^(?:Agent · (?:Current session|Fresh background)|Temporary provider · Ephemeral)$/)).toHaveLength(3);
   });
+
+  it('renders no assignment fallback when a workflow has no agent assignments', () => {
+    render(<WorkflowAssignmentSummary workflowName="Script Only" items={[]} />);
+
+    expect(screen.queryByText('Default assignment')).toBeNull();
+  });
 });

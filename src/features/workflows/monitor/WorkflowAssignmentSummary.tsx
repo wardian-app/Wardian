@@ -26,7 +26,7 @@ export function WorkflowAssignmentSummary({
   };
 
   if (items.length === 0) {
-    return <span className="text-[10px] text-muted">Default assignment</span>;
+    return null;
   }
 
   const collapsedItems = items.slice(0, maxVisible);

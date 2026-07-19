@@ -104,9 +104,10 @@ agent labels.
 
 ## Agent Assignment Presentation
 
-Collapsed cards show up to two role-aware assignment chips. Examples include
-`writer · Librarian`, `reviewer · Paper-Reviewer`, and
-`publisher · Temporary Codex`.
+Collapsed cards show up to two role-aware assignment chips when the workflow has
+agent assignments. Pure script workflows do not show an invented default
+assignment. Examples include `writer · Librarian`, `reviewer · Paper-Reviewer`,
+and `publisher · Temporary Codex`.
 
 When more than two assignments exist, a `+N agents` button expands an inline
 assignment map containing every role, target name, target type, and conversation

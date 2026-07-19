@@ -581,8 +581,27 @@ describe('WorkflowMonitor', () => {
     const olderRunRow = screen.getByTestId('workflow-history-run-run-old');
     expect(latestRunCard.compareDocumentPosition(olderRunRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(olderRunRow).not.toHaveTextContent('run-old');
-    expect(olderRunRow).toHaveTextContent('Default');
+    expect(olderRunRow).not.toHaveTextContent('Default assignment');
     expect(screen.queryByRole('button', { name: /show .*older/i })).toBeNull();
+  });
+
+  it('does not invent assignment text when a scheduled workflow has no agent assignments', () => {
+    scheduleState.schedules = [{
+      id: 'schedule-script',
+      blueprint_id: 'script-only',
+      name: 'Script Only',
+      input: {},
+      bindings: {},
+      schedule: { schedule_type: 'weekly', days_of_week: ['Mon'], time_of_day: '09:35', active: true },
+      is_paused: false,
+      next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+    }];
+
+    render(<WorkflowMonitor onOpenRun={vi.fn()} onEditSchedule={vi.fn()} />);
+
+    const card = screen.getByTestId('workflow-activity-row-script-only');
+    expect(card).toHaveTextContent('Script Only');
+    expect(card).not.toHaveTextContent('Default assignment');
   });
 
   it('keeps schedule names and assignment labels on scheduled history cards', () => {

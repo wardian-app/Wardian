@@ -92,10 +92,12 @@ Each section uses a card hierarchy suited to the operator's question:
 - **All** preserves those section-specific priorities instead of forcing every
   activity into one universal row layout.
 
-Cards show up to two role-aware assignment chips. When a workflow has more
-assignments, the accessible **+N agents** control expands the complete role map
-without making every collapsed card taller. Stored agent ids remain visible if
-an assigned agent is no longer in the roster.
+Cards show up to two role-aware assignment chips when a workflow actually has
+agent assignments. Pure script workflows do not show an invented default
+assignment. When a workflow has more assignments, the accessible **+N agents**
+control expands the complete role map without making every collapsed card
+taller. Stored agent ids remain visible if an assigned agent is no longer in the
+roster.
 
 Run and schedule times use local, calendar-aware labels such as **Today**,
 **Tomorrow**, a nearby weekday and date, or a full date for more distant

@@ -116,9 +116,11 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
           </div>
         </header>
 
-        <div className="mt-2">
-          <WorkflowAssignmentSummary workflowName={schedule.name} items={assignments} compact />
-        </div>
+        {assignments.length > 0 ? (
+          <div className="mt-2">
+            <WorkflowAssignmentSummary workflowName={schedule.name} items={assignments} compact />
+          </div>
+        ) : null}
 
         <dl className="mt-2 grid grid-cols-2 gap-2 border-t border-wardian-border pt-2">
           <CompactDetail label="Schedule">{scheduleSummaryLabel(schedule.schedule)}</CompactDetail>
@@ -168,9 +170,11 @@ export function WorkflowGlanceCard(props: WorkflowGlanceCardProps) {
         </button>
       </header>
 
-      <div className="mt-2">
-        <WorkflowAssignmentSummary workflowName={workflowName} items={assignments} compact />
-      </div>
+      {assignments.length > 0 ? (
+        <div className="mt-2">
+          <WorkflowAssignmentSummary workflowName={workflowName} items={assignments} compact />
+        </div>
+      ) : null}
 
       <dl className="mt-2 grid grid-cols-2 gap-2 border-t border-wardian-border pt-2">
         <CompactDetail label="Started">{timeLabel(run.started_at, 'Unknown', now)}</CompactDetail>

@@ -40,7 +40,22 @@ async function installScheduleMonitorIpcMock(page: Page) {
   await page.addInitScript(({ blueprintFixture, agentFixtures, completedRunFixture }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
-    let schedules: Array<Record<string, unknown>> = [];
+    let schedules: Array<Record<string, unknown>> = [{
+      id: "schedule-script-only",
+      blueprint_id: "script-only",
+      name: "Trident LEAPS Scan",
+      provider: null,
+      workspace: null,
+      input: {},
+      bindings: {},
+      schedule: { schedule_type: "weekly", days_of_week: ["Mon", "Tue", "Wed", "Thu", "Fri"], time_of_day: "09:35", active: true },
+      next_run_epoch_ms: Date.parse("2026-07-17T13:35:00.000Z"),
+      paused_remaining_ms: null,
+      is_paused: false,
+      last_run_status: null,
+      last_run_error: null,
+      last_run_epoch_ms: null,
+    }];
     const tauriWindow = window as Window & {
       __scheduleMonitorInvokes?: Array<{ command: string; args?: Record<string, unknown> }>;
       __TAURI_INTERNALS__?: Record<string, unknown>;
@@ -117,7 +132,7 @@ async function installScheduleMonitorIpcMock(page: Page) {
         if (command === "schedule_list") return schedules;
         if (command === "schedule_create") {
           const schedule = {
-            id: `schedule-${schedules.length + 1}`,
+            id: "schedule-1",
             blueprint_id: args?.blueprintId,
             name: args?.name,
             provider: args?.provider ?? null,
@@ -252,6 +267,11 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(scheduledCard).not.toContainText("run-completed");
   await expect(scheduledCard.getByRole("button", { name: "Show 1 more agents for E2E Nightly" })).toHaveText("+1 agents");
   await scheduledCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/monitor-adaptive-cards.png` });
+
+  const scriptOnlyCard = monitor.getByTestId("workflow-activity-row-script-only");
+  await expect(scriptOnlyCard).toContainText("Trident LEAPS Scan");
+  await expect(scriptOnlyCard).not.toContainText("Default assignment");
+  await scriptOnlyCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/script-only-card.png` });
 
   await monitor.getByRole("button", { name: "History" }).click();
   const historyCard = monitor.getByTestId("workflow-history-run-run-completed");
