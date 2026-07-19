@@ -67,20 +67,18 @@ Codex executes against the real target workspace while Wardian keeps mutable pro
 
 Codex reads `AGENTS.md`. Wardian passes the real project root with `--cd <absolute-workspace-path>` and projects assigned skills into the agent-specific `CODEX_HOME/skills` tree. This keeps skill scope per agent while preserving Codex trust and command execution against the actual repository path.
 
-Each agent keeps its own Codex home. Wardian reconciles shared policy defaults into
+Each agent keeps its own Codex home. Wardian reconciles shared configuration defaults into
 that home without copying another agent's sessions, history, databases, workspace
 trust, or local overrides.
 
-### Plugin Policy
+### Plugin Pass-Through
 
-Plugins default to disabled. Electrical Engineer and Mechanical Engineer are
-allowlisted for `computer-use@openai-bundled`; Wardian installs and enables that
-plugin only in the allowed agent's own `CODEX_HOME`. Its app surface is enabled
-only when an allowed plugin needs it. Other agents continue to launch with
-plugins and apps disabled.
-
-Changing this policy requires a fresh Codex session because the provider fixes
-its tool list when the session starts. Inspect the effective state with:
+Wardian does not class-filter, install, enable, disable, or globally suppress
+Codex plugins. Each agent sees the plugin state in its own `CODEX_HOME`, and
+Wardian launches Codex without global plugin or app disable flags. A plugin or
+configuration change takes effect only in a fresh Codex session because the
+provider fixes its tool surface when the thread starts. Inspect the effective
+state with:
 
 ```bash
 wardian agent doctor <agent-name-or-uuid>
@@ -93,10 +91,11 @@ Codex session IDs are discovered after launch. Wardian starts fresh sessions wit
 ### Debug First
 
 If Codex behaves unexpectedly, run `wardian agent doctor <agent-name-or-uuid>`
-first. It reports the agent's effective `CODEX_HOME`, allowed and installed
-plugins, launch flags, restart requirement, and absence reasons. Then separate
-the checks: did it discover the skill, did it trust the real workspace, and did
-the sandbox allow the command to run?
+first. It reports the agent's effective `CODEX_HOME`, installed/enabled plugins
+from that home, and launch flags. If the home changed after the thread began,
+start a fresh Codex session before judging the tool list. Then separate the
+checks: did it discover the skill, did it trust the real workspace, and did the
+sandbox allow the command to run?
 
 ## OpenCode (`opencode`)
 

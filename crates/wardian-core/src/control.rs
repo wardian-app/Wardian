@@ -197,10 +197,8 @@ pub struct AgentUpdateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexPluginDiagnostic {
     pub selector: String,
-    pub requires_apps: bool,
     pub installed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,7 +208,9 @@ pub struct AgentDoctorResponse {
     pub applicable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_home: Option<String>,
-    pub allowed_plugins: Vec<CodexPluginDiagnostic>,
+    pub plugins: Vec<CodexPluginDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_inspection_error: Option<String>,
     pub launch_flags: Vec<String>,
     pub restart_required: bool,
     pub reasons: Vec<String>,
@@ -812,18 +812,18 @@ mod tests {
             },
             applicable: true,
             codex_home: Some("D:/wardian/agents/agent-1/habitat/.codex".to_string()),
-            allowed_plugins: vec![CodexPluginDiagnostic {
-                selector: "computer-use@openai-bundled".to_string(),
-                requires_apps: true,
+            plugins: vec![CodexPluginDiagnostic {
+                selector: "documents@openai-primary-runtime".to_string(),
                 installed: true,
-                error: None,
+                enabled: true,
             }],
+            plugin_inspection_error: None,
             launch_flags: vec!["--no-alt-screen".to_string()],
             restart_required: false,
             reasons: Vec::new(),
         };
         let response_json = serde_json::to_string(&response).unwrap();
-        assert!(response_json.contains("computer-use@openai-bundled"));
+        assert!(response_json.contains("documents@openai-primary-runtime"));
         assert!(!response_json.contains("auth.json"));
     }
 

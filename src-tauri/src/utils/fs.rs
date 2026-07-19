@@ -119,7 +119,7 @@ pub fn prepare_provider_habitat(
 
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
-        ensure_codex_home_projection(&habitat_root, workspace_root, class_name)?;
+        ensure_codex_home_projection(&habitat_root, workspace_root)?;
     }
 
     Ok(Some(habitat_root))
@@ -511,7 +511,6 @@ fn projected_link_matches_target(link: &std::path::Path, target: &std::path::Pat
 fn ensure_codex_home_projection(
     habitat_root: &std::path::Path,
     workspace_root: &std::path::Path,
-    class_name: &str,
 ) -> Result<(), String> {
     let real_codex_home = dirs::home_dir()
         .ok_or("Could not find user home directory")?
@@ -519,14 +518,6 @@ fn ensure_codex_home_projection(
     let projected_home = habitat_codex_home(habitat_root);
     let wardian_skills = habitat_root.join(".agents").join("skills");
     sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
-
-    let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-    let plugin_policy = crate::utils::resolve_codex_plugin_policy(class_name, &runtime_policy);
-    reconcile_codex_plugin_policy(
-        &projected_home,
-        &plugin_policy,
-        &codex_config_fingerprint(&real_codex_home.join("config.toml")),
-    )?;
 
     if crate::utils::load_codex_runtime_policy()
         .map(|policy| policy.trust_workspaces)
@@ -635,98 +626,41 @@ fn merge_codex_config_items(base: &toml_edit::Item, agent: &mut toml_edit::Item)
     }
 }
 
-const CODEX_POLICY_STATUS_FILE: &str = "wardian-codex-policy.json";
-
-/// Non-secret reconciliation result retained in an agent-local Codex home.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct CodexPluginStatus {
     pub selector: String,
     pub installed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub enabled: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub(crate) struct CodexPolicyStatus {
-    pub fingerprint: String,
-    pub base_config_fingerprint: String,
-    pub allowed_plugins: Vec<crate::utils::AllowedCodexPlugin>,
-    pub plugins: Vec<CodexPluginStatus>,
+#[derive(serde::Deserialize)]
+struct CodexPluginList {
+    #[serde(default)]
+    installed: Vec<CodexPluginListEntry>,
 }
 
-pub(crate) fn codex_policy_status_path(codex_home: &std::path::Path) -> std::path::PathBuf {
-    codex_home.join(CODEX_POLICY_STATUS_FILE)
+#[derive(serde::Deserialize)]
+struct CodexPluginListEntry {
+    #[serde(rename = "pluginId")]
+    selector: String,
+    installed: bool,
+    enabled: bool,
 }
 
-pub(crate) fn read_codex_policy_status(
+/// Reads the plugin surface from the target home without changing it.
+pub(crate) fn inspect_codex_plugins(
     codex_home: &std::path::Path,
-) -> Result<Option<CodexPolicyStatus>, String> {
-    let path = codex_policy_status_path(codex_home);
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    serde_json::from_str(&content)
-        .map(Some)
-        .map_err(|error| format!("Could not parse Codex policy status: {error}"))
-}
+) -> Result<Vec<CodexPluginStatus>, String> {
+    let provider = crate::providers::ProviderFactory::resolve("codex")?;
+    let (program, mut args) = provider.get_executable();
+    args.extend([
+        "plugin".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ]);
 
-fn reconcile_codex_plugin_policy(
-    codex_home: &std::path::Path,
-    policy: &crate::utils::CodexPluginPolicy,
-    base_config_fingerprint: &str,
-) -> Result<(), String> {
-    let mut plugins = Vec::with_capacity(policy.allowed_plugins.len());
-    for allowed in &policy.allowed_plugins {
-        let status = match codex_plugin_is_installed(codex_home, &allowed.selector) {
-            Ok(true) => CodexPluginStatus {
-                selector: allowed.selector.clone(),
-                installed: true,
-                error: None,
-            },
-            Ok(false) => match install_codex_plugin(codex_home, &allowed.selector) {
-                Ok(()) => CodexPluginStatus {
-                    selector: allowed.selector.clone(),
-                    installed: true,
-                    error: None,
-                },
-                Err(error) => CodexPluginStatus {
-                    selector: allowed.selector.clone(),
-                    installed: false,
-                    error: Some(error),
-                },
-            },
-            Err(error) => CodexPluginStatus {
-                selector: allowed.selector.clone(),
-                installed: false,
-                error: Some(error),
-            },
-        };
-        plugins.push(status);
-    }
-
-    let status = CodexPolicyStatus {
-        fingerprint: policy.fingerprint(),
-        base_config_fingerprint: base_config_fingerprint.to_string(),
-        allowed_plugins: policy.allowed_plugins.clone(),
-        plugins,
-    };
-    let encoded = serde_json::to_vec_pretty(&status)
-        .map_err(|error| format!("Could not serialize Codex policy status: {error}"))?;
-    std::fs::write(codex_policy_status_path(codex_home), encoded).map_err(|error| error.to_string())
-}
-
-pub(crate) fn codex_config_fingerprint(config_path: &std::path::Path) -> String {
-    use sha2::Digest;
-
-    let content = std::fs::read(config_path).unwrap_or_default();
-    format!("{:x}", sha2::Sha256::digest(content))
-}
-
-fn codex_plugin_is_installed(codex_home: &std::path::Path, selector: &str) -> Result<bool, String> {
-    let output = std::process::Command::new("codex")
-        .args(["plugin", "list"])
+    let output = std::process::Command::new(&program)
+        .args(&args)
         .env("CODEX_HOME", codex_home)
         .output()
         .map_err(|error| format!("Could not inspect Codex plugins: {error}"))?;
@@ -737,26 +671,21 @@ fn codex_plugin_is_installed(codex_home: &std::path::Path, selector: &str) -> Re
         ));
     }
 
-    let listing = String::from_utf8_lossy(&output.stdout);
-    Ok(listing.lines().any(|line| {
-        line.contains(selector) && !line.to_ascii_lowercase().contains("not installed")
-    }))
+    parse_codex_plugin_statuses(&output.stdout)
 }
 
-fn install_codex_plugin(codex_home: &std::path::Path, selector: &str) -> Result<(), String> {
-    let output = std::process::Command::new("codex")
-        .args(["plugin", "add", selector, "--json"])
-        .env("CODEX_HOME", codex_home)
-        .output()
-        .map_err(|error| format!("Could not install {selector}: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Could not install {selector}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+fn parse_codex_plugin_statuses(bytes: &[u8]) -> Result<Vec<CodexPluginStatus>, String> {
+    let listing: CodexPluginList = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Could not parse Codex plugin list: {error}"))?;
+    Ok(listing
+        .installed
+        .into_iter()
+        .map(|plugin| CodexPluginStatus {
+            selector: plugin.selector,
+            installed: plugin.installed,
+            enabled: plugin.enabled,
+        })
+        .collect())
 }
 
 pub(crate) fn trust_codex_workspace_in_home(
@@ -1371,8 +1300,7 @@ mod tests {
         std::fs::create_dir_all(&wardian_skills).expect("create wardian skills");
 
         std::fs::write(real_home.join("auth.json"), "auth").expect("write auth");
-        std::fs::write(real_home.join("config.toml"), "model = \"gpt-5\"\n")
-            .expect("write config");
+        std::fs::write(real_home.join("config.toml"), "model = \"gpt-5\"\n").expect("write config");
         std::fs::write(real_home.join("cap_sid"), "cap").expect("write cap sid");
         std::fs::write(real_home.join("history.jsonl"), "history").expect("write unrelated file");
         std::fs::write(real_home.join("session_index.jsonl"), "index")
@@ -1420,8 +1348,7 @@ mod tests {
         .expect("write agent config");
         std::fs::write(projected_home.join("history.jsonl"), "agent history")
             .expect("write history");
-        std::fs::write(projected_home.join("state_5.sqlite"), "agent state")
-            .expect("write state");
+        std::fs::write(projected_home.join("state_5.sqlite"), "agent state").expect("write state");
 
         sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
             .expect("sync codex home");
@@ -1441,6 +1368,33 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_plugin_inspection_parses_installed_and_enabled_state() {
+        let statuses = super::parse_codex_plugin_statuses(
+            br#"{
+                "installed": [
+                    {
+                        "pluginId": "computer-use@openai-bundled",
+                        "installed": true,
+                        "enabled": true
+                    },
+                    {
+                        "pluginId": "example@marketplace",
+                        "installed": true,
+                        "enabled": false
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse plugin list");
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].selector, "computer-use@openai-bundled");
+        assert!(statuses[0].installed);
+        assert!(statuses[0].enabled);
+        assert!(!statuses[1].enabled);
     }
 
     #[cfg(windows)]

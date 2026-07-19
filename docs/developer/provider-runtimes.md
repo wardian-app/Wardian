@@ -147,18 +147,15 @@ Current model:
 
 This preserves per-agent skill scope without forcing the project repo itself to hold agent-specific skill directories.
 
-### Plugin policy and diagnostics
+### Plugin pass-through and diagnostics
 
-Codex plugins are default-deny per agent class. Electrical Engineer and
-Mechanical Engineer may use `computer-use@openai-bundled`; all other classes
-launch with both `plugins` and `apps` disabled. When an allowed plugin needs an
-app surface, Wardian omits the corresponding global disable flag, but preserves
-normal Codex approvals and the plugin's own confirmation/interrupt controls.
-
-Plugin installation and enablement remain in the agent's `CODEX_HOME`. A future
-implementation may deduplicate immutable plugin implementation files, but must
-not share installed or enabled state between agent homes. Policy/config changes
-need a new Codex session because an existing session has a fixed tool list.
+Plugin installation and enablement remain entirely in each agent's
+`CODEX_HOME`. Wardian does not apply a class allowlist, does not alter installed
+or enabled plugin state, and does not pass global plugin/app disable flags.
+Plugin implementation files may be cached by Codex, but the per-agent installed
+and enabled surface must remain local to the agent home. A configuration or
+plugin change needs a new Codex session because an existing thread has a fixed
+tool list.
 
 Use the provider-neutral control surface to inspect effective state without
 reading sensitive Codex files:
@@ -167,9 +164,9 @@ reading sensitive Codex files:
 wardian agent doctor <agent-name-or-uuid>
 ```
 
-The response includes the effective home path, allowed and installed plugins,
-launch feature flags, `restart_required`, and concise reasons for a missing
-expected plugin.
+The response includes the effective home path, installed/enabled plugins read
+from that home through the provider-resolved Codex executable, and launch
+feature flags. It never changes plugin state.
 
 ### Session identity and bootstrap
 

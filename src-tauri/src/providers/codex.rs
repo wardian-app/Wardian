@@ -1,4 +1,4 @@
-use crate::utils::{resolve_codex_plugin_policy, CodexRuntimePolicy};
+use crate::utils::CodexRuntimePolicy;
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::{AgentConfig, CodexProviderConfig};
 
@@ -186,13 +186,6 @@ impl CodexProvider {
             // scrollback. Wardian embeds the TUI inside xterm, so interactive
             // sessions should prefer scrollback-friendly output.
             args.push("--no-alt-screen".into());
-            // Preserve the default-deny plugin surface, but let class-scoped
-            // plugins opt into only the Codex features they require.
-            let plugin_policy = resolve_codex_plugin_policy(&config.agent_class, runtime_policy);
-            for feature in plugin_policy.launch_feature_disables() {
-                args.push("--disable".into());
-                args.push(feature.into());
-            }
         }
 
         let mut explicit_includes = Vec::new();
@@ -587,12 +580,7 @@ mod tests {
         assert!(args.contains(&"on-request".to_string()));
         assert!(args.contains(&"--search".to_string()));
         assert!(args.contains(&"--no-alt-screen".to_string()));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
+        assert!(!args.windows(2).any(|pair| pair[0] == "--disable"));
     }
 
     #[test]
@@ -603,16 +591,11 @@ mod tests {
         let args = p.get_spawn_args(&config, false);
 
         assert!(args.contains(&"--no-alt-screen".to_string()));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--disable" && pair[1] == "plugins"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--disable" && pair[1] == "apps"));
+        assert!(!args.windows(2).any(|pair| pair[0] == "--disable"));
     }
 
     #[test]
-    fn electrical_engineer_does_not_disable_plugins_or_apps() {
+    fn electrical_engineer_does_not_receive_plugin_specific_launch_flags() {
         let p = make_provider();
         let config = AgentConfig {
             provider: "codex".into(),
@@ -632,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn mechanical_engineer_does_not_disable_plugins_or_apps() {
+    fn mechanical_engineer_does_not_receive_plugin_specific_launch_flags() {
         let p = make_provider();
         let config = AgentConfig {
             provider: "codex".into(),

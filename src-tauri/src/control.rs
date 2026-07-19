@@ -978,7 +978,8 @@ async fn build_agent_doctor_response(
             agent,
             applicable: false,
             codex_home: None,
-            allowed_plugins: Vec::new(),
+            plugins: Vec::new(),
+            plugin_inspection_error: None,
             launch_flags: Vec::new(),
             restart_required: false,
             reasons: vec!["not_applicable".to_string()],
@@ -988,73 +989,34 @@ async fn build_agent_doctor_response(
     let wardian_home = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| ControlError::request_failed("Could not locate Wardian home"))?;
     let codex_home = crate::utils::fs::habitat_codex_home(
-        &wardian_home.join("agents").join(&config.session_id).join("habitat"),
+        &wardian_home
+            .join("agents")
+            .join(&config.session_id)
+            .join("habitat"),
     );
-    let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-    let plugin_policy = crate::utils::resolve_codex_plugin_policy(
-        &config.agent_class,
-        &runtime_policy,
-    );
-    let persisted = crate::utils::fs::read_codex_policy_status(&codex_home)
-        .map_err(ControlError::request_failed)?;
     let provider = crate::providers::ProviderFactory::resolve("codex")
         .map_err(ControlError::request_failed)?;
     let launch_flags = provider.get_spawn_args(&config, false);
-    let current_base_fingerprint = crate::utils::fs::codex_config_fingerprint(
-        &dirs::home_dir()
-            .ok_or_else(|| ControlError::request_failed("Could not find user home directory"))?
-            .join(".codex")
-            .join("config.toml"),
-    );
-    let restart_required = persisted.as_ref().is_none_or(|status| {
-        status.fingerprint != plugin_policy.fingerprint()
-            || status.base_config_fingerprint != current_base_fingerprint
-    });
 
     let mut reasons = Vec::new();
-    if plugin_policy.allowed_plugins.is_empty() {
-        reasons.push("not_allowlisted".to_string());
-    }
-    if launch_flags
-        .windows(2)
-        .any(|pair| pair[0] == "--disable" && pair[1] == "plugins")
-    {
-        reasons.push("plugins_feature_disabled".to_string());
-    }
-    if launch_flags
-        .windows(2)
-        .any(|pair| pair[0] == "--disable" && pair[1] == "apps")
-    {
-        reasons.push("apps_feature_disabled".to_string());
-    }
-    if restart_required {
-        reasons.push("restart_required".to_string());
-    }
-
-    let allowed_plugins = plugin_policy
-        .allowed_plugins
-        .iter()
-        .map(|allowed| {
-            let status = persisted.as_ref().and_then(|snapshot| {
-                snapshot
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.selector == allowed.selector)
-            });
-            if status.is_none_or(|status| !status.installed) {
-                reasons.push("not_installed".to_string());
+    let (plugins, plugin_inspection_error) =
+        match crate::utils::fs::inspect_codex_plugins(&codex_home) {
+            Ok(statuses) => (
+                statuses
+                    .into_iter()
+                    .map(|status| CodexPluginDiagnostic {
+                        selector: status.selector,
+                        installed: status.installed,
+                        enabled: status.enabled,
+                    })
+                    .collect(),
+                None,
+            ),
+            Err(error) => {
+                reasons.push("plugin_inspection_failed".to_string());
+                (Vec::new(), Some(error))
             }
-            if status.and_then(|status| status.error.as_ref()).is_some() {
-                reasons.push("installer_failed".to_string());
-            }
-            CodexPluginDiagnostic {
-                selector: allowed.selector.clone(),
-                requires_apps: allowed.requires_apps,
-                installed: status.is_some_and(|status| status.installed),
-                error: status.and_then(|status| status.error.clone()),
-            }
-        })
-        .collect();
+        };
     reasons.sort();
     reasons.dedup();
 
@@ -1063,9 +1025,10 @@ async fn build_agent_doctor_response(
         agent,
         applicable: true,
         codex_home: Some(codex_home.to_string_lossy().to_string()),
-        allowed_plugins,
+        plugins,
+        plugin_inspection_error,
         launch_flags,
-        restart_required,
+        restart_required: false,
         reasons,
     })
 }
