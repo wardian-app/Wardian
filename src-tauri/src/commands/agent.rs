@@ -892,7 +892,7 @@ fn new_agent_identity_plan(provider_name: &str) -> NewAgentIdentityPlan {
         wardian_session_id: uuid::Uuid::new_v4().to_string(),
         fresh_provider_session_id: provider_uses_manual_session_id(provider_name)
             .then(|| uuid::Uuid::new_v4().to_string()),
-        bootstrap_provider_session: matches!(provider_name, "codex" | "opencode" | "antigravity"),
+        bootstrap_provider_session: matches!(provider_name, "codex" | "opencode"),
     }
 }
 
@@ -901,7 +901,11 @@ fn ensure_provider_available_before_session_bootstrap(provider_name: &str) -> Re
 }
 
 fn provider_needs_obtain_session_id_on_clear(provider_name: &str) -> bool {
-    matches!(provider_name, "codex" | "opencode" | "antigravity")
+    matches!(provider_name, "codex" | "opencode")
+}
+
+fn provider_allows_deferred_session_identity(provider_name: &str) -> bool {
+    provider_name == "antigravity"
 }
 
 fn restore_runtime_state_snapshot_after_resume(
@@ -1832,16 +1836,20 @@ fn prepare_resume_config_in_place(config: &mut AgentConfig) -> Result<(), String
         return Ok(());
     }
 
-    let resume_session = config
+    let Some(resume_session) = config
         .resume_session
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "{} cannot resume without an exact provider session identity",
-                config.provider
-            )
-        })?;
+    else {
+        if provider_allows_deferred_session_identity(&config.provider) {
+            config.is_off = false;
+            return Ok(());
+        }
+        return Err(format!(
+            "{} cannot resume without an exact provider session identity",
+            config.provider
+        ));
+    };
     let provider = config.provider.clone();
     manager::apply_provider_identity(&provider, config, &resume_session)?;
     config.is_off = false;
@@ -6099,10 +6107,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn antigravity_uses_a_distinct_wardian_id_and_exact_bootstrap() {
+    fn antigravity_defers_its_provider_identity_until_the_first_prompt() {
         let identity = super::new_agent_identity_plan("antigravity");
         assert!(uuid::Uuid::parse_str(&identity.wardian_session_id).is_ok());
-        assert!(identity.bootstrap_provider_session);
+        assert!(!identity.bootstrap_provider_session);
         assert!(identity.fresh_provider_session_id.is_none());
     }
 
@@ -6112,7 +6120,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(!provider_needs_obtain_session_id_on_clear("claude"));
         assert!(provider_needs_obtain_session_id_on_clear("codex"));
         assert!(provider_needs_obtain_session_id_on_clear("opencode"));
-        assert!(provider_needs_obtain_session_id_on_clear("antigravity"));
+        assert!(!provider_needs_obtain_session_id_on_clear("antigravity"));
     }
 
     #[test]
@@ -6524,7 +6532,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
     }
 
     #[test]
-    fn antigravity_resume_without_conversation_id_does_not_use_wardian_uuid() {
+    fn antigravity_resume_without_conversation_id_starts_fresh() {
         let (_guard, _temp) = use_isolated_resume_setting();
         let mut config = AgentConfig {
             provider: "antigravity".to_string(),
@@ -6534,11 +6542,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             ..Default::default()
         };
 
-        let before = config.clone();
-        prepare_resume_config(&mut config).expect_err("exact Antigravity ID is required");
+        prepare_resume_config(&mut config).expect("Antigravity can defer its provider identity");
 
-        assert_eq!(config.resume_session, before.resume_session);
-        assert_eq!(config.is_off, before.is_off);
+        assert!(config.resume_session.is_none());
+        assert!(!config.is_off);
         std::env::remove_var("WARDIAN_HOME");
     }
 

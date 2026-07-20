@@ -9,7 +9,7 @@ pub(crate) fn codex_bootstrap_workspace_key(workspace_cwd: &std::path::Path) -> 
     format!("workspace-{hash:016x}")
 }
 
-fn codex_session_file_path_in(
+pub(crate) fn codex_session_file_path_in(
     base: &std::path::Path,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
@@ -164,6 +164,11 @@ pub(crate) fn migrate_codex_bootstrap_home(
             continue;
         }
 
+        if name_str == "sessions" {
+            merge_missing_codex_session_entries(&source, &target)?;
+            continue;
+        }
+
         if target.exists() || target.symlink_metadata().is_ok() {
             continue;
         }
@@ -172,6 +177,41 @@ pub(crate) fn migrate_codex_bootstrap_home(
     }
 
     std::fs::create_dir_all(bootstrap_home).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Merge fresh bootstrap rollouts into an existing agent-local Codex session tree.
+///
+/// Established agents already have a `sessions` directory, so treating it as an
+/// all-or-nothing top-level entry leaves every newly bootstrapped rollout behind.
+/// Session rollouts have unique thread IDs; retain any existing file on collision
+/// and move only missing entries into the agent's projected `CODEX_HOME`.
+fn merge_missing_codex_session_entries(
+    source_dir: &std::path::Path,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+
+    let entries = std::fs::read_dir(source_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let target = target_dir.join(entry.file_name());
+
+        if source.is_dir() {
+            if target.exists() || target.symlink_metadata().is_ok() {
+                if target.is_dir() {
+                    merge_missing_codex_session_entries(&source, &target)?;
+                    let _ = std::fs::remove_dir(&source);
+                }
+                continue;
+            }
+        } else if target.exists() || target.symlink_metadata().is_ok() {
+            continue;
+        }
+
+        std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
@@ -234,6 +274,56 @@ mod tests {
         assert!(!final_home.join("state_5.sqlite").exists());
         assert!(!final_home.join("logs_2.sqlite").exists());
         assert!(final_home.join("sessions").join("session.jsonl").exists());
+    }
+
+    #[test]
+    fn migrate_codex_bootstrap_home_merges_sessions_into_existing_agent_history() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_home = temp.path().join("bootstrap").join(".codex");
+        let final_home = temp.path().join("final").join(".codex");
+        let old_rollout = final_home
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("19")
+            .join("old.jsonl");
+        let fresh_rollout = bootstrap_home
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("20")
+            .join("fresh.jsonl");
+
+        std::fs::create_dir_all(old_rollout.parent().expect("old rollout parent"))
+            .expect("create existing agent session tree");
+        std::fs::write(&old_rollout, "old session").expect("write old rollout");
+        std::fs::create_dir_all(fresh_rollout.parent().expect("fresh rollout parent"))
+            .expect("create bootstrap session tree");
+        std::fs::write(&fresh_rollout, "fresh session").expect("write fresh rollout");
+
+        migrate_codex_bootstrap_home(&bootstrap_home, &final_home)
+            .expect("merge bootstrap session history");
+
+        assert_eq!(
+            std::fs::read_to_string(&old_rollout).unwrap(),
+            "old session"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                final_home
+                    .join("sessions")
+                    .join("2026")
+                    .join("07")
+                    .join("20")
+                    .join("fresh.jsonl")
+            )
+            .unwrap(),
+            "fresh session"
+        );
+        assert!(
+            !fresh_rollout.exists(),
+            "the bootstrap rollout must leave the reusable bootstrap home"
+        );
     }
 
     #[cfg(windows)]
