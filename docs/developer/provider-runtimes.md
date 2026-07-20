@@ -24,9 +24,9 @@ This document captures the practical runtime differences between Wardian's suppo
 
 | Provider | Working root | Instruction file | Skill model | Session identity |
 | --- | --- | --- | --- | --- |
-| Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Discovered from conversation cache and transcript path |
+| Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Captured after the first real prompt |
 | Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
-| Codex | Real target workspace via `--cd`; habitat-backed `CODEX_HOME` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Discovered from provider output, then adopted |
+| Codex | Real target workspace via `--cd`; habitat-backed `CODEX_HOME` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Fresh local rollout, then exact resume |
 | OpenCode | Habitat command root with real workspace passed as `--dir` | `AGENTS.md` plus injected runtime config | `skills.paths` built from Wardian include roots | Discovered from provider output |
 | Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
@@ -50,7 +50,9 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Headless launches use `agy --print <prompt>`.
 - Resume launches pass `--conversation <conversation-id>`.
 - Antigravity may write the useful assistant response only to `brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
-- Wardian discovers the active conversation from `cache/last_conversations.json` or the newest `brain/<conversation-id>` directory, stores that ID as `resume_session`, and parses completed `MODEL` `PLANNER_RESPONSE` transcript records for status and `wardian agent watch` transcript text.
+- Clear starts Antigravity fresh without sending a bootstrap prompt. Wardian records the first conversation mapping that differs from the pre-launch workspace mapping, then stores it as `resume_session`.
+- Until a real prompt creates that mapping, no provider identity exists to resume; a restart starts a fresh conversation again.
+- Wardian parses completed `MODEL` `PLANNER_RESPONSE` transcript records for status and `wardian agent watch` transcript text.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
 ### Practical implications
@@ -107,8 +109,8 @@ Codex must run with the real project workspace as its effective working root. Wa
 
 Wardian still keeps Codex state in a per-agent habitat:
 
-- final agent home: `.wardian/agents/<provider_session_id>/habitat/.codex`
-- temporary bootstrap home: `.wardian/provider-bootstrap/codex/session-*/.codex`
+- final agent home: `.wardian/agents/<wardian-agent-id>/habitat/.codex`
+- legacy fallback bootstrap home: `.wardian/provider-bootstrap/codex/session-*/.codex`
 
 The critical rule is: **trust should bind to the real workspace, not to the bootstrap directory or habitat path**.
 
@@ -170,17 +172,16 @@ feature flags. It never changes plugin state.
 
 ### Session identity and bootstrap
 
-Codex session IDs are still discovered from provider output, so fresh session creation has a bootstrap phase.
+Codex fresh-session materialization does not require a model bootstrap turn.
 
 Current sequence:
 
-1. Create a temporary bootstrap `CODEX_HOME` under `.wardian/provider-bootstrap/codex/session-*/.codex`.
-2. Seed it with shared Codex auth/trust files and Windows sandbox support files when present.
-3. Launch Codex with the real workspace as `--cd`.
-4. Parse `thread.started` to get the provider session ID.
-5. Create the final habitat at `.wardian/agents/<provider_session_id>/habitat/.codex`.
-6. Project any bootstrap-generated Windows sandbox support into the final home.
-7. Migrate session artifacts from the bootstrap home into the final agent home while leaving reusable sandbox support in the bootstrap home.
+1. Create or update the agent's projected `CODEX_HOME` under `.wardian/agents/<wardian-agent-id>/habitat/.codex`.
+2. Generate a distinct provider UUID and write a minimal `session_meta` rollout at `sessions/<year>/<month>/<day>/rollout-<timestamp>-<provider-id>.jsonl`.
+3. Validate that Codex resolves the rollout from that same projected home.
+4. Launch interactive Codex with the real workspace as `--cd` and resume the exact provider UUID.
+
+Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 
