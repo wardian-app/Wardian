@@ -211,6 +211,7 @@ describe("GraphView", () => {
     expect(container.querySelector(".graph-inspector")).toBeInTheDocument();
     expect(appCss).toMatch(/@container wardian-surface \(max-width:\s*760px\)/);
     expect(appCss).not.toMatch(/@media \(max-width:\s*760px\)/);
+    expect(appCss).toMatch(/\.graph-canvas-shell\s*\{[^}]*overflow:\s*hidden;/s);
   });
 
   it("opens inspector when a node is selected", () => {
