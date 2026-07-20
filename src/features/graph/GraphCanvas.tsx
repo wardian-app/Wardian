@@ -216,68 +216,84 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     const renderer = rendererRef.current;
     const container = containerRef.current;
     if (!renderer || !container) return;
-    const currentProjection = projectionRef.current;
+    let animationFrame: number | null = null;
 
-    // Build off-renderer, then swap once. Mutating Sigma's live Graphology
-    // instance emits a refresh for clear and every add; those intermediate
-    // frames fight an in-progress camera animation and make wheel zoom jitter.
-    const graph = new Graph();
-    const hasSelectedNode = currentProjection.nodes.some((node) => node.selected);
-
-    for (const node of currentProjection.nodes) {
-      graph.addNode(node.id, {
-        label: node.label,
-        x: node.x,
-        y: node.y,
-        size: node.size,
-        color: resolveGraphColor(node.color, container),
-        highlighted: node.selected,
-        forceLabel: !hasSelectedNode || node.selected,
-        zIndex: 1,
-      });
-    }
-
-    for (const edge of currentProjection.edges) {
-      const primaryReason = edge.reasons[0] ?? "same_team";
-      graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
-        size: 1,
-        color: resolveGraphColor(EDGE_REASON_COLORS[primaryReason], container),
-        label: edge.reasons.map(formatRelationshipReason).join(", "),
-        type: "line",
-      });
-    }
-
-    // Render manual communication edges
-    for (const commEdge of currentProjection.commEdges) {
-      if (commEdge.origin !== "manual") continue;
-      const color = getCommEdgeColor(commEdge, container);
-      const baseSize = commEdge.state === "ongoing" ? 2.5 : 2;
-      const size = selectedEdgeId === commEdge.id ? baseSize + 1 : baseSize;
-      const edgeColor = selectedEdgeId === commEdge.id
-        ? resolveGraphColor("var(--color-wardian-accent)", container)
-        : color;
-
-      // Topology is the always-on base layer: a manual edge replaces any
-      // legacy lens edge occupying the same canonical key.
-      if (graph.hasEdge(commEdge.id)) {
-        graph.dropEdge(commEdge.id);
+    const syncGraph = () => {
+      // A status or activity update can arrive while wheel zoom is animating.
+      // Swapping Sigma's graph schedules a render against a new projection,
+      // which interrupts that in-flight camera frame. Keep only the latest
+      // projection and apply it once the camera has settled.
+      if (renderer.getCamera().isAnimated()) {
+        animationFrame = requestAnimationFrame(syncGraph);
+        return;
       }
-      graph.addEdgeWithKey(commEdge.id, commEdge.source, commEdge.target, {
-        size,
-        color: edgeColor,
-        type: "line",
-      });
-    }
 
-    // Re-resolve label color for theme changes (matches edge color re-resolution above)
-    const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
-    if (labelColorRef.current !== labelColor) {
-      labelColorRef.current = labelColor;
-      renderer.setSetting("labelColor", { color: labelColor });
-    }
+      const currentProjection = projectionRef.current;
+      // Build off-renderer, then swap once. Mutating Sigma's live Graphology
+      // instance emits a refresh for clear and every add.
+      const graph = new Graph();
+      const hasSelectedNode = currentProjection.nodes.some((node) => node.selected);
 
-    graphRef.current = graph;
-    renderer.setGraph(graph);
+      for (const node of currentProjection.nodes) {
+        graph.addNode(node.id, {
+          label: node.label,
+          x: node.x,
+          y: node.y,
+          size: node.size,
+          color: resolveGraphColor(node.color, container),
+          highlighted: node.selected,
+          forceLabel: !hasSelectedNode || node.selected,
+          zIndex: 1,
+        });
+      }
+
+      for (const edge of currentProjection.edges) {
+        const primaryReason = edge.reasons[0] ?? "same_team";
+        graph.addEdgeWithKey(edge.id, edge.source, edge.target, {
+          size: 1,
+          color: resolveGraphColor(EDGE_REASON_COLORS[primaryReason], container),
+          label: edge.reasons.map(formatRelationshipReason).join(", "),
+          type: "line",
+        });
+      }
+
+      // Render manual communication edges
+      for (const commEdge of currentProjection.commEdges) {
+        if (commEdge.origin !== "manual") continue;
+        const color = getCommEdgeColor(commEdge, container);
+        const baseSize = commEdge.state === "ongoing" ? 2.5 : 2;
+        const size = selectedEdgeId === commEdge.id ? baseSize + 1 : baseSize;
+        const edgeColor = selectedEdgeId === commEdge.id
+          ? resolveGraphColor("var(--color-wardian-accent)", container)
+          : color;
+
+        // Topology is the always-on base layer: a manual edge replaces any
+        // legacy lens edge occupying the same canonical key.
+        if (graph.hasEdge(commEdge.id)) {
+          graph.dropEdge(commEdge.id);
+        }
+        graph.addEdgeWithKey(commEdge.id, commEdge.source, commEdge.target, {
+          size,
+          color: edgeColor,
+          type: "line",
+        });
+      }
+
+      // Re-resolve label color for theme changes (matches edge color re-resolution above)
+      const labelColor = resolveGraphColor("var(--color-wardian-text)", container);
+      if (labelColorRef.current !== labelColor) {
+        labelColorRef.current = labelColor;
+        renderer.setSetting("labelColor", { color: labelColor });
+      }
+
+      graphRef.current = graph;
+      renderer.setGraph(graph);
+    };
+
+    syncGraph();
+    return () => {
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    };
   }, [renderSignature, selectedEdgeId, themeVersion]);
 
   const previousResetSignalRef = useRef(resetSignal);

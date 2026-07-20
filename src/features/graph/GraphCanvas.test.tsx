@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
   return {
     handlers: new Map<string, (payload: unknown) => void>(),
     animatedReset: vi.fn(),
+    isAnimated: vi.fn(() => false),
     kill: vi.fn(),
     refresh: vi.fn(),
     setGraph: vi.fn(),
@@ -39,7 +40,12 @@ vi.mock("sigma", () => ({
       }) as unknown as HTMLCanvasElement;
     return {
       on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
-      getCamera: () => ({ animatedReset: mocks.animatedReset, disable: vi.fn(), enable: vi.fn() }),
+      getCamera: () => ({
+        animatedReset: mocks.animatedReset,
+        disable: vi.fn(),
+        enable: vi.fn(),
+        isAnimated: mocks.isAnimated,
+      }),
       getMouseCaptor: () => ({
         on: (event: string, handler: (payload: unknown) => void) => mocks.handlers.set(event, handler),
       }),
@@ -107,6 +113,8 @@ describe("GraphCanvas", () => {
     mocks.handlers.clear();
     mocks.edgeIds.clear();
     mocks.animatedReset.mockClear();
+    mocks.isAnimated.mockReset();
+    mocks.isAnimated.mockReturnValue(false);
     mocks.kill.mockClear();
     mocks.refresh.mockClear();
     mocks.setGraph.mockClear();
@@ -333,6 +341,39 @@ describe("GraphCanvas", () => {
     expect(mocks.setGraph).toHaveBeenCalledTimes(2);
     expect(mocks.graphology.clear).not.toHaveBeenCalled();
     expect(mocks.kill).not.toHaveBeenCalled();
+  });
+
+  it("defers graph swaps until the zoom camera has stopped moving", () => {
+    const requestAnimationFrame = vi.fn<(callback: FrameRequestCallback) => number>();
+    vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
+    const { rerender } = render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    mocks.setGraph.mockClear();
+    mocks.isAnimated.mockReturnValue(true);
+    rerender(
+      <GraphCanvas
+        projection={{ ...projection, nodes: [{ ...projection.nodes[0], status: "Processing" }] }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.setGraph).not.toHaveBeenCalled();
+    expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
+
+    mocks.isAnimated.mockReturnValue(false);
+    act(() => requestAnimationFrame.mock.calls[0][0](0));
+
+    expect(mocks.setGraph).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 
   it("does not rebuild graphology for telemetry-only projection updates", () => {
