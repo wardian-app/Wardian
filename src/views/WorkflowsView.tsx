@@ -233,8 +233,8 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
 
   return (
     <div data-testid="workflows-view" className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-wardian-border bg-[var(--color-wardian-bg)] text-primary">
-      <div className="workflows-toolbar flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3">
-        <div className="workflows-toolbar__primary flex min-w-0 flex-1 items-center gap-2">
+      <div className={`workflows-toolbar ${mode === 'monitor' ? 'workflows-toolbar--monitor' : ''} flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3`}>
+        <div className={`workflows-toolbar__primary flex min-w-0 flex-1 items-center gap-2 ${mode === 'monitor' ? 'flex-nowrap' : ''}`}>
           <BlueprintSelector selectedPath={blueprintPath} onOpen={(path) => void openBlueprint(path)} onNew={newBlueprint} />
           <div className="flex rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-0.5" aria-label="Workflow mode">
             {(['edit', 'observe', 'monitor'] as const).map((value) => (
@@ -266,7 +266,7 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
             </div>
           )}
         </div>
-        <div className="workflows-toolbar__actions flex shrink-0 items-center gap-2">
+        <div className={`workflows-toolbar__actions flex shrink-0 items-center gap-2 ${mode === 'monitor' ? 'flex-nowrap' : ''}`}>
           {mode === 'edit' ? (
             <button
               type="button"

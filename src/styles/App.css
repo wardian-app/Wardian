@@ -1258,11 +1258,83 @@ select option {
   grid-template-columns: minmax(0, 1fr) 320px;
 }
 
+/* Monitor cards follow the Workbench surface width instead of the app viewport. */
+.workflow-monitor__stats {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.workflow-monitor__activity-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workflow-activity-card__details {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .library-view__back {
   display: none;
 }
 
 @container wardian-surface (max-width: 760px) {
+  .workflow-monitor__stats {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.375rem;
+  }
+
+  .workflow-monitor__toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-monitor__filters {
+    width: 100%;
+    flex-shrink: 1;
+    flex-wrap: wrap;
+  }
+
+  .workflow-monitor__activity-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-activity-card__header,
+  .workflow-activity-card__identity,
+  .workflow-activity-card__actions {
+    min-width: 0;
+  }
+
+  .workflow-activity-card__header,
+  .workflow-activity-card__identity,
+  .workflow-activity-card__actions {
+    flex-wrap: wrap;
+  }
+
+  .workflow-activity-card__identity {
+    flex: 1 1 11rem;
+  }
+
+  .workflow-activity-card__actions {
+    max-width: 100%;
+    flex-shrink: 1;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  .workflow-activity-card__details {
+    grid-template-columns: repeat(auto-fit, minmax(min(8rem, 100%), 1fr));
+  }
+
+  [data-virtual-layout="compact"] .workflow-activity-card__details-shell {
+    margin-top: 0.25rem;
+    padding-top: 0.125rem;
+  }
+
+  .workflow-activity-card__detail-value {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
   .workflows-toolbar {
     min-height: 0;
     align-items: stretch;
@@ -1286,6 +1358,43 @@ select option {
     justify-content: flex-end;
     overflow-x: auto;
     padding-bottom: 1px;
+  }
+
+  .workflows-toolbar--monitor {
+    min-height: 0;
+    align-items: center;
+    flex-direction: row;
+    gap: 0.5rem;
+    padding-block: 0.375rem;
+  }
+
+  .workflows-toolbar--monitor .workflows-toolbar__primary {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    gap: 0.375rem;
+  }
+
+  .workflows-toolbar--monitor .blueprint-selector {
+    min-width: 0;
+    flex: 0 1 15rem;
+    gap: 0.375rem;
+  }
+
+  .workflows-toolbar--monitor .blueprint-selector select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .workflows-toolbar--monitor .workflows-toolbar__actions {
+    width: auto;
+    flex-shrink: 0;
+    flex-wrap: nowrap;
+    gap: 0.375rem;
+    justify-content: flex-end;
+    overflow-x: visible;
+    padding-bottom: 0;
   }
 
   .workflows-body[data-drawer-open="true"],

@@ -99,7 +99,9 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
             onBroadcast={onBroadcast}
           />
         )}
-        {activeTab === "workflows" && <WorkflowsGlancePane onOpenSurface={onOpenSurface} />}
+        {activeTab === "workflows" && (
+          <WorkflowsGlancePane agents={agents} onOpenSurface={onOpenSurface} />
+        )}
 
       </div>
       {!leftCollapsed && (
@@ -115,10 +117,11 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
 };
 
 interface WorkflowsGlancePaneProps {
+  agents: AgentConfig[];
   onOpenSurface: (request: OpenSurfaceRequest) => void;
 }
 
-const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenSurface }) => {
+const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ agents, onOpenSurface }) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
   const pauseSchedule = useSchedulesStore((state) => state.pause);
@@ -142,6 +145,7 @@ const WorkflowsGlancePane: React.FC<WorkflowsGlancePaneProps> = ({ onOpenSurface
 
   return (
     <WorkflowMonitorGlance
+      agents={agents}
       schedules={schedules}
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {

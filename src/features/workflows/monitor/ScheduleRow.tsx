@@ -1,7 +1,7 @@
 import type { WorkflowAssignments, WorkflowSchedule } from '../../../types/workflow';
 import { useState } from 'react';
 import { MoreHorizontal, Pause, Pencil, Play, RotateCcw, Trash2 } from 'lucide-react';
-import { cadenceLabel, nextRunLabel, scheduleStatusColor, scheduleStatusLabel } from './scheduleStatus';
+import { nextRunLabel, scheduleStatusColor, scheduleStatusLabel, scheduleSummaryLabel } from './scheduleStatus';
 
 interface ScheduleRowProps {
   schedule: WorkflowSchedule;
@@ -41,7 +41,7 @@ export function ScheduleRow({ schedule, agentLabels = {}, onPause, onResume, onR
         </div>
       </td>
       <td className="min-w-0 px-3 py-2">
-        <div className="truncate text-[10px] text-muted" title={cadenceLabel(schedule.schedule)}>{cadenceLabel(schedule.schedule)}</div>
+        <div className="truncate text-[10px] text-muted" title={scheduleSummaryLabel(schedule.schedule)}>{scheduleSummaryLabel(schedule.schedule)}</div>
         <div className="mt-0.5 truncate text-[10px] text-muted" title={nextRunLabel(schedule)}>next {nextRunLabel(schedule)}</div>
       </td>
       <td className="min-w-0 px-3 py-2">

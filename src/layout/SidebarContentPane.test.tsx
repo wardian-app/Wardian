@@ -12,6 +12,7 @@ const loadRunsMock = vi.hoisted(() => vi.fn());
 const openRunMock = vi.hoisted(() => vi.fn());
 const observeRunMock = vi.hoisted(() => vi.fn());
 const setModeMock = vi.hoisted(() => vi.fn());
+const workflowMonitorGlanceMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../features/agents/ConfigureAgentPanel", () => ({
   ConfigureAgentPanel: () => <h3 className="text-xs">Configure Agent</h3>,
@@ -28,18 +29,21 @@ vi.mock("../features/commands/CommandPanel", () => ({
 vi.mock("../features/workflows/monitor/WorkflowMonitorGlance", () => ({
   WorkflowMonitorGlance: ({
     onOpenRun,
+    agents,
     onOpenMonitor,
     onPauseSchedule,
     onResumeSchedule,
     onRunScheduleNow,
   }: {
     onOpenRun: (blueprintId: string, runId: string) => void;
+    agents: AgentConfig[];
     onOpenMonitor: () => void;
     onPauseSchedule: (id: string) => void;
     onResumeSchedule: (id: string) => void;
     onRunScheduleNow: (id: string) => void;
-  }) => (
-    <div>
+  }) => {
+    workflowMonitorGlanceMock({ agents });
+    return <div>
       <button type="button" onClick={() => onOpenRun("workflow-1", "run-1")}>
         Open Run
       </button>
@@ -55,8 +59,8 @@ vi.mock("../features/workflows/monitor/WorkflowMonitorGlance", () => ({
       <button type="button" onClick={() => onRunScheduleNow("schedule-1")}>
         Run schedule now
       </button>
-    </div>
-  ),
+    </div>;
+  },
 }));
 
 vi.mock("../store/useSchedulesStore", () => ({
@@ -89,7 +93,16 @@ const agentClasses: AgentClassDefinition[] = [
   { name: "Generalist", description: "", is_default: true },
 ];
 
-const agents: AgentConfig[] = [];
+const agents: AgentConfig[] = [
+  {
+    session_id: "agent-1",
+    session_name: "Workflow Owner",
+    agent_class: "Generalist",
+    folder: "/workspace",
+    is_off: false,
+    provider: "codex",
+  },
+];
 const sourceControlStatus: SelectedAgentGitStatus = {
   rootPath: null,
   status: null,
@@ -141,6 +154,7 @@ describe("SidebarContentPane", () => {
     openRunMock.mockResolvedValue(undefined);
     observeRunMock.mockReset();
     setModeMock.mockReset();
+    workflowMonitorGlanceMock.mockReset();
   });
 
   it("uses compact sidebar title typography for agent configuration", () => {
@@ -185,6 +199,7 @@ describe("SidebarContentPane", () => {
 
     expect(loadSchedulesMock).toHaveBeenCalled();
     expect(loadRunsMock).toHaveBeenCalled();
+    expect(workflowMonitorGlanceMock).toHaveBeenCalledWith({ agents });
 
     fireEvent.click(screen.getByRole("button", { name: /pause schedule/i }));
     fireEvent.click(screen.getByRole("button", { name: /resume schedule/i }));

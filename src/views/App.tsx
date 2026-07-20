@@ -1330,6 +1330,7 @@ function AppBody() {
         <WorkflowsSurface
           surface_id={surface.surface_id}
           theme={theme}
+          visibility={visibility}
         />
       );
     }

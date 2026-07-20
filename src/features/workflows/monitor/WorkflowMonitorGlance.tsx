@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react';
-import { ExternalLink, Pause, Play, RotateCcw } from 'lucide-react';
+import type { AgentConfig } from '../../../types';
 import type { WorkflowSchedule } from '../../../types/workflow';
-import type { RunStatusKind, RunSummary } from '../run/runTypes';
-import { formatRunStatus } from '../run/statusLabels';
-import { cadenceLabel, nextRunLabel, scheduleStatusColor, scheduleStatusLabel } from './scheduleStatus';
+import type { RunSummary } from '../run/runTypes';
+import { WorkflowGlanceCard } from './WorkflowGlanceCard';
+import { buildAgentLabelMap, workflowAssignmentItems } from './assignmentPresentation';
+import { scheduleStatusLabel } from './scheduleStatus';
 
 interface GlanceProps {
+  agents: AgentConfig[];
   schedules: WorkflowSchedule[];
   activeRuns: RunSummary[];
   onOpenRun: (blueprintId: string, runId: string) => void;
@@ -15,14 +17,8 @@ interface GlanceProps {
   onRunScheduleNow: (id: string) => void;
 }
 
-const RUN_STATUS_COLOR: Record<RunStatusKind, string> = {
-  running: 'var(--color-wardian-processing)',
-  awaiting_approval: 'var(--color-wardian-warning)',
-  completed: 'var(--color-wardian-success)',
-  failed: 'var(--color-wardian-error)',
-};
-
 export function WorkflowMonitorGlance({
+  agents,
   schedules,
   activeRuns,
   onOpenRun,
@@ -34,14 +30,48 @@ export function WorkflowMonitorGlance({
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
   const matchesQuery = (text: string) => !normalizedQuery || text.toLowerCase().includes(normalizedQuery);
+  const agentLabels = useMemo(() => buildAgentLabelMap(agents), [agents]);
+  const schedulesById = useMemo(
+    () => new Map(schedules.map((schedule) => [schedule.id, schedule])),
+    [schedules],
+  );
 
   const visibleRuns = useMemo(
-    () => activeRuns.filter((run) => matchesQuery(`${run.blueprint_id} ${run.run_id} ${run.status}`)),
-    [activeRuns, normalizedQuery],
+    () => activeRuns.filter((run) => {
+      const schedule = run.schedule_id ? schedulesById.get(run.schedule_id) : undefined;
+      const assignmentLabels = schedule
+        ? workflowAssignmentItems(schedule.assignments, schedule.bindings, schedule.provider, agentLabels)
+            .map((item) => item.fullLabel)
+            .join(' ')
+        : '';
+      return matchesQuery([
+        schedule?.name,
+        run.blueprint_id,
+        run.run_id,
+        run.status,
+        run.failure,
+        assignmentLabels,
+      ].filter(Boolean).join(' '));
+    }),
+    [activeRuns, agentLabels, normalizedQuery, schedulesById],
   );
   const visibleSchedules = useMemo(
-    () => schedules.filter((schedule) => matchesQuery(`${schedule.name} ${schedule.blueprint_id} ${schedule.last_run_error ?? ''}`)),
-    [schedules, normalizedQuery],
+    () => schedules.filter((schedule) => {
+      const assignmentLabels = workflowAssignmentItems(
+        schedule.assignments,
+        schedule.bindings,
+        schedule.provider,
+        agentLabels,
+      ).map((item) => item.fullLabel).join(' ');
+      return matchesQuery([
+        schedule.name,
+        schedule.blueprint_id,
+        scheduleStatusLabel(schedule),
+        schedule.last_run_error,
+        assignmentLabels,
+      ].filter(Boolean).join(' '));
+    }),
+    [agentLabels, normalizedQuery, schedules],
   );
 
   const attentionRuns = visibleRuns.filter((run) => run.status === 'awaiting_approval');
@@ -85,7 +115,14 @@ export function WorkflowMonitorGlance({
         ) : (
           <div className="grid gap-1.5">
             {attentionRuns.map((run) => (
-              <RunCard key={`${run.blueprint_id}:${run.run_id}:attention`} run={run} onOpenRun={onOpenRun} />
+              <WorkflowGlanceCard
+                key={`${run.blueprint_id}:${run.run_id}:attention`}
+                kind="run"
+                run={run}
+                schedule={run.schedule_id ? schedulesById.get(run.schedule_id) : undefined}
+                agentLabels={agentLabels}
+                onOpenRun={onOpenRun}
+              />
             ))}
           </div>
         )}
@@ -98,7 +135,14 @@ export function WorkflowMonitorGlance({
         ) : (
           <div className="grid gap-1.5">
             {activeOnlyRuns.slice(0, 5).map((run) => (
-              <RunCard key={`${run.blueprint_id}:${run.run_id}`} run={run} onOpenRun={onOpenRun} />
+              <WorkflowGlanceCard
+                key={`${run.blueprint_id}:${run.run_id}`}
+                kind="run"
+                run={run}
+                schedule={run.schedule_id ? schedulesById.get(run.schedule_id) : undefined}
+                agentLabels={agentLabels}
+                onOpenRun={onOpenRun}
+              />
             ))}
           </div>
         )}
@@ -111,10 +155,12 @@ export function WorkflowMonitorGlance({
         ) : (
           <div className="grid gap-1.5">
             {upcoming.map((schedule) => (
-              <ScheduleCard
+              <WorkflowGlanceCard
                 key={schedule.id}
+                kind="schedule"
                 schedule={schedule}
                 tone="normal"
+                agentLabels={agentLabels}
                 onPauseSchedule={onPauseSchedule}
                 onResumeSchedule={onResumeSchedule}
                 onRunScheduleNow={onRunScheduleNow}
@@ -158,85 +204,6 @@ function EmptyState({ label }: { label: string }) {
     </div>
   );
 }
-
-function RunCard({ run, onOpenRun }: { run: RunSummary; onOpenRun: (blueprintId: string, runId: string) => void }) {
-  return (
-    <div
-      data-testid={`workflow-glance-row-run-${run.run_id}`}
-      className="flex h-[46px] min-w-0 items-center gap-2 rounded border border-wardian-border bg-[var(--color-wardian-bg)] px-2 py-1.5"
-    >
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: RUN_STATUS_COLOR[run.status] }} aria-hidden />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[11px] font-bold text-[var(--color-wardian-text)]">{run.blueprint_id}</div>
-        <div className="truncate text-[9px] font-mono text-muted">{formatRunStatus(run.status)} · {run.run_id}</div>
-      </div>
-      <button
-        type="button"
-        onClick={() => onOpenRun(run.blueprint_id, run.run_id)}
-        aria-label={`Open ${run.blueprint_id} run`}
-        title="Open run"
-        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]"
-      >
-        <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-      </button>
-    </div>
-  );
-}
-
-function ScheduleCard({
-  schedule,
-  tone,
-  onPauseSchedule,
-  onResumeSchedule,
-  onRunScheduleNow,
-}: {
-  schedule: WorkflowSchedule;
-  tone: 'attention' | 'normal';
-  onPauseSchedule: (id: string) => void;
-  onResumeSchedule: (id: string) => void;
-  onRunScheduleNow: (id: string) => void;
-}) {
-  return (
-    <div
-      data-testid={`workflow-glance-row-${schedule.id}`}
-      className={`flex h-[54px] min-w-0 items-center gap-2 rounded border bg-[var(--color-wardian-bg)] px-2 py-1.5 ${
-        tone === 'attention' ? 'border-[var(--color-wardian-error)]/35' : 'border-wardian-border'
-      }`}
-    >
-      <span
-        className="h-2 w-2 shrink-0 rounded-full"
-        style={{ backgroundColor: scheduleStatusColor(schedule) }}
-        aria-hidden
-      />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[11px] font-bold text-[var(--color-wardian-text)]" title={schedule.name}>{schedule.name}</div>
-        <div className="mt-0.5 truncate text-[9px] text-muted" title={`${schedule.blueprint_id} · ${cadenceLabel(schedule.schedule)} · ${nextRunLabel(schedule)}`}>
-          {scheduleStatusLabel(schedule)} · {cadenceLabel(schedule.schedule)} · {nextRunLabel(schedule)}
-        </div>
-        {schedule.last_run_error ? (
-          <div className="mt-0.5 truncate text-[9px] text-[var(--color-wardian-error)]">{schedule.last_run_error}</div>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
-        {schedule.is_paused ? (
-          <button type="button" className={smallActionClass} onClick={() => onResumeSchedule(schedule.id)} aria-label={`Resume ${schedule.name}`} title="Resume">
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-          </button>
-        ) : (
-          <button type="button" className={smallActionClass} onClick={() => onPauseSchedule(schedule.id)} aria-label={`Pause ${schedule.name}`} title="Pause">
-            <Pause className="h-3.5 w-3.5" aria-hidden />
-          </button>
-        )}
-        <button type="button" className={smallActionClass} onClick={() => onRunScheduleNow(schedule.id)} aria-label={`Run ${schedule.name} now`} title="Run now">
-          <Play className="h-3.5 w-3.5" aria-hidden />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-const smallActionClass =
-  'inline-flex h-7 w-7 items-center justify-center rounded border border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]';
 
 function sortScheduleForSidebar(schedule: WorkflowSchedule) {
   if (schedule.is_paused) return Number.MAX_SAFE_INTEGER;
