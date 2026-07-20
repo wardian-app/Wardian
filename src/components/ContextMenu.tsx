@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useContextMenuSurface } from './useContextMenuSurface';
 
 export interface ContextMenuItem {
   label?: string;
@@ -94,7 +95,7 @@ const MenuItem = memo(({ item, index, onClose }: { item: ContextMenuItem; index:
 });
 
 export const ContextMenu = memo(({ x, y, items, onClose }: ContextMenuProps) => {
-  const menuRef = useRef<HTMLDivElement>(null);
+  const { menuRef, style } = useContextMenuSurface<HTMLDivElement>(x, y, onClose);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -110,14 +111,10 @@ export const ContextMenu = memo(({ x, y, items, onClose }: ContextMenuProps) => 
     };
   }, [onClose]);
 
-  // Adjust position if it goes off-screen
-  const adjustedX = Math.min(x, window.innerWidth - 220);
-  const adjustedY = Math.min(y, window.innerHeight - 350);
-
   return createPortal(
     <div 
       ref={menuRef}
-      style={{ left: adjustedX, top: adjustedY }}
+      style={style}
       className="fixed min-w-[200px] bg-[var(--color-wardian-bg)] border border-wardian-border rounded-xl shadow-2xl p-1 z-[9999] backdrop-blur-3xl animate-in zoom-in-95 duration-100 ring-1 ring-white/10"
       onContextMenu={(e) => e.preventDefault()}
     >

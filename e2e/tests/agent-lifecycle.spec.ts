@@ -13,6 +13,7 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import * as path from "path";
 import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 async function installCustomCloneIpcMock(page: Page) {
@@ -194,6 +195,33 @@ test.describe("Agent Spawn Form", () => {
 });
 
 test.describe("Custom Agent Clone", () => {
+  test("anchors an agent context menu at the pointer in the document overlay", async ({ page }) => {
+    await installCustomCloneIpcMock(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+    const sourceRow = page.locator('[data-testid="agent-watchlist"] .watchlist-row', { hasText: "E2E Mock Agent" });
+    await expect(sourceRow).toBeVisible();
+    const rowBox = await sourceRow.boundingBox();
+    if (!rowBox) throw new Error("Agent row has no bounding box");
+    const pointer = { x: rowBox.x + 24, y: rowBox.y + rowBox.height / 2 };
+
+    await page.mouse.click(pointer.x, pointer.y, { button: "right" });
+
+    const menu = page.locator('[data-testid="agent-context-menu"]');
+    await expect(menu).toBeVisible();
+    const menuBox = await menu.boundingBox();
+    if (!menuBox) throw new Error("Agent context menu has no bounding box");
+    expect(menuBox.x).toBeGreaterThanOrEqual(pointer.x - 1);
+    expect(menuBox.y).toBeGreaterThanOrEqual(pointer.y - 1);
+    expect(await menu.evaluate((element) => element.parentElement === document.body)).toBe(true);
+
+    await page.screenshot({
+      path: path.join("e2e", "screenshots", "context-menu-positioning", "2026-07-20", "agent-menu-at-cursor.png"),
+      animations: "disabled",
+    });
+  });
+
   test("opens the modal, changes file selection, and creates a clone row", async ({ page }) => {
     await installCustomCloneIpcMock(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });

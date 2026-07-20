@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode } from "../../types";
 import type { Watchlist, ContextMenuState, WatchlistPrefs, AgentInteractions, SortableColumnId, OptionalColumnId, AgentTeam, WatchlistDisplayItem, WatchlistEntry } from "./types";
@@ -24,6 +25,7 @@ import {
 } from "./watchlistUtils";
 import { deriveCurrentThought, getStatusColorClass, getAgentStatusLabel, getAgentStatusTextClass } from "../../utils/statusUtils";
 import { AgentContextMenu } from "../../../src/components/AgentContextMenu";
+import { useContextMenuSurface } from "../../components/useContextMenuSurface";
 import { ColumnPicker } from "./ColumnPicker";
 import { isUserFacingProviderName, providerDisplayName } from "../../features/agents/providerOptions";
 import { useLayoutStore } from "../../store/useLayoutStore";
@@ -191,6 +193,12 @@ export default function AgentWatchlist({
   const [teamContextMenu, setTeamContextMenu] = useState<{ visible: boolean; x: number; y: number; teamId: string | null }>({
     visible: false, x: 0, y: 0, teamId: null,
   });
+  const { menuRef: tabContextMenuRef, style: tabContextMenuStyle } = useContextMenuSurface<HTMLDivElement>(
+    tabContextMenu.x,
+    tabContextMenu.y,
+    () => setTabContextMenu((menu) => ({ ...menu, visible: false })),
+    tabContextMenu.visible,
+  );
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [editingAgentName, setEditingAgentName] = useState("");
   const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
@@ -342,10 +350,7 @@ export default function AgentWatchlist({
   const handleTabContextMenu = (e: React.MouseEvent, listId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const menuW = 180, menuH = 100;
-    const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
-    const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
-    setTabContextMenu({ visible: true, x, y, listId });
+    setTabContextMenu({ visible: true, x: e.clientX, y: e.clientY, listId });
   };
 
   // ── Mouse-based Drag & Drop (WebView2-compatible) ──────────────────
@@ -663,9 +668,6 @@ export default function AgentWatchlist({
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const menuW = 200, menuH = 280;
-    const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
-    const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
     const isInsideMultiSelection = selectedAgentIds.size > 1 && selectedAgentIds.has(agentId);
     if (!isInsideMultiSelection && !selectedAgentIds.has(agentId)) {
       if (onSelectAgent) {
@@ -678,8 +680,8 @@ export default function AgentWatchlist({
     }
     setContextMenu({
       visible: true,
-      x,
-      y,
+      x: e.clientX,
+      y: e.clientY,
       agentId,
       agentIds: isInsideMultiSelection ? Array.from(selectedAgentIds) : [agentId],
     });
@@ -688,11 +690,10 @@ export default function AgentWatchlist({
   const handleTeamContextMenu = (e: React.MouseEvent, teamId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const menuW = 200, menuH = 160;
     setTeamContextMenu({
       visible: true,
-      x: Math.min(e.clientX, window.innerWidth - menuW - 8),
-      y: Math.min(e.clientY, window.innerHeight - menuH - 8),
+      x: e.clientX,
+      y: e.clientY,
       teamId,
     });
   };
@@ -1251,10 +1252,11 @@ export default function AgentWatchlist({
       })()}
 
       {/* ── Tab Context Menu (right-click on watchlist tab) ──── */}
-      {tabContextMenu.visible && tabContextMenu.listId && (
+      {tabContextMenu.visible && tabContextMenu.listId && createPortal(
         <div
+          ref={tabContextMenuRef}
           className="context-menu"
-          style={{ top: tabContextMenu.y, left: tabContextMenu.x }}
+          style={tabContextMenuStyle}
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -1280,7 +1282,8 @@ export default function AgentWatchlist({
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
             Delete List
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {!collapsed && (
