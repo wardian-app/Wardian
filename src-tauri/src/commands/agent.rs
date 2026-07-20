@@ -241,7 +241,7 @@ fn take_agent_runtime_for_termination(agent: &mut ActiveAgent) -> ActiveAgent {
 fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
     let termination = take_agent_runtime_for_termination(agent);
     let config = agent.config.lock().unwrap().clone();
-    let init_timestamp = agent.init_timestamp.lock().unwrap().clone();
+    let init_timestamp = None;
 
     if let Ok(mut title) = agent.terminal_title.lock() {
         title.clear();
@@ -249,6 +249,9 @@ fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
     agent.current_status = std::sync::Arc::new(std::sync::Mutex::new("Processing...".to_string()));
     if let Ok(mut count) = agent.query_count.lock() {
         *count = 0;
+    }
+    if let Ok(mut timestamp) = agent.init_timestamp.lock() {
+        *timestamp = None;
     }
     if let Ok(mut log_path) = agent.log_path.lock() {
         *log_path = None;
@@ -6457,10 +6460,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             prepared.config.session_id,
             active.config.lock().unwrap().session_id
         );
-        assert_eq!(
-            prepared.init_timestamp.as_deref(),
-            Some("2026-05-20T00:00:00Z")
-        );
+        assert_eq!(prepared.init_timestamp, None);
         assert_eq!(active.process_id, None);
         assert_eq!(active.runtime_generation, None);
         assert!(
@@ -6473,6 +6473,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             "Processing..."
         );
         assert_eq!(*active.query_count.lock().unwrap(), 0);
+        assert!(active.init_timestamp.lock().unwrap().is_none());
         assert!(active.log_path.lock().unwrap().is_none());
         assert!(active.log_last_modified.lock().unwrap().is_none());
         let watch_snapshot = active

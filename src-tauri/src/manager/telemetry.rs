@@ -857,6 +857,34 @@ fn timestamp_to_system_time(timestamp: Option<&str>) -> Option<std::time::System
     Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64))
 }
 
+fn discover_opencode_telemetry_log_path(
+    log_dirs: &[std::path::PathBuf],
+    _wardian_session_id: &str,
+    resume_session: Option<&str>,
+    spawn_time: Option<std::time::SystemTime>,
+) -> Option<std::path::PathBuf> {
+    if let Some(opencode_session_id) = resume_session
+        .map(str::trim)
+        .filter(|value| value.starts_with("ses_"))
+    {
+        for dir in log_dirs {
+            if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
+                return Some(path);
+            }
+        }
+        return Some(opencode_session_diff_path(opencode_session_id));
+    }
+
+    let spawn_time = spawn_time?;
+    for dir in log_dirs {
+        if let Some(path) = opencode_log_path_after(dir, spawn_time) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 fn collect_descendant_pids(
     pid: u32,
     children_map: &HashMap<u32, Vec<u32>>,
@@ -1065,35 +1093,17 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
 
                     // Provider-aware log discovery
                     if snap.provider == "opencode" {
-                        let mut discovered_log = None;
                         let log_dirs = opencode_log_dirs();
-                        for dir in &log_dirs {
-                            if let Some(path) = opencode_log_path_in(dir, opencode_session_id) {
-                                discovered_log = Some(path);
-                                break;
-                            }
-                        }
-                        if discovered_log.is_none()
-                            && snap
-                                .resume_session
-                                .as_deref()
-                                .is_none_or(|value| !value.starts_with("ses_"))
-                        {
-                            let spawn_time =
-                                snap.init_timestamp.lock().ok().and_then(|timestamp| {
-                                    timestamp_to_system_time(timestamp.as_deref())
-                                });
-                            if let Some(spawn_time) = spawn_time {
-                                for dir in &log_dirs {
-                                    if let Some(path) = opencode_log_path_after(dir, spawn_time) {
-                                        discovered_log = Some(path);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        *log_path_lock = discovered_log
-                            .or_else(|| Some(opencode_session_diff_path(opencode_session_id)));
+                        let spawn_time =
+                            snap.init_timestamp.lock().ok().and_then(|timestamp| {
+                                timestamp_to_system_time(timestamp.as_deref())
+                            });
+                        *log_path_lock = discover_opencode_telemetry_log_path(
+                            &log_dirs,
+                            &snap.session_id,
+                            snap.resume_session.as_deref(),
+                            spawn_time,
+                        );
                     } else if snap.provider == "antigravity" {
                         let conversation_id = snap
                             .resume_session
@@ -1853,6 +1863,50 @@ mod tests {
         );
 
         assert_eq!(status, "Error");
+    }
+
+    #[test]
+    fn opencode_telemetry_discovery_ignores_uuid_matching_logs_before_spawn() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        let stale_log = log_dir.join("opencode.log");
+        std::fs::write(
+            &stale_log,
+            "timestamp=2026-06-12T13:47:45.000Z level=INFO run=old message=loading path=\"C:\\\\tmp\\\\agents\\\\opencode-agent\\\\habitat\\\\.opencode\\\\opencode.json\"\n",
+        )
+        .expect("write stale log");
+
+        let discovered = super::discover_opencode_telemetry_log_path(
+            &[log_dir],
+            "opencode-agent",
+            None,
+            Some(std::time::SystemTime::now() + std::time::Duration::from_secs(60)),
+        );
+
+        assert_eq!(discovered, None);
+    }
+
+    #[test]
+    fn opencode_telemetry_discovery_uses_post_spawn_log_until_real_session_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_dir = temp.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        let log = log_dir.join("opencode.log");
+        std::fs::write(
+            &log,
+            "timestamp=2026-06-12T13:47:45.000Z level=INFO run=new message=loading path=\"C:\\\\tmp\\\\agents\\\\opencode-agent\\\\habitat\\\\.opencode\\\\opencode.json\"\n",
+        )
+        .expect("write log");
+
+        let discovered = super::discover_opencode_telemetry_log_path(
+            &[log_dir],
+            "opencode-agent",
+            None,
+            Some(std::time::UNIX_EPOCH),
+        );
+
+        assert_eq!(discovered.as_deref(), Some(log.as_path()));
     }
 
     #[test]
