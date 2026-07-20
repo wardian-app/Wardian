@@ -538,20 +538,35 @@ describe('AgentWatchlist', () => {
     expect(within(screen.getByTestId('team-block-team-1')).getByText('Beta')).toBeInTheDocument();
   });
 
-  it('toggles a team collapsed from the chevron without selecting the team or writing global prefs', () => {
-    render(
+  it('persists a collapsed team from the chevron without selecting the team', () => {
+    let controlledPrefs: WatchlistPrefs = { ...defaultPrefs, collapsed_team_ids: [] };
+    const handlePrefsChange = vi.fn((next: WatchlistPrefs) => {
+      controlledPrefs = next;
+    });
+    const { rerender } = render(
       <AgentWatchlist
         {...defaultProps}
         teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
-        prefs={{ ...defaultPrefs, collapsed_team_ids: [] }}
-        onPrefsChange={mockOnPrefsChange}
+        prefs={controlledPrefs}
+        onPrefsChange={handlePrefsChange}
       />
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' }));
 
     expect(mockOnSelectionChange).not.toHaveBeenCalled();
-    expect(mockOnPrefsChange).not.toHaveBeenCalled();
+    expect(handlePrefsChange).toHaveBeenCalledWith(expect.objectContaining({
+      collapsed_team_ids: ['team-1'],
+      collapsed_team_ids_by_list: { all: ['team-1'] },
+    }));
+    rerender(
+      <AgentWatchlist
+        {...defaultProps}
+        teams={[{ id: 'team-1', name: 'Core Dev Swarm', agentIds: ['agent-1', 'agent-2'] }]}
+        prefs={controlledPrefs}
+        onPrefsChange={handlePrefsChange}
+      />
+    );
     expect(screen.getByRole('button', { name: 'Expand Core Dev Swarm' })).toBeInTheDocument();
     expect(within(screen.getByTestId('team-block-team-1')).queryByText('Alpha')).not.toBeInTheDocument();
   });
@@ -575,7 +590,7 @@ describe('AgentWatchlist', () => {
     expect(await screen.findByRole('button', { name: 'Query Team' })).toBeInTheDocument();
   });
 
-  it('keeps a collapsed team scoped to the active watchlist', () => {
+  it('persists a collapsed team scoped to the active watchlist', () => {
     const lists: Watchlist[] = [
       { id: 'today', name: 'Today', entries: [{ type: 'team', teamId: 'team-1' }] },
       { id: 'later', name: 'Later', entries: [{ type: 'team', teamId: 'team-1' }] },
@@ -596,6 +611,9 @@ describe('AgentWatchlist', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Collapse Core Dev Swarm' }));
+    expect(handlePrefsChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      collapsed_team_ids_by_list: { today: ['team-1'] },
+    }));
     rerender(
       <AgentWatchlist
         {...defaultProps}

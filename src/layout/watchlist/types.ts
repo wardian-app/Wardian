@@ -65,7 +65,13 @@ export interface WatchlistPrefs {
   columns: WatchlistColumnConfig[];
   sort: { column_id: SortableColumnId; direction: 'asc' | 'desc' } | null;
   preserve_team_grouping_when_sorted: boolean;
+  /**
+   * Legacy collapse state for the All Agents roster. Kept so existing
+   * preferences files continue to restore their prior state.
+   */
   collapsed_team_ids: string[];
+  /** Collapse state scoped to each watchlist, including the "all" roster. */
+  collapsed_team_ids_by_list?: Record<string, string[]>;
 }
 
 // agentId → ISO 8601 timestamp of last query sent to that agent
@@ -82,4 +88,5 @@ export const DEFAULT_WATCHLIST_PREFS: WatchlistPrefs = {
   sort: null,
   preserve_team_grouping_when_sorted: false,
   collapsed_team_ids: [],
+  collapsed_team_ids_by_list: {},
 };

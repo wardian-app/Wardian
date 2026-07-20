@@ -108,7 +108,7 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 - **Bulk Context Menu**: If you right-click inside the current multi-selection, the menu applies to the whole selection. Bulk delete shows one confirmation dialog for the full selected set instead of prompting once per agent.
 
 ### Collapsing Teams
-Click the chevron in a team header to hide or reveal that team's members. The team header stays visible with its member count, and context-menu actions still apply to the full team. Collapse state is scoped to the current watchlist view on desktop and in the mobile PWA, so collapsing a team in one custom list does not collapse the same team in another list.
+Click the chevron in a team header to hide or reveal that team's members. The team header stays visible with its member count, and context-menu actions still apply to the full team. Desktop collapse state is scoped to the current watchlist view, saved to `<wardian-home>/watchlists/prefs.json`, and restored after Wardian restarts. Collapsing a team in one custom list does not collapse the same team in another list, and an Off member does not change the saved state.
 
 ![Wardian watchlist showing one collapsed team and one expanded team](../assets/screenshots/watchlists/team-collapse.png)
 

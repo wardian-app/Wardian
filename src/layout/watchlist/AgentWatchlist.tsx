@@ -211,7 +211,7 @@ export default function AgentWatchlist({
   const [dropTarget, setDropTargetState] = useState<DropTarget | null>(null);
   const [draggedListId, setDraggedListId] = useState<string | null>(null);
   const [tabDropTarget, setTabDropTargetState] = useState<TabDropTarget | null>(null);
-  const [collapsedTeamsByList, setCollapsedTeamsByList] = useState<Record<string, string[]>>({});
+  const [unpersistedCollapsedTeamsByList, setUnpersistedCollapsedTeamsByList] = useState<Record<string, string[]>>({});
   const wasDragging = useRef(false);
   const lastSelectedIdRef = useRef<string | null>(null);
 
@@ -247,8 +247,10 @@ export default function AgentWatchlist({
       : watchlists.find((l) => l.id === activeListId) || null;
   const activeCollapseScopeId = activeList?.id ?? "all";
   const legacyAllCollapsedTeamIds = prefs.collapsed_team_ids ?? [];
+  const collapsedTeamsByList = prefs.collapsed_team_ids_by_list ?? {};
   const activeCollapsedTeamIds =
     collapsedTeamsByList[activeCollapseScopeId] ??
+    unpersistedCollapsedTeamsByList[activeCollapseScopeId] ??
     (activeCollapseScopeId === "all" ? legacyAllCollapsedTeamIds : []);
 
   const baseDisplayItems = getDisplayItemsForList(agents, activeList, teams);
@@ -713,14 +715,28 @@ export default function AgentWatchlist({
   }
 
   const handleToggleTeamCollapsed = (teamId: string) => {
-    setCollapsedTeamsByList((current) => {
-      const scopeCollapsed = current[activeCollapseScopeId] ??
-        (activeCollapseScopeId === "all" ? legacyAllCollapsedTeamIds : []);
-      const collapsed = new Set(scopeCollapsed);
-      if (collapsed.has(teamId)) collapsed.delete(teamId);
-      else collapsed.add(teamId);
-      return { ...current, [activeCollapseScopeId]: Array.from(collapsed) };
-    });
+    const scopeCollapsed = collapsedTeamsByList[activeCollapseScopeId] ??
+      (activeCollapseScopeId === "all" ? legacyAllCollapsedTeamIds : []);
+    const collapsed = new Set(scopeCollapsed);
+    if (collapsed.has(teamId)) collapsed.delete(teamId);
+    else collapsed.add(teamId);
+
+    const nextCollapsedTeamsByList = {
+      ...collapsedTeamsByList,
+      [activeCollapseScopeId]: Array.from(collapsed),
+    };
+    if (onPrefsChange) {
+      onPrefsChange({
+        ...prefs,
+        collapsed_team_ids: nextCollapsedTeamsByList.all ?? legacyAllCollapsedTeamIds,
+        collapsed_team_ids_by_list: nextCollapsedTeamsByList,
+      });
+    } else {
+      setUnpersistedCollapsedTeamsByList((current) => ({
+        ...current,
+        [activeCollapseScopeId]: Array.from(collapsed),
+      }));
+    }
   };
 
   // ── Dynamic grid template: dot | name | [visible columns]
