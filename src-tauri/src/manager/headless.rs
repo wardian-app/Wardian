@@ -530,6 +530,38 @@ pub async fn run_headless_with_options(
     }
 }
 
+fn append_codex_bootstrap_args(
+    provider_args: &mut Vec<String>,
+    provider: &dyn AgentProvider,
+    provider_cwd: &std::path::Path,
+    config: Option<&AgentConfig>,
+) {
+    provider_args.push("--cd".to_string());
+    provider_args.push(provider_cwd.to_string_lossy().to_string());
+
+    // Codex global options must precede `exec`; exec only accepts its own
+    // subcommand options after this point.
+    if let Some(config) = config {
+        let spawn_args =
+            strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
+        provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
+    }
+
+    provider_args.push("exec".to_string());
+    if let Some(config) = config {
+        let codex = config.codex_config();
+        if codex.skip_git_repo_check.unwrap_or(true) {
+            provider_args.push("--skip-git-repo-check".to_string());
+        }
+        if codex.ephemeral.unwrap_or(false) {
+            provider_args.push("--ephemeral".to_string());
+        }
+    }
+
+    provider_args.push("--json".to_string());
+    provider_args.push(session_bootstrap_prompt().to_string());
+}
+
 pub async fn obtain_session_id(
     cwd: &std::path::Path,
     agent_class: Option<&str>,
@@ -572,25 +604,12 @@ pub async fn obtain_session_id(
     };
 
     if provider_name == "codex" {
-        provider_args.push("--cd".to_string());
-        provider_args.push(provider_cwd.to_string_lossy().to_string());
-        provider_args.push("exec".to_string());
-
-        if let Some(config) = config {
-            let spawn_args =
-                strip_flag_value_pairs(provider.get_spawn_args(config, false), "--add-dir");
-            provider_args.extend(strip_standalone_flag(spawn_args, "--no-alt-screen"));
-            let codex = config.codex_config();
-            if codex.skip_git_repo_check.unwrap_or(true) {
-                provider_args.push("--skip-git-repo-check".to_string());
-            }
-            if codex.ephemeral.unwrap_or(false) {
-                provider_args.push("--ephemeral".to_string());
-            }
-        }
-
-        provider_args.push("--json".to_string());
-        provider_args.push(session_bootstrap_prompt().to_string());
+        append_codex_bootstrap_args(
+            &mut provider_args,
+            provider.as_ref(),
+            &provider_cwd,
+            config,
+        );
     } else if provider_name == "opencode" {
         provider_args.push("run".to_string());
         if let Some(config) = config {
@@ -1059,6 +1078,38 @@ mod tests {
         assert!(args.contains(&"/workspace/docs".to_string()));
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"--json".to_string()));
+    }
+
+    #[test]
+    fn codex_bootstrap_places_global_flags_before_exec() {
+        let provider = crate::providers::ProviderFactory::resolve("codex").unwrap();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    sandbox_mode: Some("danger-full-access".into()),
+                    approval_policy: Some("never".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        let mut args = Vec::new();
+
+        append_codex_bootstrap_args(
+            &mut args,
+            provider.as_ref(),
+            Path::new("/workspace"),
+            Some(&config),
+        );
+
+        let exec_index = args.iter().position(|arg| arg == "exec").unwrap();
+        let approval_index = args
+            .iter()
+            .position(|arg| arg == "--ask-for-approval")
+            .unwrap();
+        assert!(approval_index < exec_index);
+        assert!(args[exec_index + 1..].contains(&"--json".to_string()));
     }
 
     #[test]

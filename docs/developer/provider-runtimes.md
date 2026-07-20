@@ -118,10 +118,12 @@ Codex does not treat `--add-dir` as a skill-discovery mechanism. Wardian therefo
 
 Current model:
 
-- shared Codex files projected into each agent home:
+- shared Codex files copied into each agent home:
   - `auth.json`
-  - `config.toml`
   - `cap_sid`
+- the user's `config.toml` is a managed base, not a shared home. Wardian
+  reconciles missing base policy values into the agent's own `config.toml` and
+  preserves agent model choices, project trust, and local overrides.
 - Codex session and history files such as `history.jsonl`,
   `session_index.jsonl`, and `sessions/**` remain per-agent so Wardian can
   resume and read logs from the agent habitat without merging independent
@@ -144,6 +146,27 @@ Current model:
 - Wardian-assigned skills are projected into `CODEX_HOME/skills/<skill-name>`
 
 This preserves per-agent skill scope without forcing the project repo itself to hold agent-specific skill directories.
+
+### Plugin pass-through and diagnostics
+
+Plugin installation and enablement remain entirely in each agent's
+`CODEX_HOME`. Wardian does not apply a class allowlist, does not alter installed
+or enabled plugin state, and does not pass global plugin/app disable flags.
+Plugin implementation files may be cached by Codex, but the per-agent installed
+and enabled surface must remain local to the agent home. A configuration or
+plugin change needs a new Codex session because an existing thread has a fixed
+tool list.
+
+Use the provider-neutral control surface to inspect effective state without
+reading sensitive Codex files:
+
+```bash
+wardian agent doctor <agent-name-or-uuid>
+```
+
+The response includes the effective home path, installed/enabled plugins read
+from that home through the provider-resolved Codex executable, and launch
+feature flags. It never changes plugin state.
 
 ### Session identity and bootstrap
 

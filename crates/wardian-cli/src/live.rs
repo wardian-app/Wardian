@@ -5,7 +5,7 @@ use std::{
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
     AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
     DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus,
@@ -66,6 +66,7 @@ pub struct SendMessageAndWatchConditionOptions<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ControlOperation {
     AgentList,
+    AgentDoctor,
     AgentKill,
     AgentPause,
     AgentResume,
@@ -250,6 +251,18 @@ pub fn list_agents() -> io::Result<Vec<AgentIdentity>> {
     let response: AgentListResponse =
         serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(response.agents)
+}
+
+pub fn agent_doctor(target: &str) -> io::Result<AgentDoctorResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentDoctor,
+        send_request(ControlRequest::AgentDoctor {
+            target: target.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
 }
 
 pub fn agent_kill(target: &str) -> io::Result<()> {
@@ -845,7 +858,7 @@ fn timeout_block(
 
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
-        ControlOperation::AgentList => CONTROL_TIMEOUT,
+        ControlOperation::AgentList | ControlOperation::AgentDoctor => CONTROL_TIMEOUT,
         ControlOperation::ConversationList
         | ControlOperation::ConversationShow
         | ControlOperation::ArtifactShow

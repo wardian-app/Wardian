@@ -12,9 +12,9 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
-    AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
-    AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
+    AskResponse, CodexPluginDiagnostic, ControlRequest, ConversationListResponse, ConversationShowResponse,
     DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
     MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
     QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
@@ -338,6 +338,18 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 updated_fields: outcome.updated_fields,
                 restart_required,
             })
+        }
+
+        ControlRequest::AgentDoctor { target } => {
+            if target == "all" || target.starts_with("class:") {
+                return Err(ControlError::not_supported(
+                    "agent doctor requires a single agent name or uuid",
+                ));
+            }
+            let uuid = resolve_target_uuid(app, &target)
+                .await
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
+            ok_json(&build_agent_doctor_response(app, &uuid).await?)
         }
 
         ControlRequest::AgentClone { target, name } => {
@@ -940,6 +952,85 @@ async fn resolve_target_uuid_in_state(state: &AppState, target: &str) -> Option<
                     .unwrap_or(false)
         })
         .map(|(id, _)| id.clone())
+}
+
+async fn build_agent_doctor_response(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<AgentDoctorResponse, ControlError> {
+    let state = app.state::<AppState>();
+    let config = {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(session_id)
+            .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))?;
+        let config = agent
+            .config
+            .lock()
+            .map_err(|_| ControlError::request_failed("agent config lock poisoned"))?
+            .clone();
+        config
+    };
+    let agent = agent_config_to_identity(&config, app).await;
+    if config.provider != "codex" {
+        return Ok(AgentDoctorResponse {
+            schema: wardian_core::control::CONTROL_SCHEMA,
+            agent,
+            applicable: false,
+            codex_home: None,
+            plugins: Vec::new(),
+            plugin_inspection_error: None,
+            launch_flags: Vec::new(),
+            restart_required: false,
+            reasons: vec!["not_applicable".to_string()],
+        });
+    }
+
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| ControlError::request_failed("Could not locate Wardian home"))?;
+    let codex_home = crate::utils::fs::habitat_codex_home(
+        &wardian_home
+            .join("agents")
+            .join(&config.session_id)
+            .join("habitat"),
+    );
+    let provider = crate::providers::ProviderFactory::resolve("codex")
+        .map_err(ControlError::request_failed)?;
+    let launch_flags = provider.get_spawn_args(&config, false);
+
+    let mut reasons = Vec::new();
+    let (plugins, plugin_inspection_error) =
+        match crate::utils::fs::inspect_codex_plugins(&codex_home) {
+            Ok(statuses) => (
+                statuses
+                    .into_iter()
+                    .map(|status| CodexPluginDiagnostic {
+                        selector: status.selector,
+                        installed: status.installed,
+                        enabled: status.enabled,
+                    })
+                    .collect(),
+                None,
+            ),
+            Err(error) => {
+                reasons.push("plugin_inspection_failed".to_string());
+                (Vec::new(), Some(error))
+            }
+        };
+    reasons.sort();
+    reasons.dedup();
+
+    Ok(AgentDoctorResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        agent,
+        applicable: true,
+        codex_home: Some(codex_home.to_string_lossy().to_string()),
+        plugins,
+        plugin_inspection_error,
+        launch_flags,
+        restart_required: false,
+        reasons,
+    })
 }
 
 async fn resolve_send_targets_in_state(state: &AppState, target: &str) -> Vec<String> {

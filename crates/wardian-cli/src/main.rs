@@ -204,6 +204,7 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             class,
             workspace,
         }) => handle_agent_update(target, class.as_deref(), workspace.as_deref()),
+        Some(AgentCommand::Doctor { target }) => handle_agent_doctor(target),
         Some(AgentCommand::Clone { target, name }) => {
             handle_agent_clone(target, name.as_deref(), &args)
         }
@@ -290,6 +291,13 @@ fn handle_agent_update(
     serde_json::to_string_pretty(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn handle_agent_doctor(target: &str) -> Result<String, CliError> {
+    let response = live::agent_doctor(target).map_err(control_error)?;
+    serde_json::to_string_pretty(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn handle_agent_clone(

@@ -615,6 +615,11 @@ pub enum AgentCommand {
         #[arg(long, required_unless_present = "class")]
         workspace: Option<String>,
     },
+    /// Show effective provider policy and launch diagnostics for one agent.
+    Doctor {
+        /// Agent name or UUID.
+        target: String,
+    },
     Clone {
         target: String,
         #[arg(long)]
@@ -1350,6 +1355,18 @@ mod tests {
             panic!()
         };
         assert!(matches!(args.command, Some(AgentCommand::Pause { .. })));
+    }
+
+    #[test]
+    fn parses_agent_doctor_target() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "doctor", "ee-1"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Doctor { target }) if target == "ee-1"
+        ));
     }
 
     #[test]

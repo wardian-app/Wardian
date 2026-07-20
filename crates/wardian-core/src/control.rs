@@ -32,6 +32,9 @@ pub enum ControlRequest {
         class: Option<String>,
         workspace: Option<String>,
     },
+    AgentDoctor {
+        target: String,
+    },
     AgentClone {
         target: String,
         name: Option<String>,
@@ -189,6 +192,28 @@ pub struct AgentUpdateResponse {
     pub agent: AgentIdentity,
     pub updated_fields: Vec<String>,
     pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexPluginDiagnostic {
+    pub selector: String,
+    pub installed: bool,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentDoctorResponse {
+    pub schema: u8,
+    pub agent: AgentIdentity,
+    pub applicable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+    pub plugins: Vec<CodexPluginDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_inspection_error: Option<String>,
+    pub launch_flags: Vec<String>,
+    pub restart_required: bool,
+    pub reasons: Vec<String>,
 }
 
 impl AgentListResponse {
@@ -759,6 +784,47 @@ mod tests {
 
         assert!(response_json.contains(r#""updated_fields":["class","workspace"]"#));
         assert!(response_json.contains(r#""restart_required":true"#));
+    }
+
+    #[test]
+    fn agent_doctor_request_and_response_serialize_without_sensitive_config() {
+        let request = ControlRequest::AgentDoctor {
+            target: "electrical-1".to_string(),
+        };
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(request_json.contains(r#""command":"agent_doctor""#));
+        assert!(request_json.contains(r#""target":"electrical-1""#));
+
+        let response = AgentDoctorResponse {
+            schema: CONTROL_SCHEMA,
+            agent: AgentIdentity {
+                name: "Electrical".to_string(),
+                uuid: "agent-1".to_string(),
+                class: "Electrical Engineer".to_string(),
+                provider: "codex".to_string(),
+                status: "idle".to_string(),
+                pid: None,
+                started_at: None,
+                workspace: Some("D:/workspace".to_string()),
+                last_status_at: None,
+                status_source: crate::identity::StatusSource::Live,
+                visibility: None,
+            },
+            applicable: true,
+            codex_home: Some("D:/wardian/agents/agent-1/habitat/.codex".to_string()),
+            plugins: vec![CodexPluginDiagnostic {
+                selector: "documents@openai-primary-runtime".to_string(),
+                installed: true,
+                enabled: true,
+            }],
+            plugin_inspection_error: None,
+            launch_flags: vec!["--no-alt-screen".to_string()],
+            restart_required: false,
+            reasons: Vec::new(),
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(response_json.contains("documents@openai-primary-runtime"));
+        assert!(!response_json.contains("auth.json"));
     }
 
     #[test]
