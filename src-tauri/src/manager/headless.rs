@@ -9,7 +9,9 @@ use crate::utils::process::new_headless_command;
 use crate::utils::shell::build_program_launch;
 use wardian_core::models::{AgentConfig, AgentEvent, AgentProvider};
 
-use super::codex::{codex_bootstrap_launch_context, migrate_codex_bootstrap_home};
+use super::codex::{
+    codex_bootstrap_launch_context, codex_session_file_path_in, migrate_codex_bootstrap_home,
+};
 use super::opencode::opencode_env;
 use super::{
     interactive_provider_cwd, persisted_agent_config, session_bootstrap_prompt,
@@ -562,6 +564,49 @@ fn append_codex_bootstrap_args(
     provider_args.push(session_bootstrap_prompt().to_string());
 }
 
+fn materialize_codex_session_rollout(
+    codex_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<String, String> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let sessions_dir = codex_home
+        .join("sessions")
+        .join(now.format("%Y").to_string())
+        .join(now.format("%m").to_string())
+        .join(now.format("%d").to_string());
+    std::fs::create_dir_all(&sessions_dir)
+        .map_err(|_| "Could not create the Codex session directory".to_string())?;
+    let rollout_path = sessions_dir.join(format!(
+        "rollout-{}-{}.jsonl",
+        now.format("%Y-%m-%dT%H-%M-%S"),
+        session_id
+    ));
+    let rollout = serde_json::json!({
+        "timestamp": timestamp,
+        "type": "session_meta",
+        "payload": {
+            "id": session_id,
+            "session_id": session_id,
+            "timestamp": timestamp,
+            "cwd": cwd,
+            "originator": "Wardian",
+            "cli_version": env!("CARGO_PKG_VERSION"),
+            "source": "vscode",
+            "model_provider": "openai",
+        }
+    });
+    std::fs::write(&rollout_path, format!("{rollout}\n"))
+        .map_err(|_| "Could not create the Codex session rollout".to_string())?;
+
+    if codex_session_file_path_in(codex_home, &session_id).is_none() {
+        return Err("Codex did not recognize the fresh session rollout".to_string());
+    }
+
+    Ok(session_id)
+}
+
 pub async fn obtain_session_id(
     cwd: &std::path::Path,
     agent_class: Option<&str>,
@@ -590,6 +635,35 @@ pub async fn obtain_session_id(
     } else {
         None
     };
+
+    if provider_name == "codex" {
+        if let Some(agent_habitat_root) = habitat_root.as_ref() {
+            let agent_codex_home = habitat_codex_home(agent_habitat_root);
+            let real_codex_home = dirs::home_dir()
+                .ok_or("Could not find user home directory")?
+                .join(".codex");
+            sync_codex_agent_home(
+                &real_codex_home,
+                &agent_codex_home,
+                std::path::Path::new(""),
+            )?;
+
+            match materialize_codex_session_rollout(&agent_codex_home, cwd) {
+                Ok(session_id) => {
+                    let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
+                        provider: provider_name.to_string(),
+                        ..Default::default()
+                    });
+                    super::apply_provider_identity(provider_name, &mut identity_config, &session_id)?;
+                    log_debug("[WARDIAN-DEBUG] Materialized a fresh local Codex session rollout.");
+                    return Ok(session_id);
+                }
+                Err(error) => log_debug(&format!(
+                    "[WARDIAN-DEBUG] Codex session rollout materialization unavailable; using legacy bootstrap: {error}"
+                )),
+            }
+        }
+    }
     let provider_cwd = interactive_provider_cwd(
         provider_name,
         cwd,
@@ -671,10 +745,11 @@ pub async fn obtain_session_id(
         for (key, value) in opencode_env(cwd, class_name, bootstrap_session_id, config)? {
             cmd.env(key, value);
         }
-        cmd.stdin(std::process::Stdio::null());
-    } else {
-        cmd.stdin(std::process::Stdio::null());
     }
+    // Bootstrap commands are unattended. Inheriting stdin lets Codex wait for
+    // a prompt that Wardian will never answer, turning a normal clear into a
+    // timeout and leaving an incomplete session behind.
+    cmd.stdin(std::process::Stdio::null());
 
     let command_cwd = if provider_name == "claude" {
         cwd.to_path_buf()
@@ -800,17 +875,16 @@ pub async fn obtain_session_id(
                 ));
             }
             if provider_name == "codex" {
-                if let (Some(session_id), Some((_, bootstrap_home))) =
-                    (session_id_res.as_ref(), codex_bootstrap.as_ref())
+                if let (Some((_, bootstrap_home)), Some(agent_habitat_root)) =
+                    (codex_bootstrap.as_ref(), habitat_root.as_ref())
                 {
-                    if let Some(final_habitat_root) =
-                        prepare_provider_habitat(provider_name, cwd, class_name, Some(session_id))?
-                    {
-                        migrate_codex_bootstrap_home(
-                            bootstrap_home,
-                            &habitat_codex_home(&final_habitat_root),
-                        )?;
-                    }
+                    // The interactive process uses a habitat keyed by Wardian's
+                    // stable agent ID. Migrating under the freshly-created Codex
+                    // thread ID makes `codex resume` look in the wrong home.
+                    migrate_codex_bootstrap_home(
+                        bootstrap_home,
+                        &habitat_codex_home(agent_habitat_root),
+                    )?;
                 }
             }
             log_debug(&format!(
@@ -917,6 +991,26 @@ mod tests {
     #[test]
     fn bootstrap_session_prompt_uses_intro_prompt_for_providers_that_need_bootstrap() {
         assert_eq!(session_bootstrap_prompt(), "Introduce yourself");
+    }
+
+    #[test]
+    fn codex_materialization_writes_a_resumable_local_rollout() {
+        let home = tempfile::tempdir().expect("Codex home");
+        let cwd = Path::new("D:/Development/Wardian");
+
+        let session_id = materialize_codex_session_rollout(home.path(), cwd)
+            .expect("materialize Codex rollout");
+        let rollout_path = codex_session_file_path_in(home.path(), &session_id)
+            .expect("locate Codex rollout");
+        let rollout: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(rollout_path).expect("read Codex rollout"),
+        )
+        .expect("parse Codex rollout");
+
+        assert_eq!(rollout["type"], "session_meta");
+        assert_eq!(rollout["payload"]["id"], session_id);
+        assert_eq!(rollout["payload"]["session_id"], session_id);
+        assert_eq!(rollout["payload"]["cwd"], cwd.to_string_lossy().as_ref());
     }
 
     #[test]

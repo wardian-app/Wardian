@@ -1,4 +1,4 @@
-use crate::providers::antigravity::AntigravityProvider;
+use crate::providers::antigravity::{changed_workspace_conversation, AntigravityProvider};
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
 use crate::providers::transcript::extract_transcript_message;
 use crate::providers::ProviderFactory;
@@ -279,6 +279,16 @@ fn line_event_status_for_pty_provider(
     )
 }
 
+fn persist_runtime_agent_configs(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let snapshot = tauri::async_runtime::block_on(async {
+        let agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        super::state_configs_snapshot(&agents, &order)
+    });
+    super::save_state_snapshot(app, &snapshot);
+}
+
 pub async fn spawn_agent(
     app: AppHandle,
     config: AgentConfig,
@@ -293,6 +303,17 @@ pub async fn spawn_agent(
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
 
     let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
+    let antigravity_workspace_before = if config.provider == "antigravity"
+        && config
+            .resume_session
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        AntigravityProvider::antigravity_home()
+            .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, &cwd))
+    } else {
+        None
+    };
 
     let expected_folder = if config.folder.is_empty() {
         cwd.to_string_lossy().to_string()
@@ -1271,6 +1292,8 @@ pub async fn spawn_agent(
         let watcher_config = config_lock.clone();
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
+        let watcher_workspace = cwd.clone();
+        let watcher_workspace_before = antigravity_workspace_before.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
@@ -1286,13 +1309,46 @@ pub async fn spawn_agent(
                 }
 
                 let home = AntigravityProvider::antigravity_home();
-                let conversation_id = {
-                    let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
-                    cfg.resume_session
+                let (conversation_id, captured_identity) = {
+                    let mut cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
+                    let existing = cfg
+                        .resume_session
                         .as_ref()
                         .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
+                        .filter(|value| !value.is_empty());
+                    if existing.is_some() {
+                        (existing, false)
+                    } else {
+                        let discovered = home.as_ref().and_then(|home| {
+                            AntigravityProvider::conversation_for_workspace(
+                                home,
+                                &watcher_workspace,
+                            )
+                        });
+                        let captured = changed_workspace_conversation(
+                            watcher_workspace_before.as_deref(),
+                            discovered.as_deref(),
+                        );
+                        if let Some(conversation_id) = captured.as_deref() {
+                            if apply_provider_identity(
+                                "antigravity",
+                                &mut cfg,
+                                conversation_id,
+                            )
+                            .is_err()
+                            {
+                                (None, false)
+                            } else {
+                                (captured, true)
+                            }
+                        } else {
+                            (None, false)
+                        }
+                    }
                 };
+                if captured_identity {
+                    persist_runtime_agent_configs(&watcher_app);
+                }
 
                 let path = home
                     .as_ref()

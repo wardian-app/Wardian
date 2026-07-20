@@ -6,9 +6,9 @@ Wardian provides one orchestration layer over five supported CLI providers: Anti
 
 | Provider | Support | Working Root | Instruction Source | Skill and Context Model | Session Identity |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[Antigravity](https://www.antigravity.google/docs/cli-overview)** | Supported | Real target workspace | `AGENTS.md` | Wardian include roots passed through repeated `--add-dir` flags | Discovered from Antigravity conversation state |
+| **[Antigravity](https://www.antigravity.google/docs/cli-overview)** | Supported | Real target workspace | `AGENTS.md` | Wardian include roots passed through repeated `--add-dir` flags | Captured after the first real prompt |
 | **[Claude Code](https://github.com/anthropics/claude-code)** | Supported | Real target workspace | `CLAUDE.md` | `--add-dir` instruction roots plus `.claude/skills` links to Wardian-managed skills | Wardian assigns fresh session IDs and resumes explicitly |
-| **[Codex](https://github.com/openai/codex)** | Supported | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME` habitat with scoped skill projection | Discovered during bootstrap, then adopted into the final habitat |
+| **[Codex](https://github.com/openai/codex)** | Supported | Real target workspace via `--cd` | `AGENTS.md` | Per-agent `CODEX_HOME` habitat with scoped skill projection | Fresh local rollout, then exact resume |
 | **[OpenCode](https://github.com/anomalyco/opencode)** | Supported | Real target workspace | `AGENTS.md` plus injected runtime config | `OPENCODE_CONFIG` adds Wardian instructions; `OPENCODE_CONFIG_DIR` exposes projected skills | Discovered from JSON events and resumed with `--session` |
 | **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** | Unmaintained | Real target workspace | `GEMINI.md` | Wardian include roots passed through `--include-directories`; Gemini patch enables multi-root skill discovery | Discovered from provider output |
 
@@ -32,6 +32,8 @@ Wardian-managed roots usually live under hidden `.wardian` directories. Antigrav
 ### Session and Status Handling
 
 Wardian launches visible Antigravity agents with `agy --prompt-interactive ""` so the CLI starts in interactive mode without an initial task. Headless workflow runs use `agy --print` and, when resuming, `--conversation <conversation-id>`. Provider options include `--sandbox`, `--dangerously-skip-permissions`, and `--print-timeout <duration>`.
+
+Clear starts a fresh interactive Antigravity session without a hidden bootstrap prompt. Wardian stores the provider conversation ID after the first real user prompt updates Antigravity's workspace conversation mapping. If Wardian restarts before that first prompt, the agent starts fresh again because no provider conversation exists yet to resume.
 
 Antigravity stores runtime state under `~/.gemini/antigravity-cli`. Wardian discovers the conversation ID from the provider cache and reads `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` for status, assistant transcript text, and tool activity. `wardian agent watch` uses completed `MODEL` `PLANNER_RESPONSE` transcript records as provider-adapted assistant output, planner `tool_calls` as tool-call rows, and model action records such as `RUN_COMMAND`, `VIEW_FILE`, `CODE_ACTION`, `SEARCH_WEB`, `LIST_DIRECTORY`, `GREP_SEARCH`, `READ_URL_CONTENT`, `ASK_QUESTION`, and `GENERIC` as tool-result rows.
 
@@ -86,7 +88,7 @@ wardian agent doctor <agent-name-or-uuid>
 
 ### Session and Status Handling
 
-Codex session IDs are discovered after launch. Wardian starts fresh sessions with a temporary bootstrap `CODEX_HOME`, parses the provider session ID, creates the final per-agent habitat, and migrates session artifacts there. Status tracking uses Codex thread and turn events, approval requests, command events, and completion markers.
+Wardian starts a fresh Codex session by writing a minimal rollout into the agent's projected `CODEX_HOME`, then resumes that exact provider UUID interactively. This avoids a bootstrap model turn while preserving per-agent session isolation. Status tracking uses Codex thread and turn events, approval requests, command events, and completion markers.
 
 ### Debug First
 
