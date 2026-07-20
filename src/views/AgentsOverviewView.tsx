@@ -209,10 +209,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const menuW = 200, menuH = 280;
-    const x = Math.min(e.clientX, window.innerWidth - menuW - 8);
-    const y = Math.min(e.clientY, window.innerHeight - menuH - 8);
-    setContextMenu({ visible: true, x, y, agentId });
+    setContextMenu({ visible: true, x: e.clientX, y: e.clientY, agentId });
   };
 
   const renderableAgents = filteredAgents.filter(

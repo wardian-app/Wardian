@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -13,6 +14,7 @@ import { openPermanentFileSurface } from '../files/fileSurfaceNavigation';
 import type { WorkbenchNavigationService } from '../workbench/navigationService';
 import { useAppShellWorkbenchNavigation } from '../../layout/AppShell';
 import { formatExplorerPathForDisplay } from '../../utils/displayPath';
+import { useContextMenuSurface } from '../../components/useContextMenuSurface';
 
 interface ExplorerPanelProps {
   selectedAgentIds: Set<string>;
@@ -64,6 +66,12 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
   // Context Menu State
   const [menuPos, setMenuPos] = useState<{x: number, y: number} | null>(null);
   const [activeNode, setActiveNode] = useState<FileNode | null>(null);
+  const { menuRef, style: menuStyle } = useContextMenuSurface<HTMLDivElement>(
+    menuPos?.x ?? 0,
+    menuPos?.y ?? 0,
+    () => setMenuPos(null),
+    menuPos !== null && activeNode !== null,
+  );
   
   const [refreshToken, setRefreshToken] = useState(0);
   const [changedPaths, setChangedPaths] = useState<string[]>([]);
@@ -423,13 +431,11 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
         )}
       </div>
 
-      {menuPos && activeNode && (
+      {menuPos && activeNode && createPortal(
         <div 
+          ref={menuRef}
           className="fixed bg-wardian-card border border-wardian-border shadow-2xl rounded-lg py-1 z-50 min-w-40 text-sm font-medium animate-in fade-in zoom-in-95 duration-100"
-          style={{ 
-            top: Math.min(menuPos.y, window.innerHeight - 200),
-            left: Math.min(menuPos.x, window.innerWidth - 200) 
-          }}
+          style={menuStyle}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="px-4 py-2 label-small truncate border-b border-wardian-border mb-1 max-w-64">
@@ -458,7 +464,8 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({ selectedAgentIds, 
           <button className="w-full text-left px-4 py-2 hover:bg-wardian-card-bg-muted transition-colors text-wardian-error group flex items-center justify-between" onClick={handleDelete}>
             Delete
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

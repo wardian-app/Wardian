@@ -4,7 +4,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
@@ -13,6 +12,7 @@ import { Plus } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { CompactOverflowButton } from "../../components/CompactOverflowButton";
+import { useContextMenuSurface } from "../../components/useContextMenuSurface";
 
 export type WorkbenchPaneTarget = {
   group_id: string;
@@ -41,18 +41,12 @@ export function WorkbenchContextMenu({
   on_close,
 }: WorkbenchContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const width = 224;
-  const estimatedHeight = Math.max(40, items.length * 32 + 8);
-  const style: CSSProperties = {
-    left: Math.max(4, Math.min(position.x, window.innerWidth - width - 4)),
-    top: Math.max(4, Math.min(position.y, window.innerHeight - estimatedHeight - 4)),
-  };
-
   const dismiss = useCallback((): void => {
     flushSync(on_close);
     const target = typeof return_focus === "function" ? return_focus() : return_focus;
     if (target?.isConnected) target.focus();
   }, [on_close, return_focus]);
+  const { menuRef: surfaceRef, style } = useContextMenuSurface<HTMLDivElement>(position.x, position.y, dismiss);
 
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent): void => {
@@ -102,7 +96,10 @@ export function WorkbenchContextMenu({
 
   return createPortal(
     <div
-      ref={menuRef}
+      ref={(element) => {
+        menuRef.current = element;
+        surfaceRef.current = element;
+      }}
       role="menu"
       aria-label={aria_label}
       className="wardian-workbench-context-menu"

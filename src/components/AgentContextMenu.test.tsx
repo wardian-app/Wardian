@@ -56,4 +56,14 @@ describe("AgentContextMenu", () => {
     expect(within(menu).queryByRole("button", { name: "Open to Side" })).not.toBeInTheDocument();
     expect(within(menu).getAllByRole("button")[0]).toHaveTextContent("Rename");
   });
+
+  it("portals the viewport-anchored menu outside transformed workbench surfaces", () => {
+    render(
+      <div style={{ transform: "translateX(100px)" }}>
+        <AgentContextMenu {...createProps()} />
+      </div>,
+    );
+
+    expect(screen.getByTestId("agent-context-menu").parentElement).toBe(document.body);
+  });
 });
