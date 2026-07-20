@@ -142,8 +142,11 @@ export function WorkbenchTab({
               key={badge.badge_id}
               className="wardian-workbench-tab-badge"
               data-surface-badge={badge.badge_id}
+              {...(badge.value === undefined ? {} : { "data-surface-badge-value": badge.value })}
               title={badge.label}
-            />
+            >
+              {badge.value}
+            </span>
           ))}
         </span>
       ) : null}

@@ -1,9 +1,11 @@
 import type {
   SurfaceCommandDefinition,
+  SurfaceBadge,
   SurfaceDefinition,
   SurfaceRestoreResult,
   WorkbenchSurfaceV1,
 } from "../../../types";
+import { useQueueStore } from "../../../store/useQueueStore";
 import type { GraphRelationshipReason } from "../../graph/graphProjection";
 
 export const DEFAULT_HEAVY_SURFACE_HIDDEN_GRACE_MS = 30_000;
@@ -159,13 +161,28 @@ export const DASHBOARD_SURFACE_DEFINITION = defineCoreViewSurface(
     restore_state: (value, version) => restoreEmptyState(value, version, "dashboard"),
   },
 );
-export const QUEUE_SURFACE_DEFINITION = defineCoreViewSurface(
-  "queue", "Queue", "recreate_from_state", {
-    default_state: () => EMPTY_STATE,
-    serialize_state: () => EMPTY_STATE,
-    restore_state: (value, version) => restoreEmptyState(value, version, "queue"),
-  },
-);
+
+function queueUnreadBadges(): SurfaceBadge[] {
+  const unreadCount = useQueueStore.getState().items.filter((item) => !item.read).length;
+  if (unreadCount === 0) return [];
+  return [{
+    badge_id: "unread",
+    label: `${unreadCount} unread queue item${unreadCount === 1 ? "" : "s"}`,
+    value: unreadCount > 9 ? "9+" : String(unreadCount),
+  }];
+}
+
+export const QUEUE_SURFACE_DEFINITION: SurfaceDefinition = {
+  ...defineCoreViewSurface(
+    "queue", "Queue", "recreate_from_state", {
+      default_state: () => EMPTY_STATE,
+      serialize_state: () => EMPTY_STATE,
+      restore_state: (value, version) => restoreEmptyState(value, version, "queue"),
+    },
+  ),
+  presentation_subscribe: (listener: () => void) => useQueueStore.subscribe(listener),
+  badges: () => queueUnreadBadges(),
+};
 export const GRAPH_SURFACE_DEFINITION = defineCoreViewSurface(
   "graph", "Graph", "suspend_when_hidden", {
     default_state: () => DEFAULT_GRAPH_SURFACE_STATE,
