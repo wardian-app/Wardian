@@ -5810,7 +5810,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         .expect("selected worktree should resolve independently of active agent");
 
         assert_eq!(found.source_folder, "/selected-repository");
-        assert_eq!(found.worktree_folder, worktree_folder);
+        assert!(workspace_paths_match(
+            &found.worktree_folder,
+            &worktree_folder
+        ));
         assert!(find_deletable_worktree_for_source(
             &configs,
             home.path(),
