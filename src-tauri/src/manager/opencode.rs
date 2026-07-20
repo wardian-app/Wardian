@@ -280,6 +280,35 @@ pub(crate) fn opencode_log_path_in(
     })
 }
 
+/// Find the newest OpenCode log modified after a fresh provider spawn.
+///
+/// Used before OpenCode has emitted a real `ses_*` session id. This avoids
+/// content-searching by Wardian UUID, which can rediscover stale logs from a
+/// prior cleared session.
+pub(crate) fn opencode_log_path_after(
+    base: &std::path::Path,
+    threshold: std::time::SystemTime,
+) -> Option<std::path::PathBuf> {
+    let mut candidates = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            if modified < threshold {
+                return None;
+            }
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|(modified, path)| (*modified, path.clone()));
+    candidates.pop().map(|(_, path)| path)
+}
+
 /// Return the ordered list of directories where opencode writes its log files.
 /// Tries platform-native data dirs first (Windows: %LOCALAPPDATA%, %APPDATA%),
 /// then the XDG fallback (~/.local/share).
