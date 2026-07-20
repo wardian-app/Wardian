@@ -1280,7 +1280,7 @@ describe("AgentChatView", () => {
     render(<AgentChatView sessionId="agent-1" status="Idle" />);
 
     const input = await screen.findByLabelText("Message agent");
-    expect(screen.getAllByText("run tests")).toHaveLength(1);
+    expect(await screen.findAllByText("run tests")).toHaveLength(1);
 
     fireEvent.change(input, { target: { value: "run tests" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
