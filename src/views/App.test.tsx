@@ -13,7 +13,7 @@ import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
-import type { AgentInteractions } from "../layout/watchlist/types";
+import type { AgentInteractions, WatchlistPrefs } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
 
@@ -100,6 +100,7 @@ const mockGetCurrentWindow = vi.mocked(getCurrentWindow);
 // Helper to set up mock return values for the initial load
 let currentAgents: AgentConfig[] = [];
 let currentWatchlists: unknown = [];
+let currentWatchlistPrefs: WatchlistPrefs | null = null;
 let currentInteractions: unknown = {};
 let currentQueueItems: unknown = [];
 let currentQueuePreferences: unknown = {};
@@ -138,6 +139,7 @@ function simulateBackendCloneTeamPlacement(sourceAgentId: string, cloneAgentId: 
 function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefinition[] = []) {
   currentAgents = [...agents];
   currentWatchlists = [];
+  currentWatchlistPrefs = null;
   currentInteractions = {};
   currentQueueItems = [];
   currentQueuePreferences = {};
@@ -178,6 +180,11 @@ function setupDefaultMocks(agents: AgentConfig[] = [], classes: AgentClassDefini
         return currentWatchlists;
       case "save_watchlists":
         currentWatchlists = args?.watchlists;
+        return null;
+      case "load_watchlist_prefs":
+        return currentWatchlistPrefs;
+      case "save_watchlist_prefs":
+        currentWatchlistPrefs = args?.prefs;
         return null;
       case "load_agent_interactions":
         return currentInteractions;
@@ -375,6 +382,16 @@ function setupDefaultMocksWithWatchlists(
 ) {
   setupDefaultMocks(agents, classes);
   currentWatchlists = watchlists;
+}
+
+function setupDefaultMocksWithWatchlistState(
+  agents: AgentConfig[],
+  classes: AgentClassDefinition[],
+  watchlists: unknown,
+  prefs: WatchlistPrefs,
+) {
+  setupDefaultMocksWithWatchlists(agents, classes, watchlists);
+  currentWatchlistPrefs = prefs;
 }
 
 function setupDefaultMocksWithInteractions(
@@ -2019,6 +2036,29 @@ describe("Agent Watchlist Sidebar", () => {
     });
 
     expect(await screen.findByText("Core Dev Swarm")).toBeInTheDocument();
+  });
+
+  it("restores a collapsed team after relaunch, including an off team member", async () => {
+    setupDefaultMocksWithWatchlistState(sampleAgents, defaultClasses, {
+      version: 2,
+      teams: [{ id: "team-1", name: "Core Dev Swarm", agentIds: ["agent-1", "agent-2"] }],
+      watchlists: [],
+    }, {
+      columns: [],
+      sort: null,
+      preserve_team_grouping_when_sorted: false,
+      collapsed_team_ids: ["team-1"],
+      collapsed_team_ids_by_list: { all: ["team-1"] },
+    });
+
+    const firstLaunch = render(<App />);
+    expect(await screen.findByRole("button", { name: "Expand Core Dev Swarm" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("team-block-team-1")).queryByText("Alpha")).not.toBeInTheDocument();
+    firstLaunch.unmount();
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Expand Core Dev Swarm" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("team-block-team-1")).queryByText("Beta")).not.toBeInTheDocument();
   });
 
   it("renders team members in the main grid when a watchlist contains a team entry", async () => {

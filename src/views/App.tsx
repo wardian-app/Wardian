@@ -100,6 +100,17 @@ declare global {
 
 const ACTIVE_STATUSES = new Set(["Processing...", "Headless", "Action Needed"]);
 
+function normalizeCollapsedTeamIdsByList(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([listId, teamIds]) => {
+      if (!Array.isArray(teamIds)) return [];
+      return [[listId, teamIds.filter((teamId): teamId is string => typeof teamId === "string")]];
+    }),
+  );
+}
+
 const NATIVE_WINDOW_WIDTH_VAR = "--wardian-native-window-width";
 const NATIVE_WINDOW_HEIGHT_VAR = "--wardian-native-window-height";
 const OUTER_WINDOW_FALLBACK_COOLDOWN_MS = 1_000;
@@ -553,11 +564,21 @@ function AppBody() {
         if (prefs) {
           // Merge saved prefs with defaults so newly-added columns always appear
           const savedMap = new Map(prefs.columns.map(c => [c.id, c]));
+          const collapsedTeamIds = Array.isArray(prefs.collapsed_team_ids)
+            ? prefs.collapsed_team_ids.filter((teamId): teamId is string => typeof teamId === "string")
+            : [];
+          const collapsedTeamIdsByList = normalizeCollapsedTeamIdsByList(
+            prefs.collapsed_team_ids_by_list,
+          );
+          if (!collapsedTeamIdsByList.all && collapsedTeamIds.length > 0) {
+            collapsedTeamIdsByList.all = collapsedTeamIds;
+          }
           setWatchlistPrefs({
             ...DEFAULT_WATCHLIST_PREFS,
             ...prefs,
             columns: DEFAULT_WATCHLIST_PREFS.columns.map(def => savedMap.get(def.id) ?? def),
-            collapsed_team_ids: Array.isArray(prefs.collapsed_team_ids) ? prefs.collapsed_team_ids : [],
+            collapsed_team_ids: collapsedTeamIds,
+            collapsed_team_ids_by_list: collapsedTeamIdsByList,
           });
         }
       } catch { /* first run */ }
