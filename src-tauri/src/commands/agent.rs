@@ -1589,6 +1589,25 @@ fn find_assignable_worktree(
         .find(|worktree| worktree.worktree_folder == normalized_worktree_folder)
 }
 
+fn find_deletable_worktree_for_source(
+    configs: &[AgentConfig],
+    wardian_home: &std::path::Path,
+    source_folder: &str,
+    worktree_folder: &str,
+    discovered: Vec<DiscoveredGitWorktree>,
+) -> Option<AgentWorktreeSummary> {
+    let normalized_source_folder = normalize_maybe_existing_workspace_record_path(source_folder);
+    let normalized_worktree_folder =
+        normalize_maybe_existing_workspace_record_path(worktree_folder);
+
+    collect_agent_worktrees_with_discovered(configs, wardian_home, discovered)
+        .into_iter()
+        .find(|worktree| {
+            workspace_paths_match(&worktree.source_folder, &normalized_source_folder)
+                && workspace_paths_match(&worktree.worktree_folder, &normalized_worktree_folder)
+        })
+}
+
 fn validate_assignable_worktree_for_agent(
     source_folder: &str,
     managed_worktree: &AgentWorktreeSummary,
@@ -3303,12 +3322,18 @@ pub async fn assign_agent_worktree(
 #[tauri::command]
 pub async fn delete_agent_worktree(
     worktree_folder: String,
+    source_folder: String,
+    force: bool,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
     let worktree_folder = worktree_folder.trim().to_string();
     if worktree_folder.is_empty() {
         return Err("Worktree folder is required".to_string());
+    }
+    let source_folder = source_folder.trim().to_string();
+    if source_folder.is_empty() {
+        return Err("Source folder is required".to_string());
     }
     let worktree_path = std::path::Path::new(&worktree_folder);
     if !worktree_path.is_dir() {
@@ -3324,16 +3349,38 @@ pub async fn delete_agent_worktree(
             .map(|agent| agent.config.lock().unwrap().clone())
             .collect::<Vec<_>>()
     };
-    let discovered = discover_git_worktrees_for_configs(&configs, &wardian_home);
-    let managed_worktree =
-        find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
-            .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
+    let normalized_source_folder = normalize_maybe_existing_workspace_record_path(&source_folder);
+    let discovered =
+        crate::commands::git::list_git_worktrees(std::path::Path::new(&normalized_source_folder))?
+            .into_iter()
+            .filter_map(|worktree| {
+                let worktree_folder = normalize_discovered_git_worktree_path(&worktree.path);
+                if workspace_paths_match(&normalized_source_folder, &worktree_folder) {
+                    return None;
+                }
+                Some(DiscoveredGitWorktree {
+                    source_folder: normalized_source_folder.clone(),
+                    worktree_folder,
+                })
+            })
+            .collect();
+    let managed_worktree = find_deletable_worktree_for_source(
+        &configs,
+        &wardian_home,
+        &normalized_source_folder,
+        &worktree_folder,
+        discovered,
+    )
+    .ok_or_else(|| "Selected worktree is not registered with its source workspace".to_string())?;
 
     validate_deletable_agent_worktree(&wardian_home, &managed_worktree)?;
-    crate::commands::git::remove_worktree_without_force(
-        std::path::Path::new(&managed_worktree.source_folder),
-        std::path::Path::new(&managed_worktree.worktree_folder),
-    )?;
+    let source_path = std::path::Path::new(&managed_worktree.source_folder);
+    let worktree_path = std::path::Path::new(&managed_worktree.worktree_folder);
+    if force {
+        crate::commands::git::remove_worktree_with_force(source_path, worktree_path)?;
+    } else {
+        crate::commands::git::remove_worktree_without_force(source_path, worktree_path)?;
+    }
 
     let _ = app.emit("agents-updated", ());
     Ok(())
@@ -3421,7 +3468,8 @@ mod tests {
         restore_agent_config_in_state, restore_runtime_state_snapshot_after_resume,
         strip_claude_embedded_stream_flags, take_agent_runtime_for_termination,
         terminal_cleared_payload, update_agent_fields_in_state,
-        validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
+        find_deletable_worktree_for_source, validate_assignable_worktree_for_agent,
+        validate_deletable_agent_worktree,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
         GIT_WORKTREE_DISCOVERY_CONCURRENCY,
@@ -5721,6 +5769,48 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         );
         assert!(found.member_agent_ids.is_empty());
         assert!(!found.can_delete);
+    }
+
+    #[test]
+    fn find_deletable_worktree_uses_the_selected_source_and_folder() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home
+            .path()
+            .join("agents")
+            .join("agent-2")
+            .join("worktrees")
+            .join("review");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let worktree_folder = normalize_workspace_record_path(&worktree);
+        let configs = vec![AgentConfig {
+            session_id: "agent-1".to_string(),
+            folder: "/unrelated-repository".to_string(),
+            ..Default::default()
+        }];
+        let discovered = vec![DiscoveredGitWorktree {
+            source_folder: "/selected-repository".to_string(),
+            worktree_folder: worktree_folder.clone(),
+        }];
+
+        let found = find_deletable_worktree_for_source(
+            &configs,
+            home.path(),
+            "/selected-repository",
+            &worktree_folder,
+            discovered.clone(),
+        )
+        .expect("selected worktree should resolve independently of active agent");
+
+        assert_eq!(found.source_folder, "/selected-repository");
+        assert_eq!(found.worktree_folder, worktree_folder);
+        assert!(find_deletable_worktree_for_source(
+            &configs,
+            home.path(),
+            "/wrong-repository",
+            &found.worktree_folder,
+            discovered,
+        )
+        .is_none());
     }
 
     #[test]
