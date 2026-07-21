@@ -103,6 +103,9 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("spctl --assess --type open");
     expect(releaseWorkflow).toContain("spctl --assess --type execute");
     expect(releaseWorkflow).toContain("*.app.tar.gz");
+    expect(stageCliScript).toContain("signMacReleaseResource");
+    expect(stageCliScript).toContain("'--options', 'runtime'");
+    expect(stageCliScript).toContain("'--timestamp'");
   });
 
   it("keeps native window minimums aligned with the frontend resize guard", () => {
@@ -188,6 +191,8 @@ describe("release workflow contract", () => {
     expect(stageCliScript).toContain("const buildArgs = ['build', '-p', 'wardian-cli'];");
     expect(stageCliScript).toContain("buildArgs.push('--release');");
     expect(stageCliScript).toContain("const target = process.env.WARDIAN_CLI_TARGET?.trim();");
+    expect(stageCliScript).toContain("const stagedResource = join(destDir, exe);");
+    expect(stageCliScript).toContain("signMacReleaseResource(stagedResource, profile)");
   });
 
   it("stages a current worktree CLI before dev startup", () => {

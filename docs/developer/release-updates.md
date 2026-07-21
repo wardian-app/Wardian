@@ -39,7 +39,7 @@ If the private key or password is lost, existing updater-enabled installs cannot
 
 ## macOS Signing and Notarization
 
-Stable and prerelease macOS release builds use a Developer ID Application certificate, Apple notarization, and stapling. The release workflow imports the certificate into an ephemeral runner keychain, signs the app and nested code, submits the macOS artifacts to Apple, and validates the stapled DMG and updater archive before the draft release can publish.
+Stable and prerelease macOS release builds use a Developer ID Application certificate, Apple notarization, and stapling. The release workflow imports the certificate into an ephemeral runner keychain, signs the app and nested code, submits the macOS artifacts to Apple, and validates the stapled DMG and updater archive before the draft release can publish. The bundled `resources/bin/wardian-cli` file is a separate Mach-O executable, so release staging signs it with hardened runtime and a secure timestamp before Tauri signs the app bundle. `wardian-core` is statically linked into the app and CLI executables and does not have a separate code-signing identity.
 
 The release-distribution decision and its operational invariants are recorded
 in the repository-internal [macOS Notarized Release Distribution
