@@ -746,6 +746,7 @@ pub fn run() {
             commands::settings::load_shell_settings,
             commands::settings::get_settings_folder_path,
             commands::settings::get_update_eligibility,
+            commands::settings::restart_app,
             commands::settings::install_update_with_windows_handoff,
             commands::settings::list_available_shells,
             commands::settings::load_app_settings,
@@ -773,9 +774,7 @@ pub fn run() {
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn register_update_plugins<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     if commands::settings::update_plugins_enabled_for_current_build() {
-        builder
-            .plugin(tauri_plugin_process::init())
-            .plugin(tauri_plugin_updater::Builder::new().build())
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
     } else {
         builder
     }

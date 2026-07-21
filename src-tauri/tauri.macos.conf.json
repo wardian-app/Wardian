@@ -5,10 +5,24 @@
         "title": "Wardian",
         "width": 800,
         "height": 600,
+        "decorations": true,
         "transparent": true,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 11
+        }
       }
+    ]
+  },
+  "bundle": {
+    "icon": [
+      "icons/white/32x32.png",
+      "icons/white/128x128.png",
+      "icons/white/128x128@2x.png",
+      "icons/white/icon.icns",
+      "icons/white/icon.ico"
     ]
   }
 }

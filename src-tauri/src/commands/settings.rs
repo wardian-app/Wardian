@@ -592,6 +592,11 @@ pub fn get_update_eligibility() -> UpdateEligibility {
     )
 }
 
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 pub fn update_plugins_enabled_for_current_build() -> bool {
     get_update_eligibility().enabled
 }

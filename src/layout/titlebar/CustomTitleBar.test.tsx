@@ -63,6 +63,16 @@ describe("CustomTitleBar density", () => {
       .toHaveStyle({ paddingLeft: "72px" });
     userAgent.mockRestore();
   });
+
+  it("keeps the macOS roster toggle clear of the window edge when collapsed", () => {
+    const userAgent = vi.spyOn(window.navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    const { container } = render(<CustomTitleBar {...titlebarProps} rightCollapsed />);
+    const titlebar = container.firstElementChild as HTMLElement;
+
+    expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("48px");
+    userAgent.mockRestore();
+  });
 });
 
 describe("CustomTitleBar navigation", () => {
