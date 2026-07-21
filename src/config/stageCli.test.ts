@@ -8,4 +8,14 @@ describe("stage CLI script", () => {
     expect(stageCliScript).toContain("if (profile === 'dev')");
     expect(stageCliScript).toContain("copyFileSync(source, devResource)");
   });
+
+  it("signs the staged macOS release CLI resource when a release identity is available", () => {
+    expect(stageCliScript).toContain("export function shouldSignMacReleaseResource");
+    expect(stageCliScript).toContain("platform === 'darwin'");
+    expect(stageCliScript).toContain("profile === 'release'");
+    expect(stageCliScript).toContain("process.env.APPLE_SIGNING_IDENTITY?.trim()");
+    expect(stageCliScript).toContain("'--options', 'runtime'");
+    expect(stageCliScript).toContain("'--timestamp'");
+    expect(stageCliScript).toContain("signMacReleaseResource(stagedResource, profile)");
+  });
 });

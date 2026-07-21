@@ -23,6 +23,40 @@ export function resolveDevResourcePath({ targetDirectory, target, exe }) {
     : join(targetDirectory, 'debug', 'resources', 'bin', exe);
 }
 
+export function shouldSignMacReleaseResource({ platform, profile, signingIdentity }) {
+  return platform === 'darwin' && profile === 'release' && Boolean(signingIdentity?.trim());
+}
+
+function signMacReleaseResource(path, profile) {
+  const signingIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim();
+  if (!shouldSignMacReleaseResource({
+    platform: process.platform,
+    profile,
+    signingIdentity,
+  })) {
+    return;
+  }
+
+  console.log(`Signing staged macOS CLI resource with ${signingIdentity}`);
+  const result = spawnSync('codesign', [
+    '--force',
+    '--options', 'runtime',
+    '--timestamp',
+    '--sign', signingIdentity,
+    path,
+  ], {
+    stdio: 'inherit',
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to sign staged macOS CLI resource: ${path}`);
+  }
+}
+
 function parseProfile(argv) {
   const profileIndex = argv.indexOf('--profile');
   const profile = profileIndex === -1 ? 'release' : argv[profileIndex + 1]?.trim();
@@ -89,7 +123,9 @@ export function main() {
   });
   const destDir = join(root, 'src-tauri', 'resources', 'bin');
   mkdirSync(destDir, { recursive: true });
-  copyFileSync(source, join(destDir, exe));
+  const stagedResource = join(destDir, exe);
+  copyFileSync(source, stagedResource);
+  signMacReleaseResource(stagedResource, profile);
 
   if (profile === 'dev') {
     const devResource = resolveDevResourcePath({
