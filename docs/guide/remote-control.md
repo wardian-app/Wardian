@@ -238,7 +238,7 @@ is focused on:
 - Viewing active agent status in a compact list.
 - Mirroring desktop watchlist and team organization.
 - Collapsing noisy team sections locally on the phone.
-- Opening an agent into a terminal-first detail view with chat one tap away.
+- Opening an agent into an interactive terminal-first detail view with chat one tap away.
 - Running lifecycle and prompt actions from the agent detail view.
 
 The watchlist itself does not expose inline actions. Tap an agent row to open
@@ -256,11 +256,11 @@ The mobile watchlist does not expose broadcast. Use agent detail for
 single-agent prompts from the phone, and use the desktop app for multi-agent
 broadcast workflows.
 
-When you tap an agent, Wardian opens a read-only terminal transcript by
-default. This transcript is a sanitized snapshot from the desktop-owned agent
-watch state; it does not drain the desktop PTY renderer. Use the Terminal and
-Chat buttons in the agent detail view to switch between the terminal transcript
-and the normalized chat transcript.
+When you tap an agent, Wardian opens its terminal and claims the interactive
+terminal presentation automatically. You can type immediately; Wardian does
+not expose ownership labels or a separate control step on the phone. Swipe or
+use the mouse wheel to review terminal history, including alternate-screen
+terminal interfaces. Chat remains one tap away.
 
 The agent detail composer sends ordinary chat messages by default. Turn on
 command mode when you need to submit a provider slash command or another input
