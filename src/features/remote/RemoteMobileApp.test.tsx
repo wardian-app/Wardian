@@ -1296,13 +1296,15 @@ describe("RemoteMobileApp", () => {
         data: JSON.stringify(remoteTerminalRegisteredMessage()),
       });
     });
-    expect(await screen.findByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Mirror");
-    await userEvent.click(screen.getByRole("button", { name: "Take terminal control" }));
-    expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
-      type: "begin_activation",
-      runtime_generation: 1,
-      observed_lease_epoch: 1,
+    await waitFor(() => {
+      expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+        type: "begin_activation",
+        runtime_generation: 1,
+        observed_lease_epoch: 1,
+      });
     });
+    expect(screen.queryByText("Mirror")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Take terminal control" })).not.toBeInTheDocument();
     const terminalTicketCall = fetchMock.mock.calls
       .filter(([url]) => url === "/remote/api/ws-ticket")
       .map(([, init]) => JSON.parse(init?.body as string))
@@ -2393,7 +2395,7 @@ describe("RemoteMobileApp", () => {
     expect(terminalInstance.scrollLines).toHaveBeenCalledWith(2);
   });
 
-  it("leaves wheel events to an alternate-screen mouse session", async () => {
+  it("maps wheel events from an alternate-screen session to xterm scrollback", async () => {
     mockRemoteAgentDetailFetch("opencode");
     render(<RemoteMobileApp />);
 
@@ -2409,10 +2411,10 @@ describe("RemoteMobileApp", () => {
 
     fireEvent.wheel(terminalSurface, { deltaY: -120, deltaMode: WheelEvent.DOM_DELTA_PIXEL });
 
-    expect(terminal.scrollLines).not.toHaveBeenCalled();
+    expect(terminal.scrollLines).toHaveBeenCalledWith(-6);
   });
 
-  it("translates alternate-screen touch travel into a wheel event", async () => {
+  it("maps alternate-screen touch travel to xterm scrollback", async () => {
     mockRemoteAgentDetailFetch("opencode");
     render(<RemoteMobileApp />);
 
@@ -2425,19 +2427,10 @@ describe("RemoteMobileApp", () => {
     (terminal.buffer.active as { type: "normal" | "alternate" }).type = "alternate";
     (terminal.modes as { mouseTrackingMode: "none" | "any" }).mouseTrackingMode = "any";
     terminal.scrollLines.mockClear();
-    const wheelListener = vi.fn();
-    terminalHost.addEventListener("wheel", wheelListener);
-
     fireEvent.touchStart(terminalHost, { touches: [{ clientX: 92, clientY: 220 }] });
     fireEvent.touchMove(terminalHost, { touches: [{ clientX: 96, clientY: 184 }] });
 
-    expect(wheelListener).toHaveBeenCalledTimes(1);
-    expect(wheelListener.mock.calls[0]?.[0]).toMatchObject({
-      clientX: 96,
-      clientY: 184,
-      deltaY: 36,
-    });
-    expect(terminal.scrollLines).not.toHaveBeenCalled();
+    expect(terminal.scrollLines).toHaveBeenCalledWith(2);
   });
 
   it("maps captured terminal child touch drags to xterm scrollback", async () => {
@@ -2635,8 +2628,16 @@ describe("RemoteMobileApp", () => {
           data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
         });
       });
-      await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
-
+      await waitFor(() => {
+        expect(MockWebSocket.instances[1]?.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+          type: "resize",
+          runtime_generation: 1,
+          lease_epoch: 1,
+          geometry_sequence: 1,
+          cols: 80,
+          rows: 24,
+        });
+      });
       const terminalResults = vi.mocked(Terminal).mock.results;
       const terminalInstance = terminalResults[terminalResults.length - 1]?.value as { cols: number; rows: number };
       terminalInstance.cols = 112;
@@ -3281,8 +3282,6 @@ describe("RemoteMobileApp", () => {
         data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
-
     const sentBeforeColorReply = terminalSocket?.sent.length ?? 0;
     act(() => {
       onData?.(colorReply);
@@ -3316,8 +3315,6 @@ describe("RemoteMobileApp", () => {
         data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true })),
       });
     });
-    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
-
     const sentBeforeTyping = terminalSocket?.sent.length ?? 0;
     act(() => {
       terminalInstance.textarea.dispatchEvent(new CompositionEvent("compositionstart"));
@@ -3406,8 +3403,6 @@ describe("RemoteMobileApp", () => {
         data: JSON.stringify(remoteTerminalRegisteredMessage({ owner: true, state: "\u001b[6n\u001b[14t" })),
       });
     });
-    await waitFor(() => expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Owner"));
-
     const inputFrames = terminalSocket?.sent.map((payload) => JSON.parse(payload)).filter((frame) => frame.type === "input");
     expect(inputFrames).toEqual([
       { type: "input", runtime_generation: 1, lease_epoch: 1, data: "\u001b[1;1R" },
