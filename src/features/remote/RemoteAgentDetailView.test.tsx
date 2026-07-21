@@ -105,6 +105,27 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses the desktop Antigravity terminal palette and contrast floor on mobile", async () => {
+    document.documentElement.style.setProperty("--color-wardian-card", "#1a1a1a");
+    document.documentElement.style.setProperty("--color-wardian-text", "#ebebeb");
+    const antigravityAgent = { ...agent, provider: "antigravity" as const };
+    vi.spyOn(remoteClient, "openTerminalStream").mockResolvedValue(new DetailSocket() as unknown as WebSocket);
+
+    render(<RemoteAgentDetailView agent={antigravityAgent} />);
+
+    await waitFor(() => expect(vi.mocked(Terminal)).toHaveBeenCalled());
+    const terminalCalls = vi.mocked(Terminal).mock.calls;
+    const terminalOptions = terminalCalls[terminalCalls.length - 1]?.[0] as {
+      minimumContrastRatio?: number;
+      theme?: { background?: string; foreground?: string };
+    };
+    expect(terminalOptions.minimumContrastRatio).toBe(7);
+    expect(terminalOptions.theme).toMatchObject({
+      background: "#1a1a1a",
+      foreground: "#c9d1d9",
+    });
+  });
+
   it("implicitly requests terminal ownership when the terminal view opens", async () => {
     const socket = new DetailSocket();
     let handlers: Parameters<typeof remoteClient.openTerminalStream>[3] | undefined;

@@ -51,6 +51,7 @@ import {
 import { installConservativeTerminalShortcuts } from "../terminal/terminalShortcuts";
 import { calculateTerminalMirrorFit } from "../terminal/terminalRendererBudget";
 import { proposeTerminalRows, renderedTerminalRowHeight } from "../terminal/terminalSizing";
+import { terminalMinimumContrastRatio, terminalThemeForProvider } from "../terminal/terminalThemes";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -106,13 +107,17 @@ function wardianColorToken(name: string, fallback: string) {
   return value || fallback;
 }
 
-function remoteTerminalTheme() {
-  return {
+function remoteTerminalTheme(provider?: string) {
+  const remoteTheme = {
     background: wardianColorToken("--color-wardian-card", "#f3f4f6"),
     foreground: wardianColorToken("--color-wardian-text", "#111827"),
     cursor: wardianColorToken("--color-wardian-accent", "#926a09"),
     selectionBackground: wardianColorToken("--color-wardian-border", "#e5e7eb"),
   };
+  if (provider !== "antigravity") return remoteTheme;
+
+  const background = cssColorToRgbParts(remoteTheme.background, [243, 244, 246]);
+  return terminalThemeForProvider(rgbLuminance(background) >= 0.5 ? "light" : "dark", provider);
 }
 
 function cssColorToRgbParts(value: string, fallback: [number, number, number]) {
@@ -153,8 +158,12 @@ function rgbLuminance(parts: [number, number, number]) {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
-function remoteTerminalCapabilityContext(terminal: Terminal, host: HTMLDivElement): TerminalCapabilityContext {
-  const theme = remoteTerminalTheme();
+function remoteTerminalCapabilityContext(
+  terminal: Terminal,
+  host: HTMLDivElement,
+  provider?: string,
+): TerminalCapabilityContext {
+  const theme = remoteTerminalTheme(provider);
   const backgroundParts = cssColorToRgbParts(theme.background, [243, 244, 246]);
   const foregroundParts = cssColorToRgbParts(theme.foreground, [17, 24, 39]);
   const rect = host.getBoundingClientRect();
@@ -174,8 +183,8 @@ function remoteTerminalCapabilityContext(terminal: Terminal, host: HTMLDivElemen
   };
 }
 
-function applyRemoteTerminalTheme(terminal: Terminal, host: HTMLDivElement) {
-  const theme = remoteTerminalTheme();
+function applyRemoteTerminalTheme(terminal: Terminal, host: HTMLDivElement, provider?: string) {
+  const theme = remoteTerminalTheme(provider);
   const terminalWithOptions = terminal as Terminal & {
     options?: { theme?: ReturnType<typeof remoteTerminalTheme> };
     refresh?: (start: number, end: number) => void;
@@ -708,16 +717,17 @@ function TerminalPane({
       cursorStyle: "bar",
       disableStdin: true,
       fontSize: remoteTerminalFontSize,
+      minimumContrastRatio: terminalMinimumContrastRatio(agent.provider ?? undefined),
       rows: 24,
       scrollback: 1_000,
-      theme: remoteTerminalTheme(),
+      theme: remoteTerminalTheme(agent.provider ?? undefined),
     });
     installConservativeTerminalShortcuts(terminal);
     const fitAddon = new FitAddon();
     terminal.loadAddon?.(fitAddon);
     terminal.open?.(host);
     fitAddon.fit?.();
-    applyRemoteTerminalTheme(terminal, host);
+    applyRemoteTerminalTheme(terminal, host, agent.provider ?? undefined);
     scrollSurface.style.touchAction = "none";
     scrollSurface.style.overscrollBehavior = "contain";
     const removeTerminalScrollBridge = installTerminalScrollBridge(terminal, scrollSurface, host);
@@ -804,7 +814,7 @@ function TerminalPane({
     const themeObserver =
       typeof MutationObserver === "undefined"
         ? null
-        : new MutationObserver(() => applyRemoteTerminalTheme(terminal, host));
+        : new MutationObserver(() => applyRemoteTerminalTheme(terminal, host, agent.provider ?? undefined));
     themeObserver?.observe(document.documentElement, {
       attributeFilter: ["class", "data-theme", "style"],
       attributes: true,
@@ -846,7 +856,7 @@ function TerminalPane({
     };
     const planRemoteTerminalOutput = (output: string) => {
       const context = {
-        ...remoteTerminalCapabilityContext(terminal, host),
+        ...remoteTerminalCapabilityContext(terminal, host, agent.provider ?? undefined),
         focusReported,
       };
       const plan = planTerminalCapabilityResponses(agent.provider ?? undefined, output, context);
