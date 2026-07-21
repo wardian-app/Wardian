@@ -676,9 +676,21 @@ pub(crate) fn worktree_build_env(config: &AgentConfig) -> Vec<(String, String)> 
         return Vec::new();
     }
 
+    let Some(worktree_folder) = config
+        .git_worktree_folder
+        .as_deref()
+        .map(str::trim)
+        .filter(|folder| !folder.is_empty())
+    else {
+        return Vec::new();
+    };
+
     vec![(
         "CARGO_TARGET_DIR".to_string(),
-        source_path.join("target").to_string_lossy().to_string(),
+        std::path::Path::new(worktree_folder)
+            .join("target")
+            .to_string_lossy()
+            .to_string(),
     )]
 }
 
@@ -1640,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_build_env_points_cargo_target_dir_to_source_checkout() {
+    fn worktree_build_env_points_cargo_target_dir_to_worktree() {
         let temp = tempfile::tempdir().expect("temp");
         let source = temp.path().join("Wardian");
         let worktree = temp.path().join("Wardian.wt").join("debugging");
@@ -1658,8 +1670,23 @@ mod tests {
 
         assert!(env.contains(&(
             "CARGO_TARGET_DIR".to_string(),
-            source.join("target").to_string_lossy().to_string(),
+            worktree.join("target").to_string_lossy().to_string(),
         )));
+    }
+
+    #[test]
+    fn worktree_build_env_skips_worktrees_without_a_folder() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("Wardian");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("Cargo.toml"), "[workspace]\n").expect("cargo toml");
+        let config = AgentConfig {
+            git_worktree: Some(true),
+            git_worktree_source: Some(source.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        assert!(worktree_build_env(&config).is_empty());
     }
 
     #[test]
