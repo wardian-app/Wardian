@@ -65,7 +65,7 @@ import {
   DashboardSurface,
   GardenSurface,
   GraphSurface,
-  QueueSurface,
+  InboxSurface,
   normalizeGardenSurfaceState,
   normalizeGraphSurfaceState,
 } from "../features/workbench/surfaces/coreSurfaceDefinitions";
@@ -857,7 +857,9 @@ function AppBody() {
     fetchAgentClasses();
     loadQueueItems();
     loadQueuePreferences();
+    const inboxPoll = window.setInterval(() => loadQueueItems(), 5_000);
     const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
+    const unlistenInbox = listen("inbox-updated", () => loadQueueItems());
     // Class definitions (create/delete/reset) are now managed exclusively
     // from the Library's ClassDetail panel, which reports changes through
     // the same `library-changed` event the library store listens for (see
@@ -871,7 +873,9 @@ function AppBody() {
     });
     return () => {
       unlistenWatchlists.then(fn => fn());
+      unlistenInbox.then(fn => fn());
       unlistenLibrary.then(fn => fn());
+      window.clearInterval(inboxPoll);
     };
   }, [loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
@@ -1247,9 +1251,9 @@ function AppBody() {
       );
     }
 
-    if (surface.surface_type === "queue") {
+    if (surface.surface_type === "inbox") {
       return (
-        <QueueSurface
+        <InboxSurface
           surface_id={surface.surface_id}
           state={{}}
           visibility={visibility}

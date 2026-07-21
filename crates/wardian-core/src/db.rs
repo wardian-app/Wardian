@@ -362,6 +362,21 @@ pub fn upsert_interaction_record(
     })
 }
 
+/// Persist related interaction records together so parent state and its reply do
+/// not become independently visible after a partial approval resolution.
+pub fn upsert_interaction_records(
+    records: &[InteractionRecord],
+) -> Result<(), Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        let transaction = conn.unchecked_transaction()?;
+        for record in records {
+            upsert_interaction_record_with_conn(&transaction, record)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+}
+
 pub fn upsert_interaction_record_with_conn(
     conn: &Connection,
     record: &InteractionRecord,

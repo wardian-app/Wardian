@@ -22,7 +22,7 @@ import {
 const SURFACE_ICONS: Readonly<Record<string, LucideIcon>> = {
   "agents-overview": LayoutGrid,
   dashboard: Gauge,
-  queue: ListTodo,
+  inbox: ListTodo,
   graph: Network,
   garden: Sprout,
   library: LibraryIcon,

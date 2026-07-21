@@ -13,7 +13,7 @@ Use it when a repeated multi-step agent process needs a saved visual flow instea
 - Chain multiple agent, command, wait, or branch steps.
 - Reuse a process that should run manually, on a schedule, or from a listener trigger.
 - Inspect upstream values before passing them into later nodes.
-- Compare workflow outcomes in [Queue](./queue.md).
+- Compare workflow outcomes in [Inbox](./inbox.md).
 
 ## What You Can Do Here
 
@@ -132,7 +132,7 @@ owned by a particular agent.
 - The visual view is for building and launching workflows. Detailed node semantics live in the workflow reference.
 - Real provider behavior still depends on the selected agent class, provider CLI, workspace, and runtime settings.
 - Scheduled and listener workflows require the app runtime to be available when they are expected to run.
-- Queue records final workflow outcomes, not every intermediate node state.
+- Inbox records final workflow outcomes and workflow approval decisions, not every intermediate node state.
 
 ## Related Links
 

@@ -218,7 +218,7 @@ Implementation must update public and developer documentation alongside code:
 - `docs/guide/cli.md`: explain structured `ask`/`reply`, durable task/reply
   interactions, ordinary `send` delivery, and the distinction between structured
   reply waiting and output-marker waiting.
-- `docs/guide/queue.md`: explain provider-sourced action-needed cards, completed
+- `docs/guide/inbox.md`: explain provider-sourced action-needed cards, completed
   interaction cards, persistence, and restart/replay guarantees.
 - `docs/developer/ipc-events.md`: document new interaction and provider runtime
   event contracts.

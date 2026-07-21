@@ -31,7 +31,7 @@ type SettingsCategory =
   | "General"
   | "Appearance"
   | "Grid"
-  | "Queue"
+  | "Inbox"
   | "Explorer"
   | "Watchlist"
   | "Terminal"
@@ -53,7 +53,7 @@ const categories: SettingsCategory[] = [
   "General",
   "Appearance",
   "Grid",
-  "Queue",
+  "Inbox",
   "Explorer",
   "Watchlist",
   "Terminal",
@@ -115,24 +115,24 @@ const rowDefinitions: SettingsRowDefinition[] = [
   },
   {
     id: "queue-desktop-notifications",
-    category: "Queue",
+    category: "Inbox",
     label: "Desktop alerts",
-    detail: "Choose which queue events can trigger operating system notifications.",
-    keywords: ["queue", "notifications", "desktop", "alerts", "action needed"],
+    detail: "Choose which Inbox events can trigger operating system notifications.",
+    keywords: ["inbox", "queue", "notifications", "desktop", "alerts", "action needed"],
   },
   {
     id: "queue-sound-notifications",
-    category: "Queue",
+    category: "Inbox",
     label: "Sound alerts",
-    detail: "Choose which queue events play Wardian's local notification tone.",
-    keywords: ["queue", "notifications", "sound", "tone", "action needed"],
+    detail: "Choose which Inbox events play Wardian's local notification tone.",
+    keywords: ["inbox", "queue", "notifications", "sound", "tone", "action needed"],
   },
   {
     id: "queue-sound-volume",
-    category: "Queue",
+    category: "Inbox",
     label: "Sound volume",
     detail: "Sets the volume for Wardian's local notification tone.",
-    keywords: ["queue", "notifications", "sound", "tone", "volume"],
+    keywords: ["inbox", "queue", "notifications", "sound", "tone", "volume"],
   },
   {
     id: "external-editor",

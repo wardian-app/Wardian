@@ -33,7 +33,7 @@
     "groups": {
       "perf-group-1": {
         "group_id": "perf-group-1",
-        "surface_ids": ["perf-agent-owner", "perf-overview", "perf-dashboard", "perf-queue", "perf-library"],
+        "surface_ids": ["perf-agent-owner", "perf-overview", "perf-dashboard", "perf-inbox", "perf-library"],
         "active_surface_id": "perf-agent-owner"
       },
       "perf-group-2": {
@@ -56,7 +56,7 @@
       "perf-agent-owner": { "surface_id": "perf-agent-owner", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
       "perf-overview": { "surface_id": "perf-overview", "surface_type": "agents-overview", "state_schema_version": 1, "state": { "mode": "auto", "focused_agent_id": "perf-agent-01", "search_query": "", "status_filter": [] } },
       "perf-dashboard": { "surface_id": "perf-dashboard", "surface_type": "dashboard", "state_schema_version": 1, "state": {} },
-      "perf-queue": { "surface_id": "perf-queue", "surface_type": "queue", "state_schema_version": 1, "state": {} },
+      "perf-inbox": { "surface_id": "perf-inbox", "surface_type": "inbox", "state_schema_version": 1, "state": {} },
       "perf-library": { "surface_id": "perf-library", "surface_type": "library", "state_schema_version": 1, "state": {} },
       "perf-agent-mirror-1": { "surface_id": "perf-agent-mirror-1", "surface_type": "agent-session", "resource_key": "perf-agent-01", "state_schema_version": 1, "state": {} },
       "perf-workflows": { "surface_id": "perf-workflows", "surface_type": "workflows", "state_schema_version": 1, "state": {} },

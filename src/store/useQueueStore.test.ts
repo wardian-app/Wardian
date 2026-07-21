@@ -10,6 +10,7 @@ function resetStore() {
     items: [],
     _agentBuffers: {},
     _workflowLastOutput: {},
+    _readNotificationIds: [],
     preferences: normalizeQueuePreferences({}),
   });
 }
@@ -130,19 +131,19 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(true);
   });
 
-  it("uses terminal output as the completion summary when no JSON result is available", () => {
+  it("does not use terminal output as a completion summary when no canonical final result is available", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[10;6HTest received.\u001b[15;6H",
       "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Test received.");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
   });
 
-  it("replaces a recent fallback Completed summary when terminal output arrives after flush", () => {
+  it("does not replace a completion fallback when terminal output arrives after flush", () => {
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
 
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
@@ -151,7 +152,7 @@ describe("useQueueStore - agent completion", () => {
     );
 
     expect(useQueueStore.getState().items).toHaveLength(1);
-    expect(useQueueStore.getState().items[0].summary).toBe("Delayed final text.");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
   });
 
   it("does not use Gemini terminal redraws as queue completion summaries", () => {
@@ -163,11 +164,11 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(false);
 
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
 
     useQueueStore.getState().appendAgentTerminalOutput("agent-1", "> What", "gemini");
     expect(useQueueStore.getState().items).toHaveLength(1);
-    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
   });
 
   it("does not use terminal prompt chrome as a completion summary", () => {
@@ -177,7 +178,7 @@ describe("useQueueStore - agent completion", () => {
       "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
   });
 
   it("uses an explicit completion summary instead of terminal fallback text", () => {
@@ -194,7 +195,7 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().items[0].summary).toBe("1\n2\n3\n4\n5");
   });
 
-  it("flushAgentCompletion creates an item with the buffered summary", () => {
+  it("flushAgentCompletion uses the fallback instead of its transient buffer", () => {
     useQueueStore.getState().appendAgentEvent("agent-1", {
       type: "result",
       result: "Final answer here",
@@ -206,11 +207,11 @@ describe("useQueueStore - agent completion", () => {
     expect(items[0].type).toBe("agent_completed");
     expect(items[0].agent_name).toBe("My Agent");
     expect(items[0].agent_session_id).toBe("agent-1");
-    expect(items[0].summary).toBe("Final answer here");
+    expect(items[0].summary).toBe("Work finished — no summary supplied");
     expect(items[0].read).toBe(false);
   });
 
-  it("keeps the beginning visible when bounding long completion summaries", () => {
+  it("bounds an explicit canonical completion summary", () => {
     const longResult = [
       "useQueueStore.test.ts:293 failed before the fix",
       "x".repeat(700),
@@ -221,7 +222,7 @@ describe("useQueueStore - agent completion", () => {
       type: "result",
       result: longResult,
     });
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", longResult);
 
     const summary = useQueueStore.getState().items[0].summary ?? "";
     expect(summary.length).toBeLessThanOrEqual(500);
@@ -230,9 +231,9 @@ describe("useQueueStore - agent completion", () => {
     expect(summary).toContain("serialize persistence writes");
   });
 
-  it("flushAgentCompletion falls back to 'Completed' when buffer is empty", () => {
+  it("flushAgentCompletion falls back when no canonical summary is available", () => {
     useQueueStore.getState().flushAgentCompletion("agent-2", "Agent B");
-    expect(useQueueStore.getState().items[0].summary).toBe("Completed");
+    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
   });
 
   it("flushAgentCompletion clears the buffer after flushing", () => {
@@ -439,6 +440,80 @@ describe("useQueueStore - persistence", () => {
     expect(useQueueStore.getState().items).toHaveLength(1);
     expect(useQueueStore.getState().items[0].id).toBe("new");
   });
+
+  it("keeps durable update notifications unread until their local acknowledgement is persisted", async () => {
+    const timestamp = Date.now();
+    mockInvoke.mockImplementation((command) => {
+      if (command === "load_queue_items") {
+        return Promise.resolve([{
+          id: "notification-read:notice-1",
+          type: "agent_update",
+          timestamp,
+          read: true,
+          inbox_notification_id: "notice-1",
+        }]);
+      }
+      if (command === "list_inbox_notifications") {
+        return Promise.resolve([{
+          id: "notice-1",
+          kind: "update",
+          sender_session_id: "agent-1",
+          status: "completed",
+          title: "Important update",
+          body: "A result needs your attention.",
+          choices: [],
+          created_at: new Date(timestamp).toISOString(),
+        }, {
+          id: "notice-2",
+          kind: "update",
+          sender_session_id: "agent-1",
+          status: "completed",
+          title: "Unread update",
+          body: "This has not been read yet.",
+          choices: [],
+          created_at: new Date(timestamp).toISOString(),
+        }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    await useQueueStore.getState().loadItems();
+
+    expect(useQueueStore.getState().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ inbox_notification_id: "notice-1", read: true }),
+      expect.objectContaining({ inbox_notification_id: "notice-2", read: false }),
+    ]));
+  });
+
+  it("does not reload persisted workflow approval projections as legacy cards", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "load_queue_items") {
+        return Promise.resolve([{
+          id: "workflow-approval:wf:run:gate",
+          type: "approval_request",
+          timestamp: Date.now(),
+          read: false,
+          workflow_approval: { blueprint_id: "wf", blueprint_path: "workflow.json", run_id: "run", node: "gate" },
+        }]);
+      }
+      if (command === "list_workflow_inbox_approvals") {
+        return Promise.resolve([{
+          blueprint_id: "wf",
+          blueprint_path: "workflow.json",
+          run_id: "run",
+          node: "gate",
+          title: "Release gate",
+          prompt: "Approve the deployment?",
+        }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    await useQueueStore.getState().loadItems();
+
+    expect(useQueueStore.getState().items).toHaveLength(1);
+    expect(useQueueStore.getState().items[0].workflow_approval).toBeDefined();
+  });
 });
 
 describe("useQueueStore - item management", () => {
@@ -464,6 +539,27 @@ describe("useQueueStore - item management", () => {
     );
     useQueueStore.getState().markAllRead();
     expect(useQueueStore.getState().items.every((i) => i.read)).toBe(true);
+  });
+
+  it("does not locally acknowledge workflow approval projections", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "workflow-approval:wf:run:gate",
+        type: "approval_request",
+        timestamp: Date.now(),
+        read: false,
+        workflow_approval: {
+          blueprint_id: "wf",
+          blueprint_path: "workflow.json",
+          run_id: "run",
+          node: "gate",
+        },
+      }],
+    });
+
+    useQueueStore.getState().markAllRead();
+
+    expect(useQueueStore.getState().items[0].read).toBe(false);
   });
 
   it("serializes queue persistence so markAllRead cannot be overwritten by an older save", async () => {
@@ -530,5 +626,28 @@ describe("useQueueStore - item management", () => {
     expect(items[0].workflow_name).toBe("Unread");
     expect(items[0].read).toBe(false);
     expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.anything());
+  });
+
+  it("preserves a durable update acknowledgement after clearing the displayed card", async () => {
+    useQueueStore.setState({
+      items: [{
+        id: "notification:notice-1",
+        type: "agent_update",
+        timestamp: Date.now(),
+        read: false,
+        inbox_notification_id: "notice-1",
+      }],
+    });
+
+    useQueueStore.getState().markRead("notification:notice-1");
+    useQueueStore.getState().clearRead();
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenLastCalledWith("save_queue_items", {
+        items: [expect.objectContaining({ inbox_notification_id: "notice-1", read: true })],
+      });
+    });
+    expect(useQueueStore.getState().items).toEqual([]);
+    expect(useQueueStore.getState()._readNotificationIds).toEqual(["notice-1"]);
   });
 });

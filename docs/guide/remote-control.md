@@ -271,14 +271,16 @@ The mobile action strip includes lifecycle controls for the selected agent.
 Clone remains a desktop-only operation so the phone does not create new agent
 sessions accidentally from a compact remote surface.
 
-The mobile Queue tab shows completion cards derived from live remote terminal
+The mobile Inbox tab shows completion cards derived from live remote terminal
 output and status transitions that the phone has observed in the current
 browser session. These cards help review recent mobile work, but they are not
-the durable desktop Queue. Restarting the PWA, using another phone, or opening
-the desktop Queue may show different history until a future remote queue
-endpoint hydrates the mobile surface from desktop-owned queue storage.
+the durable desktop Inbox: CLI `notify` updates, CLI approval requests, and
+workflow Approval nodes remain desktop-only in this release. Restarting the
+PWA, using another phone, or opening the desktop Inbox may show different
+history until a future remote Inbox endpoint hydrates the mobile surface from
+desktop-owned Inbox storage.
 
-![Mobile PWA Queue showing a recent agent completion summary](../assets/screenshots/remote-control/mobile-pwa-queue-summary.png)
+![Mobile PWA Inbox showing a recent agent completion summary](../assets/screenshots/remote-control/mobile-pwa-queue-summary.png)
 
 The service worker caches only the remote app shell and static assets. It does
 not queue agent, workflow, PTY, or revocation actions while offline. If the

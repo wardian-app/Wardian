@@ -836,7 +836,7 @@ describe("Workbench persistence boot integration", () => {
     for (const surfaceType of [
       "agents-overview",
       "dashboard",
-      "queue",
+      "inbox",
       "graph",
       "garden",
       "library",
@@ -950,7 +950,7 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
   });
 
-  it("routes Queue agent actions to an Agent Session surface", async () => {
+  it("routes Inbox agent actions to an Agent Session surface", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     currentQueueItems = [{
       id: "queue-agent-2",
@@ -968,7 +968,7 @@ describe("Workbench persistence boot integration", () => {
         return Promise.resolve({
           source: "primary",
           document: makeSingleGroupDocument([
-            makeSurface("queue-surface", { surface_type: "queue", state: {} }),
+            makeSurface("queue-surface", { surface_type: "inbox", state: {} }),
           ]),
           notice: null,
           durable_revision: 0,
@@ -979,8 +979,8 @@ describe("Workbench persistence boot integration", () => {
     });
 
     render(<App />);
-    const queueSurface = await screen.findByTestId("queue-surface");
-    fireEvent.click(within(queueSurface).getByRole("button", { name: /open agent terminal/i }));
+    const inboxSurface = await screen.findByTestId("inbox-surface");
+    fireEvent.click(within(inboxSurface).getByRole("button", { name: /open agent terminal/i }));
 
     const sessionSurface = await screen.findByTestId("agent-session-surface");
     const sessionTab = await screen.findByRole("tab", { name: "Beta" });
@@ -1679,7 +1679,7 @@ describe("Agent Watchlist Sidebar", () => {
               type: "agent_completed",
               agent_session_id: "agent-1",
               agent_name: "Alpha",
-              summary: "Finished the requested update.",
+              summary: "Work finished — no summary supplied",
               read: false,
             }),
           ],
@@ -1836,7 +1836,7 @@ describe("Agent Watchlist Sidebar", () => {
               type: "agent_completed",
               agent_session_id: "agent-1",
               agent_name: "Alpha",
-              summary: "Completed",
+              summary: "Work finished — no summary supplied",
               read: false,
             }),
           ],

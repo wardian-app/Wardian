@@ -97,6 +97,15 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_scope: Option<String>,
     },
+    NotifyCreate {
+        notification: InboxNotificationPayload,
+        origin: MessageOrigin,
+    },
+    NotifyWait {
+        notification_id: String,
+        timeout_ms: Option<u64>,
+        origin: MessageOrigin,
+    },
     Ask {
         target: String,
         message: String,
@@ -381,6 +390,44 @@ pub enum ReplyStatus {
     Done,
     Blocked,
     Failed,
+}
+
+/// A user-facing Inbox item created by a Wardian-managed agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxNotificationKind {
+    Update,
+    Approval,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxNotificationPayload {
+    pub kind: InboxNotificationKind,
+    pub title: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxNotificationDecision {
+    pub choice: String,
+    pub resolved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboxNotificationResponse {
+    pub schema: u8,
+    pub notification_id: String,
+    pub status: InteractionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<InboxNotificationDecision>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -702,6 +749,33 @@ mod tests {
         assert_eq!(value["command"], "artifact_present");
         assert_eq!(value["origin"]["kind"], "wardian_agent");
         assert_eq!(value["addressed_comment_ids"][1], "comment-2");
+        assert_eq!(
+            serde_json::from_value::<ControlRequest>(value).expect("roundtrip"),
+            request
+        );
+    }
+
+    #[test]
+    fn notification_requests_keep_structured_approval_fields() {
+        let request = ControlRequest::NotifyCreate {
+            notification: InboxNotificationPayload {
+                kind: InboxNotificationKind::Approval,
+                title: "Deploy production".to_string(),
+                body: "Deployment is ready".to_string(),
+                proposed_action: Some("Deploy the release".to_string()),
+                risk: Some("Changes live traffic".to_string()),
+                choices: vec!["Deploy".to_string(), "Do not deploy".to_string()],
+                expires_at: Some("2026-07-21T13:00:00.000Z".to_string()),
+            },
+            origin: MessageOrigin::WardianAgent {
+                session_id: "session-1".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(value["command"], "notify_create");
+        assert_eq!(value["notification"]["kind"], "approval");
+        assert_eq!(value["notification"]["choices"][1], "Do not deploy");
         assert_eq!(
             serde_json::from_value::<ControlRequest>(value).expect("roundtrip"),
             request

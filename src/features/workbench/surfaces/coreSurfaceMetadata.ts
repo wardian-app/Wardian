@@ -39,7 +39,7 @@ export const HEAVY_SURFACE_HIDDEN_GRACE_MS = resolveHeavySurfaceHiddenGraceMs(
 export const CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION = 1;
 export const CORE_VIEW_SURFACE_MAX_STATE_BYTES = 4 * 1024;
 
-export type CoreViewSurfaceType = "dashboard" | "queue" | "graph" | "garden";
+export type CoreViewSurfaceType = "dashboard" | "inbox" | "graph" | "garden";
 export type EmptyCoreViewSurfaceState = Readonly<Record<string, never>>;
 export type GraphSurfaceState = Readonly<{
   enabled_reasons: readonly GraphRelationshipReason[];
@@ -76,7 +76,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function restoreEmptyState(
   value: unknown,
   version: number,
-  surfaceType: "dashboard" | "queue",
+  surfaceType: "dashboard" | "inbox",
 ): SurfaceRestoreResult<EmptyCoreViewSurfaceState> {
   if (version !== CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION) {
     return { ok: false, error: `unsupported ${surfaceType} state version ${version}` };
@@ -167,17 +167,17 @@ function queueUnreadBadges(): SurfaceBadge[] {
   if (unreadCount === 0) return [];
   return [{
     badge_id: "unread",
-    label: `${unreadCount} unread queue item${unreadCount === 1 ? "" : "s"}`,
+    label: `${unreadCount} unread Inbox item${unreadCount === 1 ? "" : "s"}`,
     value: unreadCount > 9 ? "9+" : String(unreadCount),
   }];
 }
 
-export const QUEUE_SURFACE_DEFINITION: SurfaceDefinition = {
+export const INBOX_SURFACE_DEFINITION: SurfaceDefinition = {
   ...defineCoreViewSurface(
-    "queue", "Queue", "recreate_from_state", {
+    "inbox", "Inbox", "recreate_from_state", {
       default_state: () => EMPTY_STATE,
       serialize_state: () => EMPTY_STATE,
-      restore_state: (value, version) => restoreEmptyState(value, version, "queue"),
+      restore_state: (value, version) => restoreEmptyState(value, version, "inbox"),
     },
   ),
   presentation_subscribe: (listener: () => void) => useQueueStore.subscribe(listener),
@@ -200,7 +200,7 @@ export const GARDEN_SURFACE_DEFINITION = defineCoreViewSurface(
 
 export const CORE_VIEW_SURFACE_DEFINITIONS: readonly SurfaceDefinition[] = Object.freeze([
   DASHBOARD_SURFACE_DEFINITION,
-  QUEUE_SURFACE_DEFINITION,
+  INBOX_SURFACE_DEFINITION,
   GRAPH_SURFACE_DEFINITION,
   GARDEN_SURFACE_DEFINITION,
 ]);

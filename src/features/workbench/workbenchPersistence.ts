@@ -775,7 +775,7 @@ export type LegacyWorkbenchMigration = {
 const INITIAL_SURFACE_TYPE_BY_VIEW: Record<LegacyWorkbenchViewMode, string> = {
   grid: "agents-overview",
   dashboard: "dashboard",
-  queue: "queue",
+  queue: "inbox",
   library: "library",
   workflows: "workflows",
   graph: "graph",

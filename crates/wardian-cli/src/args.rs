@@ -18,6 +18,7 @@ pub enum Command {
     Watchlist(WatchlistArgs),
     Graph(GraphArgs),
     Send(SendArgs),
+    Notify(NotifyArgs),
     Ask(AskArgs),
     Reply(ReplyArgs),
 }
@@ -388,6 +389,58 @@ pub enum WorkflowScheduleCommand {
 // ---------------------------------------------------------------------------
 // wardian send
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// wardian notify
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Args)]
+pub struct NotifyArgs {
+    #[command(subcommand)]
+    pub command: NotifyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotifyCommand {
+    /// Send an important, concise update to the user's Inbox.
+    Update {
+        /// Update body (omit when using --stdin or --file)
+        message: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long, conflicts_with = "message")]
+        stdin: bool,
+        #[arg(long, conflicts_with_all = ["message", "stdin"])]
+        file: Option<String>,
+    },
+    /// Request exceptional human approval for a consequential action.
+    Approval {
+        /// Request context (omit when using --stdin or --file)
+        message: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        risk: String,
+        /// Explicit choice to present to the user; supply two to five times.
+        #[arg(long = "choice", required = true)]
+        choices: Vec<String>,
+        /// Expiry, for example 30m or 2h. Expiry never means approval.
+        #[arg(long = "expires-in", default_value = "30m")]
+        expires_in: String,
+        /// Wait for a user decision or expiry.
+        #[arg(long)]
+        wait: bool,
+        /// Maximum wait duration when --wait is supplied.
+        #[arg(long, default_value = "30m")]
+        timeout: String,
+        #[arg(long, conflicts_with = "message")]
+        stdin: bool,
+        #[arg(long, conflicts_with_all = ["message", "stdin"])]
+        file: Option<String>,
+    },
+}
 
 #[derive(Debug, Args)]
 pub struct SendArgs {
@@ -1162,6 +1215,36 @@ mod tests {
         assert!(matches!(
             args.command,
             WorkflowCommand::Normalize { ref path, write: true } if path == "wf.md"
+        ));
+    }
+
+    #[test]
+    fn parses_notify_approval_with_explicit_choices() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "notify",
+            "approval",
+            "Deployment is ready",
+            "--title",
+            "Deploy production",
+            "--action",
+            "Deploy the release",
+            "--risk",
+            "Changes live traffic",
+            "--choice",
+            "Deploy",
+            "--choice",
+            "Do not deploy",
+            "--wait",
+        ])
+        .expect("parse notify approval");
+        let Command::Notify(args) = cli.command else {
+            panic!("expected Notify")
+        };
+        assert!(matches!(
+            args.command,
+            NotifyCommand::Approval { wait: true, ref choices, .. }
+                if choices == &vec!["Deploy".to_string(), "Do not deploy".to_string()]
         ));
     }
 

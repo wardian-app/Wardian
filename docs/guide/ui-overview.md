@@ -3,7 +3,7 @@
 Wardian features a dense local-first interface for watching, directing, and
 reorganizing the agents you run locally. Its persistent app shell surrounds a
 tab-based [Workbench](./workbench.md), keeping live terminals, reusable assets,
-workflow state, Queue evidence, auxiliary tools, and the agent roster close to
+workflow state, Inbox evidence, auxiliary tools, and the agent roster close to
 the work. The center can hold one surface, several tabs, or multiple split panes
 without confusing the restorable layout with agent runtime state.
 
@@ -85,5 +85,5 @@ Workbench shortcuts yield to text inputs and terminal-owned key combinations. Se
 - [Agents](./agents-overview.md)
 - [Watchlists](./watchlists.md)
 - [Dashboard](./dashboard.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)
 - [Command Panel](./command-panel.md)

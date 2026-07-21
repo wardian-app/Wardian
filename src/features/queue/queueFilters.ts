@@ -71,10 +71,13 @@ export function normalizeQueuePreferences(value: unknown): QueuePreferences {
 }
 
 export function queueEventTypeForItem(item: QueueItem): QueueEventType {
+  if (item.type === "agent_update") return "agent_completed";
+  if (item.type === "approval_request") return "action_needed";
   if (item.type === "workflow_completed" && item.status === "failed") return "workflow_failed";
   return item.type;
 }
 
 export function queueItemIsVisible(item: QueueItem, preferences: QueuePreferences): boolean {
+  if (item.type === "agent_update" || item.type === "approval_request") return true;
   return preferences.visible_event_types[queueEventTypeForItem(item)];
 }

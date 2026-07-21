@@ -1,10 +1,10 @@
 # Workbench
 
-The Workbench is Wardian's main workspace. Every app surface opens as a tab, and panes let you keep several surfaces visible at the same time. Opening Queue, Dashboard, Library, Workflows, Graph, Garden, Agents, or an agent session no longer replaces a global page.
+The Workbench is Wardian's main workspace. Every app surface opens as a tab, and panes let you keep several surfaces visible at the same time. Opening Inbox, Dashboard, Library, Workflows, Graph, Garden, Agents, or an agent session no longer replaces a global page.
 
-Use the Workbench when you want to keep context in place: an agent terminal beside Queue, Agents beside Source Control, or a workflow beside the agents running it.
+Use the Workbench when you want to keep context in place: an agent terminal beside Inbox, Agents beside Source Control, or a workflow beside the agents running it.
 
-![Wardian Workbench with pane-local tabs, Agents, Queue, auxiliary rail, and agent roster](../assets/screenshots/workbench-navigation/tabs-and-splits.png)
+![Wardian Workbench with pane-local tabs, Agents, Inbox, auxiliary rail, and agent roster](../assets/screenshots/workbench-navigation/tabs-and-splits.png)
 
 ## Open a Surface
 
@@ -22,7 +22,7 @@ By default, a pane's **+** button appends and focuses an ordinary **New Tab** in
 
 To make **+** open the searchable list directly, open **Settings > Appearance**, find **New tab button**, and select **Searchable list**. Select **New Tab** to restore the default. This preference changes only **+**: **Quick Open** always opens the searchable list.
 
-In the searchable list, select a surface name to open it in the captured pane, or press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS to open it to the side. There is no separate visible **Open to Side** button in the picker. A surface that is already open as a singleton, such as Dashboard or Queue, is focused instead of duplicated.
+In the searchable list, select a surface name to open it in the captured pane, or press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS to open it to the side. There is no separate visible **Open to Side** button in the picker. A surface that is already open as a singleton, such as Dashboard or Inbox, is focused instead of duplicated.
 
 The **Agent Session** choice needs one selected agent in the right roster. For a faster agent-specific path, use the roster actions described in [Watchlists](./watchlists.md).
 
@@ -210,5 +210,5 @@ Workbench shortcuts do not intercept normal typing inside text fields or termina
 
 - [Agents](./agents-overview.md)
 - [Watchlists](./watchlists.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)
 - [Command Panel](./command-panel.md)

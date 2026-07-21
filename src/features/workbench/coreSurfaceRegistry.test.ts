@@ -262,7 +262,7 @@ describe("core workbench surface registry", () => {
     });
     expect(registry.default_state("new-tab")).toEqual({});
 
-    expect(["dashboard", "queue", "graph", "garden", "library", "workflows"].map((type) => {
+    expect(["dashboard", "inbox", "graph", "garden", "library", "workflows"].map((type) => {
       const definition = registry.get(type);
       return {
         type,
@@ -273,7 +273,7 @@ describe("core workbench surface registry", () => {
       };
     })).toEqual([
       { type: "dashboard", open_policy: "singleton", render_policy: "recreate_from_state", close_policy: "close_view", command_id: "workbench.open.dashboard" },
-      { type: "queue", open_policy: "singleton", render_policy: "recreate_from_state", close_policy: "close_view", command_id: "workbench.open.queue" },
+      { type: "inbox", open_policy: "singleton", render_policy: "recreate_from_state", close_policy: "close_view", command_id: "workbench.open.inbox" },
       { type: "graph", open_policy: "singleton", render_policy: "suspend_when_hidden", close_policy: "close_view", command_id: "workbench.open.graph" },
       { type: "garden", open_policy: "singleton", render_policy: "suspend_when_hidden", close_policy: "close_view", command_id: "workbench.open.garden" },
       { type: "library", open_policy: "singleton", render_policy: "keep_alive", close_policy: "confirm_if_dirty", command_id: "workbench.open.library" },

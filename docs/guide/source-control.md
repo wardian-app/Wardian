@@ -180,4 +180,4 @@ wardian agent worktree disable <agent-name-or-id>
 
 - [Explorer](./explorer.md)
 - [Watchlists](./watchlists.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { QueueView } from "./QueueView";
+import { InboxView } from "./InboxView";
 import { useQueueStore } from "../store/useQueueStore";
 import { normalizeQueuePreferences } from "../features/queue/queueFilters";
 
@@ -12,23 +12,24 @@ function resetStore() {
     items: [],
     _agentBuffers: {},
     _workflowLastOutput: {},
+    _readNotificationIds: [],
     preferences: normalizeQueuePreferences({}),
   });
 }
 
-describe("QueueView", () => {
+describe("InboxView", () => {
   beforeEach(resetStore);
 
   it("shows empty state when no items", () => {
-    render(<QueueView />);
+    render(<InboxView />);
     expect(screen.getByText("No completions yet.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /first-run guide/i })).toHaveAttribute(
       "href",
       "https://docs.wardian.org/guide/getting-started",
     );
-    expect(screen.getByRole("link", { name: /queue guide/i })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /inbox guide/i })).toHaveAttribute(
       "href",
-      "https://docs.wardian.org/guide/queue",
+      "https://docs.wardian.org/guide/inbox",
     );
   });
 
@@ -44,7 +45,7 @@ describe("QueueView", () => {
         summary: "Done writing tests.",
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
     expect(document.body.textContent).toContain("My CoderAgent task completed");
     expect(screen.getByText("Agent task completed")).toBeInTheDocument();
     expect(screen.getByText("My Coder")).toBeInTheDocument();
@@ -67,7 +68,7 @@ describe("QueueView", () => {
       }],
     });
 
-    render(<QueueView onOpenAgent={onOpenAgent} onSendAgentPrompt={onSendAgentPrompt} />);
+    render(<InboxView onOpenAgent={onOpenAgent} onSendAgentPrompt={onSendAgentPrompt} />);
 
     expect(screen.getByText("Action needed")).toBeInTheDocument();
     expect(screen.getByTestId("queue-item-summary-item-action")).toHaveTextContent("Do you want to proceed? 1. Yes 2. No");
@@ -95,7 +96,7 @@ describe("QueueView", () => {
       }],
     });
 
-    render(<QueueView onSendAgentPrompt={onSendAgentPrompt} />);
+    render(<InboxView onSendAgentPrompt={onSendAgentPrompt} />);
 
     expect(screen.getByText("Approve file write?")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /send action response/i })).not.toBeInTheDocument();
@@ -130,7 +131,7 @@ describe("QueueView", () => {
       ],
     }));
 
-    render(<QueueView />);
+    render(<InboxView />);
 
     expect(screen.queryByText("Hidden Agent")).not.toBeInTheDocument();
     expect(screen.getByText("Visible Agent")).toBeInTheDocument();
@@ -158,13 +159,13 @@ describe("QueueView", () => {
       ],
     });
 
-    render(<QueueView />);
+    render(<InboxView />);
 
-    expect(screen.getByRole("button", { name: /filter queue events/i })).toHaveTextContent("Filter: All events");
+    expect(screen.getByRole("button", { name: /filter inbox events/i })).toHaveTextContent("Filter: All events");
     expect(screen.queryByLabelText("Desktop alert for workflow failures")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Sound alert for action needed")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /filter queue events/i }));
+    fireEvent.click(screen.getByRole("button", { name: /filter inbox events/i }));
     fireEvent.click(screen.getByLabelText("Show agent completions"));
 
     const { preferences } = useQueueStore.getState();
@@ -185,7 +186,7 @@ describe("QueueView", () => {
       }],
     });
 
-    render(<QueueView />);
+    render(<InboxView />);
 
     expect(screen.getByTestId("queue-unread-dot")).toHaveClass("left-2", "top-2");
   });
@@ -202,7 +203,7 @@ describe("QueueView", () => {
         error: "Timeout after 30s",
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
     expect(document.body.textContent).toContain("CI PipelineWorkflow failed");
     expect(screen.getByText("CI Pipeline")).toBeInTheDocument();
     expect(screen.getByText("Workflow failed")).toBeInTheDocument();
@@ -222,7 +223,7 @@ describe("QueueView", () => {
         summary: "Processed 42 records.",
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
     expect(document.body.textContent).toContain("Data PipelineWorkflow completed");
     expect(screen.getByText("Workflow completed")).toBeInTheDocument();
     expect(screen.getByText("Processed 42 records.")).toBeInTheDocument();
@@ -246,7 +247,7 @@ describe("QueueView", () => {
         ].join("\n"),
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
 
     const summary = screen.getByTestId("queue-item-summary-item-long");
     expect(summary).toHaveClass("line-clamp-4");
@@ -271,10 +272,36 @@ describe("QueueView", () => {
         summary: "Done.",
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
     fireEvent.click(screen.getByRole("button", { name: /clear item/i }));
     expect(screen.queryByText("My Coder")).not.toBeInTheDocument();
     expect(screen.getByText("No completions yet.")).toBeInTheDocument();
+  });
+
+  it("does not offer local acknowledgement controls for workflow approval projections", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "workflow-approval:wf:run:gate",
+        type: "approval_request",
+        timestamp: Date.now(),
+        read: false,
+        notification_title: "Release gate",
+        summary: "Approve the deployment?",
+        approval_choices: ["Approve", "Reject"],
+        workflow_approval: {
+          blueprint_id: "wf",
+          blueprint_path: "workflow.json",
+          run_id: "run",
+          node: "gate",
+        },
+      }],
+    });
+
+    render(<InboxView />);
+
+    expect(screen.queryByRole("button", { name: /clear item/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Release gate"));
+    expect(useQueueStore.getState().items[0].read).toBe(false);
   });
 
   it("mark all read button appears and calls markAllRead", () => {
@@ -288,7 +315,7 @@ describe("QueueView", () => {
         summary: "Done.",
       }],
     });
-    render(<QueueView />);
+    render(<InboxView />);
     fireEvent.click(screen.getByRole("button", { name: /mark all read/i }));
     expect(useQueueStore.getState().items[0].read).toBe(true);
   });
@@ -305,7 +332,7 @@ describe("QueueView", () => {
       }],
     });
 
-    render(<QueueView />);
+    render(<InboxView />);
 
     expect(screen.getByRole("button", { name: /mark all read/i })).toHaveClass(
       "rounded-md",
@@ -344,7 +371,7 @@ describe("QueueView", () => {
       ],
     });
 
-    render(<QueueView />);
+    render(<InboxView />);
     fireEvent.click(screen.getByRole("button", { name: /clear read/i }));
 
     expect(screen.queryByText("Read Agent")).not.toBeInTheDocument();
@@ -363,7 +390,7 @@ describe("QueueView", () => {
       })),
     });
 
-    render(<QueueView />);
+    render(<InboxView />);
 
     const firstCard = screen.getByText("Agent 0").closest(".group");
     expect(firstCard).toHaveClass("shrink-0");
@@ -384,7 +411,7 @@ describe("QueueView", () => {
         })),
       });
 
-      render(<QueueView />);
+      render(<InboxView />);
 
       expect(screen.getByText("Agent 0")).toBeInTheDocument();
       expect(screen.getByText("Agent 79")).toBeInTheDocument();

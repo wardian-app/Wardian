@@ -40,7 +40,7 @@ const BETA_AGENT: WorkbenchAgentFixture = {
 const CORE_SINGLETON_SURFACES = [
   "agents-overview",
   "dashboard",
-  "queue",
+  "inbox",
   "graph",
   "garden",
   "library",
@@ -154,7 +154,7 @@ function noEmptyNonFinalGroup(document: WorkbenchDocumentV1): boolean {
 
 function twoGroupDocument(): WorkbenchDocumentV1 {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   const graph = makeWorkbenchSurface("graph-1", "graph");
   return makeWorkbenchDocument({
     root: {
@@ -212,10 +212,10 @@ test("opens every migrated surface and focuses an existing singleton", async ({ 
   await expect(agentTab).toHaveCount(1);
   await expect(agentTab.locator('[data-surface-icon="agent-session"]')).toBeVisible();
 
-  await surfaceTab(page, "queue").click();
-  await openSurface(page, "queue");
-  await expect(surfaceTab(page, "queue")).toHaveCount(1);
-  await expect(surfaceTab(page, "queue")).toHaveAttribute("aria-selected", "true");
+  await surfaceTab(page, "inbox").click();
+  await openSurface(page, "inbox");
+  await expect(surfaceTab(page, "inbox")).toHaveCount(1);
+  await expect(surfaceTab(page, "inbox")).toHaveAttribute("aria-selected", "true");
 });
 
 test("uses real top-edge tab groups as responsive window chrome", async ({ page }) => {
@@ -426,10 +426,10 @@ test("offers a responsive keyboard-accessible launcher in an empty tab", async (
     getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length
   ))).toBe(1);
 
-  const queue = launcher.locator('[data-surface-type="queue"]');
+  const queue = launcher.locator('[data-surface-type="inbox"]');
   await queue.focus();
   await page.keyboard.press("Enter");
-  await expect(surfaceTab(page, "queue")).toHaveAttribute("aria-selected", "true");
+  await expect(surfaceTab(page, "inbox")).toHaveAttribute("aria-selected", "true");
 });
 
 test("opens an inline New Tab in its captured pane and transitions Browse all to search", async ({ page }) => {
@@ -469,7 +469,7 @@ test("opens an inline New Tab in its captured pane and transitions Browse all to
   await expect(targetGroup.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
   await targetGroup.getByRole("button", { name: /^Queue:/ }).click();
 
-  const queueTab = surfaceTab(page, "queue");
+  const queueTab = surfaceTab(page, "inbox");
   await expect(queueTab).toBeVisible();
   await expect(queueTab.locator('xpath=ancestor::*[@data-testid="workbench-group"][1]'))
     .toHaveAttribute("data-group-id", "group-2");
@@ -515,7 +515,7 @@ test("honors the persisted palette plus preference while Quick Open remains sear
 test("reorders tabs with real pointer coordinates and persists canonical order", async ({ page }) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   const ipc = await bootWorkbench(page, makeWorkbenchDocument({
     groups: {
       "group-1": {
@@ -533,19 +533,19 @@ test("reorders tabs with real pointer coordinates and persists canonical order",
   expect(initialGroupBounds).not.toBeNull();
   expect(dashboardBounds).not.toBeNull();
 
-  await dragSurfaceTab(page, surfaceTab(page, "queue"), {
+  await dragSurfaceTab(page, surfaceTab(page, "inbox"), {
     x: dashboardBounds!.x + 4,
     y: dashboardBounds!.y + dashboardBounds!.height / 2,
   });
 
-  await expect.poll(() => tabSurfaceIds(group)).toEqual(["queue-1", "dashboard-1"]);
+  await expect.poll(() => tabSurfaceIds(group)).toEqual(["inbox-1", "dashboard-1"]);
   await expect(page.getByTestId("workbench-group")).toHaveCount(1);
   const finalGroupBounds = await group.boundingBox();
   expect(finalGroupBounds).not.toBeNull();
   expect(Math.abs(finalGroupBounds!.x - initialGroupBounds!.x)).toBeLessThanOrEqual(2);
   expect(Math.abs(finalGroupBounds!.width - initialGroupBounds!.width)).toBeLessThanOrEqual(2);
   await expectPersistedTopology(ipc, (document) => (
-    document.groups["group-1"]?.surface_ids.join(",") === "queue-1,dashboard-1"
+    document.groups["group-1"]?.surface_ids.join(",") === "inbox-1,dashboard-1"
     && noEmptyNonFinalGroup(document)
   ));
   expect(fatalDragErrors()).toEqual([]);
@@ -554,7 +554,7 @@ test("reorders tabs with real pointer coordinates and persists canonical order",
 test("moves a sole source tab to another pane center and collapses the source pane", async ({ page }) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   const document = makeWorkbenchDocument({
     root: {
       kind: "split",
@@ -590,14 +590,14 @@ test("moves a sole source tab to another pane center and collapses the source pa
   expect(targetBounds).not.toBeNull();
   expect(sourceBounds).not.toBeNull();
 
-  await dragSurfaceTab(page, surfaceTab(page, "queue"), {
+  await dragSurfaceTab(page, surfaceTab(page, "inbox"), {
     x: targetBounds!.x + targetBounds!.width / 2,
     y: targetBounds!.y + targetBounds!.height * 0.6,
   });
 
   await expect(page.getByTestId("workbench-group")).toHaveCount(1);
-  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-1");
-  await expect.poll(() => tabSurfaceIds(targetGroup)).toEqual(["dashboard-1", "queue-1"]);
+  await expect(surfaceOwner(page, "inbox-1")).toHaveAttribute("data-group-id", "group-1");
+  await expect.poll(() => tabSurfaceIds(targetGroup)).toEqual(["dashboard-1", "inbox-1"]);
   await expect(sourceGroup).toHaveCount(0);
   const finalBounds = await targetGroup.boundingBox();
   expect(finalBounds).not.toBeNull();
@@ -612,7 +612,7 @@ test("moves a sole source tab to another pane center and collapses the source pa
     saved.root.kind === "group"
     && saved.root.group_id === "group-1"
     && Object.keys(saved.groups).length === 1
-    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,queue-1"
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,inbox-1"
     && noEmptyNonFinalGroup(saved)
   ));
   expect(fatalDragErrors()).toEqual([]);
@@ -621,7 +621,7 @@ test("moves a sole source tab to another pane center and collapses the source pa
 test("rejects an impossible narrow edge split while retaining center movement", async ({ page }) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   const graph = makeWorkbenchSurface("graph-1", "graph");
   const ipc = await bootWorkbench(page, makeWorkbenchDocument({
     root: {
@@ -650,7 +650,7 @@ test("rejects an impossible narrow edge split while retaining center movement", 
 
   const targetGroup = workbenchGroup(page, "group-1");
   const contentTarget = targetGroup.locator(":scope > .dv-content-container");
-  const queueTab = surfaceTab(page, "queue");
+  const queueTab = surfaceTab(page, "inbox");
   const [, targetBounds, contentBounds] = await waitForStableBoundingBoxes(
     page,
     [queueTab, targetGroup, contentTarget],
@@ -665,12 +665,12 @@ test("rejects an impossible narrow edge split while retaining center movement", 
   });
 
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
-  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-2");
+  await expect(surfaceOwner(page, "inbox-1")).toHaveAttribute("data-group-id", "group-2");
   await expectPersistedTopology(ipc, (saved) => (
     saved.root.kind === "split"
     && Object.keys(saved.groups).length === 2
     && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1"
-    && saved.groups["group-2"]?.surface_ids.join(",") === "queue-1,graph-1"
+    && saved.groups["group-2"]?.surface_ids.join(",") === "inbox-1,graph-1"
   ));
 
   const [, centerBounds] = await waitForStableBoundingBoxes(page, [queueTab, contentTarget]);
@@ -680,11 +680,11 @@ test("rejects an impossible narrow edge split while retaining center movement", 
   });
 
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
-  await expect(surfaceOwner(page, "queue-1")).toHaveAttribute("data-group-id", "group-1");
+  await expect(surfaceOwner(page, "inbox-1")).toHaveAttribute("data-group-id", "group-1");
   await expectPersistedTopology(ipc, (saved) => (
     saved.root.kind === "split"
     && Object.keys(saved.groups).length === 2
-    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,queue-1"
+    && saved.groups["group-1"]?.surface_ids.join(",") === "dashboard-1,inbox-1"
     && saved.groups["group-2"]?.surface_ids.join(",") === "graph-1"
     && noEmptyNonFinalGroup(saved)
   ));
@@ -749,7 +749,7 @@ test("keeps a sole-tab self-edge preview center-only without creating a group", 
 test("shows an accurate half-pane edge preview and splits with a real pointer drop", async ({ page }, testInfo) => {
   const fatalDragErrors = installDragErrorMonitor(page);
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   const ipc = await bootWorkbench(page, makeWorkbenchDocument({
     groups: {
       "group-1": {
@@ -763,7 +763,7 @@ test("shows an accurate half-pane edge preview and splits with a real pointer dr
 
   const targetGroup = workbenchGroup(page, "group-1");
   const contentTarget = targetGroup.locator(":scope > .dv-content-container");
-  const queueTab = surfaceTab(page, "queue");
+  const queueTab = surfaceTab(page, "inbox");
   const [, targetBounds, contentBounds] = await waitForStableBoundingBoxes(
     page,
     [queueTab, targetGroup, contentTarget],
@@ -800,7 +800,7 @@ test("shows an accurate half-pane edge preview and splits with a real pointer dr
   await expect(page.locator(".dv-drop-target-selection:visible")).toHaveCount(0);
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
   const dashboardOwner = surfaceOwner(page, "dashboard-1");
-  const queueOwner = surfaceOwner(page, "queue-1");
+  const queueOwner = surfaceOwner(page, "inbox-1");
   const [dashboardGroupId, queueGroupId] = await Promise.all([
     dashboardOwner.getAttribute("data-group-id"),
     queueOwner.getAttribute("data-group-id"),
@@ -831,7 +831,7 @@ test("shows an accurate half-pane edge preview and splits with a real pointer dr
     const dashboardGroup = Object.values(saved.groups)
       .find((group) => group.surface_ids.includes("dashboard-1"));
     const queueGroup = Object.values(saved.groups)
-      .find((group) => group.surface_ids.includes("queue-1"));
+      .find((group) => group.surface_ids.includes("inbox-1"));
     return Object.keys(saved.groups).length === 2
       && dashboardGroup !== undefined
       && queueGroup !== undefined
@@ -844,7 +844,7 @@ test("shows an accurate half-pane edge preview and splits with a real pointer dr
 
 test("splits, moves, zooms, joins, closes, and reopens through semantic controls", async ({ page }) => {
   const dashboard = makeWorkbenchSurface("dashboard-1", "dashboard");
-  const queue = makeWorkbenchSurface("queue-1", "queue");
+  const queue = makeWorkbenchSurface("inbox-1", "inbox");
   await bootWorkbench(page, makeWorkbenchDocument({ surfaces: [dashboard, queue] }));
 
   const groups = page.getByTestId("workbench-group");
@@ -905,7 +905,7 @@ test("traverses tabs and groups with workbench keyboard commands", async ({ page
   await bootWorkbench(page, twoGroupDocument());
 
   const dashboardTab = surfaceTab(page, "dashboard");
-  const queueTab = surfaceTab(page, "queue");
+  const queueTab = surfaceTab(page, "inbox");
   const graphTab = surfaceTab(page, "graph");
 
   await dashboardTab.focus();

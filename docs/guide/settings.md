@@ -36,7 +36,7 @@ Categories:
 - **General**: app version and update status.
 - **Appearance**: app theme and top bar telemetry visibility.
 - **Grid**: display mode for agent cards in Agents surfaces.
-- **Queue**: queue event desktop and sound notification rules.
+- **Inbox**: Inbox event desktop and sound notification rules.
 - **Explorer**: file click behavior and the external app or editor used by the
   Explorer.
 - **Watchlist**: roster behavior for newly spawned agents.

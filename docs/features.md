@@ -4,8 +4,8 @@ This page maps Wardian's major capabilities to their detailed guides.
 
 ## Malleable Agent Environment
 
-- Local-first agent habitat where prompts, classes, skills, workflows, queue evidence, and memory-ready context are inspectable artifacts rather than opaque app-only state
-- Multiple lenses over shared Wardian state: desktop UI, CLI, Library, Workflows, Explorer, Queue, Graph, and Garden operate against the same canonical records
+- Local-first agent habitat where prompts, classes, skills, workflows, inbox evidence, and memory-ready context are inspectable artifacts rather than opaque app-only state
+- Multiple lenses over shared Wardian state: desktop UI, CLI, Library, Workflows, Explorer, Inbox, Graph, and Garden operate against the same canonical records
 - Gentle slope from use to creation: run an agent, save a prompt, tune a class, deploy a skill, automate a workflow, then promote durable evidence into memory or project context
 - Explicit scopes for global, class, agent, team/project, workspace, and workflow-run context so reusable capabilities can be shared without losing provenance
 
@@ -22,7 +22,7 @@ Related docs:
 - High-density Grid and Dashboard views for live local agent sessions
 - Left control rail for spawning, commands, workflows, Explorer, and settings
 - Right roster with status lights, thought snippets, and agent working sets
-- Queue tab for unread agent completions and workflow outcomes
+- Inbox tab for unread agent completions, important updates, and workflow outcomes
 - Roadmap direction: Sites, Cohorts, movable surfaces, richer Garden spatial organization, and Graph communication topology
 
 Related docs:
@@ -32,7 +32,7 @@ Related docs:
 - [Grid](./guide/grid.md)
 - [Dashboard](./guide/dashboard.md)
 - [Watchlists](./guide/watchlists.md)
-- [Queue](./guide/queue.md)
+- [Inbox](./guide/inbox.md)
 
 ## Agent Classes and Reusable Library
 
@@ -93,16 +93,17 @@ Related docs:
 - [Triggers](./workflows/triggers.md)
 - [Workflow Engine Architecture](./developer/workflow-engine.md)
 
-## Queue and Completion Triage
+## Inbox and Completion Triage
 
-- Captures agent completions when active terminal output settles back to Idle
+- Captures agent completions without treating arbitrary terminal output as a final summary
+- Receives explicit agent updates and exceptional manual approval requests through `wardian notify`
 - Records completed and failed workflow outcomes for later review
-- Persists queue items under the Wardian home so unread work survives app restarts
+- Persists Inbox completion projections under the Wardian home so unread work survives app restarts
 - Supports unread badges, mark-read, clear-read, dismiss, and expandable long summaries
 
 Related docs:
 
-- [Queue](./guide/queue.md)
+- [Inbox](./guide/inbox.md)
 - [Workflow Overview](./workflows/index.md)
 
 ## Runtime Shell and Session Policy Controls

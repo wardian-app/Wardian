@@ -9,7 +9,7 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 ## When to Use It
 
 - Browse the workspace for the agent selected in [Watchlists](./watchlists.md).
-- Inspect files after an agent reports completion in [Queue](./queue.md).
+- Inspect files after an agent reports completion in [Inbox](./inbox.md).
 - Open a quick preview in a Workbench tab before deciding whether to keep it.
 - Open a file or folder in your configured local app or editor.
 - Reveal a file in the system file manager when you need native OS actions.
@@ -133,4 +133,4 @@ When the selected root is a Git repository, the Explorer uses status colors and 
 - [Getting Started](./getting-started.md)
 - [Watchlists](./watchlists.md)
 - [Source Control](./source-control.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)

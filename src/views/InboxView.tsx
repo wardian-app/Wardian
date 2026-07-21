@@ -67,12 +67,16 @@ function useProgressiveQueueItems(items: QueueItem[]) {
 function queueItemLabel(item: QueueItem) {
   if (item.type === "action_needed") return "Action needed";
   if (item.type === "agent_completed") return "Agent task completed";
+  if (item.type === "agent_update") return "Important update";
+  if (item.type === "approval_request") {
+    return item.notification_status === "expired" ? "Approval expired" : "Approval requested";
+  }
   return item.status === "failed" ? "Workflow failed" : "Workflow completed";
 }
 
 function StatusBadge({ item }: { item: QueueItem }) {
-  const isCompleted = item.type === "agent_completed" || item.status === "completed";
-  const isActionNeeded = item.type === "action_needed";
+  const isCompleted = item.type === "agent_completed" || item.status === "completed" || item.type === "agent_update";
+  const isActionNeeded = item.type === "action_needed" || item.type === "approval_request";
   return (
     <span
       className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -89,7 +93,7 @@ function StatusBadge({ item }: { item: QueueItem }) {
 }
 
 function queueItemAccent(item: QueueItem) {
-  if (item.type === "action_needed") {
+  if (item.type === "action_needed" || item.type === "approval_request") {
     return "bg-wardian-warning";
   }
   if (item.type === "workflow_completed" && item.status === "failed") {
@@ -99,8 +103,8 @@ function queueItemAccent(item: QueueItem) {
 }
 
 function QueueItemIcon({ item }: { item: QueueItem }) {
-  const isAgent = item.type === "agent_completed" || item.type === "action_needed";
-  const isActionNeeded = item.type === "action_needed";
+  const isAgent = item.type === "agent_completed" || item.type === "action_needed" || item.type === "agent_update" || item.type === "approval_request";
+  const isActionNeeded = item.type === "action_needed" || item.type === "approval_request";
   const isFailed = item.type === "workflow_completed" && item.status === "failed";
   const Icon = isAgent ? Bot : GitBranch;
   const iconClass = isFailed
@@ -130,18 +134,24 @@ interface QueueCardProps {
 function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   const dismissItem = useQueueStore((s) => s.dismissItem);
   const markRead = useQueueStore((s) => s.markRead);
+  const resolveApprovalRequest = useQueueStore((s) => s.resolveApprovalRequest);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isSending, setIsSending] = useState(false);
 
-  const isAgent = item.type === "agent_completed" || item.type === "action_needed";
+  const isAgent = item.type === "agent_completed" || item.type === "action_needed" || item.type === "agent_update" || item.type === "approval_request";
   const isActionNeeded = item.type === "action_needed";
-  const title = isAgent ? item.agent_name : item.workflow_name;
+  const isApprovalRequest = item.type === "approval_request";
+  const title = item.notification_title ?? (isAgent ? item.agent_name : item.workflow_name);
   const bodyText = item.status === "failed" && item.error ? item.error : item.summary;
   const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
   const summaryId = `queue-item-summary-${item.id}`;
   const canOpenAgent = Boolean(item.agent_session_id && onOpenAgent);
   const actionChoices = isActionNeeded ? parseQueueActionChoices(bodyText) : [];
   const canUseActionChoices = Boolean(item.agent_session_id && onSendAgentPrompt && actionChoices.length > 0);
+  const approvalChoices = isApprovalRequest && item.notification_status === "awaiting_reply"
+    ? item.approval_choices ?? []
+    : [];
+  const canAcknowledge = !item.workflow_approval;
 
   const handleActionChoice = async (choice: QueueActionChoice) => {
     if (!item.agent_session_id || !onSendAgentPrompt) return;
@@ -155,6 +165,16 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
     }
   };
 
+  const handleApprovalChoice = async (choice: string) => {
+    if (!item.inbox_notification_id && !item.workflow_approval) return;
+    setIsSending(true);
+    try {
+      await resolveApprovalRequest(item, choice);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   return (
     <div
       className={`group relative shrink-0 overflow-hidden rounded-lg border transition-colors cursor-pointer ${
@@ -162,7 +182,9 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
           ? "border-wardian-border bg-wardian-card-bg-muted"
           : "border-[var(--color-wardian-accent)]/30 bg-wardian-card-bg"
       }`}
-      onClick={() => markRead(item.id)}
+      onClick={() => {
+        if (canAcknowledge) markRead(item.id);
+      }}
     >
       <div className={`absolute left-0 top-0 h-full w-1 ${queueItemAccent(item)}`} />
       {!item.read && (
@@ -217,7 +239,15 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
               )}
             </div>
           )}
-          {(canOpenAgent || canUseActionChoices) && (
+          {isApprovalRequest && (
+            <dl className="mt-3 grid gap-2 text-[12px] leading-5 text-muted">
+              <div><dt className="font-semibold text-primary">Proposed action</dt><dd>{item.proposed_action}</dd></div>
+              <div><dt className="font-semibold text-primary">Risk</dt><dd>{item.risk}</dd></div>
+              {item.approval_decision && <div><dt className="font-semibold text-primary">Decision</dt><dd>{item.approval_decision}</dd></div>}
+              {item.notification_status === "expired" && <div className="text-wardian-warning">Expired without approval.</div>}
+            </dl>
+          )}
+          {(canOpenAgent || canUseActionChoices || approvalChoices.length > 0) && (
             <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()}>
               {canOpenAgent && item.agent_session_id && (
                 <button
@@ -252,11 +282,26 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
                   ))}
                 </div>
               )}
+              {approvalChoices.length > 0 && (
+                <div className="flex min-w-0 flex-wrap items-center gap-2" aria-label="Approval choices">
+                  {approvalChoices.map((choice) => (
+                    <button
+                      key={choice}
+                      type="button"
+                      disabled={isSending}
+                      onClick={() => void handleApprovalChoice(choice)}
+                      className="inline-flex h-7 max-w-[220px] items-center rounded-md border border-[color-mix(in_srgb,var(--color-wardian-warning),transparent_35%)] bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_88%)] px-2 text-[11px] font-semibold text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-warning),transparent_80%)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {choice}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        <button
+        {!item.inbox_notification_id && !item.workflow_approval && <button
           type="button"
           aria-label="Clear item"
           title="Clear item"
@@ -264,7 +309,7 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
           className="shrink-0 p-1 rounded hover:bg-wardian-card-bg-muted text-muted-neutral hover:text-bright-neutral transition-colors"
         >
           <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -290,13 +335,13 @@ function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: Queue
 
   return (
     <div className="flex items-center justify-between gap-2">
-      <h2 className="text-sm font-semibold text-primary tracking-wide">Queue</h2>
+      <h2 className="text-sm font-semibold text-primary tracking-wide">Inbox</h2>
       {hasItems && (
         <div className="flex items-center gap-2">
           <div className="relative">
             <button
               type="button"
-              aria-label="Filter queue events"
+              aria-label="Filter Inbox events"
               aria-expanded={filtersOpen}
               onClick={() => setFiltersOpen((open) => !open)}
               className="inline-flex h-7 items-center gap-1.5 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-2 text-[11px] font-semibold text-muted-neutral transition-colors hover:text-bright-neutral"
@@ -346,12 +391,12 @@ function QueueControls({ hasItems, hasReadItems, markAllRead, clearRead }: Queue
   );
 }
 
-export interface QueueViewProps {
+export interface InboxViewProps {
   onOpenAgent?: (sessionId: string) => void;
   onSendAgentPrompt?: (sessionId: string, prompt: string) => Promise<void> | void;
 }
 
-export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
+export function InboxView({ onOpenAgent, onSendAgentPrompt }: InboxViewProps) {
   const items = useQueueStore((s) => s.items);
   const preferences = useQueueStore((s) => s.preferences);
   const markAllRead = useQueueStore((s) => s.markAllRead);
@@ -372,17 +417,17 @@ export function QueueView({ onOpenAgent, onSendAgentPrompt }: QueueViewProps) {
           <div className="max-w-sm text-center">
             <p className="text-sm font-semibold text-primary">No completions yet.</p>
             <p className="mt-2 text-xs leading-5 text-muted-neutral">
-              Queue fills after an active agent or workflow finishes and returns a result.
+              Your Inbox collects completed work, important updates, and requests that need your input.
             </p>
             <div className="mt-3 flex justify-center gap-4">
               <DocsLink path="/guide/getting-started">First-run guide</DocsLink>
-              <DocsLink path="/guide/queue">Queue guide</DocsLink>
+              <DocsLink path="/guide/inbox">Inbox guide</DocsLink>
             </div>
           </div>
         </div>
       ) : visibleItems.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-sm font-semibold text-primary">No matching queue items.</p>
+          <p className="text-sm font-semibold text-primary">No matching Inbox items.</p>
         </div>
       ) : (
         <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto pr-1">

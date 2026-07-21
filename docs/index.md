@@ -18,7 +18,7 @@ Habitat only when the smaller adaptation is no longer enough.
 - [First-Time Install and First Run](./guide/getting-started.md)
 - [UI Overview](./guide/ui-overview.md)
 - [Wardian CLI](./guide/cli.md)
-- [Queue](./guide/queue.md)
+- [Inbox](./guide/inbox.md)
 - [Workflows](./workflows/index.md)
 - [Key Features](./features.md)
 - [Provider Runtimes](./providers.md)
@@ -33,7 +33,7 @@ Habitat only when the smaller adaptation is no longer enough.
 - [Watchlists](./guide/watchlists.md)
 - [Command Panel](./guide/command-panel.md)
 - [Wardian CLI](./guide/cli.md)
-- [Queue](./guide/queue.md)
+- [Inbox](./guide/inbox.md)
 - [Source Control](./guide/source-control.md)
 - [Settings](./guide/settings.md)
 

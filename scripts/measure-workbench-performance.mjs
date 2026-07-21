@@ -99,9 +99,9 @@ function fixtureErrors(fixture) {
   const document = fixture?.workbench;
   const surfaces = Object.values(document?.surfaces ?? {});
   const presentations = fixture?.terminal_presentations ?? [];
-  const required = ["agents-overview", "graph", "garden", "queue", "library", "workflows"];
+  const required = ["agents-overview", "graph", "garden", "inbox", "library", "workflows"];
   const singletonTypes = new Set([
-    "agents-overview", "dashboard", "queue", "graph", "garden", "library", "workflows",
+    "agents-overview", "dashboard", "inbox", "graph", "garden", "library", "workflows",
   ]);
   if (fixture?.schema_version !== 1) errors.push("fixture schema_version must be 1");
   if (Object.keys(document?.groups ?? {}).length !== 4) errors.push("fixture must contain four groups");

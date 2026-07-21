@@ -3,7 +3,7 @@
 Wardian's central workspace is a restorable workbench of pane-local surface
 tabs. The workbench document describes layout and presentation state; existing
 domain stores and the Rust backend remain authoritative for agents, workflows,
-Queue entries, library assets, and live runtimes.
+Inbox entries, library assets, and live runtimes.
 
 ## Ownership Boundaries
 

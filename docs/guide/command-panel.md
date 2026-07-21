@@ -26,7 +26,7 @@ Both modes operate on your current agent selection in the right roster.
 2. Open the **Command** tab in the left sidebar.
 3. Click a starred quick prompt or type a broadcast message.
 4. Confirm the all-agent fallback when no agents are selected.
-5. Keep the active agent session, [Agents](./agents-overview.md), [Dashboard](./dashboard.md), or [Queue](./queue.md) visible while responses arrive.
+5. Keep the active agent session, [Agents](./agents-overview.md), [Dashboard](./dashboard.md), or [Inbox](./inbox.md) visible while responses arrive.
 
 ## Quick Prompts
 

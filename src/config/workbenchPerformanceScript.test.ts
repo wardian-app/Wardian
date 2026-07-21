@@ -72,14 +72,14 @@ describe("workbench performance script", () => {
     expect(fixture.agents).toHaveLength(20);
     expect(new Set(fixture.agents.map((agent) => agent.session_id)).size).toBe(20);
     expect([...new Set(surfaces.map((surface) => surface.surface_type))]).toEqual(
-      expect.arrayContaining(["agents-overview", "graph", "garden", "queue", "library", "workflows"]),
+      expect.arrayContaining(["agents-overview", "graph", "garden", "inbox", "library", "workflows"]),
     );
     expect(fixture.terminal_presentations.filter((entry) => entry.mode === "owner")).toHaveLength(1);
     expect(fixture.terminal_presentations.filter((entry) => entry.mode === "mirror")).toHaveLength(3);
     expect(new Set(fixture.terminal_presentations.map((entry) => entry.session_id)).size).toBe(1);
 
     const singletonTypes = [
-      "agents-overview", "dashboard", "queue", "graph", "garden", "library", "workflows",
+      "agents-overview", "dashboard", "inbox", "graph", "garden", "library", "workflows",
     ];
     for (const type of singletonTypes) {
       expect(surfaces.filter((surface) => surface.surface_type === type)).toHaveLength(1);

@@ -8,8 +8,9 @@ use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
     AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
-    DeliveryDetail, MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus,
-    SendMessageResponse, StructuredReply, WatchEvent, WatchEvidenceError, WorkflowRunResponse,
+    DeliveryDetail, InboxNotificationPayload, InboxNotificationResponse, MessageInputMode,
+    MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
+    WatchEvent, WatchEvidenceError, WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -85,6 +86,10 @@ enum ControlOperation {
     WatchlistsChanged,
     WorkflowRun,
     SendMessage,
+    NotifyCreate,
+    NotifyWait {
+        requested: Duration,
+    },
     Ask {
         requested: Duration,
         target: String,
@@ -549,6 +554,52 @@ pub fn send_message_with_delivery_and_scope_options(
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
+pub fn require_current_message_origin() -> io::Result<MessageOrigin> {
+    current_message_origin().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "WARDIAN_SESSION_ID environment variable is not set",
+        )
+    })
+}
+
+pub fn create_notification(
+    notification: InboxNotificationPayload,
+    origin: MessageOrigin,
+) -> io::Result<InboxNotificationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::NotifyCreate,
+        send_request(ControlRequest::NotifyCreate {
+            notification,
+            origin,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn wait_for_notification(
+    notification_id: &str,
+    timeout: Duration,
+) -> io::Result<InboxNotificationResponse> {
+    let origin = require_current_message_origin()?;
+    let timeout_ms = u64::try_from(timeout.as_millis()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "notification timeout is too large")
+    })?;
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::NotifyWait { requested: timeout },
+        send_request(ControlRequest::NotifyWait {
+            notification_id: notification_id.to_string(),
+            timeout_ms: Some(timeout_ms),
+            origin,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
 pub fn submit_reply(
     request_id: &str,
     status: ReplyStatus,
@@ -876,10 +927,12 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::WorkflowRun
         | ControlOperation::ArtifactPresent
         | ControlOperation::SendMessage
-        | ControlOperation::SubmitReply => CONTROL_MUTATION_TIMEOUT,
+        | ControlOperation::SubmitReply
+        | ControlOperation::NotifyCreate => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,
         ControlOperation::Ask { requested, .. } => watch_timeout_for(*requested),
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
+        ControlOperation::NotifyWait { requested } => watch_timeout_for(*requested),
     }
 }
 

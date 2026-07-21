@@ -15,7 +15,8 @@ use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
     AskResponse, CodexPluginDiagnostic, ControlRequest, ConversationListResponse, ConversationShowResponse,
-    DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationKind,
+    InboxNotificationPayload, InboxNotificationResponse, InteractionBodyRef, InteractionStatus,
     MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
     QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
     WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
@@ -526,6 +527,79 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                 ok: true,
                 delivery,
             })
+        }
+
+        ControlRequest::NotifyCreate {
+            notification,
+            origin,
+        } => {
+            let MessageOrigin::WardianAgent { session_id } = origin;
+            validate_inbox_notification(&notification)?;
+            let state = app.state::<AppState>();
+            {
+                let agents = state.agents.lock().await;
+                if !agents.contains_key(&session_id) {
+                    return Err(ControlError::coded(
+                        "invalid_origin",
+                        "notification origin is not a live Wardian agent session",
+                    ));
+                }
+            }
+            let record = state
+                .interactions
+                .create_notification_durable(session_id, notification)
+                .await
+                .map_err(notification_control_error)?;
+            let _ = app.emit("inbox-updated", ());
+            ok_json(&InboxNotificationResponse {
+                schema: wardian_core::control::CONTROL_SCHEMA,
+                notification_id: record.id,
+                status: record.status,
+                decision: None,
+            })
+        }
+
+        ControlRequest::NotifyWait {
+            notification_id,
+            timeout_ms,
+            origin,
+        } => {
+            let MessageOrigin::WardianAgent { session_id } = origin;
+            let state = app.state::<AppState>();
+            let timeout = Duration::from_millis(timeout_ms.unwrap_or(30 * 60 * 1000));
+            let started = std::time::Instant::now();
+            loop {
+                let record = state
+                    .interactions
+                    .expire_notification_if_needed(&notification_id)
+                    .await
+                    .ok_or_else(|| ControlError::coded("not_found", "notification was not found"))?;
+                if record.sender_session_id.as_deref() != Some(session_id.as_str()) {
+                    return Err(ControlError::coded(
+                        "unauthorized",
+                        "notification does not belong to this agent session",
+                    ));
+                }
+                match record.status {
+                    InteractionStatus::Completed | InteractionStatus::Expired => {
+                        let decision = state.interactions.notification_decision(&notification_id).await;
+                        let _ = app.emit("inbox-updated", ());
+                        return ok_json(&InboxNotificationResponse {
+                            schema: wardian_core::control::CONTROL_SCHEMA,
+                            notification_id,
+                            status: record.status,
+                            decision,
+                        });
+                    }
+                    _ if started.elapsed() >= timeout => {
+                        return Err(ControlError::coded(
+                            "notify_timeout",
+                            "notification was not resolved before the requested timeout",
+                        ));
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(150)).await,
+                }
+            }
         }
 
         ControlRequest::Ask {
@@ -3404,6 +3478,66 @@ async fn agent_config_to_identity(
 // ---------------------------------------------------------------------------
 // Serialization helpers
 // ---------------------------------------------------------------------------
+
+fn validate_inbox_notification(notification: &InboxNotificationPayload) -> Result<(), ControlError> {
+    let valid_text = |text: &str, max: usize| !text.trim().is_empty() && text.len() <= max;
+    if !valid_text(&notification.title, 160) || !valid_text(&notification.body, 4_000) {
+        return Err(ControlError::bad_request(
+            "notification title and body must be non-empty and within their size limits",
+        ));
+    }
+    match notification.kind {
+        InboxNotificationKind::Update => {
+            if notification.proposed_action.is_some()
+                || notification.risk.is_some()
+                || !notification.choices.is_empty()
+                || notification.expires_at.is_some()
+            {
+                return Err(ControlError::bad_request(
+                    "updates cannot include approval fields",
+                ));
+            }
+        }
+        InboxNotificationKind::Approval => {
+            if !notification
+                .proposed_action
+                .as_deref()
+                .is_some_and(|value| valid_text(value, 1_000))
+                || !notification
+                    .risk
+                    .as_deref()
+                    .is_some_and(|value| valid_text(value, 1_000))
+                || notification.choices.len() < 2
+                || notification.choices.len() > 5
+                || notification.choices.iter().any(|choice| !valid_text(choice, 120))
+                || notification
+                    .expires_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .is_none()
+            {
+                return Err(ControlError::bad_request(
+                    "approvals require a proposed action, risk, two to five choices, and an expiry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn notification_control_error(error: &'static str) -> ControlError {
+    match error {
+        "approval_already_open" => ControlError::coded(
+            "approval_already_open",
+            "this agent already has an unresolved approval request",
+        ),
+        "persistence_failed" => {
+            ControlError::coded("persistence_failed", "could not persist Inbox notification")
+        }
+        "invalid_notification" => ControlError::bad_request("invalid Inbox notification"),
+        _ => ControlError::request_failed(error),
+    }
+}
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ControlError> {
     serde_json::to_string(value).map_err(ControlError::request_failed)

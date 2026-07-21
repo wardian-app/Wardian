@@ -23,7 +23,7 @@ function makeCommandDocument(): WorkbenchDocumentV1 {
   let document = makeSingleGroupDocument([
     makeSurface("surface-1", { surface_type: "agents-overview" }),
     makeSurface("surface-2", { surface_type: "dashboard" }),
-    makeSurface("surface-3", { surface_type: "queue" }),
+    makeSurface("surface-3", { surface_type: "inbox" }),
   ]);
   document = apply(document, {
     type: "split_group",

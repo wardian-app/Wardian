@@ -3812,7 +3812,7 @@ describe("RemoteMobileApp", () => {
     await waitFor(() => expect(useRemoteStore.getState().remoteQueueItems).toHaveLength(1));
 
     await userEvent.click(screen.getByRole("button", { name: "Back to remote agents" }));
-    await userEvent.click(screen.getByRole("button", { name: "Queue" }));
+    await userEvent.click(screen.getByRole("button", { name: "Inbox" }));
 
     expect(screen.getByText("Agent task completed")).toBeVisible();
     expect(screen.getByText("Coder")).toBeVisible();

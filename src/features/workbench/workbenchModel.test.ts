@@ -576,7 +576,7 @@ describe("workbench model", () => {
     const dashboard = makeSurface("surface-dashboard", { surface_type: "dashboard" });
     const placeholder = makeSurface("surface-new-tab", { surface_type: "new-tab", state: {} });
     const previouslyClosed = {
-      surface: makeSurface("surface-closed", { surface_type: "queue" }),
+      surface: makeSurface("surface-closed", { surface_type: "inbox" }),
       previous_group_id: "group-1",
       previous_index: 0,
     };
@@ -597,7 +597,7 @@ describe("workbench model", () => {
   it("atomically replaces a sole New Tab pane with the latest closed surface", () => {
     const left = makeSurface("surface-left", { surface_type: "dashboard" });
     const placeholder = makeSurface("surface-placeholder", { surface_type: "new-tab", state: {} });
-    const closed = makeSurface("surface-closed", { surface_type: "queue" });
+    const closed = makeSurface("surface-closed", { surface_type: "inbox" });
     const initial = makeSingleGroupDocument([left]);
     initial.root = {
       kind: "split",
@@ -637,7 +637,7 @@ describe("workbench model", () => {
 
   it("rejects placeholder reopen for ordinary surfaces without changing history", () => {
     const ordinary = makeSurface("surface-dashboard", { surface_type: "dashboard" });
-    const closed = makeSurface("surface-closed", { surface_type: "queue" });
+    const closed = makeSurface("surface-closed", { surface_type: "inbox" });
     const initial = makeSingleGroupDocument([ordinary]);
     initial.recently_closed = [{
       surface: closed,
@@ -658,7 +658,7 @@ describe("workbench model", () => {
   it("resolves reopened IDs that collide while retaining the placeholder position", () => {
     const collision = makeSurface("surface-closed", { state: { open: true } });
     const placeholder = makeSurface("surface-placeholder", { surface_type: "new-tab", state: {} });
-    const closed = makeSurface("surface-closed", { surface_type: "queue", state: { closed: true } });
+    const closed = makeSurface("surface-closed", { surface_type: "inbox", state: { closed: true } });
     const initial = makeSingleGroupDocument([collision, placeholder]);
     initial.recently_closed = [{
       surface: closed,

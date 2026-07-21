@@ -27,7 +27,7 @@ function makeNavigation(overrides: Partial<WorkbenchNavigationService> = {}) {
 
 function makeTwoPaneDocument() {
   const left = makeSurface("surface-left", { surface_type: "dashboard" });
-  const right = makeSurface("surface-right", { surface_type: "queue" });
+  const right = makeSurface("surface-right", { surface_type: "inbox" });
   const document = makeSingleGroupDocument([left]);
   return {
     ...document,
@@ -149,12 +149,12 @@ describe("WorkbenchHost", () => {
     expect(listeners).toHaveLength(0);
   });
 
-  it("refreshes the Queue tab unread badge when queue items change", async () => {
+  it("refreshes the Inbox tab unread badge when queue items change", async () => {
     useQueueStore.setState({ items: [] });
     const registry = createCoreWorkbenchSurfaceRegistry();
     const store = createWorkbenchStore({
       initial_document: makeSingleGroupDocument([
-        makeSurface("queue-1", { surface_type: "queue", state: {} }),
+        makeSurface("inbox-1", { surface_type: "inbox", state: {} }),
       ]),
     });
 
@@ -166,7 +166,7 @@ describe("WorkbenchHost", () => {
       />,
     );
 
-    const queueTab = await screen.findByRole("tab", { name: "Queue" });
+    const queueTab = await screen.findByRole("tab", { name: "Inbox" });
     expect(queueTab.querySelector('[data-surface-badge="unread"]')).toBeNull();
 
     act(() => {
@@ -272,20 +272,20 @@ describe("WorkbenchHost", () => {
     fireEvent.click(screen.getByRole("button", { name: "Browse all surfaces" }));
 
     const searchable = screen.getByRole("dialog", { name: "Open Surface" });
-    const queueOption = searchable.querySelector<HTMLElement>('[data-surface-type="queue"]');
-    if (!queueOption) throw new Error("Queue surface option missing");
-    fireEvent.click(queueOption);
+    const inboxOption = searchable.querySelector<HTMLElement>('[data-surface-type="inbox"]');
+    if (!inboxOption) throw new Error("Inbox surface option missing");
+    fireEvent.click(inboxOption);
 
     expect(store.getState().document.groups["group-1"].surface_ids)
       .toEqual(["surface-1", "new-tab-1"]);
-    expect(store.getState().document.surfaces["new-tab-1"].surface_type).toBe("queue");
+    expect(store.getState().document.surfaces["new-tab-1"].surface_type).toBe("inbox");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Open Surface" }))
       .not.toBeInTheDocument());
   });
 
   it("consumes the inline placeholder when Browse all reopens a recently closed surface", async () => {
     const dashboard = makeSurface("surface-1", { surface_type: "dashboard" });
-    const closedQueue = makeSurface("queue-closed", { surface_type: "queue" });
+    const closedQueue = makeSurface("queue-closed", { surface_type: "inbox" });
     const initial = makeSingleGroupDocument([dashboard]);
     initial.recently_closed = [{
       surface: closedQueue,
@@ -297,7 +297,7 @@ describe("WorkbenchHost", () => {
     render(<WorkbenchHost store={store} create_id={() => "new-tab-1"} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open Surface" }));
     fireEvent.click(screen.getByRole("button", { name: "Browse all surfaces" }));
-    fireEvent.click(screen.getByRole("option", { name: "Reopen Queue" }));
+    fireEvent.click(screen.getByRole("option", { name: "Reopen Inbox" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Open Surface" }))
       .not.toBeInTheDocument());
@@ -376,7 +376,7 @@ describe("WorkbenchHost", () => {
       toJSON: () => ({}),
     });
     fireEvent.click(within(group).getByRole("button", { name: "Open Surface" }));
-    fireEvent.click(screen.getByRole("option", { name: "Queue" }), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("option", { name: "Inbox" }), { ctrlKey: true });
 
     expect(Object.keys(store.getState().document.groups)).toEqual(["group-1"]);
     expect(store.getState().document.groups["group-1"].surface_ids).toEqual(["surface-1"]);

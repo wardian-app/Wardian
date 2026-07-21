@@ -77,7 +77,7 @@ function makeStatusTelemetry(
 
 /**
  * Owns the single desktop subscription and load path for shared agent resources.
- * Queue, watchlist, confirmation, and interaction persistence policies enter only
+ * Inbox, watchlist, confirmation, and interaction persistence policies enter only
  * through callbacks or returned operation results; they are not mirrored here.
  */
 export function useAgentResourceController(

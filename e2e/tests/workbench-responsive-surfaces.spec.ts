@@ -31,7 +31,7 @@ const agents: WorkbenchAgentFixture[] = [
 const surfaceTypes = [
   "new-tab",
   "dashboard",
-  "queue",
+  "inbox",
   "graph",
   "garden",
   "library",
