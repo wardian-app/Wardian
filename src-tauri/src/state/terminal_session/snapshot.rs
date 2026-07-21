@@ -115,4 +115,32 @@ mod tests {
 
         assert_eq!(snapshot.terminal_state_base64, state);
     }
+
+    #[test]
+    fn formatted_state_excludes_scrollback_that_clients_must_restore_separately() {
+        let mut parser = vt100::Parser::new(4, 80, SNAPSHOT_SCROLLBACK_LINES);
+        let output = (1..=12)
+            .map(|line| format!("history row {line:02}\r\n"))
+            .collect::<String>();
+        parser.process(output.as_bytes());
+
+        let snapshot = build_snapshot(
+            "session",
+            1,
+            12,
+            TerminalGeometry { cols: 80, rows: 4 },
+            parser.screen(),
+            1,
+        );
+        let formatted = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(&snapshot.terminal_state_base64)
+                .expect("formatted terminal state"),
+        )
+        .expect("utf-8 terminal state");
+
+        assert!(snapshot.scrollback.iter().any(|row| row.contains("history row 01")));
+        assert!(!formatted.contains("history row 01"));
+        assert!(formatted.contains("history row 12"));
+    }
 }
