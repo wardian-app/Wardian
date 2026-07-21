@@ -97,6 +97,12 @@ describe("SettingsModal", () => {
     });
   });
 
+  it("places the backdrop above the custom titlebar chrome", () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    expect(screen.getByRole("dialog", { name: "Settings" }).parentElement).toHaveClass("z-[60]");
+  });
+
   it("renders Codex-style category navigation and concise setting details", () => {
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
