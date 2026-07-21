@@ -89,6 +89,22 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow.match(/--config src-tauri\/tauri\.updater\.conf\.json/g)).toHaveLength(3);
   });
 
+  it("signs, notarizes, and validates macOS release artifacts before publication", () => {
+    expect(releaseWorkflow).toContain("Require macOS signing and notarization secrets");
+    expect(releaseWorkflow).toContain("APPLE_CERTIFICATE");
+    expect(releaseWorkflow).toContain("APPLE_CERTIFICATE_PASSWORD");
+    expect(releaseWorkflow).toContain("APPLE_ID");
+    expect(releaseWorkflow).toContain("APPLE_PASSWORD");
+    expect(releaseWorkflow).toContain("APPLE_TEAM_ID");
+    expect(releaseWorkflow).toContain("Import macOS Developer ID certificate");
+    expect(releaseWorkflow).toContain("Developer ID Application identity was not available after import");
+    expect(releaseWorkflow).toContain("Verify notarized macOS release artifacts");
+    expect(releaseWorkflow).toContain("xcrun stapler validate");
+    expect(releaseWorkflow).toContain("spctl --assess --type open");
+    expect(releaseWorkflow).toContain("spctl --assess --type execute");
+    expect(releaseWorkflow).toContain("*.app.tar.gz");
+  });
+
   it("keeps native window minimums aligned with the frontend resize guard", () => {
     const windowConfig = JSON.parse(tauriConfig).app.windows[0];
 

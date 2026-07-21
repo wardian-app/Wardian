@@ -33,10 +33,21 @@ Choose the asset for your operating system and CPU:
 Debian/Ubuntu users who want package-manager updates can use the optional
 [Wardian APT repository](../developer/package-manager-distribution.md#linux-apt-repository).
 
-Wardian binaries are currently unsigned:
+### macOS installation details
 
-- **Windows:** SmartScreen can show a warning. Choose **More info**, then **Run anyway**.
-- **macOS:** Gatekeeper can block the first launch. Right-click Wardian and choose **Open**.
+Official macOS releases built by Wardian's signed release workflow are Developer
+ID signed and Apple-notarized. After downloading a DMG:
+
+1. Open the DMG and drag **Wardian** to **Applications**.
+2. Eject the DMG.
+3. Launch the copy in **Applications**.
+
+Do not launch Wardian directly from the mounted DMG. That location is read-only,
+so an in-app update cannot replace the running app. A source-built or older
+unsigned app can still show the normal Gatekeeper warning; approve it only when
+you built it yourself or otherwise trust its source.
+
+- **Windows:** SmartScreen can show a reputation warning for a new release. Continue only when the installer came from the official Wardian release you intended to install.
 - **Linux:** APT installs update through the system package manager. Make the AppImage executable before running it.
 
 ```bash
