@@ -4,7 +4,6 @@ import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { check } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppUpdate } from './useAppUpdate';
 import packageJson from '../../../package.json';
@@ -26,15 +25,10 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
   check: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/plugin-process', () => ({
-  relaunch: vi.fn(),
-}));
-
 const mockGetVersion = vi.mocked(getVersion);
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
 const mockCheck = vi.mocked(check);
-const mockRelaunch = vi.mocked(relaunch);
 const mockedRuntimeVersion = '0.3.5';
 const packageVersion = packageJson.version;
 const setTauriRuntime = (available: boolean) => {
@@ -113,7 +107,6 @@ describe('useAppUpdate', () => {
       };
     });
     mockCheck.mockResolvedValue(null);
-    mockRelaunch.mockResolvedValue();
   });
 
   it('loads the current app version and silently checks for updates', async () => {
@@ -142,7 +135,7 @@ describe('useAppUpdate', () => {
     });
   });
 
-  it('updates download progress and relaunches after installation completes', async () => {
+  it('updates download progress and restarts through the native process after installation completes', async () => {
     const user = userEvent.setup();
     const update = makeUpdate({
       downloadAndInstall: async (onEvent) => {
@@ -164,7 +157,7 @@ describe('useAppUpdate', () => {
     expect(screen.getByTestId('content-length')).toHaveTextContent('100');
     expect(screen.getByTestId('percent')).toHaveTextContent('100');
     expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith('restart_app');
   });
 
   it('uses the Windows backend handoff and keeps progress in sync', async () => {
@@ -207,7 +200,7 @@ describe('useAppUpdate', () => {
     });
     expect(unlistenCallCount).toBe(1);
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith('restart_app');
   });
 
   it('maps explicit update errors into visible state', async () => {
@@ -224,21 +217,34 @@ describe('useAppUpdate', () => {
     expect(screen.getByTestId('error')).toHaveTextContent('network failed');
   });
 
-  it('relaunches through the explicit restart action', async () => {
+  it('restarts through the native process from the explicit restart action', async () => {
     const user = userEvent.setup();
     render(<Probe />);
 
     await screen.findByText('up-to-date');
-    expect(mockRelaunch).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith('restart_app');
 
     await user.click(screen.getByText('restart'));
 
-    expect(mockRelaunch).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith('restart_app');
   });
 
   it('maps restart errors into visible state', async () => {
     const user = userEvent.setup();
-    mockRelaunch.mockRejectedValue(new Error('restart denied'));
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'get_update_eligibility') {
+        return {
+          enabled: true,
+          channel: 'stable',
+          reason: null,
+          windows_handoff: false,
+        };
+      }
+      if (command === 'restart_app') {
+        throw new Error('restart denied');
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
     render(<Probe />);
 
     await screen.findByText('up-to-date');

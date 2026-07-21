@@ -358,7 +358,7 @@ test("keeps the top tab strip stable when its empty chrome drags the window", as
   expect(after?.height).toBe(36);
 });
 
-test("keeps the first tab clear of collapsed macOS traffic-light chrome", async ({ browser }) => {
+test("keeps the first tab clear of collapsed macOS traffic-light chrome", async ({ browser }, testInfo) => {
   const context = await browser.newContext({
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
   });
@@ -385,6 +385,16 @@ test("keeps the first tab clear of collapsed macOS traffic-light chrome", async 
     expect(firstTabBounds).not.toBeNull();
     expect(leftChromeBounds!.x + leftChromeBounds!.width)
       .toBeLessThanOrEqual(firstTabBounds!.x + 1);
+
+    await page.getByRole("button", { name: "Hide Agent Roster", exact: true }).click();
+    await expect(titlebar).toHaveAttribute("data-right-collapsed", "true");
+    await expect(titlebar).toHaveCSS("--titlebar-right-width", "48px");
+
+    const screenshotPath = process.env.WARDIAN_MACOS_TITLEBAR_SCREENSHOT;
+    if (screenshotPath) {
+      await page.screenshot({ path: screenshotPath, animations: "disabled" });
+      await testInfo.attach("macos-titlebar-roster-inset", { path: screenshotPath, contentType: "image/png" });
+    }
 
     await firstGroup.getByRole("tab").nth(1).click();
     await firstTab.click();

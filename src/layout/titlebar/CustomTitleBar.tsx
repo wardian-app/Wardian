@@ -31,7 +31,7 @@ export const CustomTitleBar: React.FC<CustomTitleBarProps> = (props) => {
     ? MAC_COLLAPSED_LEFT_CHROME_WIDTH
     : DEFAULT_LEFT_RAIL_WIDTH + (props.leftCollapsed ? 0 : props.leftSidebarWidth);
   const rightWidth = props.rightCollapsed
-    ? (isMac ? 40 : 184)
+    ? (isMac ? 48 : 184)
     : props.rightSidebarWidth;
 
   return (

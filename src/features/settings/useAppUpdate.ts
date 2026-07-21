@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type DownloadEvent } from '@tauri-apps/plugin-updater';
 import packageJson from '../../../package.json';
 
@@ -267,7 +266,9 @@ export const useAppUpdate = (): AppUpdateState => {
         }
       } else {
         await update.downloadAndInstall(handleDownloadEvent);
-        await relaunch();
+        setStatus('installed');
+        await invoke('restart_app');
+        return;
       }
       setStatus('installed');
     } catch (error) {
@@ -279,7 +280,7 @@ export const useAppUpdate = (): AppUpdateState => {
   const relaunchApp = useCallback(async () => {
     setErrorMessage('');
     try {
-      await relaunch();
+      await invoke('restart_app');
     } catch (error) {
       setErrorMessage(errorMessageFrom(error));
       setStatus('error');

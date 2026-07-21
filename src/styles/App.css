@@ -94,7 +94,8 @@
 /* Zone 3: Aligns with the right sidebar column */
 .titlebar-right {
   width: var(--titlebar-right-width, 240px);
-  padding: 0;
+  box-sizing: border-box;
+  padding: 0 8px;
   flex-shrink: 0;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
@@ -135,7 +136,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-left: 8px;
+  justify-content: flex-end;
   height: 100%;
 }
 
