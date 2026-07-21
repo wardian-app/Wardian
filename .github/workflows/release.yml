@@ -139,11 +139,13 @@ jobs:
           - os: macos-latest
             arch: aarch64
             name: macos-arm64
+            macos: true
             args: --target aarch64-apple-darwin
             rust-target: aarch64-apple-darwin
           - os: macos-latest
             arch: x86_64
             name: macos-x64
+            macos: true
             args: --target x86_64-apple-darwin
             rust-target: x86_64-apple-darwin
           - os: ubuntu-22.04
@@ -182,6 +184,49 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Require macOS signing and notarization secrets
+        if: matrix.platform.macos
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for secret_name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "Missing required macOS release secret: $secret_name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import macOS Developer ID certificate
+        if: matrix.platform.macos
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/wardian-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/wardian-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -t 21600 -u "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$identity" ]]; then
+            echo "Developer ID Application identity was not available after import" >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Build and upload (tag push)
         if: github.event_name == 'push'
         uses: tauri-apps/tauri-action@v0
@@ -191,6 +236,12 @@ jobs:
           WARDIAN_UPDATE_CHANNEL: ${{ needs.create-release.outputs.is_prerelease == 'false' && 'stable' || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform.macos && env.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.platform.macos && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform.macos && secrets.APPLE_TEAM_ID || '' }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
@@ -208,6 +259,12 @@ jobs:
           WARDIAN_UPDATE_CHANNEL: ${{ needs.resolve-release.outputs.is_prerelease == 'false' && 'stable' || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform.macos && env.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.platform.macos && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform.macos && secrets.APPLE_TEAM_ID || '' }}
         with:
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           tagName: ${{ inputs.release_tag }}
@@ -223,8 +280,60 @@ jobs:
           WARDIAN_CLI_TARGET: ${{ matrix.platform.rust-target || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform.macos && env.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.platform.macos && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform.macos && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform.macos && secrets.APPLE_TEAM_ID || '' }}
         with:
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
+
+      - name: Verify notarized macOS release artifacts
+        if: matrix.platform.macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_count=0
+          while IFS= read -r -d '' dmg; do
+            dmg_count=$((dmg_count + 1))
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --verbose=4 "$dmg"
+
+            mount_path="$(mktemp -d)"
+            hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_path"
+            app_path="$(find "$mount_path" -maxdepth 1 -type d -name '*.app' -print -quit)"
+            if [[ -z "$app_path" ]]; then
+              echo "No app bundle found in $dmg" >&2
+              exit 1
+            fi
+            codesign --verify --deep --strict --verbose=4 "$app_path"
+            xcrun stapler validate "$app_path"
+            spctl --assess --type execute --verbose=4 "$app_path"
+            hdiutil detach "$mount_path"
+          done < <(find target src-tauri/target -type f -name '*.dmg' -print0 2>/dev/null || true)
+          if [[ "$dmg_count" -eq 0 ]]; then
+            echo "No macOS DMG artifacts were produced" >&2
+            exit 1
+          fi
+
+          updater_count=0
+          while IFS= read -r -d '' updater; do
+            updater_count=$((updater_count + 1))
+            extract_path="$(mktemp -d)"
+            tar -xzf "$updater" -C "$extract_path"
+            app_path="$(find "$extract_path" -type d -name '*.app' -print -quit)"
+            if [[ -z "$app_path" ]]; then
+              echo "No app bundle found in updater archive $updater" >&2
+              exit 1
+            fi
+            codesign --verify --deep --strict --verbose=4 "$app_path"
+            xcrun stapler validate "$app_path"
+          done < <(find target src-tauri/target -type f -name '*.app.tar.gz' -print0 2>/dev/null || true)
+          if [[ "$updater_count" -eq 0 ]]; then
+            echo "No macOS updater archives were produced" >&2
+            exit 1
+          fi
 
       - name: Upload dry-run artifacts
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true'
