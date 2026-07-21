@@ -1517,7 +1517,13 @@ function decodeTerminalSnapshot(snapshot: TerminalSnapshot) {
     try {
       const binary = atob(snapshot.terminal_state_base64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      return new TextDecoder().decode(bytes);
+      // vt100's formatted state restores the visible grid and cursor, but not
+      // the parser's scrollback. Prepend the broker's oldest-first plain-text
+      // projection so every snapshot boundary (registration, resize, resync,
+      // or replay-gap recovery) retains the history xterm has already shown.
+      return [...snapshot.scrollback, new TextDecoder().decode(bytes)]
+        .filter(Boolean)
+        .join("\r\n");
     } catch {
       // A size-capped snapshot may omit or truncate the formatted state. The
       // bounded plain-text projection is the recovery fallback.

@@ -2248,6 +2248,51 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("restores broker scrollback before the formatted visible grid", async () => {
+    const formattedVisibleGrid = "\u001b[Hvisible broker grid";
+    const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
+    const snapshot = {
+      ...modernSnapshot(),
+      terminal_state_base64: encodedVisibleGrid,
+      scrollback: ["oldest retained row", "newer retained row"],
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-scrollback"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-scrollback").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-scrollback"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenCalledWith(
+        `oldest retained row\r\nnewer retained row\r\n${formattedVisibleGrid}`,
+        expect.any(Function),
+      );
+    });
+  });
+
   it("does not consume OpenCode's live focus reply while normalizing a restored snapshot", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const focusMode = "\u001b[?1004h";

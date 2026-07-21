@@ -409,6 +409,10 @@ test("user mouse wheel scrolls the agent terminal renderer and parser", { timeou
     wheelStats: narrowSnapshot?.wheelStats,
     viewportScrollState: narrowSnapshot?.renderer?.viewportScrollState,
   }));
+  // A broker resize returns a formatted vt100 snapshot. Its visible grid does
+  // not include early history, so this asserts the client restores the broker
+  // scrollback projection before applying that formatted grid.
+  await waitForScrollback(driver, presentationId, "wheel-16");
   await assertWheelScrolls(driver, sessionId, presentationId, "narrow");
 
   await driver.manage().window().setRect({ width: 1920, height: 1080 });
