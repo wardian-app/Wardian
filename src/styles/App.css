@@ -837,6 +837,10 @@ select option {
   position: relative;
   min-width: 0;
   min-height: 0;
+  /* Sigma rounds canvas dimensions to whole pixels. A fractional Dockview
+     split can otherwise leak that rounding remainder into the surface,
+     toggling a scrollbar and feeding its width change back into the camera. */
+  overflow: hidden;
   border-right: 1px solid var(--color-wardian-border);
 }
 
