@@ -97,6 +97,12 @@ describe("SettingsModal", () => {
     });
   });
 
+  it("places the backdrop above the custom titlebar chrome", () => {
+    const { container } = render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    expect(container.firstElementChild).toHaveClass("z-[60]");
+  });
+
   it("renders Codex-style category navigation and concise setting details", () => {
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
