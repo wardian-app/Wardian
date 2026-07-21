@@ -41,6 +41,10 @@ If the private key or password is lost, existing updater-enabled installs cannot
 
 Stable and prerelease macOS release builds use a Developer ID Application certificate, Apple notarization, and stapling. The release workflow imports the certificate into an ephemeral runner keychain, signs the app and nested code, submits the macOS artifacts to Apple, and validates the stapled DMG and updater archive before the draft release can publish.
 
+The release-distribution decision and its operational invariants are recorded
+in the repository-internal [macOS Notarized Release Distribution
+specification](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-07-21-macos-notarized-release-distribution.md).
+
 Configure these GitHub Actions secrets for macOS release jobs:
 
 - `APPLE_CERTIFICATE`: base64-encoded, password-protected Developer ID Application `.p12` export.
@@ -52,6 +56,14 @@ Configure these GitHub Actions secrets for macOS release jobs:
 The certificate private key, its export password, the app-specific password, and the Tauri updater private key are distinct secrets. Back up each outside the repository. Do not commit them, send them in chat, or substitute the normal Apple ID password for `APPLE_PASSWORD`.
 
 The workflow fails macOS builds before artifact publication when any required secret is missing. It verifies the signed app inside each DMG with `codesign`, validates stapled tickets with `xcrun stapler`, assesses the DMG and app with Gatekeeper, and checks the signed app inside each Tauri updater `.app.tar.gz` archive.
+
+For an end-to-end release check, install the produced DMG on a clean macOS
+machine by copying the app to `/Applications`, ejecting the DMG, launching the
+installed copy, and then exercising an in-app update. A mounted DMG is
+read-only, so launching from it can make the updater fail with OS error 30 even
+when the release package itself is valid. Source builds are not a substitute for
+this check because they do not carry the CI Developer ID signature or
+notarization ticket.
 
 ## Stable Channel
 

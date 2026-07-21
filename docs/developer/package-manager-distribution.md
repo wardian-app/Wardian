@@ -86,11 +86,13 @@ Wardian release dispatch GitHub App configured. Set
 `WARDIAN_RELEASE_DISPATCH_PRIVATE_KEY` as a repository secret. The app must be
 installed on `wardian-app/homebrew-tap` with Actions write permission.
 
-The tap workflow reads the published Wardian release assets, rewrites
-`Casks/wardian.rb`, runs Homebrew audit, and opens a pull request in the tap.
-The generated `dist/package-managers/vX.Y.Z/homebrew/wardian.rb` file remains a
-local fallback and a useful comparison artifact, but maintainers should prefer
-the tap workflow for published cask updates.
+The tap workflow first downloads both published macOS DMGs and validates their
+Developer ID signature, notarization ticket, stapling, and Gatekeeper
+assessment. Only then does it rewrite `Casks/wardian.rb`, run Homebrew audit,
+and open a pull request in the tap. The generated
+`dist/package-managers/vX.Y.Z/homebrew/wardian.rb` file remains a local fallback
+and a useful comparison artifact, but maintainers should prefer the tap
+workflow for published cask updates.
 
 Validate local cask changes on macOS:
 

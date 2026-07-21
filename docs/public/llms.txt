@@ -61,6 +61,8 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 - https://docs.wardian.org/developer/state-management - Understand persisted state, runtime state, and frontend state ownership.
 - https://docs.wardian.org/developer/workflow-engine - Debug or extend deterministic workflow execution.
 - https://docs.wardian.org/developer/native-e2e - Pick the native E2E layer for PTY, invoke, provider, and filesystem behavior.
+- https://docs.wardian.org/developer/release-updates - Configure, validate, and recover signed desktop release updates, including macOS notarization.
+- https://docs.wardian.org/developer/package-manager-distribution - Publish and validate winget, Homebrew Cask, and Linux package-manager metadata from stable release artifacts.
 - https://docs.wardian.org/developer/docs-maintenance - Maintain public docs, screenshots, and this agent-readable index.
 
 ## Project Context

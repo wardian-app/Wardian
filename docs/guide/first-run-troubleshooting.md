@@ -15,12 +15,27 @@ Use this guide when the first setup path breaks before you can complete a simple
 Operating systems may warn before opening a new or unsigned Wardian build.
 
 - **Windows SmartScreen or reputation warnings**: continue only if the installer came from the official Wardian release you intended to install.
-- **macOS unidentified developer warnings**: verify the app source before approving the app in system privacy or security settings.
+- **macOS official release**: install the app by dragging it from the DMG to **Applications**, eject the DMG, and launch the installed copy. Official packages built by the signed release workflow are Developer ID signed and Apple-notarized.
+- **macOS source-built or older unsigned app**: verify the source before approving its normal Gatekeeper warning. Do not use a Gatekeeper bypass as a substitute for verifying an unknown download.
 - **Linux executable or package warnings**: verify the package source and file permissions before launching it.
 
 Do not bypass an operating system warning for a build whose source you cannot verify. If a managed device blocks the app, ask your administrator whether local unsigned developer tools are allowed.
 
 If Wardian opens to a blank or broken window, close it completely, reopen it once, and capture the visible warning text or blank-window screenshot if the problem repeats.
+
+### macOS: "Wardian is damaged" or an update reports a read-only filesystem
+
+For an official release, remove the affected app and DMG, download the matching
+Apple Silicon (`aarch64`) or Intel (`x64`) DMG again from the official Releases
+page, and drag the app to **Applications** before launching it. Do not run the
+app from the mounted DMG: it is read-only, and an in-app update can fail with
+OS error 30 when it cannot replace the app.
+
+If the message only affects a source-built app, it does not establish that the
+official packaged release is damaged. Source builds do not carry the release
+workflow's Developer ID signature and notarization. Report the exact macOS
+warning, Wardian version, install location, and whether the package came from
+the official release or a local build.
 
 ## Provider Is Not Detected
 

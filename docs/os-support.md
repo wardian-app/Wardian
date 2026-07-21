@@ -21,7 +21,7 @@ Wardian is fully supported on macOS, with a focus on Apple Silicon (M-series) pe
 
 - **Implementation**: Standard Unix PTY via `portable-pty`.
 - **Status**: Stable. All core features (Library management, Workflows, Telemetry) are verified on macOS.
-- **Install**: Use `brew install --cask wardian-app/tap/wardian`, or download the Apple Silicon or Intel `.dmg` from the Releases page.
+- **Install**: Use `brew install --cask wardian-app/tap/wardian`, or download the Apple Silicon or Intel `.dmg` from the Releases page. Official releases built by the signed workflow are Developer ID signed and Apple-notarized; copy the app to **Applications** and eject the DMG before launch so updates have a writable install location.
 - **Visuals**: The UI includes macOS-specific titlebar and sidebar width optimizations for a more native look and feel.
 
 ---
