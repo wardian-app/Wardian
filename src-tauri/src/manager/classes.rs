@@ -247,9 +247,21 @@ mod tests {
 
         for (link, reference) in [
             (
-                "references/agents-and-worktrees.md",
+                "references/agents.md",
                 include_str!(
-                    "../../resources/library/skills/wardian-skills/wardian-cli/references/agents-and-worktrees.md"
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/agents.md"
+                ),
+            ),
+            (
+                "references/orchestration.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/orchestration.md"
+                ),
+            ),
+            (
+                "references/topology.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/topology.md"
                 ),
             ),
             (
@@ -259,9 +271,9 @@ mod tests {
                 ),
             ),
             (
-                "references/library.md",
+                "references/assets.md",
                 include_str!(
-                    "../../resources/library/skills/wardian-skills/wardian-cli/references/library.md"
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/assets.md"
                 ),
             ),
             (
@@ -281,6 +293,27 @@ mod tests {
             assert!(
                 !reference.trim().is_empty(),
                 "routed reference must contain instructions: {link}"
+            );
+        }
+
+        for command in [
+            "`wardian agent`",
+            "`wardian agent wait`",
+            "`wardian agent watch`",
+            "`wardian graph`",
+            "`wardian send`",
+            "`wardian ask`",
+            "`wardian reply`",
+            "`wardian conversation`",
+            "`wardian library`",
+            "`wardian artifact`",
+            "`wardian workflow`",
+            "`wardian team`",
+            "`wardian watchlist`",
+        ] {
+            assert!(
+                ROOT.contains(command),
+                "root skill must route top-level CLI command: {command}"
             );
         }
     }

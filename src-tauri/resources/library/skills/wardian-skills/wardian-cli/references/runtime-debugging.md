@@ -1,23 +1,8 @@
 # Runtime Debugging
 
-## Observe Agent Output
-
-Use `agent watch` for bounded observation:
-
-```bash
-wardian agent watch reviewer-a1 --until output:REVIEW_DONE --include status,output --timeout 10m
-```
-
-The default response includes status, provider-adapted transcript text,
-sanitized terminal output, delivery details, and a cursor. Use `--raw` or
-`--include raw_output` only when debugging terminal escape sequences or repaint
-behavior. Marker matching checks transcript text, sanitized output, and an
-internal raw-output fallback. `--follow` is reserved and returns
-`not_supported`.
-
-Use `--until output:<token>` only when output-substring compatibility is needed.
-Explicit `status:<status>`, `event:<kind>`, and `delivery:<state>` conditions
-retain watch-based behavior.
+Use [orchestration](orchestration.md) for normal live-task control, waiting,
+and observation. Use this reference when a command fails or when a development
+app and CLI need to share the same runtime state.
 
 ## Interpret Common Errors
 

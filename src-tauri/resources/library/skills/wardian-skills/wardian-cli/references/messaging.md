@@ -49,6 +49,22 @@ provider cannot safely accept it. `live-only` fails instead of queueing, while
 `mailbox-only` queues without attempting a live submit. Use the policy that
 matches whether the work can wait for a safe provider turn.
 
+## Inspect Conversations
+
+Use `conversation` to retrieve durable message history rather than inferring a
+peer's state from terminal scrollback:
+
+```bash
+wardian conversation list
+wardian conversation list --agent reviewer-a1
+wardian conversation list --scope all
+wardian conversation show <conversation-id>
+```
+
+The default `current` scope is the current agent's conversation set. Use an
+explicit agent or `--scope all` only when the coordination task needs a wider
+history.
+
 ## Send Approval Actions
 
 Use an approval action only to answer an outstanding provider approval. It is

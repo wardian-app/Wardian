@@ -19,25 +19,25 @@ Do not infer agent state from UI, terminal titles, or files such as
 - Treat default JSON as the automation contract. Request `status_source` when
   it matters whether state is `live` (desktop app) or `persisted` (`state.db`).
 - Require the running desktop app with the same `WARDIAN_HOME` for mutating
-  commands. Never edit persisted state to replace `agent update` or worktree
-  commands.
+  commands. Never edit persisted state to replace official agent or workspace
+  assignment commands.
 
 ## Choose A Command Family
 
 | Need | Start with | Read for details |
 | --- | --- | --- |
-| Inspect, coordinate, create, update, or move agents | `wardian agent` | [agents and worktrees](references/agents-and-worktrees.md) |
-| Send work, request an accountable reply, or respond | `wardian send`, `wardian ask`, `wardian reply` | [messaging](references/messaging.md) |
-| Inspect or deploy reusable agent assets | `wardian library` | [library](references/library.md) |
-| Validate or run workflows; inspect teams or watchlists | `wardian workflow`, `wardian team`, `wardian watchlist` | [workflows](references/workflows.md) |
-| Observe output, diagnose CLI errors, or run a dev/runtime check | `wardian agent watch` | [runtime debugging](references/runtime-debugging.md) |
+| Inspect, create, update, or assign workspaces to agents | `wardian agent` | [agents](references/agents.md) |
+| Control a live task, wait, watch output, or delegate work | `wardian agent wait`, `wardian agent watch` | [orchestration](references/orchestration.md) |
+| Inspect or change communication boundaries | `wardian graph` | [topology](references/topology.md) |
+| Send work, request an accountable reply, respond, or inspect conversations | `wardian send`, `wardian ask`, `wardian reply`, `wardian conversation` | [messaging](references/messaging.md) |
+| Manage reusable assets or present durable work for review | `wardian library`, `wardian artifact` | [assets](references/assets.md) |
+| Validate or run workflows; manage teams and watchlists | `wardian workflow`, `wardian team`, `wardian watchlist` | [workflows](references/workflows.md) |
+| Diagnose CLI errors or run a shared dev/runtime check | `wardian` | [runtime debugging](references/runtime-debugging.md) |
 
 ## Non-Negotiable Defaults
 
 - Use `agent update` rather than editing `settings/state.json`; restart an
   agent when its result reports `restart_required`.
-- Use `agent worktree enable`, `join`, and `disable` for managed agents.
-  `disable` clears only the assignment; it never deletes the physical worktree.
 - Use `send` for a live message. Use `ask` when one named peer must return a
   structured `done`, `blocked`, or `failed` reply with delivery evidence.
   Use `reply` only to complete an ask request.
@@ -49,8 +49,6 @@ Do not infer agent state from UI, terminal titles, or files such as
   attribution.
 - Treat `library deploy --targets` as the complete desired target set. Pass a
   non-empty, explicit list, or use `--clear` to remove every deployment.
-- Keep raw PTY inspection opt-in. Use the readable watch response unless
-  terminal escape bytes or repaint evidence are specifically needed.
 
 Read the linked reference before using a conditional command shape or relying
 on command-specific behavior. Keep prompts bounded, verify delivery or replies,
