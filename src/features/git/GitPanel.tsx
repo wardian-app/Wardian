@@ -35,6 +35,9 @@ const normalizeComparablePath = (path: string): string => {
   return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
 };
 
+const isDirtyWorktreeRemovalError = (message: string) =>
+  /contains modified or untracked files/i.test(message) && /use --force/i.test(message);
+
 const isAbsoluteResourcePath = (path: string) =>
   /^[a-z]:[\\/]/i.test(path) || path.startsWith("/") || path.startsWith("\\\\");
 
@@ -161,6 +164,10 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
   const [cloneRepositoryUrl, setCloneRepositoryUrl] = useState("");
   const [cloningRepository, setCloningRepository] = useState(false);
   const [worktreeLoading, setWorktreeLoading] = useState(false);
+  const [forceDeleteTarget, setForceDeleteTarget] = useState<{
+    worktree: AgentWorktreeSummary;
+    reason: string;
+  } | null>(null);
   const [availableWorktrees, setAvailableWorktrees] = useState<AgentWorktreeSummary[]>([]);
   const [currentWorktreeName, setCurrentWorktreeName] = useState<ActiveWorktreeName | null>(null);
   const [isNamingWorktree, setIsNamingWorktree] = useState(false);
@@ -1157,14 +1164,43 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
     try {
       await invoke("delete_agent_worktree", {
         worktreeFolder: worktree.worktree_folder,
+        sourceFolder: worktree.source_folder,
+        force: false,
       });
       setAvailableWorktrees((current) =>
         current.filter((candidate) => candidate.worktree_folder !== worktree.worktree_folder),
       );
+    } catch (err) {
+      const reason = formatError(err);
+      if (!isDirtyWorktreeRemovalError(reason)) {
+        setPanelError(reason);
+        return;
+      }
+      setForceDeleteTarget({ worktree, reason });
+    } finally {
       onAgentsUpdated();
+      setWorktreeLoading(false);
+    }
+  };
+
+  const handleForceDeleteWorktree = async () => {
+    if (!forceDeleteTarget) return;
+    const { worktree } = forceDeleteTarget;
+    setForceDeleteTarget(null);
+    setWorktreeLoading(true);
+    try {
+      await invoke("delete_agent_worktree", {
+        worktreeFolder: worktree.worktree_folder,
+        sourceFolder: worktree.source_folder,
+        force: true,
+      });
+      setAvailableWorktrees((current) =>
+        current.filter((candidate) => candidate.worktree_folder !== worktree.worktree_folder),
+      );
     } catch (err) {
       setPanelError(formatError(err));
     } finally {
+      onAgentsUpdated();
       setWorktreeLoading(false);
     }
   };
@@ -2594,6 +2630,57 @@ export const GitPanel: React.FC<GitPanelProps> = ({ selectedAgentIds, agents, on
           items={branchMenu.items}
           onClose={() => setBranchMenu(null)}
         />
+      )}
+      {forceDeleteTarget && (
+        <div
+          className="fixed inset-0 z-[11000] flex items-center justify-center"
+          style={{ backgroundColor: "var(--color-wardian-overlay)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="force-delete-worktree-title"
+        >
+          <div
+            className="w-full max-w-sm mx-4 rounded-lg p-6 shadow-2xl"
+            style={{
+              background: "var(--color-wardian-sidebar-primary)",
+              border: "1px solid var(--color-wardian-border-heavy)",
+            }}
+          >
+            <h2 id="force-delete-worktree-title" className="text-sm font-bold text-primary">
+              Force delete {forceDeleteTarget.worktree.name}?
+            </h2>
+            <p className="mt-3 text-xs leading-relaxed text-muted">
+              Git reported local changes or untracked files in this worktree. Force deletion permanently discards them.
+            </p>
+            <p className="mt-3 break-all font-mono text-[10px] text-muted">
+              {forceDeleteTarget.worktree.worktree_folder}
+            </p>
+            <p className="mt-3 text-[10px] text-muted">{forceDeleteTarget.reason}</p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setForceDeleteTarget(null)}
+                disabled={worktreeLoading}
+                className="px-4 py-2 text-xs font-bold rounded text-muted hover:text-primary disabled:opacity-40"
+                style={{
+                  background: "var(--color-wardian-card-bg-muted)",
+                  border: "1px solid var(--color-wardian-border)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleForceDeleteWorktree()}
+                disabled={worktreeLoading}
+                className="px-4 py-2 text-xs font-bold rounded text-white disabled:opacity-40"
+                style={{ background: "var(--color-wardian-error)" }}
+              >
+                Force delete — discard changes
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

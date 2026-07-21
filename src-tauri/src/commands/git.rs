@@ -1079,6 +1079,14 @@ pub(crate) fn remove_worktree_without_force(
     remove_worktree_with_options(workspace_path, worktree_path, false)
 }
 
+pub(crate) fn remove_worktree_with_force(
+    workspace_path: &Path,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
+    remove_worktree_with_options(workspace_path, worktree_path, true)
+}
+
 fn cleanup_generated_worktree_build_caches(
     workspace_path: &Path,
     worktree_path: &Path,
@@ -1166,12 +1174,55 @@ fn remove_worktree_with_options(
     let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
     let workspace = path_to_git_arg(&workspace_path)?;
     let worktree = path_to_git_arg(&worktree_path)?;
-    if force {
-        run_git(&workspace, &["worktree", "remove", &worktree, "--force"])?;
+    let result = if force {
+        run_git(
+            &workspace,
+            &["-c", "core.longpaths=true", "worktree", "remove", &worktree, "--force"],
+        )
     } else {
-        run_git(&workspace, &["worktree", "remove", &worktree])?;
+        run_git(
+            &workspace,
+            &["-c", "core.longpaths=true", "worktree", "remove", &worktree],
+        )
+    };
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(error)
+            if !git_worktree_contains_path(&workspace_path, &worktree_path).unwrap_or(true) => {
+                remove_worktree_directory(&worktree_path).map_err(|cleanup_error| {
+                    format!(
+                        "{error}\nGit unregistered the worktree, but Wardian could not remove its remaining folder: {cleanup_error}"
+                    )
+                })
+            }
+        Err(error) => Err(error),
     }
-    Ok(())
+}
+
+fn remove_worktree_directory(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(worktree_removal_path(path)).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn worktree_removal_path(path: &Path) -> PathBuf {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let value = path.to_string_lossy();
+    if value.starts_with(r"\\?\") {
+        path
+    } else if let Some(unc_path) = value.strip_prefix(r"\\") {
+        PathBuf::from(format!(r"\\?\UNC\{unc_path}"))
+    } else {
+        PathBuf::from(format!(r"\\?\{value}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn worktree_removal_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
