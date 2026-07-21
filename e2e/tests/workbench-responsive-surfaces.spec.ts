@@ -43,7 +43,7 @@ type ResponsiveSurfaceType = typeof surfaceTypes[number];
 const rootSelector: Record<ResponsiveSurfaceType, string> = {
   "new-tab": ".wardian-workbench-home",
   dashboard: ".dashboard-view",
-  queue: ".queue-view",
+  inbox: ".queue-view",
   graph: "[data-testid=graph-view]",
   garden: ".garden-view",
   library: "[data-testid=library-view]",

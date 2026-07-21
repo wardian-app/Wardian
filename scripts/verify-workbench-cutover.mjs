@@ -32,7 +32,7 @@ const frozenAudit = Object.freeze([
   ["scripts/capture-doc-screenshots.mjs", "migrated", "Desktop capture must use semantic workbench navigation."],
   ["scripts/capture-readme-demo-real.mjs", "migrated", "Desktop capture must use semantic workbench navigation."],
   ["src/styles/App.css", "migrated", "Task 19 removes the flag-off titlebar navigation styles."],
-  ["e2e/tests/remote-pwa.spec.ts", "intentionally-unrelated", "Remote PWA Queue navigation is not desktop surface navigation."],
+  ["e2e/tests/remote-pwa.spec.ts", "migrated", "Remote PWA navigation now uses the Inbox surface name."],
   ["src/features/remote/RemoteMobileApp.test.tsx", "intentionally-unrelated", "Remote mobile navigation is not desktop surface navigation."],
   ["src/features/settings/SettingsModal.test.tsx", "intentionally-unrelated", "Settings Queue and Grid controls configure alerts and density, not desktop surfaces."],
 ].map(([auditPath, disposition, reason]) => Object.freeze({
@@ -87,12 +87,6 @@ const rules = Object.freeze([
 ]);
 
 const allowlistedMatches = Object.freeze([
-  {
-    path: "e2e/tests/remote-pwa.spec.ts",
-    rule_ids: ["legacy-role-button-selector", "direct-desktop-surface-launch-click"],
-    context: /Queue/,
-    reason: "Remote PWA Queue navigation is an intentionally unrelated mobile surface.",
-  },
   {
     path: "src/features/remote/RemoteMobileApp.test.tsx",
     rule_ids: ["legacy-role-button-selector", "direct-desktop-surface-launch-click"],
