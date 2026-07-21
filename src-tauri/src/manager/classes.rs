@@ -207,6 +207,121 @@ mod tests {
     }
 
     #[test]
+    fn bundled_common_skill_copies_reference_material() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_root = temp.path().join("resources").join("library").join("skills");
+        let source = source_root.join("wardian-skills").join("wardian-cli");
+        let reference = source.join("references").join("messaging.md");
+        fs::create_dir_all(reference.parent().expect("reference parent")).expect("source dir");
+        fs::write(source.join("SKILL.md"), "bundled").expect("source skill");
+        fs::write(&reference, "messaging instructions").expect("reference material");
+
+        let app_dir = temp.path().join("home");
+        seed_bundled_common_skill(&source_root, &app_dir, "wardian-skills/wardian-cli")
+            .expect("seed bundled skill");
+
+        for deployed_skill in [
+            app_dir
+                .join("library")
+                .join("skills")
+                .join("wardian-skills")
+                .join("wardian-cli"),
+            app_dir
+                .join("common")
+                .join(".agents")
+                .join("skills")
+                .join("wardian-cli"),
+        ] {
+            assert_eq!(
+                fs::read_to_string(deployed_skill.join("references").join("messaging.md"))
+                    .expect("reference material"),
+                "messaging instructions"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_wardian_cli_skill_routes_to_packaged_references() {
+        const ROOT: &str =
+            include_str!("../../resources/library/skills/wardian-skills/wardian-cli/SKILL.md");
+
+        for (link, reference) in [
+            (
+                "references/agents-and-worktrees.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/agents-and-worktrees.md"
+                ),
+            ),
+            (
+                "references/messaging.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/messaging.md"
+                ),
+            ),
+            (
+                "references/library.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/library.md"
+                ),
+            ),
+            (
+                "references/workflows.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/workflows.md"
+                ),
+            ),
+            (
+                "references/runtime-debugging.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/runtime-debugging.md"
+                ),
+            ),
+        ] {
+            assert!(ROOT.contains(link), "root skill must route to {link}");
+            assert!(
+                !reference.trim().is_empty(),
+                "routed reference must contain instructions: {link}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_wardian_cli_skill_preserves_messaging_safety_contract() {
+        const ROOT: &str =
+            include_str!("../../resources/library/skills/wardian-skills/wardian-cli/SKILL.md");
+        const MESSAGING: &str = include_str!(
+            "../../resources/library/skills/wardian-skills/wardian-cli/references/messaging.md"
+        );
+
+        for required_root_instruction in [
+            "Keep broadcasts and class sends neighbor-scoped",
+            "`ask` accepts one named peer or UUID, never a broadcast",
+            "Use `send --as-command` only for one explicit agent or UUID",
+        ] {
+            assert!(
+                ROOT.contains(required_root_instruction),
+                "root skill must retain messaging safety instruction: {required_root_instruction}"
+            );
+        }
+
+        for required_messaging_instruction in [
+            "Use `wardian send` for one-way inter-agent communication",
+            "`all` and class targets resolve among neighbors",
+            "`--queue-policy queue-if-busy` is the default",
+            "Use an approval action only to answer an outstanding provider approval",
+            "Use `ask` when the task needs a named peer's accountable result",
+            "wardian ask reviewer-a1 --file review-request.md --timeout 10m",
+            "wardian reply ask_0123456789abcdef --status blocked --file findings.md",
+            "broadcasts, class selectors, and `--thread` are unsupported",
+        ] {
+            assert!(
+                MESSAGING.contains(required_messaging_instruction),
+                "messaging reference must retain safety instruction: {required_messaging_instruction}"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_wardian_skill_overwrites_existing_library_copy() {
         let temp = tempfile::tempdir().expect("temp dir");
         let source_root = temp.path().join("resources").join("library").join("skills");
