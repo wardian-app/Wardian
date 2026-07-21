@@ -1,5 +1,4 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,7 +105,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows a passive Mirror and explicitly requests ownership before enabling input", async () => {
+  it("implicitly requests terminal ownership when the terminal view opens", async () => {
     const socket = new DetailSocket();
     let handlers: Parameters<typeof remoteClient.openTerminalStream>[3] | undefined;
     vi.spyOn(remoteClient, "openTerminalStream").mockImplementation(async (_session, _cols, _rows, nextHandlers) => {
@@ -121,7 +120,6 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
       await handlers?.onMessage(registered());
     });
 
-    expect(screen.getByTestId("remote-terminal-presentation-mode")).toHaveTextContent("Mirror");
     const terminalResults = vi.mocked(Terminal).mock.results;
     const terminalInstance = terminalResults[terminalResults.length - 1]?.value as Terminal & {
       options: { disableStdin?: boolean };
@@ -131,8 +129,8 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     const fitCallsBeforeActivation = fit.mock.calls.length;
     expect(terminalInstance.write).toHaveBeenCalledWith("ready", expect.any(Function));
     expect(terminalInstance.options.disableStdin).toBe(true);
-
-    await userEvent.click(screen.getByRole("button", { name: "Take terminal control" }));
+    expect(screen.queryByText("Mirror")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Take terminal control" })).not.toBeInTheDocument();
     expect(socket.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: "begin_activation",
       runtime_generation: 1,

@@ -22,7 +22,6 @@ import type {
   AgentChatRole,
   RemoteAgentSummary,
   RemoteTerminalBrokerEvent,
-  RemoteTerminalPresentationMode,
   TerminalSnapshot,
 } from "../../types";
 import { toActivityBlock, type ActivityBlockModel } from "../grid/activityBlocks";
@@ -197,10 +196,6 @@ function terminalRowPixelHeight(terminal: Terminal, measureHost: HTMLDivElement)
   return Number.isFinite(measured) && measured > 0 ? measured : 18;
 }
 
-function terminalOwnsMouseInteraction(terminal: Terminal) {
-  return terminal.buffer.active.type === "alternate" && terminal.modes.mouseTrackingMode !== "none";
-}
-
 function installTerminalScrollBridge(
   terminal: Terminal,
   eventSurface: HTMLDivElement,
@@ -220,9 +215,6 @@ function installTerminalScrollBridge(
   };
 
   const onWheel = (event: WheelEvent) => {
-    if (terminalOwnsMouseInteraction(terminal)) {
-      return;
-    }
     const rowHeight = terminalRowPixelHeight(terminal, measureHost);
     const rows =
       event.deltaMode === WheelEvent.DOM_DELTA_LINE
@@ -249,21 +241,8 @@ function installTerminalScrollBridge(
     if (!touch) return;
     const nextTouchPoint = { clientX: touch.clientX, clientY: touch.clientY };
     const deltaY = lastTouchPoint.clientY - nextTouchPoint.clientY;
-    if (terminalOwnsMouseInteraction(terminal)) {
-      (terminal.element ?? measureHost).dispatchEvent(
-        new WheelEvent("wheel", {
-          bubbles: true,
-          cancelable: true,
-          clientX: nextTouchPoint.clientX,
-          clientY: nextTouchPoint.clientY,
-          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
-          deltaY,
-        }),
-      );
-    } else {
-      const rowHeight = terminalRowPixelHeight(terminal, measureHost);
-      touchRemainder = scrollByRows(touchRemainder + deltaY / rowHeight);
-    }
+    const rowHeight = terminalRowPixelHeight(terminal, measureHost);
+    touchRemainder = scrollByRows(touchRemainder + deltaY / rowHeight);
     lastTouchPoint = nextTouchPoint;
     event.preventDefault();
   };
@@ -707,11 +686,8 @@ function TerminalPane({
   const terminalScrollSurfaceRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const sessionClientRef = useRef<RemoteTerminalSessionClient | null>(null);
   const [streamError, setStreamError] = useState("");
   const [connected, setConnected] = useState(false);
-  const [presentationMode, setPresentationMode] = useState<RemoteTerminalPresentationMode>("connecting");
-  const [leaseNotice, setLeaseNotice] = useState("");
   const appendRemoteTerminalQueueOutput = useRemoteStore((state) => state.appendRemoteTerminalQueueOutput);
   const remoteTerminalFontSize = useRemoteStore((state) => state.remoteTerminalFontSize);
 
@@ -721,8 +697,6 @@ function TerminalPane({
     if (!host || !scrollSurface) return;
     host.replaceChildren();
     setConnected(false);
-    setPresentationMode("connecting");
-    setLeaseNotice("");
     setStreamError("");
 
     const terminal = new Terminal({
@@ -770,6 +744,7 @@ function TerminalPane({
     terminalTextarea?.addEventListener("compositionend", onCompositionEnd);
     let disposed = false;
     let terminalSession: RemoteTerminalSessionClient | null = null;
+    let requestedInitialActivation = false;
     const reportViewport = (runtimeGeneration: number, cols: number, rows: number) => {
       if (
         lastViewport.runtimeGeneration === runtimeGeneration
@@ -941,12 +916,15 @@ function TerminalPane({
               if (disposed) return;
               const mode = state.mode;
               setConnected(Boolean(state.presentation));
-              setPresentationMode(mode);
               setTerminalStdinEnabled(
                 terminal,
                 mode === "owner" && !state.presentation?.requires_resync,
               );
               if (state.presentation) updateTerminalLayout();
+              if (mode === "mirror" && !requestedInitialActivation) {
+                requestedInitialActivation = true;
+                terminalSession?.activate();
+              }
               if (mode === "owner" && !state.presentation?.requires_resync) {
                 flushCapabilityResponses();
               }
@@ -965,21 +943,10 @@ function TerminalPane({
                 requestedResyncKey = "";
               }
             },
-            onLeaseDecision: (decision) => {
-              if (decision.status === "accepted") {
-                setLeaseNotice("");
-              } else if (!disposed) {
-                setLeaseNotice(decision.reason?.replace(/_/g, " ") ?? "Lease changed");
-              }
-            },
-            onNonfatalError: (code) => {
-              if (!disposed) setLeaseNotice(code.replace(/_/g, " "));
-            },
             onFatalError: (code) => {
               if (!disposed) setStreamError(code);
             },
           });
-          sessionClientRef.current = terminalSession;
         },
         onClose: () => {
           socketRef.current = null;
@@ -1003,7 +970,6 @@ function TerminalPane({
       setTerminalStdinEnabled(terminal, false);
       terminalSession?.detach();
       terminalSession = null;
-      sessionClientRef.current = null;
       socketRef.current?.close();
       socketRef.current = null;
       terminalRef.current = null;
@@ -1027,32 +993,10 @@ function TerminalPane({
           Attaching terminal...
         </div>
       )}
-      {connected && (
-        <div className="flex shrink-0 items-center justify-between gap-2" aria-live="polite">
-          <div className="min-w-0 text-xs text-muted-neutral">
-            <span
-              data-testid="remote-terminal-presentation-mode"
-              className="rounded-full border border-wardian-border bg-wardian-card px-2 py-1 font-semibold text-primary"
-            >
-              {presentationMode === "owner" ? "Owner" : "Mirror"}
-            </span>
-            {leaseNotice ? <span className="ml-2">{leaseNotice}</span> : null}
-          </div>
-          {presentationMode === "mirror" ? (
-            <button
-              type="button"
-              className="rounded-md border border-[var(--color-wardian-accent)] px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)]"
-              onClick={() => sessionClientRef.current?.activate()}
-            >
-              Take terminal control
-            </button>
-          ) : null}
-        </div>
-      )}
       <div
         ref={terminalScrollSurfaceRef}
         data-testid="remote-terminal-scroll-surface"
-        className="mt-2 min-h-0 flex-1 overflow-hidden rounded-md border border-wardian-border bg-wardian-card"
+        className="min-h-0 flex-1 overflow-hidden rounded-md border border-wardian-border bg-wardian-card"
       >
         <div
           ref={terminalHostRef}
