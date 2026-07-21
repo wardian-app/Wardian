@@ -283,6 +283,12 @@ mod tests {
                 ),
             ),
             (
+                "references/coordination-groups.md",
+                include_str!(
+                    "../../resources/library/skills/wardian-skills/wardian-cli/references/coordination-groups.md"
+                ),
+            ),
+            (
                 "references/runtime-debugging.md",
                 include_str!(
                     "../../resources/library/skills/wardian-skills/wardian-cli/references/runtime-debugging.md"

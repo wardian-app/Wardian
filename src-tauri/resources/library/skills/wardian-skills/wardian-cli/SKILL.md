@@ -31,7 +31,8 @@ Do not infer agent state from UI, terminal titles, or files such as
 | Inspect or change communication boundaries | `wardian graph` | [topology](references/topology.md) |
 | Send work, request an accountable reply, respond, or inspect conversations | `wardian send`, `wardian ask`, `wardian reply`, `wardian conversation` | [messaging](references/messaging.md) |
 | Manage reusable assets or present durable work for review | `wardian library`, `wardian artifact` | [assets](references/assets.md) |
-| Validate or run workflows; manage teams and watchlists | `wardian workflow`, `wardian team`, `wardian watchlist` | [workflows](references/workflows.md) |
+| Validate, run, or inspect workflow automation | `wardian workflow` | [workflows](references/workflows.md) |
+| Organize durable teams and monitoring watchlists | `wardian team`, `wardian watchlist` | [teams and watchlists](references/coordination-groups.md) |
 | Diagnose CLI errors or run a shared dev/runtime check | `wardian` | [runtime debugging](references/runtime-debugging.md) |
 
 ## Non-Negotiable Defaults
