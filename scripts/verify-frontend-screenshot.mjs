@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 
-const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(https:\/\/[^)\s]+\.(?:png|jpe?g|webp|gif)(?:[?#][^)\s]*)?\)/i;
-const HTML_IMAGE_PATTERN = /<img\b[^>]*\bsrc=["']https:\/\/[^"']+\.(?:png|jpe?g|webp|gif)(?:[?#][^"']*)?["'][^>]*>/i;
+const IMAGE_URL_PATTERN =
+  "https:\\/\\/(?:[^)\\s]+\\.(?:png|jpe?g|webp|gif)|github\\.com\\/user-attachments\\/assets\\/[0-9a-f-]+)(?:[?#][^)\\s]*)?";
+const MARKDOWN_IMAGE_PATTERN = new RegExp(`!\\[[^\\]]*]\\(${IMAGE_URL_PATTERN}\\)`, "i");
+const HTML_IMAGE_PATTERN = new RegExp(`<img\\b[^>]*\\bsrc=["']${IMAGE_URL_PATTERN}["'][^>]*>`, "i");
 
 const FRONTEND_PATTERNS = [
   /^src\/.+\.(css|ts|tsx)$/,
