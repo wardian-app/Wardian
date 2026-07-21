@@ -467,7 +467,7 @@ test("opens an inline New Tab in its captured pane and transitions Browse all to
     .toHaveAttribute("aria-selected", "true");
   await expect(targetGroup.getByRole("heading", { name: "Choose a surface" })).toBeVisible();
   await expect(targetGroup.getByLabel("Available surfaces").getByRole("button")).toHaveCount(7);
-  await targetGroup.getByRole("button", { name: /^Queue:/ }).click();
+  await targetGroup.getByRole("button", { name: /^Inbox:/ }).click();
 
   const queueTab = surfaceTab(page, "inbox");
   await expect(queueTab).toBeVisible();
@@ -503,8 +503,8 @@ test("honors the persisted palette plus preference while Quick Open remains sear
   await expect(searchable).toBeVisible();
   await expect(page.getByRole("dialog", { name: "Choose a surface", exact: true })).toHaveCount(0);
   const search = searchable.getByRole("combobox", { name: "Open a surface" });
-  await search.fill("Queue");
-  await expect(searchable.getByRole("option", { name: "Queue", exact: true })).toBeVisible();
+  await search.fill("Inbox");
+  await expect(searchable.getByRole("option", { name: "Inbox", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
 
   await page.keyboard.press(process.platform === "darwin" ? "Meta+p" : "Control+p");

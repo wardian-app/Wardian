@@ -154,11 +154,11 @@ test("native workbench persistence restores exact state and preserves recovery f
     "the first deliberate save must rotate the exact validated base primary",
   );
 
-  await openWorkbenchSurface(driver, "queue", { toSide: true });
+  await openWorkbenchSurface(driver, "inbox", { toSide: true });
   const secondDocument = await waitForDocument(primaryPath, (document) => (
     document.revision > firstDocument.revision
       && document.root.kind === "split"
-      && Object.values(document.surfaces).some((surface) => surface.surface_type === "queue")
+      && Object.values(document.surfaces).some((surface) => surface.surface_type === "inbox")
   ));
   const secondBytes = fs.readFileSync(primaryPath);
   assert.equal(secondDocument.revision, firstDocument.revision + 1);
