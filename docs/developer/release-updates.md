@@ -116,7 +116,7 @@ Each platform entry must include a URL and inline signature. The metadata versio
 
 Manual backfill runs must target an explicit `release_tag`. Backfill is draft-only unless the workflow is deliberately changed to support published-release mutation. If the target release is already published, the workflow should fail instead of rewriting updater metadata.
 
-Release dry-run builds still require signing secrets because they use the updater config overlay. Dry runs can prove signed installer generation, but they do not publish `latest.json`; validate release-scoped metadata against a real draft or backfill release before claiming updater release readiness.
+Release dry-run builds still require signing secrets because they use the updater config overlay. They verify the signed app structure in the DMG and updater archive, but intentionally skip Apple ticket and Gatekeeper checks because dry runs do not notarize or staple the artifacts. Dry runs can prove signed installer generation, but they do not publish `latest.json`; validate release-scoped metadata against a real draft or backfill release before claiming updater release readiness.
 
 ## Verification
 

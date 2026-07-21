@@ -98,7 +98,9 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("APPLE_TEAM_ID");
     expect(releaseWorkflow).toContain("Import macOS Developer ID certificate");
     expect(releaseWorkflow).toContain("Developer ID Application identity was not available after import");
-    expect(releaseWorkflow).toContain("Verify notarized macOS release artifacts");
+    expect(releaseWorkflow).toContain("Verify macOS release artifacts");
+    expect(releaseWorkflow).toContain("NOTARIZATION_REQUIRED");
+    expect(releaseWorkflow).toContain('inputs.dry_run != \'true\'');
     expect(releaseWorkflow).toContain("xcrun stapler validate");
     expect(releaseWorkflow).toContain("spctl --assess --type open");
     expect(releaseWorkflow).toContain("spctl --assess --type execute");

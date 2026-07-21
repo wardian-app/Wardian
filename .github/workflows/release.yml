@@ -289,16 +289,20 @@ jobs:
         with:
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
-      - name: Verify notarized macOS release artifacts
+      - name: Verify macOS release artifacts
         if: matrix.platform.macos
         shell: bash
+        env:
+          NOTARIZATION_REQUIRED: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true' }}
         run: |
           set -euo pipefail
           dmg_count=0
           while IFS= read -r -d '' dmg; do
             dmg_count=$((dmg_count + 1))
-            xcrun stapler validate "$dmg"
-            spctl --assess --type open --verbose=4 "$dmg"
+            if [[ "$NOTARIZATION_REQUIRED" == "true" ]]; then
+              xcrun stapler validate "$dmg"
+              spctl --assess --type open --verbose=4 "$dmg"
+            fi
 
             mount_path="$(mktemp -d)"
             hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_path"
@@ -308,8 +312,10 @@ jobs:
               exit 1
             fi
             codesign --verify --deep --strict --verbose=4 "$app_path"
-            xcrun stapler validate "$app_path"
-            spctl --assess --type execute --verbose=4 "$app_path"
+            if [[ "$NOTARIZATION_REQUIRED" == "true" ]]; then
+              xcrun stapler validate "$app_path"
+              spctl --assess --type execute --verbose=4 "$app_path"
+            fi
             hdiutil detach "$mount_path"
           done < <(find target src-tauri/target -type f -name '*.dmg' -print0 2>/dev/null || true)
           if [[ "$dmg_count" -eq 0 ]]; then
@@ -328,7 +334,9 @@ jobs:
               exit 1
             fi
             codesign --verify --deep --strict --verbose=4 "$app_path"
-            xcrun stapler validate "$app_path"
+            if [[ "$NOTARIZATION_REQUIRED" == "true" ]]; then
+              xcrun stapler validate "$app_path"
+            fi
           done < <(find target src-tauri/target -type f -name '*.app.tar.gz' -print0 2>/dev/null || true)
           if [[ "$updater_count" -eq 0 ]]; then
             echo "No macOS updater archives were produced" >&2
