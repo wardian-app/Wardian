@@ -152,7 +152,7 @@ describe('AgentWatchlist', () => {
     expect(screen.getByLabelText('Agent Beta')).toHaveAttribute('data-selected', 'false');
   });
 
-  it('routes plain, Ctrl, and Shift clicks only through roster selection', () => {
+  it('reveals an agent on a plain click while preserving modified-click selection', () => {
     render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
     const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
     const betaRow = screen.getByText('Beta').closest('.watchlist-row')!;
@@ -179,18 +179,23 @@ describe('AgentWatchlist', () => {
       shiftKey: true,
       rangeAgentIds: ['agent-1', 'agent-2'],
     });
+    expect(mockOnRevealAgent).toHaveBeenCalledTimes(1);
+    expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
     expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnOpenAgentToSide).not.toHaveBeenCalled();
     expect(mockOnAgentClick).not.toHaveBeenCalled();
   });
 
-  it('reveals an agent on an unmodified double-click without opening a tab', () => {
+  it('ignores the second click of a double-click after navigating on the first', () => {
     render(<AgentWatchlist {...defaultProps} onSelectAgent={mockOnSelectAgent} />);
     const alphaRow = screen.getByText('Alpha').closest('.watchlist-row')!;
 
-    fireEvent.doubleClick(alphaRow);
+    fireEvent.click(alphaRow, { detail: 1 });
+    fireEvent.click(alphaRow, { detail: 2 });
 
+    expect(mockOnRevealAgent).toHaveBeenCalledTimes(1);
     expect(mockOnRevealAgent).toHaveBeenCalledWith('agent-1');
+    expect(mockOnSelectAgent).toHaveBeenCalledTimes(1);
     expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnAgentClick).not.toHaveBeenCalled();
   });
@@ -242,7 +247,7 @@ describe('AgentWatchlist', () => {
       />,
     );
 
-    fireEvent.doubleClick(screen.getByText('Alpha').closest('.watchlist-row')!);
+    fireEvent.click(screen.getByText('Alpha').closest('.watchlist-row')!);
 
     expect(mockOnAgentClick).toHaveBeenCalledWith('agent-1');
   });
