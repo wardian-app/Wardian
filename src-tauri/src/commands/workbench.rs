@@ -87,7 +87,20 @@ async fn load_workbench_state_for_home(
     state: &AppState,
 ) -> Result<WorkbenchLoadResult, String> {
     let _io_guard = state.workbench_io_lock.lock().await;
-    load_workbench_for_home(home).map_err(|error| error.to_string())
+    let mut loaded = load_workbench_for_home(home).map_err(|error| error.to_string())?;
+    if let Some(document) = loaded.document.as_mut() {
+        for surface in document.surfaces.values_mut() {
+            if surface.surface_type == "queue" {
+                surface.surface_type = "inbox".to_string();
+            }
+        }
+        for closed in &mut document.recently_closed {
+            if closed.surface.surface_type == "queue" {
+                closed.surface.surface_type = "inbox".to_string();
+            }
+        }
+    }
+    Ok(loaded)
 }
 
 async fn save_workbench_state_for_home(
@@ -112,7 +125,7 @@ async fn reset_workbench_state_for_home(
 mod tests {
     use super::*;
     use wardian_core::{
-        models::workbench::MAX_SAFE_INTEGER,
+        models::workbench::{ClosedSurfaceV1, WorkbenchSurfaceV1, MAX_SAFE_INTEGER},
         workbench::{WorkbenchLoadSource, WorkbenchPersistenceOutcome},
     };
 
@@ -211,5 +224,71 @@ mod tests {
         .expect_err("invalid command input");
 
         assert!(error.contains("invalid workbench document"));
+    }
+
+    #[tokio::test]
+    async fn loading_legacy_queue_surfaces_migrates_them_to_inbox() {
+        let home = tempfile::tempdir().expect("temp home");
+        let state = AppState::new();
+        let loaded = load_workbench_state_for_home(home.path(), &state)
+            .await
+            .expect("load default");
+        let mut document = loaded.document.expect("default document");
+        let queue_surface = WorkbenchSurfaceV1 {
+            surface_id: "surface-queue".to_string(),
+            surface_type: "queue".to_string(),
+            resource_key: None,
+            presentation_provenance: None,
+            state_schema_version: 1,
+            state: serde_json::json!({}),
+        };
+        document
+            .groups
+            .get_mut("group-1")
+            .expect("default group")
+            .surface_ids
+            .push(queue_surface.surface_id.clone());
+        document
+            .groups
+            .get_mut("group-1")
+            .expect("default group")
+            .active_surface_id = Some(queue_surface.surface_id.clone());
+        document
+            .surfaces
+            .insert(queue_surface.surface_id.clone(), queue_surface.clone());
+        document.recently_closed.push(ClosedSurfaceV1 {
+            surface: WorkbenchSurfaceV1 {
+                surface_id: "closed-queue".to_string(),
+                ..queue_surface
+            },
+            previous_group_id: "group-1".to_string(),
+            previous_index: 0,
+        });
+        document.revision = 1;
+        document.saved_at = "2026-07-21T12:00:00.000Z".to_string();
+
+        save_workbench_state_for_home(
+            home.path(),
+            WorkbenchSaveRequest {
+                document,
+                expected_revision: 0,
+                expected_token: loaded.durable_token.expect("default token"),
+                request_id: "save-legacy-queue".to_string(),
+            },
+            &state,
+        )
+        .await
+        .expect("save legacy document");
+
+        let migrated = load_workbench_state_for_home(home.path(), &state)
+            .await
+            .expect("load migrated document")
+            .document
+            .expect("migrated document");
+        assert_eq!(
+            migrated.surfaces["surface-queue"].surface_type,
+            "inbox"
+        );
+        assert_eq!(migrated.recently_closed[0].surface.surface_type, "inbox");
     }
 }

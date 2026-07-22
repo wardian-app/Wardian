@@ -4,7 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemotePairingView } from "./RemotePairingView";
-import { RemoteQueueView } from "./RemoteQueueView";
+import { RemoteInboxView } from "./RemoteInboxView";
 import { RemoteSettingsView } from "./RemoteSettingsView";
 import { RemoteWatchlistView } from "./RemoteWatchlistView";
 import { useRemoteStore } from "./useRemoteStore";
@@ -178,7 +178,7 @@ export const RemoteMobileApp: React.FC = () => {
       {activeRemoteTab === "watchlist" ? (
         <RemoteWatchlistView onOpenSettings={openSettings} />
       ) : activeRemoteTab === "queue" ? (
-        <RemoteQueueView />
+        <RemoteInboxView />
       ) : (
         <RemotePlaceholderPanel tab={activeRemoteTab} />
       )}
@@ -189,7 +189,7 @@ export const RemoteMobileApp: React.FC = () => {
 
 function RemotePlaceholderPanel({ tab }: { tab: "workflows" | "queue" | "garden" | "library" }) {
   const label =
-    tab === "workflows" ? "Workflows" : tab === "queue" ? "Queue" : tab === "garden" ? "Garden" : "Library";
+    tab === "workflows" ? "Workflows" : tab === "queue" ? "Inbox" : tab === "garden" ? "Garden" : "Library";
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">

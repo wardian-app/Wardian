@@ -42,7 +42,7 @@ describe("OpenSurfaceDialog", () => {
     for (const surfaceType of [
       "agents-overview",
       "dashboard",
-      "queue",
+      "inbox",
       "graph",
       "garden",
       "library",
@@ -145,7 +145,7 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("option", { name: "Queue" }), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("option", { name: "Inbox" }), { ctrlKey: true });
 
     expect(canSplitGroup).toHaveBeenCalledWith("group-1", "horizontal");
     expect(Object.keys(fixture.store.getState().document.groups)).toEqual(["group-1"]);
@@ -165,7 +165,7 @@ describe("OpenSurfaceDialog", () => {
         navigation={fixture.navigation}
         registry={fixture.registry}
         recently_closed={[{
-          surface: makeSurface("closed-queue", { surface_type: "queue" }),
+          surface: makeSurface("closed-queue", { surface_type: "inbox" }),
           previous_group_id: "group-1",
           previous_index: 0,
         }]}
@@ -181,7 +181,7 @@ describe("OpenSurfaceDialog", () => {
       surface_type: "agent-session",
       resource_key: "agent-7",
     });
-    fireEvent.click(screen.getByRole("option", { name: "Reopen Queue" }));
+    fireEvent.click(screen.getByRole("option", { name: "Reopen Inbox" }));
     expect(onReopen).toHaveBeenCalledOnce();
   });
 
@@ -220,7 +220,7 @@ describe("OpenSurfaceDialog", () => {
         registry={fixture.registry}
         recently_closed={[
           {
-            surface: makeSurface("closed-queue", { surface_type: "queue" }),
+            surface: makeSurface("closed-queue", { surface_type: "inbox" }),
             previous_group_id: "group-1",
             previous_index: 0,
           },
@@ -234,7 +234,7 @@ describe("OpenSurfaceDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("option", { name: "Reopen Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Reopen Inbox" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Reopen Dashboard" })).not.toBeInTheDocument();
   });
 

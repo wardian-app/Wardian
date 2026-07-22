@@ -13,7 +13,7 @@ invariants:
   watchlist/team records own roster organization until a broader project-scope
   model exists.
 - **Surfaces are lenses, not state silos.** Agents, Dashboard, Graph,
-  Garden, Library, Workflows, Queue, and future workbench contributions resolve
+  Garden, Library, Workflows, Inbox, and future workbench contributions resolve
   and mutate canonical Wardian records through shared commands or file
   contracts. A surface owns bounded presentation state, not a private copy of
   domain or runtime truth.
@@ -44,7 +44,7 @@ invariants:
 - **Worker Threads**:
   - **Workflow Scheduler**: Fires persisted workflow schedule invokers.
   - **Metrics Push**: Pushes system/agent resource usage to the UI via Tauri events.
-- **App Queue Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts.
+- **Inbox Persistence**: Completion triage state is stored under the active Wardian home so agent and workflow outcomes survive app restarts; durable agent notifications use the interaction store.
 
 ### 2. The Logical Layer (Workflow Engine)
 
@@ -71,7 +71,7 @@ invariants:
 - **Visual Builder**: A specialized canvas for designing complex multi-agent workflows, featuring the [Integrated Variable Assistant](./visual-builder.md).
 - **Agents**: A responsive workbench surface for monitoring multiple
   terminal presentations in Auto, Grid, or Single mode.
-- **Queue Surface**: A triage surface for unread agent completions and workflow outcomes.
+- **Inbox Surface**: A triage surface for unread agent completions, important updates, approvals, and workflow outcomes.
 
 ## 📡 Communication (IPC)
 

@@ -9,7 +9,7 @@ Update user-facing docs when a change affects any of these surfaces:
 - first-run setup, provider installation, app launch, or troubleshooting
 - visible UI behavior, labels, navigation, status indicators, settings, or empty states
 - CLI commands, arguments, output fields, exit behavior, or live-control requirements
-- workflow authoring, node behavior, scheduling, Queue behavior, or agent assignment
+- workflow authoring, node behavior, scheduling, Inbox behavior, or agent assignment
 - provider runtime behavior, shell behavior, permissions, sandboxing, session persistence, or filesystem expectations
 - release, installation, platform support, or upgrade behavior
 - error messages or recovery paths that users are expected to act on

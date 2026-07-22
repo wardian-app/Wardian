@@ -222,10 +222,10 @@ impl AgentProvider for AntigravityProvider {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         match parsed.get("type").and_then(|value| value.as_str()) {
             Some("USER_INPUT") => Some(AgentEvent::UserQuery),
-            Some("PLANNER_RESPONSE") if is_antigravity_model_response(&parsed) => {
-                Some(AgentEvent::TurnCompleted)
-            }
-            Some("PLANNER_RESPONSE") => Some(AgentEvent::Generating),
+            // Antigravity emits a DONE PLANNER_RESPONSE for every planner step:
+            // tool calls, progress prose, and the final answer. The terminal
+            // ready prompt is the only reliable end-of-turn boundary.
+            Some("PLANNER_RESPONSE") => Some(AgentEvent::Unknown),
             Some("SYSTEM_MESSAGE") | Some("CONVERSATION_HISTORY") => Some(AgentEvent::Unknown),
             _ => Some(AgentEvent::Unknown),
         }
@@ -392,7 +392,7 @@ SET dp0=%~dp0
     }
 
     #[test]
-    fn parse_output_maps_transcript_lifecycle() {
+    fn parse_output_leaves_planner_responses_to_terminal_ready_detection() {
         let provider = make_provider();
 
         assert_eq!(
@@ -407,7 +407,7 @@ SET dp0=%~dp0
                     r#"{"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"ok"}"#
                 )
                 .unwrap(),
-            AgentEvent::TurnCompleted
+            AgentEvent::Unknown
         );
     }
 

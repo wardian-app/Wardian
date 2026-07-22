@@ -18,13 +18,16 @@ use std::{
 
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, Cli, Command,
-    ConversationArgs, ConversationCommand, QueuePolicyArg, ReplyArgs, ReplyStatusArg, SendArgs,
-    WorkflowArgs, WorkflowCommand, WorkflowScheduleCommand,
+    ConversationArgs, ConversationCommand, NotifyArgs, NotifyCommand, QueuePolicyArg, ReplyArgs,
+    ReplyStatusArg, SendArgs, WorkflowArgs, WorkflowCommand, WorkflowScheduleCommand,
 };
 use clap::Parser;
 use errors::{CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
-use wardian_core::control::{ApprovalAction, MessageInputMode, QueuePolicy, WorkflowRunResponse};
+use wardian_core::control::{
+    ApprovalAction, InboxNotificationKind, InboxNotificationPayload, MessageInputMode, QueuePolicy,
+    WorkflowRunResponse,
+};
 use wardian_core::identity::{self, ListFilters, Scope};
 
 fn main() {
@@ -56,6 +59,7 @@ fn run() -> i32 {
         Command::Watchlist(args) => watchlist::handle_watchlist(args),
         Command::Graph(args) => graph::handle_graph(args),
         Command::Send(args) => handle_send(args),
+        Command::Notify(args) => handle_notify(args),
         Command::Ask(args) => handle_ask(args),
         Command::Reply(args) => handle_reply(args),
     };
@@ -949,6 +953,76 @@ fn render_workflow_gen(out: &str, kind: GenKind, check: bool) -> Result<String, 
 // ---------------------------------------------------------------------------
 // wardian send
 // ---------------------------------------------------------------------------
+
+fn handle_notify(args: NotifyArgs) -> Result<String, CliError> {
+    let origin = live::require_current_message_origin().map_err(|_| CliError::not_in_session())?;
+    let (notification, wait_timeout) = match args.command {
+        NotifyCommand::Update {
+            message,
+            title,
+            stdin,
+            file,
+        } => (
+            InboxNotificationPayload {
+                kind: InboxNotificationKind::Update,
+                title,
+                body: read_message_input(message.as_deref(), stdin, file.as_deref())?,
+                proposed_action: None,
+                risk: None,
+                choices: Vec::new(),
+                expires_at: None,
+            },
+            None,
+        ),
+        NotifyCommand::Approval {
+            message,
+            title,
+            action,
+            risk,
+            choices,
+            expires_in,
+            wait,
+            timeout,
+            stdin,
+            file,
+        } => {
+            let expires_in = parse_timeout(&expires_in)?;
+            if expires_in.is_zero() || expires_in > Duration::from_secs(24 * 60 * 60) {
+                return Err(CliError::backend(
+                    ExitCode::Generic,
+                    "invalid_expiry",
+                    "--expires-in must be greater than zero and no longer than 24h",
+                ));
+            }
+            let expires_at = chrono::Utc::now()
+                + chrono::Duration::from_std(expires_in)
+                    .map_err(|error| CliError::generic(error.to_string()))?;
+            (
+                InboxNotificationPayload {
+                    kind: InboxNotificationKind::Approval,
+                    title,
+                    body: read_message_input(message.as_deref(), stdin, file.as_deref())?,
+                    proposed_action: Some(action),
+                    risk: Some(risk),
+                    choices,
+                    expires_at: Some(
+                        expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    ),
+                },
+                wait.then(|| parse_timeout(&timeout)).transpose()?,
+            )
+        }
+    };
+    let created = live::create_notification(notification, origin).map_err(control_error)?;
+    let response = if let Some(timeout) = wait_timeout {
+        live::wait_for_notification(&created.notification_id, timeout).map_err(control_error)?
+    } else {
+        created
+    };
+    serde_json::to_string_pretty(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
+}
 
 fn handle_send(args: SendArgs) -> Result<String, CliError> {
     let approval_action = args.approval.map(approval_arg_to_control);

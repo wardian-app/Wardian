@@ -81,6 +81,54 @@ enum OutputReadyEmitAction {
     Suppress,
 }
 
+/// Antigravity's transcript marks every planner step as `DONE`, including
+/// script execution and interim progress prose. A visible compose prompt is
+/// the provider's actual end-of-turn boundary. This gate observes the PTY
+/// output only while the submitted turn is processing and consumes the first
+/// ready prompt, so terminal redraws cannot emit duplicate completions.
+#[derive(Default)]
+struct AntigravityTurnCompletionGate {
+    tracking_processing_turn: bool,
+    output_since_turn_started: String,
+}
+
+impl AntigravityTurnCompletionGate {
+    fn observe_output(&mut self, provider_name: &str, current_status: &str, output: &str) -> bool {
+        if provider_name != "antigravity" || current_status != "Processing..." {
+            self.reset();
+            return false;
+        }
+
+        if !self.tracking_processing_turn {
+            self.tracking_processing_turn = true;
+            self.output_since_turn_started.clear();
+        }
+
+        self.output_since_turn_started.push_str(output);
+        const MAX_PROMPT_PROBE_CHARS: usize = 32_768;
+        let char_count = self.output_since_turn_started.chars().count();
+        if char_count > MAX_PROMPT_PROBE_CHARS {
+            self.output_since_turn_started = self
+                .output_since_turn_started
+                .chars()
+                .skip(char_count - MAX_PROMPT_PROBE_CHARS)
+                .collect();
+        }
+
+        if crate::control::antigravity_output_has_ready_prompt(&self.output_since_turn_started) {
+            self.reset();
+            return true;
+        }
+
+        false
+    }
+
+    fn reset(&mut self) {
+        self.tracking_processing_turn = false;
+        self.output_since_turn_started.clear();
+    }
+}
+
 #[derive(Default)]
 struct CodexTerminalThemeProbeResponder {
     answered_light_dark: bool,
@@ -629,6 +677,7 @@ pub async fn spawn_agent(
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
+        let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
@@ -713,6 +762,25 @@ pub async fn spawn_agent(
                     let text = pty_decoder.decode_chunk(&buf[0..n]);
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
+                    }
+
+                    let status_before_output = current_status_clone
+                        .lock()
+                        .map(|status| status.clone())
+                        .unwrap_or_default();
+                    if antigravity_turn_completion_gate.observe_output(
+                        &provider_name_for_pty,
+                        &status_before_output,
+                        &text,
+                    ) {
+                        apply_agent_event(
+                            &pty_app,
+                            &sid_for_pty,
+                            AgentEvent::TurnCompleted,
+                            &query_count_clone,
+                            &init_timestamp_clone,
+                            &current_status_clone,
+                        );
                     }
 
                     // Process stream events to capture Session ID / Status changes
@@ -1643,6 +1711,30 @@ mod tests {
             OutputReadyEmitAction::Suppress
         );
         assert!(gate.finish_delayed_emit(true, start + OUTPUT_READY_EMIT_MIN_INTERVAL));
+    }
+
+    #[test]
+    fn antigravity_completion_gate_emits_once_for_the_ready_prompt() {
+        let mut gate = AntigravityTurnCompletionGate::default();
+
+        assert!(!gate.observe_output(
+            "antigravity",
+            "Processing...",
+            "Running the synchronization script...\r\n",
+        ));
+        assert!(gate.observe_output(
+            "antigravity",
+            "Processing...",
+            "\r\n>\r\n? for shortcuts\r\n",
+        ));
+        assert!(!gate.observe_output("antigravity", "Idle", "\r\n>\r\n? for shortcuts\r\n",));
+    }
+
+    #[test]
+    fn antigravity_completion_gate_ignores_ready_prompt_before_processing() {
+        let mut gate = AntigravityTurnCompletionGate::default();
+
+        assert!(!gate.observe_output("antigravity", "Idle", "\r\n>\r\n? for shortcuts\r\n",));
     }
 
     #[test]

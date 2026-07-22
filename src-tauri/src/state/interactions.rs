@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use wardian_core::control::{
     DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
+    InboxNotificationDecision, InboxNotificationKind, InboxNotificationPayload,
     InteractionDeliveryAttemptRecord, InteractionKind, InteractionRecord, InteractionStatus,
     InteractionTriggerPolicy, ProviderInputReadiness, ProviderInputState, ProviderReadyEvidence,
     ReplyStatus, StructuredReply,
@@ -101,6 +102,201 @@ impl InteractionState {
             .await
             .insert(record.id.clone(), record.clone());
         Ok(record)
+    }
+
+    pub async fn create_notification_durable(
+        &self,
+        sender_session_id: String,
+        payload: InboxNotificationPayload,
+    ) -> Result<InteractionRecord, &'static str> {
+        let is_approval = matches!(payload.kind, InboxNotificationKind::Approval);
+        let now = now_rfc3339_millis();
+        let record = InteractionRecord {
+            id: new_interaction_id(),
+            kind: InteractionKind::Notification,
+            sender_session_id: Some(sender_session_id.clone()),
+            target_session_ids: Vec::new(),
+            status: if is_approval {
+                InteractionStatus::AwaitingReply
+            } else {
+                InteractionStatus::Completed
+            },
+            trigger_policy: if is_approval {
+                InteractionTriggerPolicy::ReplyRequired
+            } else {
+                InteractionTriggerPolicy::NotifyOnly
+            },
+            body_ref: InteractionBodyRef::Inline {
+                body: serde_json::to_string(&payload).map_err(|_| "invalid_notification")?,
+            },
+            parent_interaction_id: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            completed_at: (!is_approval).then_some(now.clone()),
+        };
+
+        let mut records = self.records.lock().await;
+        let expired_records = if is_approval {
+            records
+                .values()
+                .filter(|existing| {
+                    existing.kind == InteractionKind::Notification
+                        && existing.sender_session_id.as_deref() == Some(sender_session_id.as_str())
+                        && existing.status == InteractionStatus::AwaitingReply
+                })
+                .filter_map(|existing| {
+                    let payload = notification_payload(existing)?;
+                    is_notification_expired(&payload, &now).then(|| {
+                        let mut expired = existing.clone();
+                        expired.status = InteractionStatus::Expired;
+                        expired.updated_at = now.clone();
+                        expired.completed_at = Some(now.clone());
+                        expired
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let has_open_approval = is_approval
+            && records.values().any(|existing| {
+                existing.kind == InteractionKind::Notification
+                    && existing.sender_session_id.as_deref() == Some(sender_session_id.as_str())
+                    && existing.status == InteractionStatus::AwaitingReply
+                    && !expired_records.iter().any(|expired| expired.id == existing.id)
+            });
+        if has_open_approval {
+            return Err("approval_already_open");
+        }
+        let mut records_to_persist = expired_records.clone();
+        records_to_persist.push(record.clone());
+        wardian_core::db::upsert_interaction_records(&records_to_persist)
+            .map_err(|_| "persistence_failed")?;
+        for expired in expired_records {
+            records.insert(expired.id.clone(), expired);
+        }
+        records.insert(record.id.clone(), record.clone());
+        Ok(record)
+    }
+
+    pub async fn inbox_notifications(&self) -> Vec<InteractionRecord> {
+        self.records
+            .lock()
+            .await
+            .values()
+            .filter(|record| record.kind == InteractionKind::Notification)
+            .cloned()
+            .collect()
+    }
+
+    pub async fn resolve_notification(
+        &self,
+        notification_id: &str,
+        choice: &str,
+    ) -> Result<InboxNotificationDecision, &'static str> {
+        let current = self
+            .expire_notification_if_needed(notification_id)
+            .await
+            .ok_or("not_found")?;
+        if current.status == InteractionStatus::Expired {
+            return Err("expired");
+        }
+        let now = now_rfc3339_millis();
+        let decision = {
+            let mut records = self.records.lock().await;
+            let notification = records.get(notification_id).cloned().ok_or("not_found")?;
+            if notification.kind != InteractionKind::Notification {
+                return Err("not_notification");
+            }
+            if notification.status != InteractionStatus::AwaitingReply {
+                return Err("already_resolved");
+            }
+            let payload = notification_payload(&notification).ok_or("invalid_notification")?;
+            if !matches!(payload.kind, InboxNotificationKind::Approval) {
+                return Err("not_approval");
+            }
+            if !payload.choices.iter().any(|candidate| candidate == choice) {
+                return Err("invalid_choice");
+            }
+            let mut updated_notification = notification;
+            updated_notification.status = InteractionStatus::Completed;
+            updated_notification.updated_at = now.clone();
+            updated_notification.completed_at = Some(now.clone());
+            let decision = InboxNotificationDecision {
+                choice: choice.to_string(),
+                resolved_at: now.clone(),
+            };
+            let resolution = InteractionRecord {
+                id: new_interaction_id(),
+                kind: InteractionKind::Reply,
+                sender_session_id: None,
+                target_session_ids: updated_notification
+                    .sender_session_id
+                    .iter()
+                    .cloned()
+                    .collect(),
+                status: InteractionStatus::Completed,
+                trigger_policy: InteractionTriggerPolicy::NotifyOnly,
+                body_ref: InteractionBodyRef::Inline {
+                    body: serde_json::to_string(&decision).map_err(|_| "invalid_notification")?,
+                },
+                parent_interaction_id: Some(notification_id.to_string()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                completed_at: Some(now),
+            };
+            wardian_core::db::upsert_interaction_records(&[
+                updated_notification.clone(),
+                resolution.clone(),
+            ])
+            .map_err(|_| "persistence_failed")?;
+            records.insert(updated_notification.id.clone(), updated_notification.clone());
+            records.insert(resolution.id.clone(), resolution.clone());
+            decision
+        };
+        Ok(decision)
+    }
+
+    pub async fn notification_decision(
+        &self,
+        notification_id: &str,
+    ) -> Option<InboxNotificationDecision> {
+        self.records.lock().await.values().find_map(|record| {
+            (record.kind == InteractionKind::Reply
+                && record.parent_interaction_id.as_deref() == Some(notification_id))
+                .then(|| notification_decision(record))
+                .flatten()
+        })
+    }
+
+    pub async fn expire_notification_if_needed(
+        &self,
+        notification_id: &str,
+    ) -> Option<InteractionRecord> {
+        let now = now_rfc3339_millis();
+        let expired = {
+            let mut records = self.records.lock().await;
+            let notification = records.get(notification_id).cloned()?;
+            if notification.kind != InteractionKind::Notification
+                || notification.status != InteractionStatus::AwaitingReply
+            {
+                return Some(notification.clone());
+            }
+            let payload = notification_payload(&notification)?;
+            if !is_notification_expired(&payload, &now) {
+                return Some(notification.clone());
+            }
+            let mut expired = notification;
+            expired.status = InteractionStatus::Expired;
+            expired.updated_at = now.clone();
+            expired.completed_at = Some(now);
+            if wardian_core::db::upsert_interaction_record(&expired).is_err() {
+                return None;
+            }
+            records.insert(expired.id.clone(), expired.clone());
+            expired
+        };
+        Some(expired)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -439,6 +635,33 @@ impl InteractionState {
     }
 }
 
+fn notification_payload(record: &InteractionRecord) -> Option<InboxNotificationPayload> {
+    let InteractionBodyRef::Inline { body } = &record.body_ref else {
+        return None;
+    };
+    serde_json::from_str(body).ok()
+}
+
+fn notification_decision(record: &InteractionRecord) -> Option<InboxNotificationDecision> {
+    let InteractionBodyRef::Inline { body } = &record.body_ref else {
+        return None;
+    };
+    serde_json::from_str(body).ok()
+}
+
+fn is_notification_expired(payload: &InboxNotificationPayload, now: &str) -> bool {
+    let Some(expires_at) = payload.expires_at.as_deref() else {
+        return false;
+    };
+    let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        return true;
+    };
+    let Ok(now) = chrono::DateTime::parse_from_rfc3339(now) else {
+        return false;
+    };
+    expires_at <= now
+}
+
 fn new_interaction_id() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -585,6 +808,51 @@ mod tests {
         assert_eq!(record.trigger_policy, InteractionTriggerPolicy::StartTurn);
         assert_eq!(record.sender_session_id.as_deref(), Some("source-agent"));
         assert_eq!(record.target_session_ids, vec!["target-agent".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn expired_approval_does_not_block_a_new_approval_from_the_same_agent() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        wardian_core::db::init_db_at_path(&home.path().join("state.db")).unwrap();
+        let state = InteractionState::default();
+        let expired = state
+            .create_notification_durable(
+                "agent-1".to_string(),
+                InboxNotificationPayload {
+                    kind: InboxNotificationKind::Approval,
+                    title: "Expired approval".to_string(),
+                    body: "This must not keep the slot open.".to_string(),
+                    proposed_action: Some("Deploy".to_string()),
+                    risk: Some("Changes production".to_string()),
+                    choices: vec!["Approve".to_string(), "Reject".to_string()],
+                    expires_at: Some((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let replacement = state
+            .create_notification_durable(
+                "agent-1".to_string(),
+                InboxNotificationPayload {
+                    kind: InboxNotificationKind::Approval,
+                    title: "Replacement approval".to_string(),
+                    body: "This can use the released slot.".to_string(),
+                    proposed_action: Some("Deploy".to_string()),
+                    risk: Some("Changes production".to_string()),
+                    choices: vec!["Approve".to_string(), "Reject".to_string()],
+                    expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.interaction(&expired.id).await.unwrap().status,
+            InteractionStatus::Expired
+        );
+        assert_eq!(replacement.status, InteractionStatus::AwaitingReply);
     }
 
     #[tokio::test]

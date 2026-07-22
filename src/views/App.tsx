@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
+import type { AgentChatEvent, CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -33,6 +33,7 @@ import { UserTerminalPanel } from "../features/terminal/UserTerminalPanel";
 import { SettingsModal } from "../features/settings/SettingsModal";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { useQueueStore } from "../store/useQueueStore";
+import { completionPreviewFromTranscript } from "../features/queue/completionPreview";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
@@ -50,6 +51,7 @@ import { AgentResourceContext } from "../features/agents/AgentResourceContext";
 import {
   useAgentResourceController,
   type AgentStatusTransition,
+  type AgentTurnCompletion,
 } from "../features/agents/useAgentResourceController";
 import { RosterProvider } from "../features/agents/RosterContext";
 import { useRosterController } from "../features/agents/useRosterController";
@@ -65,7 +67,7 @@ import {
   DashboardSurface,
   GardenSurface,
   GraphSurface,
-  QueueSurface,
+  InboxSurface,
   normalizeGardenSurfaceState,
   normalizeGraphSurfaceState,
 } from "../features/workbench/surfaces/coreSurfaceDefinitions";
@@ -98,7 +100,6 @@ declare global {
   }
 }
 
-const ACTIVE_STATUSES = new Set(["Processing...", "Headless", "Action Needed"]);
 
 function normalizeCollapsedTeamIdsByList(value: unknown): Record<string, string[]> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -363,33 +364,25 @@ function AppBody() {
     };
   }, []);
 
-  const maybeFlushAgentQueueCompletion = useCallback((
-    sessionId: string,
-    currentStatus: string,
-    previousStatus: string | undefined,
-    agent: AgentConfig | undefined,
+  const handleAgentTurnCompletion = useCallback((
+    completion: AgentTurnCompletion,
   ) => {
-    const wasActive = previousStatus ? ACTIVE_STATUSES.has(previousStatus) : false;
-    if (currentStatus === "Idle" && wasActive) {
-      if (pendingQueueFlushRef.current.has(sessionId)) return;
-      pendingQueueFlushRef.current.add(sessionId);
-      const agentName = agent?.session_name ?? sessionId;
-      const finishFlush = (summary?: string | null) => {
-        try {
-          flushAgentCompletion(sessionId, agentName, summary);
-        } finally {
-          pendingQueueFlushRef.current.delete(sessionId);
-        }
-      };
+    const { session_id: sessionId, agent } = completion;
+    const agentName = agent?.session_name.trim();
+    // Never emit a durable notification with a session UUID while the roster
+    // is still loading. A later config load intentionally does not replay it.
+    if (!agentName || pendingQueueFlushRef.current.has(sessionId)) return;
 
-      if (agent?.provider === "opencode" && sessionId.startsWith("ses_")) {
-        invoke<string | null>("load_opencode_last_assistant_text", { sessionId })
-          .then(finishFlush)
-          .catch(() => finishFlush());
-      } else {
-        finishFlush();
-      }
-    }
+    pendingQueueFlushRef.current.add(sessionId);
+    invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
+      .then(completionPreviewFromTranscript)
+      .then((preview) => {
+        if (preview) {
+          flushAgentCompletion(sessionId, agentName, preview.summary, preview.evidence_id);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => pendingQueueFlushRef.current.delete(sessionId));
   }, [flushAgentCompletion]);
 
   const maybeAddActionNeededQueueItem = useCallback((
@@ -447,19 +440,13 @@ function AppBody() {
   const hasAutoPatched = useRef(false);
 
   const handleAgentStatusTransition = useCallback((transition: AgentStatusTransition) => {
-    maybeFlushAgentQueueCompletion(
-      transition.session_id,
-      transition.current_status,
-      transition.previous_status,
-      transition.agent,
-    );
     maybeAddActionNeededQueueItem(
       transition.session_id,
       transition.current_status,
       transition.previous_status,
       transition.agent,
     );
-  }, [maybeAddActionNeededQueueItem, maybeFlushAgentQueueCompletion]);
+  }, [maybeAddActionNeededQueueItem]);
 
   const queueAgentInteractionSnapshot = useCallback((snapshot: AgentInteractions) => {
     interactionSaveChainRef.current = interactionSaveChainRef.current
@@ -478,6 +465,7 @@ function AppBody() {
   const agentResources = useAgentResourceController({
     on_agent_json_event: appendAgentEvent,
     on_agent_status_transition: handleAgentStatusTransition,
+    on_agent_turn_completed: handleAgentTurnCompletion,
     on_agent_interactions: handleAgentInteractions,
   });
   const {
@@ -857,7 +845,9 @@ function AppBody() {
     fetchAgentClasses();
     loadQueueItems();
     loadQueuePreferences();
+    const inboxPoll = window.setInterval(() => loadQueueItems(), 5_000);
     const unlistenWatchlists = listen("watchlists-updated", () => loadWatchlistState());
+    const unlistenInbox = listen("inbox-updated", () => loadQueueItems());
     // Class definitions (create/delete/reset) are now managed exclusively
     // from the Library's ClassDetail panel, which reports changes through
     // the same `library-changed` event the library store listens for (see
@@ -871,7 +861,9 @@ function AppBody() {
     });
     return () => {
       unlistenWatchlists.then(fn => fn());
+      unlistenInbox.then(fn => fn());
       unlistenLibrary.then(fn => fn());
+      window.clearInterval(inboxPoll);
     };
   }, [loadQueueItems, loadQueuePreferences, loadWatchlistState]);
 
@@ -1247,9 +1239,9 @@ function AppBody() {
       );
     }
 
-    if (surface.surface_type === "queue") {
+    if (surface.surface_type === "inbox") {
       return (
-        <QueueSurface
+        <InboxSurface
           surface_id={surface.surface_id}
           state={{}}
           visibility={visibility}

@@ -43,7 +43,7 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
    presentation state. Mirrors fit the owner's canonical grid locally; only the
    explicit lease owner may resize the PTY or send terminal input.
 5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
-6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Queue completions and CLI `watch --until status:*` evidence come from live transitions after hydration.
+6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Inbox completions come only from live explicit provider turn-completed events with a canonical final assistant response; CLI `watch --until status:*` evidence comes from live transitions after hydration.
 
 ## Workbench State
 
@@ -61,7 +61,7 @@ Conflicts freeze saving without overwriting the local draft.
 
 The document contains split/group/tab placement, bounded surface presentation
 state, recently closed entries, and shell dimensions. It excludes agents,
-workflows, Queue/library data, PTY contents, terminal leases, runtime geometry,
+workflows, Inbox/library data, PTY contents, terminal leases, runtime geometry,
 DOM focus, drag state, group zoom, credentials, and other recomputable or live
 truth. See [Workbench Surfaces](./workbench-surfaces.md) for migration and
 versioning rules.

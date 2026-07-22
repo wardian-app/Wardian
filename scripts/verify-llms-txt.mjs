@@ -7,7 +7,7 @@ const llmsPath = join(repoRoot, "docs", "public", "llms.txt");
 const requiredEntries = [
   ["## Getting Started", "https://docs.wardian.org/guide/getting-started", "docs/guide/getting-started.md"],
   ["## Core Workspace", "https://docs.wardian.org/guide/grid", "docs/guide/grid.md"],
-  ["## Core Workspace", "https://docs.wardian.org/guide/queue", "docs/guide/queue.md"],
+  ["## Core Workspace", "https://docs.wardian.org/guide/inbox", "docs/guide/inbox.md"],
   ["## Core Workspace", "https://docs.wardian.org/guide/watchlists", "docs/guide/watchlists.md"],
   ["## Workflow Automation", "https://docs.wardian.org/workflows/", "docs/workflows/index.md"],
   ["## CLI and Agent Communication", "https://docs.wardian.org/guide/cli", "docs/guide/cli.md"],

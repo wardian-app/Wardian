@@ -3,7 +3,7 @@ import type { Locator, Page } from "@playwright/test";
 export type CoreWorkbenchSurfaceType =
   | "agents-overview"
   | "dashboard"
-  | "queue"
+  | "inbox"
   | "graph"
   | "garden"
   | "library"

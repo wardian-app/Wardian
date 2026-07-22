@@ -149,7 +149,7 @@ describe("SettingsModal", () => {
   it("exposes queue notification rules from the settings navigation", () => {
     render(<SettingsModal isOpen onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox" }));
     fireEvent.click(screen.getByLabelText("Desktop alert for workflow failures"));
     fireEvent.click(screen.getByLabelText("Sound alert for action needed"));
     fireEvent.change(screen.getByLabelText("Sound alert volume"), {

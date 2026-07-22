@@ -23,11 +23,18 @@ export type AgentStatusTransition = {
   agent: AgentConfig | undefined;
 };
 
+export type AgentTurnCompletion = {
+  session_id: string;
+  agent: AgentConfig | undefined;
+};
+
 export type AgentResourceControllerOptions = {
   /** Receives the provider event after the resource controller updates its thought projection. */
   on_agent_json_event?: (session_id: string, data: Record<string, unknown>) => void;
   /** Receives status transitions so queue policy can remain outside this resource owner. */
   on_agent_status_transition?: (transition: AgentStatusTransition) => void;
+  /** Receives explicit provider turn completions, separate from ordinary idle status changes. */
+  on_agent_turn_completed?: (completion: AgentTurnCompletion) => void;
   /** Receives one coalesced interaction update per telemetry payload. */
   on_agent_interactions?: (updates: Readonly<Record<string, string>>) => void;
   on_error?: (operation: string, error: unknown) => void;
@@ -77,7 +84,7 @@ function makeStatusTelemetry(
 
 /**
  * Owns the single desktop subscription and load path for shared agent resources.
- * Queue, watchlist, confirmation, and interaction persistence policies enter only
+ * Inbox, watchlist, confirmation, and interaction persistence policies enter only
  * through callbacks or returned operation results; they are not mirrored here.
  */
 export function useAgentResourceController(
@@ -267,6 +274,13 @@ export function useAgentResourceController(
         };
         telemetry_ref.current = next_telemetry;
         setTelemetry(next_telemetry);
+      }),
+      listen<{ session_id: string }>("agent-turn-completed", (event) => {
+        const session_id = event.payload.session_id;
+        options_ref.current.on_agent_turn_completed?.({
+          session_id,
+          agent: agents_ref.current.find((agent) => agent.session_id === session_id),
+        });
       }),
     ];
 

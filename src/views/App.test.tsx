@@ -432,12 +432,16 @@ function captureLibraryChangedListener() {
 function captureQueueAgentListeners() {
   let jsonListener: EventCallback<{ session_id: string; data: Record<string, unknown> }> | null = null;
   let statusListener: EventCallback<{ session_id: string; current_status: string }> | null = null;
+  let turnCompletionListener: EventCallback<{ session_id: string }> | null = null;
   mockListen.mockImplementation((eventName, handler) => {
     if (eventName === "agent-json-event") {
       jsonListener = handler as EventCallback<{ session_id: string; data: Record<string, unknown> }>;
     }
     if (eventName === "agent-status-updated") {
       statusListener = handler as EventCallback<{ session_id: string; current_status: string }>;
+    }
+    if (eventName === "agent-turn-completed") {
+      turnCompletionListener = handler as EventCallback<{ session_id: string }>;
     }
     return Promise.resolve(() => {});
   });
@@ -447,6 +451,9 @@ function captureQueueAgentListeners() {
     },
     emitStatus(payload: { session_id: string; current_status: string }) {
       statusListener?.({ event: "agent-status-updated", id: 0, payload });
+    },
+    emitTurnCompletion(payload: { session_id: string }) {
+      turnCompletionListener?.({ event: "agent-turn-completed", id: 0, payload });
     },
   };
 }
@@ -481,17 +488,6 @@ const sampleAgents: AgentConfig[] = [
   { session_id: "agent-1", session_name: "Alpha", agent_class: "Coder", folder: "C:/project", is_off: false },
   { session_id: "agent-2", session_name: "Beta", agent_class: "Architect", folder: "C:/other", is_off: false },
   { session_id: "agent-3", session_name: "Gamma", agent_class: "DevOps", folder: "/tmp", is_off: false },
-];
-
-const opencodeAgents: AgentConfig[] = [
-  {
-    session_id: "ses_opencode",
-    session_name: "OpenCode Agent",
-    agent_class: "Coder",
-    folder: "C:/project",
-    is_off: false,
-    provider: "opencode",
-  },
 ];
 
 beforeEach(() => {
@@ -836,7 +832,7 @@ describe("Workbench persistence boot integration", () => {
     for (const surfaceType of [
       "agents-overview",
       "dashboard",
-      "queue",
+      "inbox",
       "graph",
       "garden",
       "library",
@@ -950,7 +946,7 @@ describe("Workbench persistence boot integration", () => {
     expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
   });
 
-  it("routes Queue agent actions to an Agent Session surface", async () => {
+  it("routes Inbox agent actions to an Agent Session surface", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     currentQueueItems = [{
       id: "queue-agent-2",
@@ -968,7 +964,7 @@ describe("Workbench persistence boot integration", () => {
         return Promise.resolve({
           source: "primary",
           document: makeSingleGroupDocument([
-            makeSurface("queue-surface", { surface_type: "queue", state: {} }),
+            makeSurface("queue-surface", { surface_type: "inbox", state: {} }),
           ]),
           notice: null,
           durable_revision: 0,
@@ -979,8 +975,8 @@ describe("Workbench persistence boot integration", () => {
     });
 
     render(<App />);
-    const queueSurface = await screen.findByTestId("queue-surface");
-    fireEvent.click(within(queueSurface).getByRole("button", { name: /open agent terminal/i }));
+    const inboxSurface = await screen.findByTestId("inbox-surface");
+    fireEvent.click(within(inboxSurface).getByRole("button", { name: /open agent terminal/i }));
 
     const sessionSurface = await screen.findByTestId("agent-session-surface");
     const sessionTab = await screen.findByRole("tab", { name: "Beta" });
@@ -1651,9 +1647,29 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("adds an agent completion to the queue when buffered output is followed by Idle", async () => {
+  it("adds an agent completion from an explicit provider turn with its final transcript response", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
-    const { emitJson, emitStatus } = captureQueueAgentListeners();
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_transcript") {
+        return Promise.resolve([
+          {
+            id: "user-1", session_id: "agent-1", provider: "claude", kind: "message", role: "user",
+            text: "Finish the requested update.", title: null, status: null, turn_id: "turn-1",
+            source: "provider_log", command: null, exit_code: null, path: null, language: null,
+            created_at: null, sequence: 1, metadata: {},
+          },
+          {
+            id: "assistant-1", session_id: "agent-1", provider: "claude", kind: "message", role: "assistant",
+            text: "Finished the requested update.", title: null, status: null, turn_id: "turn-1",
+            source: "provider_log", command: null, exit_code: null, path: null, language: null,
+            created_at: null, sequence: 2, metadata: {},
+          },
+        ]);
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    const { emitTurnCompletion } = captureQueueAgentListeners();
 
     await act(async () => {
       render(<App />);
@@ -1662,12 +1678,7 @@ describe("Agent Watchlist Sidebar", () => {
     mockInvoke.mockClear();
 
     await act(async () => {
-      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
-      emitJson({
-        session_id: "agent-1",
-        data: { type: "result", result: "Finished the requested update." },
-      });
-      emitStatus({ session_id: "agent-1", current_status: "Idle" });
+      emitTurnCompletion({ session_id: "agent-1" });
     });
 
     await waitFor(() => {
@@ -1680,12 +1691,75 @@ describe("Agent Watchlist Sidebar", () => {
               agent_session_id: "agent-1",
               agent_name: "Alpha",
               summary: "Finished the requested update.",
+              evidence_id: "assistant-1",
+              evidence_source: "provider_runtime",
               read: false,
             }),
           ],
         }),
       );
     });
+  });
+
+  it("suppresses provider-control turns from the Inbox", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_transcript") {
+        return Promise.resolve([
+          {
+            id: "user-login", session_id: "agent-1", provider: "claude", kind: "message", role: "user",
+            text: "/login", title: null, status: null, turn_id: "turn-login", source: "provider_log",
+            command: null, exit_code: null, path: null, language: null, created_at: null, sequence: 1, metadata: {},
+          },
+          {
+            id: "assistant-login", session_id: "agent-1", provider: "claude", kind: "message", role: "assistant",
+            text: "Opening browser to sign in.", title: null, status: null, turn_id: "turn-login", source: "provider_log",
+            command: null, exit_code: null, path: null, language: null, created_at: null, sequence: 2, metadata: {},
+          },
+        ]);
+      }
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    const { emitTurnCompletion } = captureQueueAgentListeners();
+
+    render(<App />);
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitTurnCompletion({ session_id: "agent-1" });
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("load_agent_chat_transcript", { sessionId: "agent-1" });
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
+  });
+
+  it("suppresses completion events received before the agent roster resolves their name", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitTurnCompletion } = captureQueueAgentListeners();
+
+    render(<App />);
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitTurnCompletion({ session_id: "unknown-agent" });
+    });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "load_agent_chat_transcript",
+      expect.objectContaining({ sessionId: "unknown-agent" }),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
   });
 
   it("adds an action-needed queue item when an agent transitions into Action Needed", async () => {
@@ -1787,7 +1861,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("adds an agent completion to the queue when agent metrics transition from active to Idle", async () => {
+  it("does not add an agent completion for an ordinary metric transition to Idle", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const emitAgentMetrics = captureAgentMetricsListener();
 
@@ -1827,22 +1901,10 @@ describe("Agent Watchlist Sidebar", () => {
       ]);
     });
 
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "save_queue_items",
-        expect.objectContaining({
-          items: [
-            expect.objectContaining({
-              type: "agent_completed",
-              agent_session_id: "agent-1",
-              agent_name: "Alpha",
-              summary: "Completed",
-              read: false,
-            }),
-          ],
-        }),
-      );
-    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
   });
 
   it("does not flush stale agent queue content from the initial Idle metrics snapshot", async () => {
@@ -1907,89 +1969,6 @@ describe("Agent Watchlist Sidebar", () => {
       expect.objectContaining({ items: expect.any(Array) }),
     );
     expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("uses OpenCode assistant database text when an OpenCode agent completes", async () => {
-    setupDefaultMocks(opencodeAgents, defaultClasses);
-    mockInvoke.mockImplementation(async (cmd: any, args?: any) => {
-      if (cmd === "load_opencode_last_assistant_text" && args?.sessionId === "ses_opencode") {
-        return "1\n2\n3\n4\n5";
-      }
-      switch (cmd) {
-        case "list_agents":
-          return opencodeAgents;
-        case "list_agent_classes":
-        case "load_watchlists":
-        case "load_queue_items":
-        case "list_workflows":
-        case "list_scheduled_runs":
-        case "list_deployed_skills":
-          return [];
-        case "get_library_tree":
-          return { type: "Folder", path: "", name: "Root", children: [] };
-        case "load_workflow_library":
-          return { folders: [], rootWorkflowIds: [] };
-        default:
-          return null;
-      }
-    });
-    const emitAgentMetrics = captureAgentMetricsListener();
-
-    await act(async () => {
-      render(<App />);
-    });
-    await screen.findByText("All Agents");
-
-    await act(async () => {
-      emitAgentMetrics([
-        {
-          session_id: "ses_opencode",
-          current_status: "Processing...",
-          cpu_usage: 0,
-          memory_mb: 0,
-          uptime_seconds: 1,
-          query_count: 1,
-          init_timestamp: null,
-          log_path: null,
-        },
-      ]);
-    });
-    mockInvoke.mockClear();
-
-    await act(async () => {
-      emitAgentMetrics([
-        {
-          session_id: "ses_opencode",
-          current_status: "Idle",
-          cpu_usage: 0,
-          memory_mb: 0,
-          uptime_seconds: 2,
-          query_count: 1,
-          init_timestamp: null,
-          log_path: null,
-        },
-      ]);
-    });
-
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("load_opencode_last_assistant_text", {
-        sessionId: "ses_opencode",
-      });
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "save_queue_items",
-        expect.objectContaining({
-          items: [
-            expect.objectContaining({
-              type: "agent_completed",
-              agent_session_id: "ses_opencode",
-              agent_name: "OpenCode Agent",
-              summary: "1\n2\n3\n4\n5",
-              read: false,
-            }),
-          ],
-        }),
-      );
-    });
   });
 
   it("shows Select All and Clear buttons", async () => {

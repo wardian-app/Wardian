@@ -27,10 +27,12 @@ The UI invokes these functions via `invoke("command_name", { args })`.
 Old workflow system commands such as `run_workflow`, `stop_all_triggers`,
 `pause_all_triggers`, and `resume_all_triggers` are compatibility history only.
 
-### Queue and Readiness
+### Inbox and Readiness
 
-- **`load_queue_items` / `save_queue_items`**: Load or persist the Queue projection for the active Wardian home. Queue item identity should be derived from canonical evidence IDs rather than frontend timestamps.
-- **`load_queue_preferences` / `save_queue_preferences`**: Load or persist per-event-type Queue visibility, desktop alert, and sound alert preferences.
+- **`load_queue_items` / `save_queue_items`**: Load or persist the legacy completion projection for the active Wardian home. Inbox item identity should be derived from canonical evidence IDs rather than frontend timestamps.
+- **`load_queue_preferences` / `save_queue_preferences`**: Load or persist per-event-type Inbox visibility, desktop alert, and sound alert preferences.
+- **`list_inbox_notifications` / `resolve_inbox_notification`**: Read and resolve durable agent-created updates and manual approval requests from the interaction store.
+- **`list_workflow_inbox_approvals`**: Project native workflow Approval nodes for Inbox while leaving workflow state authoritative.
 - **`list_provider_readiness`**: Returns install/auth readiness for provider commands before spawn. This is separate from live provider input readiness, which is tracked per agent runtime generation.
 
 ### Files Resources
@@ -170,7 +172,7 @@ subscription.
 
 ### Interaction and Delivery Watch Events
 
-The CLI live-control `agent_watch`, `ask`, `send_message`, and `submit_reply` paths expose ordered watch events through `WatchEvent` records. These records are not raw terminal output.
+The CLI live-control `agent_watch`, `ask`, `send_message`, `submit_reply`, `notify_create`, and `notify_wait` paths expose ordered control evidence. These records are not raw terminal output.
 
 ```json
 {
@@ -237,9 +239,9 @@ Live delivery readiness is tracked per provider runtime generation. The generati
 
 Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `unavailable`. Valid readiness evidence values are `provider_event`, `prompt_detected`, `title_detected`, and `manual_status`. Stale readiness from an older generation must be ignored.
 
-### Queue Evidence
+### Inbox Evidence
 
-Queue items project canonical live evidence instead of replayed terminal text. Queue records can include:
+Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian emits its event only when that provider returns to its visible ready prompt, once per active turn. Legacy completion records can include:
 
 ```json
 {
@@ -255,7 +257,7 @@ Queue items project canonical live evidence instead of replayed terminal text. Q
 }
 ```
 
-`evidence_source` is one of `provider_runtime`, `interaction_store`, or `live_runtime`. Hydration may restore existing queue items, but it must not emit new evidence. Replay of provider logs or terminal buffers must not create duplicate Queue cards.
+`evidence_source` is one of `provider_runtime`, `interaction_store`, or `live_runtime`. Hydration may restore existing completion items, but it must not emit new evidence. Replay of provider logs or terminal buffers must not create duplicate Inbox cards. Agent-originated updates and approvals use durable notification interactions rather than this frontend projection.
 
 ### `workflow-telemetry`
 

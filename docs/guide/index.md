@@ -7,9 +7,9 @@ automation, and extension. Take only the next step that helps the work at hand.
 
 ## Start and Orient
 
-- [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Queue result.
+- [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Inbox result.
 - [Provider Readiness](./provider-readiness.md): verify provider CLIs, authentication, shell `PATH`, and runtime prerequisites before spawning agents.
-- [First-Run Troubleshooting](./first-run-troubleshooting.md): recover from app launch, provider detection, terminal startup, Queue, or CLI issues during first setup.
+- [First-Run Troubleshooting](./first-run-troubleshooting.md): recover from app launch, provider detection, terminal startup, Inbox, or CLI issues during first setup.
 - [UI Overview](./ui-overview.md): learn the title bar, auxiliary rail, roster, and central workspace.
 - [Workbench](./workbench.md): open surfaces as tabs, split and merge panes, move and reopen tabs, zoom, restore, and reset the layout.
 
@@ -20,7 +20,7 @@ automation, and extension. Take only the next step that helps the work at hand.
 - [Dashboard](./dashboard.md): compare live agent health and quick controls.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.
-- [Queue](./queue.md): triage completed agent and workflow outcomes.
+- [Inbox](./inbox.md): triage completed work, important updates, and decisions.
 - [Class Management](./class-management.md): understand class blueprints; edit them from the Library's Classes section.
 
 ## Reuse and Direct Work

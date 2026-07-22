@@ -6,7 +6,7 @@ import {
 } from "../../../views/DashboardView";
 import { GardenView, type GardenViewProps } from "../../../views/GardenView";
 import { GraphView, type GraphViewProps } from "../../../views/GraphView";
-import { QueueView, type QueueViewProps } from "../../../views/QueueView";
+import { InboxView, type InboxViewProps } from "../../../views/InboxView";
 import {
   CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION,
   HEAVY_SURFACE_HIDDEN_GRACE_MS,
@@ -109,18 +109,18 @@ export function DashboardSurface({
   );
 }
 
-export interface QueueSurfaceProps
-  extends QueueViewProps, ManagedSurfaceProps<EmptyCoreViewSurfaceState> {}
+export interface InboxSurfaceProps
+  extends InboxViewProps, ManagedSurfaceProps<EmptyCoreViewSurfaceState> {}
 
-export function QueueSurface({
+export function InboxSurface({
   surface_id,
   state: _state,
   visibility = "visible",
   ...viewProps
-}: QueueSurfaceProps) {
+}: InboxSurfaceProps) {
   return (
-    <SurfaceFrame surface_id={surface_id} surface_type="queue" visibility={visibility}>
-      <QueueView {...viewProps} />
+    <SurfaceFrame surface_id={surface_id} surface_type="inbox" visibility={visibility}>
+      <InboxView {...viewProps} />
     </SurfaceFrame>
   );
 }

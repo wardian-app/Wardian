@@ -345,8 +345,8 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   });
 
   await page.getByRole("button", { name: "Back to remote agents" }).click();
-  await page.getByRole("button", { name: "Queue" }).click();
+  await page.getByRole("button", { name: "Inbox" }).click();
   await expect(page.getByText("Agent task completed")).toBeVisible();
   await expect(page.getByText("Finished remote e2e update.")).toBeVisible();
-  await captureFeatureScreenshot("queue-summary.png", page.locator("main"));
+  await captureFeatureScreenshot("inbox-summary.png", page.locator("main"));
 });

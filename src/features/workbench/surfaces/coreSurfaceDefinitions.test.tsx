@@ -3,8 +3,8 @@ import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../views/DashboardView", () => ({ DashboardView: () => null }));
-vi.mock("../../../views/QueueView", () => ({
-  QueueView: ({ onOpenAgent }: { onOpenAgent?: (agentId: string) => void }) => (
+vi.mock("../../../views/InboxView", () => ({
+  InboxView: ({ onOpenAgent }: { onOpenAgent?: (agentId: string) => void }) => (
     <button type="button" onClick={() => onOpenAgent?.("agent-1")}>Open queued agent</button>
   ),
 }));
@@ -16,7 +16,7 @@ import {
   CORE_VIEW_SURFACE_MAX_STATE_BYTES,
   CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION,
   HEAVY_SURFACE_HIDDEN_GRACE_MS,
-  QueueSurface,
+  InboxSurface,
   SuspendedSurfaceRenderer,
   DEFAULT_GRAPH_SURFACE_STATE,
   normalizeCoreViewSurfaceState,
@@ -56,12 +56,12 @@ describe("core view surface definitions", () => {
         command_id: "workbench.open.dashboard",
       },
       {
-        type: "queue",
+        type: "inbox",
         open_policy: "singleton",
         render_policy: "recreate_from_state",
         state_schema_version: CORE_VIEW_SURFACE_STATE_SCHEMA_VERSION,
         max_state_bytes: CORE_VIEW_SURFACE_MAX_STATE_BYTES,
-        command_id: "workbench.open.queue",
+        command_id: "workbench.open.inbox",
       },
       {
         type: "graph",
@@ -104,19 +104,19 @@ describe("core view surface definitions", () => {
     })).toEqual(DEFAULT_GRAPH_SURFACE_STATE);
   });
 
-  it("renders a typed Queue surface frame and forwards agent navigation", () => {
+  it("renders a typed Inbox surface frame and forwards agent navigation", () => {
     const onOpenAgent = vi.fn();
     render(
-      <QueueSurface
+      <InboxSurface
         onOpenAgent={onOpenAgent}
         state={{}}
-        surface_id="queue-1"
+        surface_id="inbox-1"
       />,
     );
 
-    const surface = screen.getByTestId("queue-surface");
-    expect(surface).toHaveAttribute("data-surface-id", "queue-1");
-    expect(surface).toHaveAttribute("data-surface-type", "queue");
+    const surface = screen.getByTestId("inbox-surface");
+    expect(surface).toHaveAttribute("data-surface-id", "inbox-1");
+    expect(surface).toHaveAttribute("data-surface-type", "inbox");
     screen.getByRole("button", { name: "Open queued agent" }).click();
     expect(onOpenAgent).toHaveBeenCalledWith("agent-1");
   });

@@ -13,6 +13,7 @@ building repeatable automation around Wardian.
 
 - Let a managed agent identify itself with `wardian agent`.
 - Send prompts or structured asks from one agent to another.
+- Send an important user-facing update or an exceptional approval request to Inbox.
 - Wait for an agent to reach a status or emit a marker.
 - Start, stop, or inspect workflows from automation.
 - Read persisted teams, watchlists, and agent state when the app is not running.
@@ -185,6 +186,8 @@ wardian send --as-command "/goal test" --to coder-a1
 wardian send "review this" --to reviewer-a1 --wait-until idle --timeout 10m
 wardian send "status?" --to class:Coder
 wardian send "stand down" --to all
+wardian notify update "The migration is ready for review" --title "Inbox refactor"
+wardian notify approval "Production deployment is prepared" --title "Deploy production" --action "Run the production deployment" --risk "This changes live traffic" --choice "Deploy" --choice "Do not deploy" --wait
 ```
 
 ## Common Workflows
@@ -226,6 +229,28 @@ Watch retained readable output for a deterministic marker:
 ```bash
 wardian agent watch coder-a1 --until output:READY_FOR_REVIEW --include transcript,output,delivery --timeout 10m
 ```
+
+Send a human-facing update only when it changes the user's understanding or next decision:
+
+```bash
+wardian notify update "The release build passed; one migration risk remains" \
+  --title "Release readiness"
+```
+
+Request approval only for an irreversible, external, security-sensitive, or materially costly action (or when the user explicitly requested it):
+
+```bash
+wardian notify approval "Deployment is ready" \
+  --title "Deploy production" \
+  --action "Run the production deployment" \
+  --risk "This changes live traffic and may require rollback" \
+  --choice "Deploy" \
+  --choice "Do not deploy" \
+  --expires-in 30m \
+  --wait
+```
+
+`notify` requires a managed agent session. Updates create a durable Inbox record. Approval requires an action, risk, two to five explicit choices, and an expiry; only one unresolved manual approval may exist per agent. `--wait` returns the structured decision or `expired`; expiry never permits the action automatically. Provider-native permission prompts remain separate provider action-needed events.
 
 Inspect provider-adapted transcript text, sanitized terminal fallback, or raw PTY evidence:
 

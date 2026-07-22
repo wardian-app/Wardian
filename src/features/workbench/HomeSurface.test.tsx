@@ -58,7 +58,7 @@ describe("HomeSurface", () => {
         registry={registry}
         recently_closed={[
           {
-            surface: makeSurface("closed-queue", { surface_type: "queue" }),
+            surface: makeSurface("closed-queue", { surface_type: "inbox" }),
             previous_group_id: "group-empty",
             previous_index: 0,
           },
@@ -74,7 +74,7 @@ describe("HomeSurface", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Reopen Queue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reopen Inbox" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Reopen Dashboard" })).not.toBeInTheDocument();
   });
 

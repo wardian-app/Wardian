@@ -55,7 +55,7 @@ with raw `send_input_to_agent` calls for prompt injection. Fixed sleeps before
 injection are not a correctness mechanism; delivery should wait for readiness
 evidence or queue the interaction.
 
-`read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Queue evidence, and provider status transitions must not depend on replaying this text.
+`read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Inbox evidence, and provider status transitions must not depend on replaying this text.
 
 ## Classes (`commands/class.rs`)
 
@@ -82,7 +82,15 @@ evidence or queue the interaction.
 
 The CLI `team` and `watchlist` commands read and write `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays for reads, write canonical v2 JSON for mutations, and best-effort notify the running app when the local control endpoint is available. Team create/add/split operations also seed communication-topology edges while preserving existing seed-suppression tombstones.
 
-Queue commands persist the frontend Queue projection and preferences for the active Wardian home. Queue items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
+Legacy Queue commands persist the frontend completion projection and preferences for the active Wardian home; the user-facing surface is Inbox. Items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
+
+## Inbox (`commands/inbox.rs`)
+
+- `list_inbox_notifications`
+- `resolve_inbox_notification`
+- `list_workflow_inbox_approvals`
+
+Agent-created updates and approvals are durable `InteractionKind::Notification` records in SQLite. Approval resolution writes a child reply record; it never impersonates a user as an agent or injects free text into a provider terminal. `list_workflow_inbox_approvals` is a read projection of native workflow Approval nodes; `workflow_approve` remains the workflow engine's authoritative transition.
 
 `load_agent_interactions` and `save_agent_interactions` preserve the existing lightweight graph interaction projection. They are separate from the backend interaction control plane records used by structured `ask` and `reply`.
 
@@ -711,6 +719,8 @@ The standalone `wardian` CLI primarily talks to the desktop app through Wardian'
 - `send_message`
 - `ask`
 - `submit_reply`
+- `notify_create`
+- `notify_wait`
 - `agent_watch`
 
 `send_message` routes provider-aware delivery to one or more targets. Delivery responses contain `runtime_state`, `delivery_state`, `input_mode`, optional `message_id`, `delivery_phase`, `observed_state`, `reason`, `profile`, and provider-specific error details. When the target runtime is not ready for live input, the command should queue the message in the mailbox or fail according to its queue policy instead of injecting text early. This slice does not create durable message interactions for ordinary `send` calls; structured durability belongs to `ask` and `reply`.
@@ -718,6 +728,8 @@ The standalone `wardian` CLI primarily talks to the desktop app through Wardian'
 `ask` creates a task interaction with `reply_required`, delivers the prompt plus reply instructions, and waits for the parent task to reach a terminal structured state. It returns the attached structured reply when complete. Output-marker waiting remains a compatibility mode, but it is not the structured ask/reply completion path.
 
 `submit_reply` resolves the request ID against the interaction store, creates or attaches a reply interaction, and completes the parent task. Unknown request IDs fail deterministically. Duplicate replies must be rejected or handled by an explicit idempotency policy. When `origin` contains a Wardian agent session ID, the backend verifies that the sender is the task target.
+
+`notify_create` accepts only a live Wardian agent origin. Updates are durable user-facing summaries. Manual approvals require a bounded structured payload: title, body, proposed action, risk, two to five choices, and an expiry; the backend permits one unresolved approval per source session. `notify_wait` returns a durable user decision or an `expired` status. No response or timeout is never approval.
 
 `agent_watch` returns ordered status, transcript, output, and delivery evidence from watch state. `delivery` snapshots are derived from delivery watch events. Raw PTY output is opt-in and should be used only for terminal rendering or transport debugging.
 

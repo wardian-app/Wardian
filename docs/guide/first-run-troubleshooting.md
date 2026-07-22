@@ -86,16 +86,16 @@ Use the status color and the terminal together:
 
 Avoid changing multiple settings at once while debugging a first-run agent. Change one thing, restart Wardian if the change affects PATH or shell discovery, and spawn a fresh test agent.
 
-## Queue Looks Empty
+## Inbox Looks Empty
 
-The Queue is a completion review surface. It is not a live prompt inbox and it does not show every terminal line.
+Inbox is a review surface for completed work, important updates, and decisions. It is not an agent Mailbox and it does not show every terminal line.
 
-Queue items appear when:
+Inbox items appear when:
 
-- an active agent returns to Idle after work
+- a configured agent completes a provider turn with a final response
 - a workflow run finishes or fails
 
-If the Queue is empty after spawning an agent, that can be expected. Send the agent a small task, wait for it to settle back to Idle, then open **Queue** again. Provider approval prompts still appear through the agent status and terminal rather than as Queue items.
+If Inbox is empty after spawning an agent, that can be expected. Send the agent a small task, wait for it to settle back to Idle, then open **Inbox** again. Provider approval prompts still appear through the agent status and terminal rather than as Inbox items until the provider reports actionable evidence.
 
 ## Wardian CLI Is Not Visible
 
@@ -158,7 +158,7 @@ Include:
 - provider name and provider CLI version, if available
 - selected shell or **Auto**
 - whether the provider starts successfully outside Wardian
-- the step that failed: launch, provider detection, spawn, terminal startup, agent status, Queue, or CLI
+- the step that failed: launch, provider detection, spawn, terminal startup, agent status, Inbox, or CLI
 - sanitized terminal output, screenshots, or logs
 
 Do not include API keys, provider tokens, private prompts, private repository contents, `.env` files, or unsanitized terminal logs.
@@ -168,6 +168,6 @@ Do not include API keys, provider tokens, private prompts, private repository co
 - [Getting Started](./getting-started.md)
 - [Provider Readiness](./provider-readiness.md)
 - [Wardian CLI](./cli.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)
 - [Settings](./settings.md)
 - [Provider Runtimes](../providers.md)

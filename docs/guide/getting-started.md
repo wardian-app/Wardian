@@ -168,20 +168,20 @@ Summarize this workspace in five bullets. Do not edit files.
 
 Use a read-only prompt for the first run. After you trust the provider, you can ask it to inspect files, make changes, run commands, or coordinate with other Wardian agents. If the terminal shows **Mirror** or **Read only**, click inside it before typing to request interaction ownership. Visible renderers restore and fit automatically.
 
-## 8. Review the Result in Queue
+## 8. Review the Result in Inbox
 
-When an active agent finishes and returns to Idle, Wardian adds a completion item to **Queue**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Queue**. To keep the agent beside Queue, leave Queue active and choose **Open to Side** for that agent in the right roster.
+When a configured agent completes a provider turn with a final response, Wardian adds that response as a completion item to **Inbox**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Inbox**. To keep the agent beside Inbox, leave Inbox active and choose **Open to Side** for that agent in the right roster.
 
-![Wardian Queue showing a completed first agent task with a summary](../assets/screenshots/queue/completed-result.png)
+![Wardian Inbox showing a completed first agent task with a summary](../assets/screenshots/queue/completed-result.png)
 
-Use Queue to keep completed work from disappearing into terminal scrollback:
+Use Inbox to keep completed work from disappearing into terminal scrollback:
 
 - Open unread items first.
 - Expand long summaries when needed.
 - Mark reviewed items read.
 - Clear read items after triage.
 
-See [Queue](./queue.md) for the full triage workflow.
+See [Inbox](./inbox.md) for the full triage workflow.
 
 ## 9. Check the Wardian CLI
 
@@ -206,14 +206,14 @@ Start with the visible failure point:
 - Provider command not found: verify the provider command works in a normal terminal and that Wardian is using the same shell.
 - Provider asks for authentication: complete the provider sign-in flow, then restart the agent.
 - Agent stays Off or Error: check the agent terminal output and provider runtime notes.
-- Queue stays empty: confirm the agent actually returned from Processing to Idle after producing output.
+- Inbox stays empty: confirm the agent actually returned from Processing to Idle after producing output.
 
 Related docs:
 
 - [First-Run Troubleshooting](./first-run-troubleshooting.md)
 - [Provider Runtimes](../providers.md)
 - [Settings](./settings.md)
-- [Queue](./queue.md)
+- [Inbox](./inbox.md)
 - [OS Support](../os-support.md)
 
 ## Next Steps
@@ -221,13 +221,13 @@ Related docs:
 - Learn tabs, splits, restore, and terminal ownership in [Workbench](./workbench.md).
 - Monitor several agents with [Agents](./agents-overview.md).
 - Learn the persistent shell in [UI Overview](./ui-overview.md).
-- Recover from first-run launch, provider, terminal, Queue, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
+- Recover from first-run launch, provider, terminal, Inbox, and CLI failures in [First-Run Troubleshooting](./first-run-troubleshooting.md).
 - Manage reusable prompts, skills, classes, and workflow blueprints in [Library](./library.md).
 - Use [Class Management](./class-management.md) for class concepts; edit class instructions and class-level skills from the Library's Classes section.
 - Browse your agent's local files in [Explorer](./explorer.md).
 - Send one instruction to multiple agents with [Command Panel](./command-panel.md).
 - Use the agent-facing [Wardian CLI](./cli.md) for scripted coordination.
-- Triage completed work in the [Queue](./queue.md).
+- Triage completed work in the [Inbox](./inbox.md).
 - Manage per-agent Git operations in [Source Control](./source-control.md).
 - Configure runtime behavior and shell defaults in [Settings](./settings.md).
 - Verify provider commands and authentication in [Provider Readiness](./provider-readiness.md).

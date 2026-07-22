@@ -512,10 +512,15 @@ pub(crate) fn apply_agent_status_event_with_policy(
         .unwrap_or_default();
     if let Some(next_status) = provider_status_from_event(&current, &event, policy) {
         set_agent_status(app, session_id, current_status, next_status);
-        if matches!(event, AgentEvent::TurnCompleted) {
+        if should_emit_agent_turn_completed(&current, &event) {
             emit_agent_turn_completed(app, session_id);
         }
     }
+}
+
+fn should_emit_agent_turn_completed(current_status: &str, event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::TurnCompleted)
+        && wardian_core::identity::normalize_status(current_status) != "idle"
 }
 
 pub(crate) fn apply_agent_status_event(
@@ -1572,6 +1577,18 @@ mod tests {
             "Action Needed"
         );
         assert_eq!(*agent.query_count.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn turn_completed_event_requires_an_active_turn() {
+        assert!(should_emit_agent_turn_completed(
+            "Processing...",
+            &AgentEvent::TurnCompleted,
+        ));
+        assert!(!should_emit_agent_turn_completed(
+            "Idle",
+            &AgentEvent::TurnCompleted,
+        ));
     }
 
     #[test]

@@ -22,7 +22,7 @@ const WorkflowNavIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => (
 const tabs: readonly RemoteNavTab[] = [
   { id: "watchlist", label: "Agents", icon: Bot },
   { id: "workflows", label: "Workflows", icon: WorkflowNavIcon },
-  { id: "queue", label: "Queue", icon: ListChecks },
+  { id: "queue", label: "Inbox", icon: ListChecks },
   { id: "garden", label: "Garden", icon: Sprout },
   { id: "library", label: "Library", icon: Library },
 ] as const;

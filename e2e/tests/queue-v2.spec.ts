@@ -1,8 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { openSurface } from "../fixtures/workbench";
+import { makeWorkbenchDocument } from "../fixtures/workbenchIpcMock";
 
 async function installQueueV2IpcMock(page: Page) {
-  await page.addInitScript(() => {
+  const workbenchDocument = makeWorkbenchDocument();
+  await page.addInitScript((workbenchDocument) => {
     type QueueItem = {
       id: string;
       type: "action_needed" | "agent_completed" | "workflow_completed";
@@ -93,7 +95,51 @@ async function installQueueV2IpcMock(page: Page) {
         if (command === "load_watchlists") return [];
         if (command === "load_watchlist_prefs") return null;
         if (command === "load_agent_interactions") return {};
+        if (command === "get_workbench_boot_config") return { safe_mode: false };
+        if (command === "load_workbench_state") {
+          return {
+            source: "default",
+            document: workbenchDocument,
+            notice: null,
+            durable_revision: workbenchDocument.revision,
+            durable_token: `mock-token-${workbenchDocument.revision}`,
+          };
+        }
+        if (command === "save_workbench_state") {
+          const document = args?.document as { revision?: number } | undefined;
+          const revision = document?.revision ?? workbenchDocument.revision;
+          return {
+            outcome: "saved",
+            durable_revision: revision,
+            durable_token: `mock-token-${revision}`,
+            request_id: args?.request_id,
+          };
+        }
         if (command === "load_queue_items") return queueItems;
+        if (command === "list_inbox_notifications") {
+          return [{
+            id: "important-update-1",
+            kind: "update",
+            sender_session_id: "mock-session-e2e-001",
+            status: "completed",
+            title: "Migration update",
+            body: "The Inbox migration is ready for review.",
+            choices: [],
+            created_at: new Date(now - 30_000).toISOString(),
+          }, {
+            id: "approval-request-1",
+            kind: "approval",
+            sender_session_id: "mock-session-e2e-001",
+            status: "awaiting_reply",
+            title: "Production deployment",
+            body: "Choose whether this deployment may proceed.",
+            proposed_action: "Deploy the approved release to production",
+            risk: "This changes live traffic and may require rollback.",
+            choices: ["Deploy", "Do not deploy"],
+            created_at: new Date(now).toISOString(),
+          }];
+        }
+        if (command === "list_workflow_inbox_approvals") return [];
         if (command === "save_queue_items") {
           queueItems = args?.items as QueueItem[];
           return null;
@@ -123,29 +169,33 @@ async function installQueueV2IpcMock(page: Page) {
         return null;
       },
     };
-  });
+  }, workbenchDocument);
 }
 
-test.describe("Queue v2", () => {
-  test("shows action-needed cards, header filtering, and clickable action choices", async ({ page }) => {
+test.describe("Inbox", () => {
+  test("shows notifications, action-needed cards, header filtering, and clickable action choices", async ({ page }) => {
     await installQueueV2IpcMock(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
 
-    await openSurface(page, "queue");
+    await openSurface(page, "inbox");
 
     await expect(page.getByText("Action needed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Production deployment", { exact: true })).toBeVisible();
+    await expect(page.getByText("Migration update", { exact: true })).toBeVisible();
     await expect(page.getByText("Approve the generated patch before continuing.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Filter queue events" })).toContainText("Filter: All events");
+    await expect(page.getByRole("button", { name: "Filter Inbox events" })).toContainText("Filter: All events");
     await expect(page.getByLabel("Desktop alert for action needed")).toBeHidden();
     await expect(page.getByLabel("Sound alert for action needed")).toBeHidden();
     await expect(page.getByRole("button", { name: "Send action response 1: Yes" })).toBeVisible();
 
-    if (process.env.WARDIAN_QUEUE_V2_SCREENSHOT) {
-      await page.screenshot({ path: process.env.WARDIAN_QUEUE_V2_SCREENSHOT, fullPage: false });
+    if (process.env.WARDIAN_INBOX_SCREENSHOT) {
+      await page
+        .locator('[data-testid="surface-panel"][data-surface-type="inbox"]')
+        .screenshot({ path: process.env.WARDIAN_INBOX_SCREENSHOT, animations: "disabled" });
     }
 
-    await page.getByRole("button", { name: "Filter queue events" }).click();
+    await page.getByRole("button", { name: "Filter Inbox events" }).click();
     await expect(page.getByLabel("Show agent completions")).toBeChecked();
     await page.getByLabel("Show agent completions").uncheck();
     await expect(page.getByText("Finished the test summary.")).toBeHidden();

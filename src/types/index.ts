@@ -273,7 +273,7 @@ export interface QueuePreferences {
 
 export interface QueueItem {
     id: string;
-    type: "action_needed" | "agent_completed" | "workflow_completed";
+    type: "action_needed" | "agent_completed" | "workflow_completed" | "agent_update" | "approval_request";
     timestamp: number;
     read: boolean;
     evidence_id?: string;
@@ -289,6 +289,21 @@ export interface QueueItem {
     error?: string;
     // shared
     summary?: string;
+    // durable user-facing notification fields
+    inbox_notification_id?: string;
+    notification_status?: "completed" | "awaiting_reply" | "expired";
+    notification_title?: string;
+    proposed_action?: string;
+    risk?: string;
+    approval_choices?: string[];
+    approval_decision?: string;
+    expires_at?: string;
+    workflow_approval?: {
+      blueprint_id: string;
+      blueprint_path: string;
+      run_id: string;
+      node: string;
+    };
 }
 
 export interface GridLayout {

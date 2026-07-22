@@ -63,12 +63,12 @@ flag-off development server cannot satisfy the run accidentally.
 | `scripts/capture-doc-screenshots.mjs` | Scheduled for the Task 20 semantic capture migration. |
 | `scripts/capture-readme-demo-real.mjs` | Scheduled for the Task 20 semantic capture migration. |
 | `src/styles/App.css` | Retained only for the flag-off comparison; Task 19 removes the legacy titlebar navigation styles after the cutover gates pass. |
-| `e2e/tests/remote-pwa.spec.ts` | Intentionally unrelated: this is the remote PWA's own mobile Queue navigation. |
+| `e2e/tests/remote-pwa.spec.ts` | Migrated to the Inbox surface name. |
 | `src/features/remote/RemoteMobileApp.test.tsx` | Intentionally unrelated: these buttons belong to the remote mobile surface. |
 | `src/features/settings/SettingsModal.test.tsx` | Intentionally unrelated: Queue and Grid are Settings navigation/density controls, not desktop surface launchers. |
 
 No baseline hit may disappear from the current-tree audit without moving to its
 recorded disposition. New matches introduced after `d53842dc` must be classified
 separately by Task 19's cutover verifier; legitimate examples such as an Agents
-Overview `Grid` mode control are not legacy desktop surface launchers. The three
+Overview `Grid` mode control are not legacy desktop surface launchers. The two
 baseline exceptions above remain allowed only for their recorded reasons.

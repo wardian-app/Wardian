@@ -36,7 +36,7 @@ test("renders a capture-ready tabs-and-splits workbench", async ({ page }, testI
       status_filter: [],
     },
   });
-  const queue = makeWorkbenchSurface("queue-evidence", "queue");
+  const queue = makeWorkbenchSurface("inbox-evidence", "inbox");
   const document = makeWorkbenchDocument({
     revision: 2,
     root: {
@@ -84,9 +84,9 @@ test("renders a capture-ready tabs-and-splits workbench", async ({ page }, testI
   await page.goto("/");
   await expect(page.getByTestId("workbench-group")).toHaveCount(2);
   await expect(surfaceTab(page, "agents-overview")).toBeVisible();
-  await expect(surfaceTab(page, "queue")).toBeVisible();
+  await expect(surfaceTab(page, "inbox")).toBeVisible();
   await expect(surfacePanel(page, "agents-overview")).toBeVisible();
-  await expect(surfacePanel(page, "queue")).toBeVisible();
+  await expect(surfacePanel(page, "inbox")).toBeVisible();
   await expect(page.getByTestId("sidebar-icon-rail")).toBeVisible();
   await expect(page.getByTestId("agent-watchlist")).toBeVisible();
   await expect(page.locator('[data-testid="agent-card"]:visible')).toHaveCount(2);

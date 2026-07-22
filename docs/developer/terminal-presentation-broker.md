@@ -20,7 +20,7 @@ For each live terminal session:
 
 Structured prompt delivery is a separate backend-authorized control path. The
 terminal lease applies to terminal keystrokes and binary input; it must not gate
-Queue, Chat, Commands, mailbox, workflow, or broadcast delivery.
+Inbox, Chat, Commands, mailbox, workflow, or broadcast delivery.
 
 ## Session, Presentation, and Consumer
 

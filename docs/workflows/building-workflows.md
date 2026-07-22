@@ -70,7 +70,7 @@ That usually means one or both of these are true:
 
 If neither is needed, the workflow launches immediately based on its trigger type.
 
-After a workflow finishes, the app can add its completed or failed outcome to the separate [Queue](../guide/queue.md) triage surface.
+After a workflow finishes, the app can add its completed or failed outcome to the separate [Inbox](../guide/inbox.md) triage surface.
 
 ## Builder vs Library
 
@@ -92,5 +92,5 @@ Use the **Workflow Library** when you need to:
 - [Triggers](./triggers.md)
 - [Node Reference](./node-reference.md)
 - [Agent Assignment](./agent-assignment.md)
-- [Queue](../guide/queue.md)
+- [Inbox](../guide/inbox.md)
 - [Visual Builder Architecture](../developer/visual-builder.md)

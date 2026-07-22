@@ -84,7 +84,7 @@ describe("CustomTitleBar navigation", () => {
     expect(screen.queryByRole("button", { name: "Commands" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Grid" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dashboard" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Queue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Inbox" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Graph" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Garden" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Library" })).not.toBeInTheDocument();

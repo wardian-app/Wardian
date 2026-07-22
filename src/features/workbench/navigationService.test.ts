@@ -247,7 +247,7 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([definition("new-tab")]);
     const dashboard = makeSurface("dashboard-1", { surface_type: "dashboard" });
     const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
-    const queue = makeSurface("queue-closed", { surface_type: "queue" });
+    const queue = makeSurface("queue-closed", { surface_type: "inbox" });
     const initial = makeSingleGroupDocument([dashboard, placeholder]);
     initial.recently_closed = [{
       surface: queue,
@@ -273,7 +273,7 @@ describe("workbench navigation service", () => {
     const registry = createSurfaceRegistry([definition("new-tab")]);
     const left = makeSurface("left", { surface_type: "dashboard" });
     const placeholder = makeSurface("placeholder", { surface_type: "new-tab" });
-    const closed = makeSurface("closed", { surface_type: "queue" });
+    const closed = makeSurface("closed", { surface_type: "inbox" });
     const initial = makeSingleGroupDocument([left]);
     initial.root = {
       kind: "split",
