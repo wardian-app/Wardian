@@ -241,7 +241,7 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 
 ### Inbox Evidence
 
-Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Legacy completion records can include:
+Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian emits its event only when that provider returns to its visible ready prompt, once per active turn. Legacy completion records can include:
 
 ```json
 {

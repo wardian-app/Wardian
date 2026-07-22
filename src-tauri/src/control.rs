@@ -1993,7 +1993,7 @@ fn gemini_output_has_api_key_prompt(output: &str) -> bool {
     output.contains("Enter Gemini API Key") || output.contains("Paste your API key here")
 }
 
-fn antigravity_output_has_ready_prompt(output: &str) -> bool {
+pub(crate) fn antigravity_output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
     let lines = cleaned
         .lines()
