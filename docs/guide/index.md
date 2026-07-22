@@ -8,6 +8,7 @@ automation, and extension. Take only the next step that helps the work at hand.
 ## Start and Orient
 
 - [First-Time Install and First Run](./getting-started.md): install Wardian, verify a provider, spawn the first agent, and review the first Inbox result.
+- [Key Concepts](./key-concepts.md): learn the app layout, agents, reusable setup, and workflow runs.
 - [Provider Readiness](./provider-readiness.md): verify provider CLIs, authentication, shell `PATH`, and runtime prerequisites before spawning agents.
 - [First-Run Troubleshooting](./first-run-troubleshooting.md): recover from app launch, provider detection, terminal startup, Inbox, or CLI issues during first setup.
 - [UI Overview](./ui-overview.md): learn the title bar, auxiliary rail, roster, and central workspace.
@@ -21,7 +22,7 @@ automation, and extension. Take only the next step that helps the work at hand.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.
 - [Inbox](./inbox.md): triage completed work, important updates, and decisions.
-- [Class Management](./class-management.md): understand class blueprints; edit them from the Library's Classes section.
+- [Class Management](./class-management.md): understand reusable agent setups; edit them from the Library's Classes section.
 
 ## Reuse and Direct Work
 

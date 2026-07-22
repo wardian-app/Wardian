@@ -1,8 +1,10 @@
 # Agents
 
-Agents is the Workbench surface for monitoring several agent sessions at once. It replaces the old assumption that Grid is Wardian's global page: Grid is now one display mode inside this surface.
+Agents is the Workbench view for monitoring several agent sessions at once. It replaces the old assumption that Grid is Wardian's global page: Grid is now one display mode inside this view.
 
 Use Agents when you want live terminals or normalized chat activity arranged together, then switch to a focused presentation when one agent needs more space.
+
+For a visual map of an agent's session, workspace, class, and skills, see [Key Concepts](./key-concepts.md#agents-and-their-setup).
 
 ## Open Agents
 
