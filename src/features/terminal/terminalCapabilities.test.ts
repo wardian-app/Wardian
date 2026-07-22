@@ -1,4 +1,5 @@
 import {
+  createProviderTerminalOutputFilter,
   normalizeTerminalOutputBatch,
   normalizeOpenCodeOutput,
   normalizeRemoteTerminalLiveOutput,
@@ -223,6 +224,21 @@ describe("terminal capability broker", () => {
     const ST = ESC + String.fromCharCode(92);
     const chunks = [ESC + "[?996n" + ESC + "]10;", "?" + BEL + ESC + "]11;?" + ST + "ok"];
     expect(normalizeTerminalOutputBatch(chunks, "codex")).toBe("ok");
+  });
+
+  it("withholds fragmented Codex color probes before xterm can auto-answer", () => {
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const filter = createProviderTerminalOutputFilter("codex");
+
+    expect(filter.filter("before" + ESC + "]10;?")).toBe("before");
+    expect(filter.filter(BEL + ESC + "]11;?" + BEL + "after")).toBe("after");
+  });
+
+  it("does not buffer ordinary output for other providers", () => {
+    const filter = createProviderTerminalOutputFilter("claude");
+
+    expect(filter.filter("before\u001b]10;?")).toBe("before\u001b]10;?");
   });
 
   it("leaves non-codex provider output color sequences untouched", () => {

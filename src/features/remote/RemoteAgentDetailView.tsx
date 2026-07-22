@@ -42,6 +42,7 @@ import { isUserFacingProviderName, providerDisplayName } from "../agents/provide
 import { remoteClient } from "./remoteClient";
 import { RemoteTerminalSessionClient } from "./remoteTerminalSessionClient";
 import {
+  createProviderTerminalOutputFilter,
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
@@ -826,6 +827,7 @@ function TerminalPane({
 
     let focusReported = false;
     let liveDecoder = new TextDecoder();
+    const terminalOutputFilter = createProviderTerminalOutputFilter(agent.provider ?? undefined);
     const pendingCapabilityResponses: string[] = [];
     let pendingCapabilityResponseBytes = 0;
     const sendOrBufferCapabilityResponse = (input: string) => {
@@ -855,11 +857,12 @@ function TerminalPane({
       }
     };
     const planRemoteTerminalOutput = (output: string) => {
+      const filteredOutput = terminalOutputFilter.filter(output);
       const context = {
         ...remoteTerminalCapabilityContext(terminal, host, agent.provider ?? undefined),
         focusReported,
       };
-      const plan = planTerminalCapabilityResponses(agent.provider ?? undefined, output, context);
+      const plan = planTerminalCapabilityResponses(agent.provider ?? undefined, filteredOutput, context);
       focusReported = plan.focusReported;
       for (const input of plan.outgoingInputs) {
         sendOrBufferCapabilityResponse(input);
