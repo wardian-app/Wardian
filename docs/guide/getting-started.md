@@ -159,7 +159,7 @@ Use a read-only prompt for the first run. After you trust the provider, you can 
 
 ## 8. Review the Result in Inbox
 
-When an active agent finishes and returns to Idle, Wardian adds a completion item to **Inbox**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Inbox**. To keep the agent beside Inbox, leave Inbox active and choose **Open to Side** for that agent in the right roster.
+When a configured agent completes a provider turn with a final response, Wardian adds that response as a completion item to **Inbox**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Inbox**. To keep the agent beside Inbox, leave Inbox active and choose **Open to Side** for that agent in the right roster.
 
 ![Wardian Inbox showing a completed first agent task with a summary](../assets/screenshots/queue/completed-result.png)
 

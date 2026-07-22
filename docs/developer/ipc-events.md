@@ -241,7 +241,7 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 
 ### Inbox Evidence
 
-Inbox items project canonical live evidence instead of replayed terminal text. Legacy completion records can include:
+Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Legacy completion records can include:
 
 ```json
 {

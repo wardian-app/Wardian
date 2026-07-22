@@ -131,19 +131,19 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(true);
   });
 
-  it("does not use terminal output as a completion summary when no canonical final result is available", () => {
+  it("suppresses a completion when no canonical final result is available", () => {
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
       "\u001b[10;6HTest received.\u001b[15;6H",
       "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
-  it("does not replace a completion fallback when terminal output arrives after flush", () => {
+  it("does not create a delayed completion from terminal output", () => {
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
 
     useQueueStore.getState().appendAgentTerminalOutput(
       "agent-1",
@@ -151,8 +151,7 @@ describe("useQueueStore - agent completion", () => {
       "opencode",
     );
 
-    expect(useQueueStore.getState().items).toHaveLength(1);
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("does not use Gemini terminal redraws as queue completion summaries", () => {
@@ -164,11 +163,10 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(false);
 
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
 
     useQueueStore.getState().appendAgentTerminalOutput("agent-1", "> What", "gemini");
-    expect(useQueueStore.getState().items).toHaveLength(1);
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("does not use terminal prompt chrome as a completion summary", () => {
@@ -178,7 +176,7 @@ describe("useQueueStore - agent completion", () => {
       "opencode",
     );
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("uses an explicit completion summary instead of terminal fallback text", () => {
@@ -195,7 +193,7 @@ describe("useQueueStore - agent completion", () => {
     expect(useQueueStore.getState().items[0].summary).toBe("1\n2\n3\n4\n5");
   });
 
-  it("flushAgentCompletion uses the fallback instead of its transient buffer", () => {
+  it("flushAgentCompletion ignores transient buffers without a canonical result", () => {
     useQueueStore.getState().appendAgentEvent("agent-1", {
       type: "result",
       result: "Final answer here",
@@ -203,12 +201,7 @@ describe("useQueueStore - agent completion", () => {
     useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
 
     const { items } = useQueueStore.getState();
-    expect(items).toHaveLength(1);
-    expect(items[0].type).toBe("agent_completed");
-    expect(items[0].agent_name).toBe("My Agent");
-    expect(items[0].agent_session_id).toBe("agent-1");
-    expect(items[0].summary).toBe("Work finished — no summary supplied");
-    expect(items[0].read).toBe(false);
+    expect(items).toHaveLength(0);
   });
 
   it("bounds an explicit canonical completion summary", () => {
@@ -231,9 +224,9 @@ describe("useQueueStore - agent completion", () => {
     expect(summary).toContain("serialize persistence writes");
   });
 
-  it("flushAgentCompletion falls back when no canonical summary is available", () => {
+  it("flushAgentCompletion suppresses a missing canonical summary", () => {
     useQueueStore.getState().flushAgentCompletion("agent-2", "Agent B");
-    expect(useQueueStore.getState().items[0].summary).toBe("Work finished — no summary supplied");
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("flushAgentCompletion clears the buffer after flushing", () => {
@@ -241,16 +234,16 @@ describe("useQueueStore - agent completion", () => {
       type: "result",
       result: "Some output",
     });
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
     expect(useQueueStore.getState()._agentBuffers["agent-1"]).toBe("");
   });
 
   it("deduplicates a second flush for the same agent within 1 second (guards against double status-updated emissions)", () => {
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
     useQueueStore.setState((s) => ({
       items: s.items.map((i) => ({ ...i, timestamp: Date.now() - 500 })),
     }));
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
+    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
     expect(useQueueStore.getState().items).toHaveLength(1);
   });
 

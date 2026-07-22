@@ -77,7 +77,7 @@ Inbox is a review surface for completed work, important updates, and decisions. 
 
 Inbox items appear when:
 
-- an active agent returns to Idle after work
+- a configured agent completes a provider turn with a final response
 - a workflow run finishes or fails
 
 If Inbox is empty after spawning an agent, that can be expected. Send the agent a small task, wait for it to settle back to Idle, then open **Inbox** again. Provider approval prompts still appear through the agent status and terminal rather than as Inbox items until the provider reports actionable evidence.

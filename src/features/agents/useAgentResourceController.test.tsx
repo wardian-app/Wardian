@@ -45,6 +45,7 @@ type ListenerPayloads = {
   "agent-metrics": AgentTelemetry[];
   "app-metrics": AppTelemetry;
   "agent-status-updated": AgentStatusUpdate;
+  "agent-turn-completed": { session_id: string };
 };
 
 let agents: AgentConfig[];
@@ -145,13 +146,14 @@ describe("useAgentResourceController", () => {
       "agent-metrics",
       "app-metrics",
       "agent-status-updated",
+      "agent-turn-completed",
     ]);
     expect(result.current.off_agent_ids).toEqual(new Set(["agent-2"]));
     expect(result.current.agent_statuses["agent-2"]).toBe("Off");
 
     const replacement_callback = vi.fn();
     rerender({ callback: replacement_callback });
-    expect(mockListen).toHaveBeenCalledTimes(5);
+    expect(mockListen).toHaveBeenCalledTimes(6);
     act(() => emit("agent-json-event", {
       session_id: "agent-1",
       data: { type: "progress", content: "Updated callback" },
@@ -211,6 +213,19 @@ describe("useAgentResourceController", () => {
       previous_status: undefined,
       source: "status_event",
       agent: expect.objectContaining({ session_id: "agent-1", session_name: "Alpha" }),
+    });
+  });
+
+  it("reports explicit provider turn completions separately from status changes", async () => {
+    const on_agent_turn_completed = vi.fn();
+    const { result } = renderHook(() => useAgentResourceController({ on_agent_turn_completed }));
+    await waitFor(() => expect(result.current.agents).toHaveLength(2));
+
+    act(() => emit("agent-turn-completed", { session_id: "agent-1" }));
+
+    expect(on_agent_turn_completed).toHaveBeenCalledWith({
+      session_id: "agent-1",
+      agent: expect.objectContaining({ session_name: "Alpha" }),
     });
   });
 

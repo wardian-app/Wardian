@@ -9,7 +9,6 @@ import { dispatchQueueNotification } from "../features/queue/queueNotifications"
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
 const SUMMARY_MAX_CHARS = 500;
 const DEDUP_WINDOW_MS = 1_000;
-export const UNSUMMARIZED_COMPLETION = "Work finished — no summary supplied";
 let persistQueue: Promise<void> = Promise.resolve();
 
 interface QueueState {
@@ -25,7 +24,12 @@ interface QueueState {
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
-  flushAgentCompletion: (sessionId: string, agentName: string, summaryOverride?: string | null) => void;
+  flushAgentCompletion: (
+    sessionId: string,
+    agentName: string,
+    summary?: string | null,
+    evidenceId?: string,
+  ) => void;
   addActionNeeded: (
     sessionId: string,
     agentName: string,
@@ -269,15 +273,20 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     return (get()._agentBuffers[sessionId] ?? "").trim().length > 0;
   },
 
-  flushAgentCompletion(sessionId, agentName, summaryOverride) {
+  flushAgentCompletion(sessionId, agentName, summaryOverride, evidenceId) {
     const { items } = get();
+    const summary = summaryOverride?.trim();
+    if (!summary) return;
     const recent = items.find(
-      (i) => i.type === "agent_completed" && i.agent_session_id === sessionId && Date.now() - i.timestamp < DEDUP_WINDOW_MS,
+      (i) => i.type === "agent_completed"
+        && i.agent_session_id === sessionId
+        && (
+          (evidenceId !== undefined && i.evidence_id === evidenceId)
+          || Date.now() - i.timestamp < DEDUP_WINDOW_MS
+        ),
     );
     if (recent) return;
 
-    const override = summaryOverride?.trim();
-    const summary = override ? boundSummary(override) : UNSUMMARIZED_COMPLETION;
     const item: QueueItem = {
       id: crypto.randomUUID(),
       type: "agent_completed",
@@ -285,7 +294,9 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       read: false,
       agent_session_id: sessionId,
       agent_name: agentName,
-      summary,
+      summary: boundSummary(summary),
+      evidence_id: evidenceId,
+      evidence_source: evidenceId ? "provider_runtime" : undefined,
     };
 
     set((s) => {

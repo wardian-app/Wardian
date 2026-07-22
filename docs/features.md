@@ -95,7 +95,7 @@ Related docs:
 
 ## Inbox and Completion Triage
 
-- Captures agent completions without treating arbitrary terminal output as a final summary
+- Captures explicit provider turn completions for named agents with their canonical final response, without treating Idle transitions or arbitrary terminal output as a final summary
 - Receives explicit agent updates and exceptional manual approval requests through `wardian notify`
 - Records completed and failed workflow outcomes for later review
 - Persists Inbox completion projections under the Wardian home so unread work survives app restarts

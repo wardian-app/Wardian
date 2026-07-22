@@ -10,7 +10,7 @@ Use Inbox to review finished work, catch failed workflow runs, read an important
 
 Wardian records these items:
 
-- **Work finished**: an agent or workflow reached a terminal outcome. Wardian shows a provider final answer or structured result when it has one. It never turns arbitrary late terminal output into a final summary. If no final summary is available, the item says **Work finished — no summary supplied**.
+- **Work finished**: an agent or workflow reached a terminal outcome. For agents, Wardian creates the card only for an explicit provider turn-completed event from a named configured agent, and shows that turn's final provider response. It never turns generic Idle transitions, terminal output, provider control commands, or an unconfigured session ID into a completion card. If Wardian cannot identify a canonical final response, it skips the automatic card.
 - **Important update**: an agent explicitly sends a concise user-facing update with `wardian notify update`. Use this for a material result, a significant limitation, or a change that affects the user's next decision.
 - **Approval request**: an agent explicitly sends a structured request with `wardian notify approval`. It names the proposed action, why it is risky, the available choices, and an expiry. Provider-native permission prompts remain provider-sourced **Action needed** items.
 - **Workflow outcome**: a workflow completed or failed. Workflow approval nodes also project their waiting decision into Inbox; the workflow engine remains authoritative for its state and resolution.
@@ -81,7 +81,7 @@ Startup hydration can restore existing Inbox records, statuses, interactions, an
 Inbox alert preferences live in **Settings > Inbox** and are per event type. Desktop and sound alerts are enabled by default only for **Action needed**; passive completions and updates stay quiet unless you opt in.
 
 - Items older than seven days are ignored by the legacy completion projection when it loads.
-- A fallback completion summary is not a substitute for an agent's final answer. Open the source session or ask the agent for a summary when needed.
+- Automatic completion cards use only a canonical final provider response. Open the source session or ask the agent for a summary when no automatic card appears.
 - Provider approval-looking text does not create generic manual choices. Wardian shows buttons only for explicit provider choices or a structured `notify approval` request.
 - Clearing read items removes only the legacy completion projection for the active Wardian home. Durable notify history and workflow state retain their own lifecycle.
 

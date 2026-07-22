@@ -4,7 +4,7 @@
 
 Rename the user-facing Queue surface to **Inbox**. Keep **Mailbox** for agent-directed delivery, so the two terms describe different directions of communication. Existing persisted `queue` workbench surfaces migrate to `inbox` when loaded; legacy completion files retain their internal compatibility names for this slice.
 
-Inbox combines four sources: legacy completion projections, provider action-needed evidence, durable agent `notify` records, and native workflow Approval-node projections. It does not treat arbitrary terminal output as a final completion summary. When Wardian lacks a canonical final result, it shows `Work finished — no summary supplied`.
+Inbox combines four sources: legacy completion projections, provider action-needed evidence, durable agent `notify` records, and native workflow Approval-node projections. Automatic legacy completion projections are created only from an explicit live provider turn-completed event for a named roster agent, using the final normalized assistant response as their summary. Generic Idle transitions, terminal redraws, provider control commands such as `/login` and `/compact`, unconfigured session IDs, and turns without a canonical final response do not create an Inbox card.
 
 ## Notify
 

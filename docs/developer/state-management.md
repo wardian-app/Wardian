@@ -43,7 +43,7 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
    presentation state. Mirrors fit the owner's canonical grid locally; only the
    explicit lease owner may resize the PTY or send terminal input.
 5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
-6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Inbox completions and CLI `watch --until status:*` evidence come from live transitions after hydration.
+6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Inbox completions come only from live explicit provider turn-completed events with a canonical final assistant response; CLI `watch --until status:*` evidence comes from live transitions after hydration.
 
 ## Workbench State
 
