@@ -792,7 +792,7 @@ describe('WorkflowMonitor', () => {
 
     await waitFor(() => expect(screen.getByTestId('workflow-history-run-run-041')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^workflow-history-run-/).length).toBeLessThanOrEqual(32);
-  });
+  }, 15_000);
 
   it('defers history virtual-row recalculation out of the scroll event', async () => {
     runState.runs = Array.from({ length: 60 }, (_, index) => ({

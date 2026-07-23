@@ -63,6 +63,55 @@ async function installCustomCloneIpcMock(page: Page) {
       },
       convertFileSrc: (filePath: string) => filePath,
       invoke: async (command: string, args?: Record<string, unknown>) => {
+        if (command === "get_workbench_boot_config") return { safe_mode: false };
+        if (command === "load_workbench_state") {
+          return {
+            source: "primary",
+            document: {
+              schema_version: 1,
+              revision: 0,
+              saved_at: "2026-07-22T00:00:00.000Z",
+              root: { kind: "group", group_id: "group-1" },
+              groups: {
+                "group-1": {
+                  group_id: "group-1",
+                  surface_ids: ["agents-overview"],
+                  active_surface_id: "agents-overview",
+                },
+              },
+              surfaces: {
+                "agents-overview": {
+                  surface_id: "agents-overview",
+                  surface_type: "agents-overview",
+                  state_schema_version: 1,
+                  state: { mode: "auto", focused_agent_id: null, search_query: "", status_filter: [] },
+                },
+              },
+              active_group_id: "group-1",
+              recently_closed: [],
+              shell: {
+                left_sidebar_collapsed: false,
+                left_sidebar_width: 240,
+                right_sidebar_collapsed: false,
+                right_sidebar_width: 240,
+                bottom_terminal_open: false,
+                bottom_terminal_height: 360,
+              },
+            },
+            notice: null,
+            durable_revision: 0,
+            durable_token: "opaque-zero",
+          };
+        }
+        if (command === "save_workbench_state") {
+          const request = args as { request_id?: string; document?: { revision?: number } } | undefined;
+          return {
+            outcome: "saved",
+            durable_revision: request?.document?.revision ?? 1,
+            durable_token: "opaque-one",
+            request_id: request?.request_id ?? "mock-request",
+          };
+        }
         if (command === "list_agents") return agents;
         if (command === "list_agent_classes") {
           return [{ name: "TestClass", description: "E2E test class", is_default: true }];
@@ -218,6 +267,23 @@ test.describe("Custom Agent Clone", () => {
 
     await page.screenshot({
       path: path.join("e2e", "screenshots", "context-menu-positioning", "2026-07-20", "agent-menu-at-cursor.png"),
+      animations: "disabled",
+    });
+  });
+
+  test("single-clicking a watchlist agent reveals it in Agents", async ({ page }) => {
+    await installCustomCloneIpcMock(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+
+    const sourceRow = page.locator('[data-testid="agent-watchlist"] .watchlist-row', { hasText: "E2E Mock Agent" });
+    await sourceRow.click();
+
+    await expect(page.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "true");
+    await expect(sourceRow).toHaveAttribute("data-selected", "true");
+    await expect(page.locator('[data-testid="agents-overview-surface"]')).toBeVisible();
+    await page.screenshot({
+      path: path.join("e2e", "screenshots", "watchlist-single-click", "2026-07-22", "single-click-reveals-agent.png"),
       animations: "disabled",
     });
   });

@@ -770,8 +770,8 @@ export default function AgentWatchlist({
           e.stopPropagation();
           if (wasDragging.current) { wasDragging.current = false; return; }
 
-          // The second click of a double-click belongs to the navigation
-          // gesture. Avoid toggling the roster target immediately before open.
+          // A double-click still dispatches a second click. Navigation occurs
+          // on the first click, so ignore the extra event to preserve selection.
           if (e.detail > 1 && !(e.ctrlKey || e.metaKey || e.shiftKey)) return;
 
           if (onSelectAgent) {
@@ -781,6 +781,7 @@ export default function AgentWatchlist({
               shiftKey: e.shiftKey,
               rangeAgentIds: displayedAgents.map((agent) => agent.session_id),
             });
+            if (!(e.ctrlKey || e.metaKey || e.shiftKey)) revealAgent?.(agentId);
             return;
           }
 
@@ -817,11 +818,7 @@ export default function AgentWatchlist({
               lastSelectedIdRef.current = agentId;
             }
           }
-        }}
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          if (wasDragging.current || e.ctrlKey || e.metaKey || e.shiftKey) return;
-          revealAgent?.(agentId);
+          if (!(e.ctrlKey || e.metaKey || e.shiftKey)) revealAgent?.(agentId);
         }}
         onKeyDown={(e) => {
           if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;

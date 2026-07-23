@@ -880,7 +880,7 @@ describe("Workbench persistence boot integration", () => {
       return row;
     });
 
-    fireEvent.doubleClick(betaRow);
+    fireEvent.click(betaRow);
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "true");
       expect(betaRow).toHaveAttribute("data-selected", "true");
@@ -2209,7 +2209,7 @@ describe("Agent Watchlist Sidebar", () => {
       .find((row): row is HTMLElement => Boolean(row));
     if (!betaWatchlistRow) throw new Error("Beta watchlist row not found");
 
-    fireEvent.doubleClick(betaWatchlistRow);
+    fireEvent.click(betaWatchlistRow);
 
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "true");
