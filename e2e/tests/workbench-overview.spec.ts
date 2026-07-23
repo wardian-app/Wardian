@@ -169,8 +169,9 @@ test("restores persisted Single independently of roster targets and falls back w
   await expect(visibleAgentCards(page)).toHaveCount(1);
   await expect(page.locator("#agent-card-agent-beta")).toBeVisible();
 
-  await page.getByLabel("Agent Alpha", { exact: true }).click();
+  await page.getByLabel("Agent Alpha", { exact: true }).click({ modifiers: ["Control"] });
   await expect(surfaceTab(page, "agent-session", ALPHA_AGENT.session_id)).toHaveCount(0);
+  await expect(page.getByLabel("Agent Alpha", { exact: true })).toHaveAttribute("data-selected", "true");
   await expect(page.locator("#agent-card-agent-beta")).toBeVisible();
   await expect(visibleAgentCards(page)).toHaveCount(1);
 
