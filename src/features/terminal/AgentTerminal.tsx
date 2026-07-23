@@ -212,6 +212,28 @@ type TerminalDebugEnv = {
   VITE_WARDIAN_TERMINAL_DEBUG?: string;
 };
 
+type SnapshotReplayTrace = {
+  at: number;
+  snapshotId: string;
+  sequenceBarrier: number;
+  brokerGeometry: { cols: number; rows: number };
+  brokerScrollbackRows: number;
+  brokerFormattedScrollbackRows: number;
+  appliedFormattedState: boolean;
+  parserBefore: TerminalBufferMetrics;
+  parserAfter: TerminalBufferMetrics;
+  rendererBefore: TerminalBufferMetrics | null;
+  rendererAfter: TerminalBufferMetrics | null;
+};
+
+type TerminalBufferMetrics = {
+  cols: number;
+  rows: number;
+  baseY: number;
+  bufferLength: number;
+  viewportY: number;
+};
+
 export function shouldExposeTerminalDebug(env: TerminalDebugEnv = import.meta.env) {
   return env.DEV === true || env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
 }
@@ -283,6 +305,7 @@ declare global {
           viewport_unchanged: number;
         } | null;
         scrollTraces: { position: number; at: number; stack: string }[] | null;
+        snapshotReplays: SnapshotReplayTrace[] | null;
         usesViewportRedraws: boolean;
         supportsViewportRedrawInPlace: boolean;
         lines: string[];
@@ -469,6 +492,7 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
           provider: entry.provider ?? null,
           wheelStats: wheelDebugStats.get(presentationId) ?? null,
           scrollTraces: scrollTraces.get(presentationId) ?? null,
+          snapshotReplays: snapshotReplayTraces.get(presentationId) ?? null,
           usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
           supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
@@ -855,6 +879,27 @@ const wheelDebugStats = new Map<string, WheelDebugStats>();
 // builds only) so native E2E can identify what moved the viewport.
 type ScrollTraceEntry = { position: number; at: number; stack: string };
 const scrollTraces = new Map<string, ScrollTraceEntry[]>();
+const snapshotReplayTraces = new Map<string, SnapshotReplayTrace[]>();
+
+function terminalBufferMetrics(term: Terminal | HeadlessTerminal): TerminalBufferMetrics {
+  const buffer = term.buffer.active;
+  return {
+    cols: term.cols,
+    rows: term.rows,
+    baseY: buffer.baseY ?? 0,
+    bufferLength: buffer.length ?? term.rows,
+    viewportY: buffer.viewportY ?? 0,
+  };
+}
+
+function recordSnapshotReplay(sessionId: string, trace: SnapshotReplayTrace) {
+  const traces = snapshotReplayTraces.get(sessionId) ?? [];
+  traces.push(trace);
+  if (traces.length > 8) {
+    traces.splice(0, traces.length - 8);
+  }
+  snapshotReplayTraces.set(sessionId, traces);
+}
 
 function recordScrollTrace(sessionId: string, position: number) {
   const trace = scrollTraces.get(sessionId) ?? [];
@@ -1570,19 +1615,42 @@ async function applyBrokerSnapshot(
     renderer.term.cols === snapshot.geometry.cols &&
     renderer.term.rows === snapshot.geometry.rows
   );
+  const snapshotTrace = shouldExposeTerminalDebug()
+    ? {
+        at: Date.now(),
+        snapshotId: snapshot.snapshot_id,
+        sequenceBarrier: snapshot.sequence_barrier,
+        brokerGeometry: snapshot.geometry,
+        brokerScrollbackRows: snapshot.scrollback.length,
+        brokerFormattedScrollbackRows: snapshot.formatted_scrollback?.length ?? 0,
+        appliedFormattedState: rendererMatchesSnapshot && Boolean(snapshot.terminal_state_base64),
+        parserBefore: terminalBufferMetrics(entry.parser),
+        rendererBefore: renderer ? terminalBufferMetrics(renderer.term) : null,
+      }
+    : null;
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
   const state = decodeTerminalSnapshot(snapshot, rendererMatchesSnapshot);
-  if (state) {
-    // Restored snapshots must pass through the same provider capability and
-    // theme normalization as live output. Writing raw broker state here
-    // regressed Codex composer recoloring and color-probe filtering.
-    await writeTerminalOutputBatch(terminalKey, entry, [state], {
-      resetBeforeWrite: true,
-      recordOutput: false,
-      queueCapabilityResponses: false,
-    });
-  } else {
-    await resetTerminalOutputBuffers(entry);
+  try {
+    if (state) {
+      // Restored snapshots must pass through the same provider capability and
+      // theme normalization as live output. Writing raw broker state here
+      // regressed Codex composer recoloring and color-probe filtering.
+      await writeTerminalOutputBatch(terminalKey, entry, [state], {
+        resetBeforeWrite: true,
+        recordOutput: false,
+        queueCapabilityResponses: false,
+      });
+    } else {
+      await resetTerminalOutputBuffers(entry);
+    }
+  } finally {
+    if (snapshotTrace) {
+      recordSnapshotReplay(terminalKey, {
+        ...snapshotTrace,
+        parserAfter: terminalBufferMetrics(entry.parser),
+        rendererAfter: entry.renderer ? terminalBufferMetrics(entry.renderer.term) : null,
+      });
+    }
   }
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }

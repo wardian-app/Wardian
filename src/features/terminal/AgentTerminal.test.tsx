@@ -2388,6 +2388,19 @@ describe("AgentTerminal scrollback", () => {
         expect.stringContaining("formatted canonical grid"),
         expect.any(Function),
       );
+      expect(
+        window.__wardianTerminalDebug?.snapshot("snapshot-geometry-fallback")?.snapshotReplays,
+      ).toEqual([
+        expect.objectContaining({
+          brokerGeometry: { cols: 120, rows: 40 },
+          brokerScrollbackRows: 2,
+          brokerFormattedScrollbackRows: 2,
+          appliedFormattedState: false,
+          rendererBefore: expect.objectContaining({ cols: 80, rows: 24 }),
+          rendererAfter: expect.objectContaining({ cols: 80, rows: 24 }),
+          parserAfter: expect.objectContaining({ cols: 80, rows: 24 }),
+        }),
+      ]);
     });
   });
 
