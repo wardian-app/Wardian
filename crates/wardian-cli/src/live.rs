@@ -69,6 +69,7 @@ enum ControlOperation {
     AgentList,
     AgentDoctor,
     AgentKill,
+    AgentRestart,
     AgentPause,
     AgentResume,
     AgentSpawn,
@@ -276,6 +277,18 @@ pub fn agent_kill(target: &str) -> io::Result<()> {
         &runtime,
         ControlOperation::AgentKill,
         send_request(ControlRequest::AgentKill {
+            target: target.to_string(),
+        }),
+    )
+    .map(|_| ())
+}
+
+pub fn agent_restart(target: &str) -> io::Result<()> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::AgentRestart,
+        send_request(ControlRequest::AgentRestart {
             target: target.to_string(),
         }),
     )
@@ -585,7 +598,10 @@ pub fn wait_for_notification(
 ) -> io::Result<InboxNotificationResponse> {
     let origin = require_current_message_origin()?;
     let timeout_ms = u64::try_from(timeout.as_millis()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "notification timeout is too large")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "notification timeout is too large",
+        )
     })?;
     let runtime = build_runtime()?;
     let value = timeout_block(
@@ -916,6 +932,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::ArtifactReviewShow
         | ControlOperation::WatchlistsChanged => CONTROL_TIMEOUT,
         ControlOperation::AgentKill
+        | ControlOperation::AgentRestart
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentSpawn

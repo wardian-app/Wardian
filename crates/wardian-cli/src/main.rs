@@ -188,7 +188,8 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             &args,
         ),
         None => handle_show(args.target.as_deref(), &args),
-        Some(AgentCommand::Kill { target }) => handle_agent_kill(target),
+        Some(AgentCommand::Kill { target, confirm }) => handle_agent_kill(target, *confirm),
+        Some(AgentCommand::Restart { target }) => handle_agent_restart(target),
         Some(AgentCommand::Pause { target }) => handle_agent_pause(target),
         Some(AgentCommand::Resume { target }) => handle_agent_resume(target),
         Some(AgentCommand::Spawn {
@@ -248,11 +249,27 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
     }
 }
 
-fn handle_agent_kill(target: &str) -> Result<String, CliError> {
+fn handle_agent_kill(target: &str, confirmed: bool) -> Result<String, CliError> {
+    if !confirmed {
+        return Err(CliError::backend(
+            ExitCode::Generic,
+            "confirmation_required",
+            "agent kill permanently removes the agent, its habitat, and its session history; rerun with --confirm, or use `wardian agent restart <name-or-uuid>` to preserve them",
+        ));
+    }
     live::agent_kill(target).map_err(control_error)?;
     Ok(format!(
         "{}\n",
         serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true,"target":target}))
+            .unwrap()
+    ))
+}
+
+fn handle_agent_restart(target: &str) -> Result<String, CliError> {
+    live::agent_restart(target).map_err(control_error)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({"schema":1,"ok":true,"target":target,"preserved":["agent","habitat","session_history"]}))
             .unwrap()
     ))
 }

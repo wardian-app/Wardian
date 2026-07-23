@@ -120,7 +120,8 @@ wardian agent <name-or-uuid>
 wardian agent show [name-or-uuid]
 wardian agent list
 wardian agent list --scope all
-wardian agent kill <name-or-uuid>
+wardian agent restart <name-or-uuid>
+wardian agent kill <name-or-uuid> --confirm
 wardian agent pause <name-or-uuid>
 wardian agent resume <name-or-uuid>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
@@ -189,6 +190,12 @@ wardian send "stand down" --to all
 wardian notify update "The migration is ready for review" --title "Inbox refactor"
 wardian notify approval "Production deployment is prepared" --title "Deploy production" --action "Run the production deployment" --risk "This changes live traffic" --choice "Deploy" --choice "Do not deploy" --wait
 ```
+
+`agent restart` restarts the provider while preserving the Wardian agent, its
+habitat, and saved session history. Use it after `agent update` when the update
+reports `restart_required`, including class changes. `agent kill` is permanent:
+it removes the agent, its habitat, and its session history, while leaving the
+project workspace files untouched. It requires `--confirm` deliberately.
 
 ## Common Workflows
 

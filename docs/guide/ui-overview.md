@@ -57,7 +57,7 @@ See [Watchlists](./watchlists.md) for grouping and targeting behavior.
 
 [Agents](./agents-overview.md) is the multi-agent monitoring surface. Its **Auto**, **Grid**, and **Single** modes adapt the number and size of visible agent cards to the available surface area. Auto keeps the full roster visible: it uses multiple columns whenever useful cards fit side by side and stacks into one scrolling column otherwise. Explicit Single is temporary focus and restores the previous Auto or Grid mode when minimized. Grid is a mode inside this surface, not a global app page.
 
-Agent cards can show the real provider terminal or a normalized Chat view. Closing the Agents surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Restart, Clear, or Delete.
+Agent cards can show the real provider terminal or a normalized Chat view. Closing the Agents surface or an agent-session tab closes only that presentation; the agent runtime continues until you use a lifecycle action such as Pause, Start Session, Restart Session, Start Fresh, or Delete Agent.
 
 ## Terminal Continuity
 

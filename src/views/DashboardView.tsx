@@ -131,8 +131,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   >Pause</button>
                   <button 
                     onClick={(e) => { e.stopPropagation(); onRestart(agentId); }} 
+                    title="Restart the provider and continue this agent session."
                     className="h-7 flex items-center justify-center bg-wardian-success/10 text-wardian-success border border-wardian-success/30 text-[9px] rounded hover:bg-wardian-success/20 transition-colors"
-                  >{isOff ? "Start" : "Restart"}</button>
+                  >{isOff ? "Start Session" : "Restart Session"}</button>
                   <button 
                     onClick={(e) => { e.stopPropagation(); onDelete(agentId); }} 
                     className="h-7 flex items-center justify-center bg-wardian-error/10 text-wardian-error border border-wardian-error/30 text-[9px] rounded hover:bg-wardian-error/20 transition-colors"

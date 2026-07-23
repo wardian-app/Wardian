@@ -12,7 +12,7 @@ This document captures the practical runtime differences between Wardian's suppo
 - `inherit_fresh` clones the selected agent's runtime configuration and scoped read context, but writes workflow artifacts under a workflow-run session ID and clears provider resume state.
 - Workflow-spawned fresh runs skip interactive startup prompts. The workflow node prompt is the first provider input.
 - Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
-- The regular-agent context menu `Clear` action forces a fresh provider launch for that one action and clears both the backend PTY output buffer and frontend terminal scrollback cache.
+- The regular-agent context menu **Start Fresh** action forces a fresh provider launch for that one action and clears both the backend PTY output buffer and frontend terminal scrollback cache. It retains the Wardian agent, habitat, and saved history.
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
@@ -50,7 +50,7 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Headless launches use `agy --print <prompt>`.
 - Resume launches pass `--conversation <conversation-id>`.
 - Antigravity may write the useful assistant response only to `brain/<conversation-id>/.system_generated/logs/transcript.jsonl`.
-- Clear starts Antigravity fresh without sending a bootstrap prompt. Wardian records the first conversation mapping that differs from the pre-launch workspace mapping, then stores it as `resume_session`.
+- Start Fresh starts Antigravity fresh without sending a bootstrap prompt. Wardian records the first conversation mapping that differs from the pre-launch workspace mapping, then stores it as `resume_session`.
 - Until a real prompt creates that mapping, no provider identity exists to resume; a restart starts a fresh conversation again.
 - Wardian parses completed `MODEL` `PLANNER_RESPONSE` transcript records for status and `wardian agent watch` transcript text.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.

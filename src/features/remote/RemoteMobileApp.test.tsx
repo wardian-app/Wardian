@@ -1828,7 +1828,7 @@ describe("RemoteMobileApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
     expect(await screen.findByText("Clear me from the PWA chat.")).toBeVisible();
 
-    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await userEvent.click(screen.getByRole("button", { name: "Start Fresh" }));
     await waitFor(() => {
       const actionCall = fetchMock.mock.calls.find(([url, init]) => url === "/remote/api/agents/action" && init?.method === "POST");
       expect(actionCall).toBeTruthy();
@@ -4296,25 +4296,25 @@ describe("RemoteMobileApp", () => {
 
     const runningRow = await screen.findByRole("button", { name: /Open Running Coder details/i });
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Fresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete Agent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     await userEvent.click(runningRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Session" })).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /Back to remote agents/i }));
 
     const offlineRow = screen.getByRole("button", { name: /Open Offline Coder details/i });
-    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     await userEvent.click(offlineRow);
     expect(await screen.findByTestId("remote-agent-detail")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Clone" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Start Session" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
@@ -4624,9 +4624,9 @@ describe("RemoteMobileApp", () => {
 
     await screen.findByText("Coder");
     await userEvent.click(screen.getByRole("button", { name: /Open Coder details/i }));
-    await userEvent.click(screen.getByRole("button", { name: "Kill" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete Agent" }));
 
-    expect(window.confirm).toHaveBeenCalledWith("Kill Coder?");
+    expect(window.confirm).toHaveBeenCalledWith("Delete Coder? This permanently removes its Wardian habitat and session history; project files remain.");
     expect(fetchMock.mock.calls.some(([url]) => url === "/remote/api/agents/action")).toBe(false);
   });
 });

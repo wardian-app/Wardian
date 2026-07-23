@@ -110,7 +110,7 @@ describe('DashboardView', () => {
     await user.click(screen.getByRole('button', { name: 'Pause' }));
     expect(props.onPause).toHaveBeenCalledWith('agent-1');
 
-    await user.click(screen.getByRole('button', { name: 'Restart' }));
+    await user.click(screen.getByRole('button', { name: 'Restart Session' }));
     expect(props.onRestart).toHaveBeenCalledWith('agent-1');
 
     await user.click(screen.getByRole('button', { name: 'Delete' }));

@@ -293,8 +293,8 @@ describe('AgentWatchlist', () => {
 
     expect(screen.getByText('Rename')).toBeInTheDocument();
     expect(screen.getByText('Pause')).toBeInTheDocument();
-    expect(screen.getByText('Restart')).toBeInTheDocument();
-    expect(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+    expect(screen.getByText('Restart Session')).toBeInTheDocument();
+    expect(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Start Fresh' })).toBeInTheDocument();
     expect(screen.getByText('Delete')).toBeInTheDocument();
   });
 
@@ -303,7 +303,7 @@ describe('AgentWatchlist', () => {
     const agentRow = screen.getByText('Alpha').closest('.watchlist-row');
 
     fireEvent.contextMenu(agentRow!);
-    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Clear' }));
+    fireEvent.click(within(screen.getByTestId('agent-context-menu')).getByRole('button', { name: 'Start Fresh' }));
 
     expect(mockOnClear).toHaveBeenCalledWith('agent-1');
   });
@@ -356,10 +356,10 @@ describe('AgentWatchlist', () => {
 
     const menu = screen.getByTestId('agent-context-menu');
     expect(within(menu).getByRole('button', { name: 'Rename' })).toBeDisabled();
-    expect(within(menu).getByRole('button', { name: 'Clear Selected' })).toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'Start Fresh Selected' })).toBeInTheDocument();
     expect(within(menu).queryByRole('button', { name: 'Clone' })).not.toBeInTheDocument();
 
-    fireEvent.click(within(menu).getByRole('button', { name: 'Clear Selected' }));
+    fireEvent.click(within(menu).getByRole('button', { name: 'Start Fresh Selected' }));
 
     await waitFor(() => {
       expect(mockOnClear).toHaveBeenCalledWith('agent-1');
@@ -1174,8 +1174,8 @@ describe('AgentWatchlist', () => {
 
     fireEvent.contextMenu(agentRow!);
 
-    expect(screen.getByText('Start')).toBeInTheDocument();
-    expect(screen.queryByText('Restart')).not.toBeInTheDocument();
+    expect(screen.getByText('Start Session')).toBeInTheDocument();
+    expect(screen.queryByText('Restart Session')).not.toBeInTheDocument();
   });
 
   it('shows last_queried column header when visible in prefs', () => {

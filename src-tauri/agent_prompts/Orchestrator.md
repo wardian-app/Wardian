@@ -68,7 +68,7 @@ Example:
 ```bash
 wardian agent spawn --provider codex --class Reviewer --name review-current-branch --workspace D:/Development/Wardian
 wardian send --stdin --to review-current-branch --wait-until idle --timeout 10m
-wardian agent kill review-current-branch
+wardian agent kill review-current-branch --confirm
 ```
 
 ## Governance
