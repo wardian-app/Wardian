@@ -1,11 +1,13 @@
 # User Interface Overview
 
-Wardian features a dense local-first interface for watching, directing, and
-reorganizing the agents you run locally. Its persistent app shell surrounds a
-tab-based [Workbench](./workbench.md), keeping live terminals, reusable assets,
-workflow state, Inbox evidence, auxiliary tools, and the agent roster close to
-the work. The center can hold one surface, several tabs, or multiple split panes
-without confusing the restorable layout with agent runtime state.
+Wardian is a desktop workspace for watching, directing, and organizing the
+agents you run locally. Its persistent app layout surrounds a tab-based
+[Workbench](./workbench.md), keeping live terminals, reusable items, workflow
+state, Inbox items, tools, and the agent roster close to the work. The center
+can hold one tab or several split panes without changing whether an agent keeps
+running.
+
+If the names for the parts of the app are new, start with [Key Concepts](./key-concepts.md).
 
 ![Wardian workspace showing the left control rail, agent surfaces, and right agent roster](../assets/screenshots/grid/app-shell.png)
 

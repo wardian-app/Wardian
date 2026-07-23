@@ -1,71 +1,72 @@
 # Wardian Documentation
 
-**Where local agent work becomes visible, durable, and malleable.**
+**Run, monitor, and organize the coding agents working in your local projects.**
 
-Wardian runs the CLI agents you already use in real workspaces, keeps their
-sessions and evidence inspectable, and gives you a gradual path from a one-off
-instruction to reusable prompts, skills, classes, workflows, and project
-context.
+Wardian runs the CLI agents you already use in real project folders. It keeps
+their sessions, output, and results easy to inspect, and lets you save useful
+prompts, skills, agent setups, and workflows when you need them again.
 
-Start with the standard onboarding path below. Once you have run a first agent
-task, let the work—not a prescribed maturity model—determine what comes next.
-The rest of the documentation stays organized around concrete tasks. Over time,
-you can reuse a successful move, compose repeatable work, and extend the
-Habitat only when the smaller adaptation is no longer enough.
+Start with the onboarding path below. After your first agent task, choose the
+next guide based on what you want to do: monitor agents, save a useful prompt,
+give new agents a shared setup, or automate a repeated process. You do not need
+to adopt every feature at once.
 
 ## Start Here
 
 - [First-Time Install and First Run](./guide/getting-started.md)
-- [UI Overview](./guide/ui-overview.md)
-- [Wardian CLI](./guide/cli.md)
-- [Inbox](./guide/inbox.md)
-- [Workflows](./workflows/index.md)
-- [Key Features](./features.md)
-- [Provider Runtimes](./providers.md)
+- [Key Concepts](./guide/key-concepts.md)
+- [Provider Readiness](./guide/provider-readiness.md)
+- [First-Run Troubleshooting](./guide/first-run-troubleshooting.md)
 
-## User Guides
+## Tailorability Slope
 
-- [Guide Index](./guide/index.md)
-- [Library System](./guide/library.md): turn repeated instructions into prompts,
-  procedures into skills, and roles into reusable classes.
+Tailorability means gradually gaining more ability to adapt Wardian to your
+work. Each step should add useful power without demanding a sudden jump in
+learning. Start with the smallest move that helps; this is not a required
+sequence of features to adopt.
+
+```text
+More tailoring power
+                                      Build a custom tool or integration
+                                Compose a workflow blueprint
+                          Define a reusable role: Class
+                    Write a reusable procedure: Skill
+              Save a repeated request: Prompt
+       Adjust an existing agent's setup
+Use an existing agent, project, and built-in tools
+──────────────────────────────────────────────────────────────
+ Less learning and effort             More learning and effort
+```
+
+Read [Key Concepts](./guide/key-concepts.md#tailorability-slope) for when to
+choose each option and how they fit together.
+
+## Explore Wardian
+
+The [Guide](./guide/index.md) is organized around the work you are doing. Use
+it as the complete map of Wardian's user-facing features.
+
+### Run and Monitor Agents
+
+- [Agents Overview](./guide/agents-overview.md), [Grid](./guide/grid.md), and
+  [Dashboard](./guide/dashboard.md)
+- [Graph](./guide/graph.md), [Watchlists](./guide/watchlists.md), and
+  [Inbox](./guide/inbox.md)
 - [Class Management](./guide/class-management.md)
-- [Explorer](./guide/explorer.md)
-- [Watchlists](./guide/watchlists.md)
-- [Command Panel](./guide/command-panel.md)
-- [Wardian CLI](./guide/cli.md)
-- [Inbox](./guide/inbox.md)
-- [Source Control](./guide/source-control.md)
-- [Settings](./guide/settings.md)
 
-## Workflow Guides
+### Reuse and Direct Work
 
-- [Workflow Overview](./workflows/index.md)
-- [Building Workflows](./workflows/building-workflows.md)
-- [Node Reference](./workflows/node-reference.md)
-- [Triggers](./workflows/triggers.md)
-- [Scheduled Runs](./workflows/scheduled-runs.md)
-- [Agent Assignment](./workflows/agent-assignment.md)
-- [Troubleshooting](./workflows/troubleshooting.md)
+- [Library](./guide/library.md): turn repeated instructions into prompts,
+  procedures into skills, and roles into reusable classes.
+- [Command Panel](./guide/command-panel.md) and [Wardian CLI](./guide/cli.md)
 
-## Developer Guides
+### Inspect, Configure, and Automate
 
-- [Developer Index](./developer/index.md)
-- [Documentation Maintenance](./developer/docs-maintenance.md)
-- [Public Docs Site](./developer/docs-site.md)
-- [Architecture](./developer/architecture.md)
-- [State Management](./developer/state-management.md)
-- [PTY Lifecycle](./developer/pty-lifecycle.md)
-- [IPC Events](./developer/ipc-events.md)
-- [Tauri Command Reference](./developer/tauri-command-reference.md)
-- [Provider Runtime Notes](./developer/provider-runtimes.md)
-- [Workflow Engine](./developer/workflow-engine.md)
-- [Visual Builder](./developer/visual-builder.md)
-- [Native E2E Harness](./developer/native-e2e.md)
-- [Package Manager Distribution](./developer/package-manager-distribution.md)
-- [Theming](./developer/theming.md)
-- [Screenshot Documentation](./developer/screenshot-documentation.md)
+- [Explorer](./guide/explorer.md) and [Source Control](./guide/source-control.md)
+- [Settings](./guide/settings.md) and [Remote Control](./guide/remote-control.md)
+- [Workflow View](./guide/workflows.md) and the [Workflow Reference](./workflows/index.md)
 
-## Project Context
+## Other Documentation
 
-- [Design Context](https://github.com/wardian-app/Wardian/blob/main/DESIGN.md)
-- [OS Support](./os-support.md)
+- [Key Features](./features.md), [Providers](./providers.md), and [OS Support](./os-support.md)
+- [Developer Documentation](./developer/index.md)

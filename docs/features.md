@@ -2,12 +2,12 @@
 
 This page maps Wardian's major capabilities to their detailed guides.
 
-## Malleable Agent Environment
+## Work with Agents Your Way
 
-- Local-first agent habitat where prompts, classes, skills, workflows, inbox evidence, and memory-ready context are inspectable artifacts rather than opaque app-only state
-- Multiple lenses over shared Wardian state: desktop UI, CLI, Library, Workflows, Explorer, Inbox, Graph, and Garden operate against the same canonical records
-- Gentle slope from use to creation: run an agent, save a prompt, tune a class, deploy a skill, automate a workflow, then promote durable evidence into memory or project context
-- Explicit scopes for global, class, agent, team/project, workspace, and workflow-run context so reusable capabilities can be shared without losing provenance
+- Your prompts, classes, skills, workflows, and results are saved as files you can inspect instead of being hidden only inside the app.
+- Use the desktop app, CLI, Library, Workflows, Explorer, Inbox, and Graph with the same saved Wardian data.
+- Start with an agent, then save a prompt, improve a class, share a skill, or automate a workflow when that helps.
+- Share reusable setup with every agent, a class, one agent, a team, a workspace, or a workflow run as appropriate.
 
 Related docs:
 
@@ -17,13 +17,13 @@ Related docs:
 - [Wardian CLI](./guide/cli.md)
 - [Architecture](./developer/architecture.md)
 
-## Live Agent Habitat
+## Monitor Live Agents
 
 - High-density Grid and Dashboard views for live local agent sessions
 - Left control rail for spawning, commands, workflows, Explorer, and settings
 - Right roster with status lights, thought snippets, and agent working sets
 - Inbox tab for unread agent completions, important updates, and workflow outcomes
-- Roadmap direction: Sites, Cohorts, movable surfaces, richer Garden spatial organization, and Graph communication topology
+- Use [Key Concepts](./guide/key-concepts.md) to understand the app layout and how its parts connect.
 
 Related docs:
 
@@ -36,8 +36,8 @@ Related docs:
 
 ## Agent Classes and Reusable Library
 
-- Class blueprints with instruction files and assigned skills
-- Prompt, skill, class, and workflow-blueprint management from a filesystem-backed library
+- Reusable agent setups with instruction files and assigned skills
+- Prompt, skill, class, and workflow management from a filesystem-backed library
 - Starred prompts for one-click execution from the Command panel
 
 Related docs:

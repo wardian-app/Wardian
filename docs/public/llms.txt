@@ -1,15 +1,16 @@
 # Wardian Docs
 
 Wardian is where local agent work becomes visible, durable, and malleable. Run
-the CLI agents you already use in real workspaces, inspect their sessions and
-evidence, and turn successful work into reusable prompts, skills, classes,
-workflows, and project context.
+the CLI agents you already use in real project folders, inspect their sessions
+and results, then save useful work as reusable prompts, skills, agent setups,
+workflows, or project context.
 
 This file is an agent-readable index for the public Wardian documentation. Use the linked pages as the canonical docs source.
 
 ## Getting Started
 
 - https://docs.wardian.org/guide/getting-started - Install Wardian, complete first-run setup, verify a provider, spawn the first agent, and inspect the first Inbox result.
+- https://docs.wardian.org/guide/key-concepts - Learn the app layout, agent setup, reusable work, workflow runs, and tailorability slope.
 - https://docs.wardian.org/guide/ui-overview - Learn the title bar, navigation rail, agent roster, workspace areas, and common app surfaces.
 - https://docs.wardian.org/guide/workbench - Open surfaces as tabs, split and merge panes, move and reopen tabs, zoom, restore, reset, and understand terminal presentation ownership.
 - https://docs.wardian.org/guide/first-run-troubleshooting - Recover from launch, provider detection, terminal startup, Inbox, and CLI setup problems.
@@ -29,7 +30,7 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 
 - https://docs.wardian.org/guide/library - Manage reusable prompts, skills, and library item assignment.
 - https://docs.wardian.org/guide/command-panel - Send one-off broadcasts or starred prompts to selected agents.
-- https://docs.wardian.org/guide/class-management - Define agent class blueprints used by spawn and clone flows.
+- https://docs.wardian.org/guide/class-management - Define reusable agent setups used by spawn and clone flows.
 
 ## Workflow Automation
 

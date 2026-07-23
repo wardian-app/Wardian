@@ -9,10 +9,12 @@ Use it when you want to save a repeatable prompt, manage a deployable skill,
 edit a class's `AGENTS.md`, or find a workflow blueprint before launching a
 run.
 
-The Library is also the first step on Wardian's gentle slope from use to
-creation. A one-off instruction can become a saved prompt; a repeated
-procedure can become a skill; a skill can be deployed globally, by class, or
-to one agent without turning the whole app into a custom plugin project.
+The Library lets you start small and reuse what proves useful. A one-off
+instruction can become a saved prompt; a repeated procedure can become a
+skill; and a skill can be shared with every agent, a class, or one agent.
+
+For a visual map of how prompts, skills, classes, and workflows relate, see
+[Key Concepts](./key-concepts.md#reusable-work).
 
 ## When to Use It
 
@@ -78,7 +80,7 @@ agents' terminals.
 
 ### 3. Classes
 
-Classes — Wardian's reusable agent blueprints — are now edited from inside
+Classes — Wardian's reusable starting setups for agents — are now edited from inside
 the Library instead of a separate sidebar panel.
 
 - **Organization**: classes are flat (no folder nesting) and appear under

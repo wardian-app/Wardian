@@ -2,10 +2,60 @@ import { defineConfig } from "vitepress";
 
 const base = process.env.DOCS_BASE ?? "/";
 
+const guideSidebar = [
+  {
+    text: "Start and Orient",
+    items: [
+      { text: "First-Time Install and First Run", link: "/guide/getting-started" },
+      { text: "Key Concepts", link: "/guide/key-concepts" },
+      { text: "Provider Readiness", link: "/guide/provider-readiness" },
+      { text: "First-Run Troubleshooting", link: "/guide/first-run-troubleshooting" },
+      { text: "UI Overview", link: "/guide/ui-overview" },
+      { text: "Workbench", link: "/guide/workbench" },
+    ],
+  },
+  {
+    text: "Run and Monitor Agents",
+    items: [
+      { text: "Agents Overview", link: "/guide/agents-overview" },
+      { text: "Grid Compatibility", link: "/guide/grid" },
+      { text: "Dashboard", link: "/guide/dashboard" },
+      { text: "Graph", link: "/guide/graph" },
+      { text: "Watchlists", link: "/guide/watchlists" },
+      { text: "Inbox", link: "/guide/inbox" },
+      { text: "Class Management", link: "/guide/class-management" },
+    ],
+  },
+  {
+    text: "Reuse and Direct Work",
+    items: [
+      { text: "Library", link: "/guide/library" },
+      { text: "Command Panel", link: "/guide/command-panel" },
+      { text: "Wardian CLI", link: "/guide/cli" },
+    ],
+  },
+  {
+    text: "Inspect and Ship Changes",
+    items: [
+      { text: "Explorer", link: "/guide/explorer" },
+      { text: "Source Control", link: "/guide/source-control" },
+    ],
+  },
+  {
+    text: "Configure and Automate",
+    items: [
+      { text: "Settings", link: "/guide/settings" },
+      { text: "Remote Control", link: "/guide/remote-control" },
+      { text: "Workflow View", link: "/guide/workflows" },
+      { text: "Workflow Reference", link: "/workflows/" },
+    ],
+  },
+];
+
 export default defineConfig({
   title: "Wardian",
   description:
-    "Public documentation for Wardian, where local agent work becomes visible, durable, and malleable.",
+    "Public documentation for running, monitoring, and organizing local coding agents.",
   base,
   vite: {
     build: {
@@ -41,52 +91,7 @@ export default defineConfig({
       },
     ],
     sidebar: {
-      "/guide/": [
-        {
-          text: "Start and Orient",
-          items: [
-            { text: "First-Time Install and First Run", link: "/guide/getting-started" },
-            { text: "Provider Readiness", link: "/guide/provider-readiness" },
-            { text: "First-Run Troubleshooting", link: "/guide/first-run-troubleshooting" },
-            { text: "UI Overview", link: "/guide/ui-overview" },
-            { text: "Workbench", link: "/guide/workbench" },
-          ],
-        },
-        {
-          text: "Run and Monitor Agents",
-          items: [
-            { text: "Agents Overview", link: "/guide/agents-overview" },
-            { text: "Grid Compatibility", link: "/guide/grid" },
-            { text: "Dashboard", link: "/guide/dashboard" },
-            { text: "Watchlists", link: "/guide/watchlists" },
-            { text: "Queue", link: "/guide/queue" },
-            { text: "Class Management", link: "/guide/class-management" },
-          ],
-        },
-        {
-          text: "Reuse and Direct Work",
-          items: [
-            { text: "Library", link: "/guide/library" },
-            { text: "Command Panel", link: "/guide/command-panel" },
-            { text: "Wardian CLI", link: "/guide/cli" },
-          ],
-        },
-        {
-          text: "Inspect and Ship Changes",
-          items: [
-            { text: "Explorer", link: "/guide/explorer" },
-            { text: "Source Control", link: "/guide/source-control" },
-          ],
-        },
-        {
-          text: "Configure and Automate",
-          items: [
-            { text: "Settings", link: "/guide/settings" },
-            { text: "Workflow View", link: "/guide/workflows" },
-            { text: "Workflow Reference", link: "/workflows/" },
-          ],
-        },
-      ],
+      "/guide/": guideSidebar,
       "/workflows/": [
         {
           text: "Workflow Reference",
@@ -128,9 +133,17 @@ export default defineConfig({
           items: [
             { text: "Documentation Index", link: "/" },
             { text: "First-Time Install and First Run", link: "/guide/getting-started" },
-            { text: "Key Features", link: "/features" },
             { text: "Providers", link: "/providers" },
             { text: "OS Support", link: "/os-support" },
+          ],
+        },
+        ...guideSidebar,
+        {
+          text: "More Documentation",
+          items: [
+            { text: "Key Features", link: "/features" },
+            { text: "Workflow Reference", link: "/workflows/" },
+            { text: "Developer Documentation", link: "/developer/" },
           ],
         },
       ],

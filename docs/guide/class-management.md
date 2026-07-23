@@ -1,10 +1,14 @@
 # Class Management
 
-In Wardian, a **Class** is more than just a label—it is a functional blueprint that defines the core identity, intelligence, and equipment of your agents.
+In Wardian, a **Class** is a reusable starting setup for agents. It combines
+shared instructions and skills for a role you expect to use again.
 
-Classes are Wardian's reusable agent blueprints. They turn repeated setup
-choices into editable, inspectable context so you can evolve an agent role over
-time instead of copying the same instructions into every new session.
+Classes turn repeated setup choices into editable, inspectable files so you can
+improve an agent role over time instead of copying the same instructions into
+every new session.
+
+For a visual map of how classes, skills, agents, sessions, and workspaces fit
+together, see [Key Concepts](./key-concepts.md#agents-and-their-setup).
 
 > **Class management has moved.** Creating, editing, and deleting classes no
 > longer happens in a left-rail **Classes** tab — that panel has been
