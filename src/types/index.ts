@@ -834,6 +834,7 @@ export type TerminalSnapshot = {
     terminal_state_base64: string;
     visible_grid: string;
     scrollback: string[];
+    formatted_scrollback?: string[];
 };
 
 export type TerminalBrokerEvent = {

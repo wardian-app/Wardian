@@ -1699,6 +1699,7 @@ mod tests {
                 terminal_state_base64: "AA==".to_string(),
                 visible_grid: String::new(),
                 scrollback: Vec::new(),
+                formatted_scrollback: Vec::new(),
             },
         );
         assert_eq!(recovery["owner_attachment_id"], "desktop-again");

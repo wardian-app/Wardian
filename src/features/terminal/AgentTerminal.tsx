@@ -1517,15 +1517,18 @@ async function resetTerminalOutputBuffers(
 }
 
 function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: boolean) {
+  const scrollback = snapshot.formatted_scrollback?.length === snapshot.scrollback.length
+    ? snapshot.formatted_scrollback
+    : snapshot.scrollback;
   if (useFormattedState && snapshot.terminal_state_base64) {
     try {
       const binary = atob(snapshot.terminal_state_base64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       // vt100's formatted state restores the visible grid and cursor, but not
-      // the parser's scrollback. Prepend the broker's oldest-first plain-text
-      // projection so every snapshot boundary (registration, resize, resync,
-      // or replay-gap recovery) retains the history xterm has already shown.
-      return [...snapshot.scrollback, new TextDecoder().decode(bytes)]
+      // the parser's scrollback. Prepend the broker's oldest-first row-local
+      // projection (formatted when available) so every snapshot boundary
+      // retains history without replaying another geometry-bound full frame.
+      return [...scrollback, new TextDecoder().decode(bytes)]
         .filter(Boolean)
         .join("\r\n");
     } catch {
@@ -1533,7 +1536,7 @@ function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: b
       // bounded plain-text projection is the recovery fallback.
     }
   }
-  return [...snapshot.scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
+  return [...scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
 }
 
 function applyCanonicalGeometry(entry: TerminalSessionEntry, cols: number, rows: number) {

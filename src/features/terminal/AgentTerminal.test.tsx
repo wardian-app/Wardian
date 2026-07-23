@@ -2293,6 +2293,52 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("restores formatted broker scrollback when available", async () => {
+    const formattedVisibleGrid = "\u001b[Hvisible broker grid";
+    const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
+    const snapshot = {
+      ...modernSnapshot(),
+      terminal_state_base64: encodedVisibleGrid,
+      scrollback: ["unstyled retained row"],
+      formatted_scrollback: ["\u001b[31mstyled retained row\u001b[m"],
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-formatted-scrollback"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-formatted-scrollback").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-formatted-scrollback"
+        provider="claude"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenCalledWith(
+        `\u001b[31mstyled retained row\u001b[m\r\n${formattedVisibleGrid}`,
+        expect.any(Function),
+      );
+    });
+  });
+
   it("uses the plain visible grid when a broker snapshot geometry differs from the card", async () => {
     const formattedVisibleGrid = "\u001b[Hformatted canonical grid";
     const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
@@ -2302,6 +2348,7 @@ describe("AgentTerminal scrollback", () => {
       terminal_state_base64: encodedVisibleGrid,
       visible_grid: "plain visible grid",
       scrollback: ["oldest retained row", "newer retained row"],
+      formatted_scrollback: ["\u001b[31moldest retained row\u001b[m", "newer retained row"],
     };
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
@@ -2334,7 +2381,7 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       const renderer = getLatestTerminalInstance();
       expect(renderer.write).toHaveBeenCalledWith(
-        "oldest retained row\r\nnewer retained row\r\nplain visible grid",
+        "\u001b[31moldest retained row\u001b[m\r\nnewer retained row\r\nplain visible grid",
         expect.any(Function),
       );
       expect(renderer.write).not.toHaveBeenCalledWith(

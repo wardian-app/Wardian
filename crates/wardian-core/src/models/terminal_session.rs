@@ -297,6 +297,8 @@ pub struct TerminalSnapshot {
     pub terminal_state_base64: String,
     pub visible_grid: String,
     pub scrollback: Vec<String>,
+    #[serde(default)]
+    pub formatted_scrollback: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
