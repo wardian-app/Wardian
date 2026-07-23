@@ -9,6 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
+  createProviderTerminalOutputFilter,
   normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
@@ -120,6 +121,7 @@ type TerminalSessionEntry = {
   rawOutputLog: string[];
   rawOutputLogChars: number;
   opencodeFocusReported: boolean;
+  terminalOutputFilter: ReturnType<typeof createProviderTerminalOutputFilter>;
   outputReadyUnlisten: (() => void) | null;
   terminalClearedUnlisten: (() => void) | null;
   provider?: string;
@@ -198,6 +200,7 @@ function setSessionProvider(entry: TerminalSessionEntry, provider?: string) {
     return;
   }
   entry.provider = provider;
+  entry.terminalOutputFilter = createProviderTerminalOutputFilter(provider);
   applyProviderTerminalOptions(entry.parser, provider);
   if (entry.renderer) {
     applyProviderTerminalOptions(entry.renderer.term, provider);
@@ -967,7 +970,8 @@ function planTerminalOutputChunk(
       ? `${foreground.slice(0, 2)}/${foreground.slice(2, 4)}/${foreground.slice(4, 6)}`
       : "eb/eb/eb";
 
-  const plan = planTerminalCapabilityResponses(entry.provider, data, {
+  const filteredData = entry.terminalOutputFilter.filter(data);
+  const plan = planTerminalCapabilityResponses(entry.provider, filteredData, {
     cursorRow: row,
     cursorCol: col,
     pixelWidth: width,
@@ -2056,6 +2060,7 @@ async function getOrCreateTerminalSession(
     rawOutputLog: [],
     rawOutputLogChars: 0,
     opencodeFocusReported: false,
+    terminalOutputFilter: createProviderTerminalOutputFilter(resolvedProvider),
     outputReadyUnlisten: null,
     terminalClearedUnlisten: null,
     provider: resolvedProvider,
@@ -2086,6 +2091,7 @@ function resetLegacyTerminalSession(entry: TerminalSessionEntry) {
   entry.recentNormalizedWritePreviews = [];
   entry.rawOutputLog = [];
   entry.rawOutputLogChars = 0;
+  entry.terminalOutputFilter.reset();
   entry.drainQueued = false;
   entry.initialPtyBackfillComplete = false;
   entry.initialPtyBackfillInFlight = false;

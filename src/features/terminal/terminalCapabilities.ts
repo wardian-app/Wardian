@@ -8,6 +8,14 @@ const OSC_FOREGROUND_QUERY_BEL = "\u001b]10;?\u0007";
 const OSC_BACKGROUND_QUERY_BEL = "\u001b]11;?\u0007";
 const OSC_FOREGROUND_QUERY_ST = "\u001b]10;?\u001b\\";
 const OSC_BACKGROUND_QUERY_ST = "\u001b]11;?\u001b\\";
+const CODEX_TERMINAL_COLOR_QUERIES = [
+  OSC_PALETTE_QUERY,
+  OSC_FOREGROUND_QUERY_BEL,
+  OSC_BACKGROUND_QUERY_BEL,
+  OSC_FOREGROUND_QUERY_ST,
+  OSC_BACKGROUND_QUERY_ST,
+  LIGHT_DARK_QUERY,
+];
 const TERMINAL_DEVICE_ATTRIBUTES_REPLY = /\u001b\[\?\d+(?:;\d+)*c/g;
 // Terminal-status REPLIES that xterm.js auto-generates when it sees a color /
 // light-dark or Device Attributes probe: the OSC 10/11/4 "rgb:..." reports, the
@@ -91,19 +99,44 @@ function stripCodexTerminalStatusEchoes(data: string) {
 // xterm never sees it suppresses the auto-reply. These are non-visible control
 // sequences, so the rendered output is unchanged.
 function stripTerminalColorQueries(data: string) {
-  return data
-    .split(OSC_FOREGROUND_QUERY_BEL)
-    .join("")
-    .split(OSC_FOREGROUND_QUERY_ST)
-    .join("")
-    .split(OSC_BACKGROUND_QUERY_BEL)
-    .join("")
-    .split(OSC_BACKGROUND_QUERY_ST)
-    .join("")
-    .split(OSC_PALETTE_QUERY)
-    .join("")
-    .split(LIGHT_DARK_QUERY)
-    .join("");
+  return CODEX_TERMINAL_COLOR_QUERIES.reduce(
+    (normalized, query) => normalized.split(query).join(""),
+    data,
+  );
+}
+
+function trailingCodexTerminalColorQueryPrefix(data: string) {
+  const maximumPrefixLength = Math.max(...CODEX_TERMINAL_COLOR_QUERIES.map((query) => query.length)) - 1;
+  for (let length = Math.min(data.length, maximumPrefixLength); length > 0; length -= 1) {
+    const suffix = data.slice(-length);
+    if (CODEX_TERMINAL_COLOR_QUERIES.some((query) => query.startsWith(suffix))) {
+      return suffix;
+    }
+  }
+  return "";
+}
+
+// Codex 0.145+ can split OSC 10/11 terminal-color probes between PTY reads.
+// xterm answers a completed probe immediately, so batch-level cleanup is too
+// late: the reply has already travelled back to Codex's line editor. Hold a
+// trailing partial probe until its next chunk arrives, then discard the whole
+// probe before it ever reaches xterm.
+export function createProviderTerminalOutputFilter(provider: string | undefined) {
+  let pending = "";
+
+  return {
+    filter(data: string) {
+      if (provider !== "codex" || !data) {
+        return data;
+      }
+      const normalized = stripTerminalColorQueries(pending + data);
+      pending = trailingCodexTerminalColorQueryPrefix(normalized);
+      return pending ? normalized.slice(0, -pending.length) : normalized;
+    },
+    reset() {
+      pending = "";
+    },
+  };
 }
 
 // Drop xterm.js's auto-generated terminal-status replies from a provider's INPUT
