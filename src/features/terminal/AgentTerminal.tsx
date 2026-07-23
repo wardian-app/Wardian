@@ -1516,8 +1516,8 @@ async function resetTerminalOutputBuffers(
   }
 }
 
-function decodeTerminalSnapshot(snapshot: TerminalSnapshot) {
-  if (snapshot.terminal_state_base64) {
+function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: boolean) {
+  if (useFormattedState && snapshot.terminal_state_base64) {
     try {
       const binary = atob(snapshot.terminal_state_base64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
@@ -1558,8 +1558,17 @@ async function applyBrokerSnapshot(
   }
   entry.generation = snapshot.runtime_generation;
   entry.brokerDecoder = new TextDecoder();
+  const renderer = entry.renderer;
+  // vt100's formatted state is an absolute, geometry-dependent paint. A card
+  // may be restored into a different local viewport after a watchlist or
+  // surface transition; replaying that frame there wraps it into scrollback.
+  // In that case the broker's plain projection is the stable reconstruction.
+  const rendererMatchesSnapshot = !renderer || (
+    renderer.term.cols === snapshot.geometry.cols &&
+    renderer.term.rows === snapshot.geometry.rows
+  );
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
-  const state = decodeTerminalSnapshot(snapshot);
+  const state = decodeTerminalSnapshot(snapshot, rendererMatchesSnapshot);
   if (state) {
     // Restored snapshots must pass through the same provider capability and
     // theme normalization as live output. Writing raw broker state here

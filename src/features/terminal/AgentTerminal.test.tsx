@@ -2293,6 +2293,57 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("uses the plain visible grid when a broker snapshot geometry differs from the card", async () => {
+    const formattedVisibleGrid = "\u001b[Hformatted canonical grid";
+    const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
+    const snapshot = {
+      ...modernSnapshot(),
+      geometry: { cols: 120, rows: 40 },
+      terminal_state_base64: encodedVisibleGrid,
+      visible_grid: "plain visible grid",
+      scrollback: ["oldest retained row", "newer retained row"],
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-geometry-fallback"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-geometry-fallback").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-geometry-fallback"
+        provider="claude"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenCalledWith(
+        "oldest retained row\r\nnewer retained row\r\nplain visible grid",
+        expect.any(Function),
+      );
+      expect(renderer.write).not.toHaveBeenCalledWith(
+        expect.stringContaining("formatted canonical grid"),
+        expect.any(Function),
+      );
+    });
+  });
+
   it("does not consume OpenCode's live focus reply while normalizing a restored snapshot", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const focusMode = "\u001b[?1004h";
