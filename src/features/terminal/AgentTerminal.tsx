@@ -1584,6 +1584,26 @@ function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: b
   return [...scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
 }
 
+function reserveRendererScrollbackForSnapshot(
+  renderer: TerminalRendererEntry | null,
+  snapshot: TerminalSnapshot,
+) {
+  if (!renderer || snapshot.scrollback.length === 0 || renderer.term.cols >= snapshot.geometry.cols) {
+    return;
+  }
+  // Broker scrollback is stored as visual rows at the canonical terminal
+  // width. Replaying those rows into a narrower card makes xterm reflow each
+  // one into multiple physical rows. Keep enough local capacity for that
+  // reflow; otherwise its default 1,000-line cap immediately evicts the
+  // oldest history during the restore itself.
+  const reflowRowsPerSnapshotRow = Math.ceil(snapshot.geometry.cols / renderer.term.cols);
+  const requiredScrollback = snapshot.scrollback.length * reflowRowsPerSnapshotRow;
+  renderer.term.options.scrollback = Math.max(
+    Number(renderer.term.options.scrollback ?? TERMINAL_SCROLLBACK_LINES),
+    requiredScrollback,
+  );
+}
+
 function applyCanonicalGeometry(entry: TerminalSessionEntry, cols: number, rows: number) {
   if (cols < 1 || rows < 1) {
     return;
@@ -1628,6 +1648,7 @@ async function applyBrokerSnapshot(
         rendererBefore: renderer ? terminalBufferMetrics(renderer.term) : null,
       }
     : null;
+  reserveRendererScrollbackForSnapshot(renderer, snapshot);
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
   const state = decodeTerminalSnapshot(snapshot, rendererMatchesSnapshot);
   try {

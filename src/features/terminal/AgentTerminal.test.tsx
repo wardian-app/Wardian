@@ -2404,6 +2404,45 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("reserves enough local history for narrow-card snapshot reflow", async () => {
+    const snapshot = {
+      ...modernSnapshot(),
+      geometry: { cols: 120, rows: 40 },
+      scrollback: Array.from({ length: 1_000 }, (_, index) => `retained row ${index}`),
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-reflow-capacity"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-reflow-capacity").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-reflow-capacity"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().options.scrollback).toBe(2_000);
+    });
+  });
+
   it("does not consume OpenCode's live focus reply while normalizing a restored snapshot", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const focusMode = "\u001b[?1004h";
