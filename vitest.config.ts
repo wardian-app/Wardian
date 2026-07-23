@@ -24,6 +24,9 @@ export default defineConfig({
     setupFiles: [path.join(workspaceRoot, "src/test/setup.ts")],
     include: ["src/**/*.test.{ts,tsx}"],
     css: false,
+    // Coverage instrumentation makes integration-style UI tests exceed
+    // Vitest's five-second default on slower CI runners.
+    testTimeout: 15_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],
