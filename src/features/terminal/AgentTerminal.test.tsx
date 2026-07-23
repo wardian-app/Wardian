@@ -3586,8 +3586,7 @@ describe("AgentTerminal scrollback", () => {
     }
   });
 
-  it("renders a small initial PTY tail before draining the full retained scrollback", async () => {
-    const fullBackfill = deferred<string | null>();
+  it("drains legacy Codex scrollback without a preview/reset replay", async () => {
     const readCalls: Array<Parameters<typeof invoke>[1]> = [];
     const appendTerminalOutput = vi.spyOn(useQueueStore.getState(), "appendAgentTerminalOutput");
 
@@ -3596,10 +3595,7 @@ describe("AgentTerminal scrollback", () => {
         case "read_agent_pty":
           readCalls.push(args);
           if (readCalls.length === 1) {
-            return "recent codex frame\n";
-          }
-          if (readCalls.length === 2) {
-            return fullBackfill.promise;
+            return "older retained scrollback\nrecent codex frame\n";
           }
           return null;
         case "resize_agent_terminal":
@@ -3613,32 +3609,18 @@ describe("AgentTerminal scrollback", () => {
 
     await waitFor(() => {
       const instance = getLatestTerminalInstance();
-      expect(instance.write).toHaveBeenCalledWith("recent codex frame\n", expect.any(Function));
-    });
-
-    const instance = getLatestTerminalInstance();
-    expect(readCalls[0]).toMatchObject({
-      sessionId: "codex-lazy-history",
-      options: {
-        max_bytes: 131_072,
-        peek: true,
-      },
-    });
-    expect(instance.write).not.toHaveBeenCalledWith(
-      "older retained scrollback\nrecent codex frame\n",
-      expect.any(Function),
-    );
-    expect(appendTerminalOutput).not.toHaveBeenCalled();
-
-    fullBackfill.resolve("older retained scrollback\nrecent codex frame\n");
-
-    await waitFor(() => {
-      expect(instance.reset).toHaveBeenCalled();
       expect(instance.write).toHaveBeenCalledWith(
         "older retained scrollback\nrecent codex frame\n",
         expect.any(Function),
       );
     });
+
+    const instance = getLatestTerminalInstance();
+    expect(readCalls).toHaveLength(2);
+    expect(readCalls.every((args) =>
+      !((args as { options?: { peek?: boolean } } | undefined)?.options?.peek),
+    )).toBe(true);
+    expect(instance.reset).not.toHaveBeenCalled();
     expect(appendTerminalOutput).toHaveBeenCalledTimes(1);
     expect(appendTerminalOutput).toHaveBeenCalledWith(
       "codex-lazy-history",
@@ -4760,18 +4742,12 @@ describe("AgentTerminal scrollback", () => {
 
   it("renders Codex's dark composer background as a light-mode fill", async () => {
     const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
+    let drained = false;
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
         case "read_agent_pty":
-          if (
-            typeof args === "object" &&
-            args !== null &&
-            "options" in args &&
-            typeof args.options === "object" &&
-            args.options !== null &&
-            "peek" in args.options &&
-            args.options.peek === true
-          ) {
+          if (!(args as { options?: { peek?: boolean } } | undefined)?.options?.peek && !drained) {
+            drained = true;
             return codexComposerFrame;
           }
           return null;
@@ -4794,9 +4770,14 @@ describe("AgentTerminal scrollback", () => {
   it("recolors Codex via composer replay on a real theme swap without typing color replies into its stdin", async () => {
     const codexComposerFrame = "\u001b[48;2;41;41;41m\n\u001b[K";
     let peekCount = 0;
+    let drained = false;
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {
         case "read_agent_pty":
+          if (!(args as { options?: { peek?: boolean } } | undefined)?.options?.peek && !drained) {
+            drained = true;
+            return codexComposerFrame;
+          }
           if (
             typeof args === "object" &&
             args !== null &&

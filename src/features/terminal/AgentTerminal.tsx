@@ -51,7 +51,7 @@ import {
 import { proposeTerminalRows, renderedTerminalRowHeight } from "./terminalSizing";
 
 const TERMINAL_SCROLLBACK_LINES = 1_000;
-const TERMINAL_INITIAL_PTY_TAIL_BYTES = 128 * 1024;
+const TERMINAL_PTY_PREVIEW_MAX_BYTES = 128 * 1024;
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 8;
 const RENDERER_RESTORE_RETRY_MS = 1_000;
@@ -135,8 +135,6 @@ type TerminalSessionEntry = {
   terminalLinkContextRef: TerminalLinkContextRef;
   drainInFlight: boolean;
   drainQueued: boolean;
-  initialPtyBackfillComplete: boolean;
-  initialPtyBackfillInFlight: boolean;
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
@@ -1846,7 +1844,7 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
     }
 
     const preview = await readAgentPty(entry.sessionId, {
-      max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
+      max_bytes: TERMINAL_PTY_PREVIEW_MAX_BYTES,
       peek: true,
     });
     if (
@@ -1878,48 +1876,6 @@ async function replayCodexTerminalPreviewWithCurrentTheme(
   }
 }
 
-async function drainInitialPtyBackfill(sessionId: string) {
-  const entry = terminalSessionMap.get(sessionId);
-  if (!entry || entry.disposed || !entry.initialPtyBackfillInFlight) {
-    return;
-  }
-
-  const drainGeneration = entry.generation;
-  const rawChunks: string[] = [];
-
-  try {
-    while (!entry.disposed) {
-      const data = await readAgentPty(entry.sessionId);
-      if (!data) {
-        break;
-      }
-      rawChunks.push(data);
-    }
-
-    if (entry.generation === drainGeneration && rawChunks.length > 0) {
-      await writeTerminalOutputBatch(sessionId, entry, rawChunks, { resetBeforeWrite: true });
-    }
-  } catch (error) {
-    entry.initialPtyBackfillInFlight = false;
-    const message = String(error);
-    if (message.includes("not found")) {
-      disposeTerminalSession(sessionId);
-      return;
-    }
-    console.warn("read_agent_pty error:", error);
-  } finally {
-    if (entry.generation === drainGeneration) {
-      entry.initialPtyBackfillComplete = true;
-      entry.initialPtyBackfillInFlight = false;
-    }
-    if (!entry.disposed && entry.drainQueued) {
-      queueMicrotask(() => {
-        void drainPty(sessionId);
-      });
-    }
-  }
-}
-
 async function drainPty(sessionId: string) {
   const entry = terminalSessionMap.get(sessionId);
   if (!entry || entry.disposed) {
@@ -1927,11 +1883,6 @@ async function drainPty(sessionId: string) {
   }
 
   if (entry.drainInFlight) {
-    entry.drainQueued = true;
-    return;
-  }
-
-  if (entry.initialPtyBackfillInFlight) {
     entry.drainQueued = true;
     return;
   }
@@ -1947,34 +1898,6 @@ async function drainPty(sessionId: string) {
         { force: true },
       );
     }
-
-    if (!entry.initialPtyBackfillComplete && entry.provider === "codex") {
-      const initialGeneration = entry.generation;
-      entry.drainQueued = false;
-      entry.initialPtyBackfillInFlight = true;
-      const preview = await readAgentPty(entry.sessionId, {
-        max_bytes: TERMINAL_INITIAL_PTY_TAIL_BYTES,
-        peek: true,
-      });
-
-      if (entry.generation !== initialGeneration || entry.disposed) {
-        entry.initialPtyBackfillInFlight = false;
-        return;
-      }
-
-      if (preview) {
-        await writeTerminalOutputBatch(sessionId, entry, [preview], {
-          recordOutput: false,
-        });
-      }
-
-      queueMicrotask(() => {
-        void drainInitialPtyBackfill(sessionId);
-      });
-      return;
-    }
-
-    entry.initialPtyBackfillComplete = true;
 
     do {
       entry.drainQueued = false;
@@ -2074,8 +1997,6 @@ async function getOrCreateTerminalSession(
     terminalLinkContextRef: { current: {} },
     drainInFlight: false,
     drainQueued: false,
-    initialPtyBackfillComplete: false,
-    initialPtyBackfillInFlight: false,
     generation: 0,
     disposed: false,
     pendingForceResize: false,
@@ -2093,8 +2014,6 @@ function resetLegacyTerminalSession(entry: TerminalSessionEntry) {
   entry.rawOutputLogChars = 0;
   entry.terminalOutputFilter.reset();
   entry.drainQueued = false;
-  entry.initialPtyBackfillComplete = false;
-  entry.initialPtyBackfillInFlight = false;
   entry.generation += 1;
   entry.latestTitle = null;
   entry.lastReportedSize = null;
