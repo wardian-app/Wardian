@@ -170,13 +170,9 @@ impl DeletedAgentReferenceCleanup {
             remaining_agent_ids,
         )?;
 
-        let mut topology = wardian_core::topology::load_topology(home);
-        let before_topology = topology.clone();
-        topology.retain_agents(remaining_agent_ids);
-        let topology_changed = topology != before_topology;
-        if topology_changed {
-            wardian_core::topology::save_topology(home, &topology).map_err(|e| e.to_string())?;
-        }
+        let (_, topology_changed) =
+            wardian_core::topology::load_reconciled_topology(home, remaining_agent_ids)
+                .map_err(|e| e.to_string())?;
 
         Ok(Self {
             watchlists_changed,
