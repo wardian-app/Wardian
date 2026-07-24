@@ -2690,13 +2690,13 @@ describe("Agent Off State Operations", () => {
       fireEvent.contextMenu(watchlistRow!);
     });
     
-    // The Start button should now be visible in the context menu
+    // The Start Session button should now be visible in the context menu
     await waitFor(() => {
-      expect(screen.getAllByText("Start").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Start Session").length).toBeGreaterThan(0);
     });
 
-    // Click Start
-    const startButtons = screen.getAllByText("Start");
+    // Click Start Session
+    const startButtons = screen.getAllByText("Start Session");
     await act(async () => {
       startButtons[0].click();
     });
