@@ -26,15 +26,19 @@ describe("OnboardingHint", () => {
     localStorage.clear();
     useOnboardingStore.setState({
       dismissedHintIds: [],
+      contextualTipsEnabled: true,
       hintsLoaded: false,
     });
 
     mockInvoke.mockImplementation(async (command, args) => {
       if (command === "load_onboarding_hints") {
-        return { dismissed_hint_ids: [] };
+        return { dismissed_hint_ids: [], contextual_tips_enabled: true };
       }
       if (command === "dismiss_onboarding_hint") {
-        return { dismissed_hint_ids: [(args as { hintId: string }).hintId] };
+        return {
+          dismissed_hint_ids: [(args as { hintId: string }).hintId],
+          contextual_tips_enabled: true,
+        };
       }
       return null;
     });
@@ -43,7 +47,7 @@ describe("OnboardingHint", () => {
   it("loads dismissed hints from Wardian state before rendering", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "load_onboarding_hints") {
-        return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
+        return { dismissed_hint_ids: ["spawn-agent-first-run:v1"], contextual_tips_enabled: true };
       }
       return null;
     });
@@ -90,8 +94,25 @@ describe("OnboardingHint", () => {
   it("does not render an already-dismissed hint from hydrated state", () => {
     useOnboardingStore.setState({
       dismissedHintIds: ["spawn-agent-first-run:v1"],
+      contextualTipsEnabled: true,
       hintsLoaded: true,
     });
+    render(
+      <OnboardingHint id="spawn-agent-first-run:v1" title="Start here">
+        Verify a provider before spawning.
+      </OnboardingHint>,
+    );
+
+    expect(screen.queryByText("Start here")).not.toBeInTheDocument();
+  });
+
+  it("hides every hint when contextual tips are disabled", () => {
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      contextualTipsEnabled: false,
+      hintsLoaded: true,
+    });
+
     render(
       <OnboardingHint id="spawn-agent-first-run:v1" title="Start here">
         Verify a provider before spawning.

@@ -16,6 +16,8 @@ import { WorkflowObserveMode } from '../features/workflows/run/WorkflowObserveMo
 import { useRunStore } from '../features/workflows/run/useRunStore';
 import type { RunSummary } from '../features/workflows/run/runTypes';
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu';
+import { DocsLink } from '../components/DocsLink';
+import { OnboardingHint } from '../components/OnboardingHint';
 import { useBuilderStore } from '../store/useBuilderStore';
 import { useSchedulesStore } from '../store/useSchedulesStore';
 import { useWorkflowsView } from '../store/useWorkflowsView';
@@ -316,6 +318,18 @@ export function WorkflowsView({ theme }: WorkflowsViewProps) {
           ) : null}
         </div>
       </div>
+
+      {mode === 'edit' && (
+        <div className="shrink-0 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3 py-2">
+          <OnboardingHint
+            id="workflow-authoring:v1"
+            title="Build, validate, then run"
+            actions={<DocsLink path="/guide/workflows">Workflow guide</DocsLink>}
+          >
+            Add nodes, connect their flow, and resolve diagnostics before running. Saved blueprints can be replayed and monitored later.
+          </OnboardingHint>
+        </div>
+      )}
 
       <div className="workflows-body grid min-h-0 flex-1" data-drawer-open={drawerOpen ? 'true' : 'false'}>
         <main className="workflows-main h-full min-h-0 overflow-hidden p-3">

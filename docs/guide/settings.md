@@ -33,7 +33,7 @@ setting labels, short descriptions, and related keywords.
 
 Categories:
 
-- **General**: app version and update status.
+- **General**: app version, update status, and onboarding guidance.
 - **Appearance**: app theme and top bar telemetry visibility.
 - **Grid**: display mode for agent cards in Agents surfaces.
 - **Inbox**: Inbox event desktop and sound notification rules.
@@ -57,10 +57,24 @@ notes that **Auto** prefers Claude when available.
 The General category shows the currently running Wardian version, such as
 `Wardian vX.Y.Z`.
 
+## Onboarding Guidance
+
+The **General** category controls optional in-app guidance:
+
+- **Contextual tips** shows or hides brief first-use guidance inside relevant
+  surfaces. Dismissing one tip hides only that tip; hiding contextual tips hides
+  every tip without deleting its dismissal history.
+- **Reset dismissed tips** makes individually dismissed tips eligible to appear
+  again. It does not change the contextual-tips setting.
+- **Guided tour** opens a short, non-blocking overview of core Wardian work
+  loops. It remains available even when contextual tips are hidden.
+
 Wardian checks for updates silently when Settings loads. If no newer stable
 release is available, Settings shows that Wardian is up to date. If a newer
 release is available, use **Install update** to fetch and install it from
 inside the app.
+
+![Settings General section showing contextual tip controls and the guided tour](../assets/screenshots/settings/onboarding-guidance.png)
 
 Wardian does not install updates before you choose **Install update**. After
 installation completes, Wardian relaunches into the updated version.

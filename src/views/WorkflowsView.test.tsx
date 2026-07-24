@@ -166,6 +166,7 @@ import { useBuilderStore } from '../store/useBuilderStore';
 import { useRunStore } from '../features/workflows/run/useRunStore';
 import { useSchedulesStore } from '../store/useSchedulesStore';
 import { useWorkflowsView } from '../store/useWorkflowsView';
+import { useOnboardingStore } from '../store/useOnboardingStore';
 import { WorkflowsView } from './WorkflowsView';
 import type { Blueprint } from '../features/workflows/builder/blueprintTypes';
 
@@ -188,6 +189,11 @@ describe('WorkflowsView', () => {
     useRunStore.getState().reset();
     useSchedulesStore.setState({ schedules: [], loading: false, error: null });
     useWorkflowsView.getState().reset();
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      contextualTipsEnabled: true,
+      hintsLoaded: true,
+    });
   });
 
   afterEach(() => {
@@ -239,6 +245,17 @@ describe('WorkflowsView', () => {
     fireEvent.click(screen.getByRole('button', { name: /show runs/i }));
     expect(screen.getByRole('heading', { name: 'Runs' })).toBeVisible();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('workflow_list_runs'));
+  });
+
+  it('shows authoring guidance while editing a workflow', () => {
+    seedBuilderWithEmptyBlueprint();
+    render(<WorkflowsView theme="dark" />);
+
+    expect(screen.getByText('Build, validate, then run')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Workflow guide' })).toHaveAttribute(
+      'href',
+      'https://docs.wardian.org/guide/workflows',
+    );
   });
 
   it('opens the registry library from the edit toolbar', async () => {

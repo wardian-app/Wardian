@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsModal } from "./SettingsModal";
 import { useAppUpdate } from "./useAppUpdate";
 import { useSettingsStore } from "../../store/useSettingsStore";
+import { useOnboardingStore } from "../../store/useOnboardingStore";
 import { normalizeQueuePreferences } from "../queue/queueFilters";
 import { useQueueStore } from "../../store/useQueueStore";
 import type { AppUpdateState } from "./useAppUpdate";
@@ -78,6 +79,11 @@ describe("SettingsModal", () => {
       _workflowLastOutput: {},
       preferences: normalizeQueuePreferences({}),
     });
+    useOnboardingStore.setState({
+      dismissedHintIds: ["graph-topology-actions:v1"],
+      contextualTipsEnabled: true,
+      hintsLoaded: true,
+    });
 
     mockInvoke.mockImplementation(async (command, args) => {
       switch (command) {
@@ -91,6 +97,18 @@ describe("SettingsModal", () => {
           return "C:/Users/test/.wardian/settings";
         case "reveal_in_explorer":
           return null;
+        case "load_onboarding_hints":
+          return { dismissed_hint_ids: [], contextual_tips_enabled: true };
+        case "set_contextual_tips_enabled":
+          return {
+            dismissed_hint_ids: useOnboardingStore.getState().dismissedHintIds,
+            contextual_tips_enabled: (args as { enabled: boolean }).enabled,
+          };
+        case "reset_onboarding_hints":
+          return {
+            dismissed_hint_ids: [],
+            contextual_tips_enabled: useOnboardingStore.getState().contextualTipsEnabled,
+          };
         default:
           return null;
       }
@@ -483,6 +501,29 @@ describe("SettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
     expect(checkNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("controls contextual tips and opens the optional guided tour", async () => {
+    render(<SettingsModal isOpen onClose={vi.fn()} />);
+
+    const tips = screen.getByLabelText("Contextual tips");
+    expect(tips).toHaveValue("show");
+    fireEvent.change(tips, { target: { value: "hide" } });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("set_contextual_tips_enabled", { enabled: false });
+    });
+    expect(useOnboardingStore.getState().contextualTipsEnabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset dismissed tips" }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("reset_onboarding_hints");
+    });
+    expect(useOnboardingStore.getState().dismissedHintIds).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open guided tour" }));
+    expect(screen.getByTestId("onboarding-tour")).toBeInTheDocument();
+    expect(screen.getByText("Start with a reliable agent")).toBeInTheDocument();
   });
 
   it("shows restarting state after update installation", () => {

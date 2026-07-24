@@ -5,6 +5,8 @@ import { PanelRightOpen, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import type { AgentConfig, AgentTelemetry, CloneMode, TopologySnapshot, PairActivityEntry } from "../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { AgentContextMenu } from "../components/AgentContextMenu";
+import { DocsLink } from "../components/DocsLink";
+import { OnboardingHint } from "../components/OnboardingHint";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
 import { isUserFacingProviderName, providerDisplayName } from "../features/agents/providerOptions";
 import type { GraphSurfaceState } from "../features/workbench/surfaces/coreSurfaceMetadata";
@@ -340,6 +342,15 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
 
       <div className={`graph-body ${inspectorOpen ? "graph-body--inspector-open" : "graph-body--inspector-hidden"}`}>
         <div className="graph-canvas-shell">
+          <div className="graph-onboarding-hint">
+            <OnboardingHint
+              id="graph-topology-actions:v1"
+              title="Shape communication deliberately"
+              actions={<DocsLink path="/guide/graph">Graph guide</DocsLink>}
+            >
+              Shift-drag between agents to create a connection. Select an edge to inspect or remove it; relationship lenses only change what you see.
+            </OnboardingHint>
+          </div>
           {props.rendererActive === false ? (
             <div className="graph-empty-state">Graph renderer paused while hidden</div>
           ) : projection.nodes.length === 0 ? (

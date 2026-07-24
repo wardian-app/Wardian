@@ -795,6 +795,16 @@ pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, 
     crate::utils::dismiss_onboarding_hint(hint_id)
 }
 
+#[tauri::command]
+pub fn set_contextual_tips_enabled(enabled: bool) -> Result<OnboardingHintsState, String> {
+    crate::utils::set_contextual_tips_enabled(enabled)
+}
+
+#[tauri::command]
+pub fn reset_onboarding_hints() -> Result<OnboardingHintsState, String> {
+    crate::utils::reset_onboarding_hints()
+}
+
 #[cfg(test)]
 mod settings_path_tests {
     use super::{

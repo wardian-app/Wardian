@@ -12,6 +12,8 @@ import {
 } from "../../store/useSettingsStore";
 import { useAppUpdate } from "./useAppUpdate";
 import { RemoteAccessSettings } from "./RemoteAccessSettings";
+import { OnboardingTour } from "../../components/OnboardingTour";
+import { useOnboardingStore } from "../../store/useOnboardingStore";
 import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES } from "../queue/queueFilters";
 import { useQueueStore } from "../../store/useQueueStore";
 import type {
@@ -71,6 +73,20 @@ const rowDefinitions: SettingsRowDefinition[] = [
     label: "Version",
     detail: "Current Wardian build and update status.",
     keywords: ["updates", "version", "release"],
+  },
+  {
+    id: "contextual-tips",
+    category: "General",
+    label: "Contextual tips",
+    detail: "Show brief first-use guidance inside relevant Wardian surfaces.",
+    keywords: ["onboarding", "help", "tips", "guidance", "tutorial"],
+  },
+  {
+    id: "guided-tour",
+    category: "General",
+    label: "Guided tour",
+    detail: "Review Wardian's core work loops without leaving your current work.",
+    keywords: ["onboarding", "help", "tour", "learn", "tutorial"],
   },
   {
     id: "theme",
@@ -379,6 +395,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const [patchStatus, setPatchStatus] = useState<"idle" | "running" | "saved" | "error">("idle");
   const [advancedStatus, setAdvancedStatus] = useState<"idle" | "copied" | "error">("idle");
   const [terminalFontSizeDraft, setTerminalFontSizeDraft] = useState("14");
+  const [onboardingTourOpen, setOnboardingTourOpen] = useState(false);
   const appUpdate = useAppUpdate();
 
   const {
@@ -432,6 +449,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const setDesktopNotification = useQueueStore((state) => state.setDesktopNotification);
   const setSoundNotification = useQueueStore((state) => state.setSoundNotification);
   const setSoundVolume = useQueueStore((state) => state.setSoundVolume);
+  const contextualTipsEnabled = useOnboardingStore((state) => state.contextualTipsEnabled);
+  const onboardingHintsLoaded = useOnboardingStore((state) => state.hintsLoaded);
+  const loadOnboardingHints = useOnboardingStore((state) => state.loadOnboardingHints);
+  const setContextualTipsEnabled = useOnboardingStore((state) => state.setContextualTipsEnabled);
+  const resetOnboardingHints = useOnboardingStore((state) => state.resetOnboardingHints);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -483,6 +505,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       void loadAvailableShells();
     }
   }, [isOpen, loadAvailableShells, loadShellSettings, shell_settings_loaded, shells_loaded]);
+
+  useEffect(() => {
+    if (isOpen && !onboardingHintsLoaded) {
+      void loadOnboardingHints();
+    }
+  }, [isOpen, loadOnboardingHints, onboardingHintsLoaded]);
 
   useEffect(() => {
     setTerminalFontSizeDraft(String(terminalFontSize));
@@ -695,6 +723,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 </button>
               )}
             </div>
+          </SettingRow>
+        );
+      case "contextual-tips":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <select
+                aria-label="Contextual tips"
+                value={contextualTipsEnabled ? "show" : "hide"}
+                onChange={(event) => void setContextualTipsEnabled(event.target.value === "show")}
+                disabled={!onboardingHintsLoaded}
+                className={optionClass}
+              >
+                <option value="show">Show tips</option>
+                <option value="hide">Hide all tips</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => void resetOnboardingHints()}
+                disabled={!onboardingHintsLoaded}
+                className={buttonClass}
+              >
+                Reset dismissed tips
+              </button>
+            </div>
+          </SettingRow>
+        );
+      case "guided-tour":
+        return (
+          <SettingRow key={row.id} label={row.label} detail={row.detail}>
+            <button type="button" onClick={() => setOnboardingTourOpen(true)} className={buttonClass}>
+              Open guided tour
+            </button>
           </SettingRow>
         );
       case "theme":
@@ -1189,6 +1250,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                     <div className="overflow-hidden rounded-lg border border-wardian-border bg-wardian-card-bg-muted/45">
                       {renderRowsWithSubgroups(group.rows, renderRow)}
                     </div>
+                    {group.category === "General" && onboardingTourOpen && (
+                      <OnboardingTour onClose={() => setOnboardingTourOpen(false)} />
+                    )}
                     {group.category === "Terminal" && (
                       <div className="mt-4 flex items-center justify-end gap-3">
                         {terminalMessage && (
