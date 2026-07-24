@@ -8,6 +8,7 @@ import type {
 import type { WorkbenchCommand } from "./workbenchModel";
 import type { WorkbenchSurfaceRegistry } from "./surfaceRegistry";
 import type { WorkbenchStore } from "./useWorkbenchStore";
+import { findAdjacentActiveSurface } from "./adjacentSurfaceTargeting";
 import {
   coordinateSurfaceClose,
   type SurfaceCloseContext,
@@ -29,6 +30,11 @@ export type WorkbenchNavigationOptions = {
 
 export interface WorkbenchNavigationService {
   open(request: OpenSurfaceRequest): string;
+  /**
+   * Reuses a directly adjoining visible resource surface when one is present;
+   * otherwise applies the ordinary open policy.
+   */
+  open_contextually(source_surface_id: string, request: OpenSurfaceRequest): Promise<string>;
   /** Opens or refreshes a resource without changing the active surface or pane. */
   open_background(request: OpenSurfaceRequest): string;
   /** Opens one replaceable preview in the target group without disturbing other groups. */
@@ -268,30 +274,89 @@ export function createWorkbenchNavigationService(
     };
   };
 
+  const openWithCurrentPolicy = (request: OpenSurfaceRequest): string => {
+    const definition = registry.require(request.surface_type);
+    const state = store.getState();
+    const candidates = orderedSurfaces(state);
+    const existingId = registry.resolve_existing(
+      definition.open_policy === "singleton"
+        ? { ...request, duplicate: false }
+        : request,
+      candidates,
+    );
+    if (existingId) {
+      apply([{ type: "focus_surface", surface_id: existingId }]);
+      return existingId;
+    }
+
+    const surfaceId = createId("surface");
+    const surface = createSurface(request, surfaceId);
+    apply([{
+      type: "open_surface",
+      surface,
+      ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
+    }]);
+    return surfaceId;
+  };
+
+  const rebindResource = async (
+    surfaceId: string,
+    request: OpenSurfaceRequest,
+  ): Promise<CloseDecision> => {
+    registry.require(request.surface_type);
+    const snapshotState = store.getState();
+    const snapshot = snapshotState.document;
+    if (!(surfaceId in snapshot.surfaces)) {
+      throw new Error(`surface ${surfaceId} does not exist`);
+    }
+    const replacement = createSurface(request, surfaceId);
+    const commands: WorkbenchCommand[] = [{ type: "replace_surface", surface: replacement }];
+    commands.push(...provenanceDetachCommands(
+      snapshot,
+      new Set([surfaceId]),
+      new Set([surfaceId]),
+    ));
+    return (await coordinateClose(
+      snapshotState,
+      [surfaceId],
+      () => store.getState().compare_and_apply_commands(
+        snapshotState.transaction_version,
+        commands,
+      ).accepted,
+    )).decision;
+  };
+
   return {
-    open: (request) => {
+    open: openWithCurrentPolicy,
+
+    open_contextually: async (sourceSurfaceId, request) => {
       const definition = registry.require(request.surface_type);
       const state = store.getState();
-      const candidates = orderedSurfaces(state);
-      const existingId = registry.resolve_existing(
-        definition.open_policy === "singleton"
-          ? { ...request, duplicate: false }
-          : request,
-        candidates,
-      );
-      if (existingId) {
-        apply([{ type: "focus_surface", surface_id: existingId }]);
-        return existingId;
+      if (definition.open_policy !== "focus_resource" || state.zoomed_group_id !== null) {
+        return openWithCurrentPolicy(request);
       }
 
-      const surfaceId = createId("surface");
-      const surface = createSurface(request, surfaceId);
-      apply([{
-        type: "open_surface",
-        surface,
-        ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
-      }]);
-      return surfaceId;
+      const requestedResourceKey = registry.resource_key(request);
+      if (requestedResourceKey === undefined) return openWithCurrentPolicy(request);
+      const targetSurfaceId = findAdjacentActiveSurface(
+        state.document,
+        sourceSurfaceId,
+        definition.type,
+      );
+      if (!targetSurfaceId) return openWithCurrentPolicy(request);
+
+      const targetSurface = state.document.surfaces[targetSurfaceId];
+      if (!targetSurface) return openWithCurrentPolicy(request);
+      if (targetSurface.resource_key === requestedResourceKey) {
+        apply([{ type: "focus_surface", surface_id: targetSurfaceId }]);
+        return targetSurfaceId;
+      }
+
+      const decision = await rebindResource(targetSurfaceId, request);
+      if (decision === "allow" && store.getState().document.surfaces[targetSurfaceId]) {
+        apply([{ type: "focus_surface", surface_id: targetSurfaceId }]);
+      }
+      return targetSurfaceId;
     },
 
     open_background: (request) => {
@@ -630,29 +695,7 @@ export function createWorkbenchNavigationService(
       return "cancel";
     },
 
-    rebind_resource: async (surfaceId, request) => {
-      registry.require(request.surface_type);
-      const snapshotState = store.getState();
-      const snapshot = snapshotState.document;
-      if (!(surfaceId in snapshot.surfaces)) {
-        throw new Error(`surface ${surfaceId} does not exist`);
-      }
-      const replacement = createSurface(request, surfaceId);
-      const commands: WorkbenchCommand[] = [{ type: "replace_surface", surface: replacement }];
-      commands.push(...provenanceDetachCommands(
-        snapshot,
-        new Set([surfaceId]),
-        new Set([surfaceId]),
-      ));
-      return (await coordinateClose(
-        snapshotState,
-        [surfaceId],
-        () => store.getState().compare_and_apply_commands(
-          snapshotState.transaction_version,
-          commands,
-        ).accepted,
-      )).decision;
-    },
+    rebind_resource: rebindResource,
 
     reset_surface: async (surfaceId) => {
       const snapshotState = store.getState();

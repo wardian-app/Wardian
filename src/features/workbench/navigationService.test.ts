@@ -64,6 +64,40 @@ function deterministicIds(values: string[]) {
   };
 }
 
+function makeSideBySideDocument(
+  source: WorkbenchSurfaceV1,
+  adjacent: WorkbenchSurfaceV1,
+): WorkbenchDocumentV1 {
+  return {
+    ...makeSingleGroupDocument(),
+    root: {
+      kind: "split",
+      node_id: "split-root",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: { kind: "group", group_id: "source-group" },
+      second: { kind: "group", group_id: "adjacent-group" },
+    },
+    groups: {
+      "source-group": {
+        group_id: "source-group",
+        surface_ids: [source.surface_id],
+        active_surface_id: source.surface_id,
+      },
+      "adjacent-group": {
+        group_id: "adjacent-group",
+        surface_ids: [adjacent.surface_id],
+        active_surface_id: adjacent.surface_id,
+      },
+    },
+    surfaces: {
+      [source.surface_id]: source,
+      [adjacent.surface_id]: adjacent,
+    },
+    active_group_id: "source-group",
+  };
+}
+
 function registerDecisionCloseAdapter(
   registry: WorkbenchSurfaceRegistry,
   type: string,
@@ -189,6 +223,104 @@ describe("workbench navigation service", () => {
       resource_key: "agent-1",
       duplicate: true,
     })).toBe("agent-duplicate");
+  });
+
+  it("retargets a directly adjoining resource surface without adding a tab", async () => {
+    const registry = createSurfaceRegistry([
+      definition("graph"),
+      definition("agent-session", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const graph = makeSurface("graph", { surface_type: "graph" });
+    const adjacentAgent = makeSurface("adjacent-agent", {
+      surface_type: "agent-session",
+      resource_key: "agent-before",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSideBySideDocument(graph, adjacentAgent),
+    });
+    const navigation = createWorkbenchNavigationService({ registry, store });
+
+    await expect(navigation.open_contextually(graph.surface_id, {
+      surface_type: "agent-session",
+      resource_key: "agent-after",
+    })).resolves.toBe(adjacentAgent.surface_id);
+
+    const document = store.getState().document;
+    expect(Object.keys(document.surfaces)).toEqual([graph.surface_id, adjacentAgent.surface_id]);
+    expect(document.surfaces[adjacentAgent.surface_id]).toMatchObject({
+      surface_type: "agent-session",
+      resource_key: "agent-after",
+    });
+    expect(document.active_group_id).toBe("adjacent-group");
+  });
+
+  it("falls back to ordinary opens when no adjoining resource surface is visible", async () => {
+    const registry = createSurfaceRegistry([
+      definition("graph"),
+      definition("notes"),
+      definition("agent-session", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const graph = makeSurface("graph", { surface_type: "graph" });
+    const notes = makeSurface("notes", { surface_type: "notes" });
+    const store = createWorkbenchStore({
+      initial_document: makeSideBySideDocument(graph, notes),
+    });
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["opened-agent"]),
+    });
+
+    await expect(navigation.open_contextually(graph.surface_id, {
+      surface_type: "agent-session",
+      resource_key: "agent-new",
+    })).resolves.toBe("opened-agent");
+
+    const document = store.getState().document;
+    expect(document.groups["source-group"].surface_ids).toEqual([graph.surface_id, "opened-agent"]);
+    expect(document.surfaces["opened-agent"]).toMatchObject({
+      surface_type: "agent-session",
+      resource_key: "agent-new",
+    });
+  });
+
+  it("falls back to ordinary opens while the source pane is zoomed", async () => {
+    const registry = createSurfaceRegistry([
+      definition("graph"),
+      definition("agent-session", {
+        open_policy: "focus_resource",
+        resource_key: (request) => request.resource_key,
+      }),
+    ]);
+    const graph = makeSurface("graph", { surface_type: "graph" });
+    const adjacentAgent = makeSurface("adjacent-agent", {
+      surface_type: "agent-session",
+      resource_key: "agent-before",
+    });
+    const store = createWorkbenchStore({
+      initial_document: makeSideBySideDocument(graph, adjacentAgent),
+    });
+    store.getState().set_zoomed_group_id("source-group");
+    const navigation = createWorkbenchNavigationService({
+      registry,
+      store,
+      create_id: deterministicIds(["opened-agent"]),
+    });
+
+    await expect(navigation.open_contextually(graph.surface_id, {
+      surface_type: "agent-session",
+      resource_key: "agent-after",
+    })).resolves.toBe("opened-agent");
+
+    const document = store.getState().document;
+    expect(document.surfaces[adjacentAgent.surface_id].resource_key).toBe("agent-before");
+    expect(document.surfaces["opened-agent"].resource_key).toBe("agent-after");
   });
 
   it("replaces a New Tab placeholder in place without changing its pane or tab order", () => {

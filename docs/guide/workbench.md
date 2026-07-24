@@ -173,6 +173,18 @@ The same terminal can appear in more than one desktop or remote presentation. Th
 
 Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly request interaction ownership for that presentation. Keyboard focus alone does not steal ownership. Short switches away from Agents keep its budgeted terminals warm but hidden and unable to accept input. Returning reuses those renderers; if Wardian had to reclaim one to stay within resource limits, it remains hidden until its backend, snapshot, and final fitted geometry are ready.
 
+### Contextual agent opens
+
+When Graph, Garden, or Inbox is visible beside an Agent Session, opening an
+agent from that surface retargets the adjoining session instead of adding a new
+tab. The session becomes focused and keeps its place in the pane layout. If no
+active Agent Session is directly beside the invoking surface, Wardian uses the
+usual focus-or-open behavior.
+
+This only applies to visible neighboring panes. If you zoom one pane, use the
+normal open action; Wardian will not retarget a hidden pane. The roster remains
+explicit: its **Open** and **Open to Side** actions keep their usual behavior.
+
 ## Left Rail and Right Roster
 
 The left icon rail controls auxiliary tools: Explorer, Source Control, Agent Configuration, Command, Workflows, the user terminal, and Settings. It never switches the active Workbench surface. A rail item can open or focus its collapsible side pane, and a tool in that pane may explicitly request a Workbench surface.
