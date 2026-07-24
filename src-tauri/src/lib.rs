@@ -759,6 +759,8 @@ pub fn run() {
             commands::settings::sync_provider_theme_settings,
             commands::settings::load_onboarding_hints,
             commands::settings::dismiss_onboarding_hint,
+            commands::settings::set_contextual_tips_enabled,
+            commands::settings::reset_onboarding_hints,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

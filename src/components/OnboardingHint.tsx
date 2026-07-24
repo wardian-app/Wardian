@@ -10,6 +10,7 @@ interface OnboardingHintProps extends PropsWithChildren {
 
 export function OnboardingHint({ id, title, actions, children }: OnboardingHintProps) {
   const dismissedHintIds = useOnboardingStore((state) => state.dismissedHintIds);
+  const contextualTipsEnabled = useOnboardingStore((state) => state.contextualTipsEnabled);
   const hintsLoaded = useOnboardingStore((state) => state.hintsLoaded);
   const loadOnboardingHints = useOnboardingStore((state) => state.loadOnboardingHints);
   const dismissOnboardingHint = useOnboardingStore((state) => state.dismissOnboardingHint);
@@ -21,7 +22,7 @@ export function OnboardingHint({ id, title, actions, children }: OnboardingHintP
     }
   }, [hintsLoaded, loadOnboardingHints]);
 
-  if (!hintsLoaded || isDismissed) {
+  if (!hintsLoaded || !contextualTipsEnabled || isDismissed) {
     return null;
   }
 

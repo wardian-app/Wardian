@@ -5,10 +5,25 @@ use crate::utils::get_wardian_home;
 
 const ONBOARDING_HINTS_FILE: &str = "settings/onboarding.json";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OnboardingHintsState {
     #[serde(default)]
     pub dismissed_hint_ids: Vec<String>,
+    #[serde(default = "default_contextual_tips_enabled")]
+    pub contextual_tips_enabled: bool,
+}
+
+impl Default for OnboardingHintsState {
+    fn default() -> Self {
+        Self {
+            dismissed_hint_ids: Vec::new(),
+            contextual_tips_enabled: true,
+        }
+    }
+}
+
+fn default_contextual_tips_enabled() -> bool {
+    true
 }
 
 pub fn load_onboarding_hints() -> Result<OnboardingHintsState, String> {
@@ -19,6 +34,20 @@ pub fn load_onboarding_hints() -> Result<OnboardingHintsState, String> {
 pub fn dismiss_onboarding_hint(hint_id: String) -> Result<OnboardingHintsState, String> {
     let path = onboarding_hints_path()?;
     dismiss_onboarding_hint_at_path(&path, &hint_id)
+}
+
+pub fn set_contextual_tips_enabled(enabled: bool) -> Result<OnboardingHintsState, String> {
+    let path = onboarding_hints_path()?;
+    let mut state = load_onboarding_hints_from_path(&path).unwrap_or_default();
+    state.contextual_tips_enabled = enabled;
+    save_onboarding_hints_to_path(&path, &state)
+}
+
+pub fn reset_onboarding_hints() -> Result<OnboardingHintsState, String> {
+    let path = onboarding_hints_path()?;
+    let mut state = load_onboarding_hints_from_path(&path).unwrap_or_default();
+    state.dismissed_hint_ids.clear();
+    save_onboarding_hints_to_path(&path, &state)
 }
 
 fn onboarding_hints_path() -> Result<PathBuf, String> {
@@ -99,6 +128,7 @@ mod tests {
             saved.dismissed_hint_ids,
             vec!["spawn-agent-first-run:v1".to_string()]
         );
+        assert!(saved.contextual_tips_enabled);
 
         let loaded = load_onboarding_hints().expect("load hints");
         assert_eq!(loaded, saved);
@@ -134,6 +164,7 @@ mod tests {
                     " ".to_string(),
                     "another-hint:v1".to_string(),
                 ],
+                contextual_tips_enabled: false,
             },
         )
         .expect("save hints");
@@ -149,5 +180,34 @@ mod tests {
             load_onboarding_hints_from_path(&path).expect("load hints"),
             saved
         );
+    }
+
+    #[test]
+    fn legacy_dismissal_only_state_keeps_contextual_tips_enabled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("onboarding.json");
+        std::fs::write(&path, r#"{"dismissed_hint_ids":["hint:v1"]}"#).expect("write legacy state");
+
+        let loaded = load_onboarding_hints_from_path(&path).expect("load legacy state");
+
+        assert_eq!(loaded.dismissed_hint_ids, vec!["hint:v1"]);
+        assert!(loaded.contextual_tips_enabled);
+    }
+
+    #[test]
+    fn disabling_tips_and_reset_preserve_each_other() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let home = tempfile::tempdir().expect("temp dir");
+        unsafe { std::env::set_var("WARDIAN_HOME", home.path()) };
+        dismiss_onboarding_hint("hint:v1".to_string()).expect("dismiss hint");
+
+        let disabled = set_contextual_tips_enabled(false).expect("disable tips");
+        assert_eq!(disabled.dismissed_hint_ids, vec!["hint:v1"]);
+        assert!(!disabled.contextual_tips_enabled);
+
+        let reset = reset_onboarding_hints().expect("reset hints");
+
+        assert!(reset.dismissed_hint_ids.is_empty());
+        assert!(!reset.contextual_tips_enabled);
     }
 }

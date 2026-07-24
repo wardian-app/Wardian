@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ConfirmProvider } from "../../components/ConfirmDialog";
 import { useLibraryStore } from "../../store/useLibraryStore";
+import { useOnboardingStore } from "../../store/useOnboardingStore";
 import type { LibraryIndex } from "../../types";
 import { flattenPromptForInjection } from "../../utils/terminalInput";
 import { CommandPanel } from "./CommandPanel";
@@ -124,6 +125,11 @@ describe("CommandPanel", () => {
       isLoading: false,
       error: null,
     });
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      contextualTipsEnabled: true,
+      hintsLoaded: true,
+    });
   });
 
   afterAll(() => {
@@ -170,6 +176,16 @@ describe("CommandPanel", () => {
     expect(screen.getByRole("heading", { name: "Command", level: 2 })).toHaveClass("text-sm");
     expect(screen.getByRole("heading", { name: "Quick Prompts", level: 3 })).toHaveClass("text-xs");
     expect(screen.getByRole("heading", { name: "Broadcast", level: 3 })).toHaveClass("text-xs");
+  });
+
+  it("explains selection scope before a command can broadcast", () => {
+    renderCommandPanel();
+
+    expect(screen.getByText("Target before you broadcast")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Command guide" })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/command-panel",
+    );
   });
 
   it("flattens and injects a quick prompt into selected agents", async () => {

@@ -845,6 +845,15 @@ select option {
   border-right: 1px solid var(--color-wardian-border);
 }
 
+.graph-onboarding-hint {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 4;
+  width: min(360px, calc(100% - 24px));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
+}
+
 .graph-body--inspector-hidden .graph-canvas-shell {
   border-right: 0;
 }

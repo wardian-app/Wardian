@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
+import { useOnboardingStore } from "../store/useOnboardingStore";
 import { GraphView } from "./GraphView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -127,6 +128,11 @@ describe("GraphView", () => {
     const { invoke } = await import("@tauri-apps/api/core");
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockResolvedValue(undefined);
+    useOnboardingStore.setState({
+      dismissedHintIds: [],
+      contextualTipsEnabled: true,
+      hintsLoaded: true,
+    });
   });
 
   it("renders scope, relationship lenses (off by default), and graph canvas", () => {
@@ -143,6 +149,16 @@ describe("GraphView", () => {
     expect(screen.getByRole("button", { name: "same team" })).not.toHaveClass("active");
     expect(screen.queryByText("Action Required")).not.toBeInTheDocument();
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
+  });
+
+  it("shows a first-use tip for deliberate topology changes", () => {
+    render(<GraphView {...defaultProps} />);
+
+    expect(screen.getByText("Shape communication deliberately")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Graph guide" })).toHaveAttribute(
+      "href",
+      "https://docs.wardian.org/guide/graph",
+    );
   });
 
   it("restores and publishes registered view state", async () => {

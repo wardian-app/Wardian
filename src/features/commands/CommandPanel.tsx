@@ -6,6 +6,8 @@ import { useLibraryStore } from "../../store/useLibraryStore";
 import { flattenAllEntries } from "../library/libraryListUtils";
 import { AgentConfig, LibraryEntry } from "../../types";
 import { useConfirm } from "../../components/ConfirmDialog";
+import { DocsLink } from "../../components/DocsLink";
+import { OnboardingHint } from "../../components/OnboardingHint";
 import { flattenPromptForInjection, submitInputToAgents } from "../../utils/terminalInput";
 
 interface CommandPanelProps {
@@ -94,6 +96,15 @@ export const CommandPanel: React.FC<CommandPanelProps> = ({
       </div>
 
       <div className="mb-8 flex-1 overflow-y-auto pr-2 no-scrollbar">
+        <div className="mb-4">
+          <OnboardingHint
+            id="command-targeting:v1"
+            title="Target before you broadcast"
+            actions={<DocsLink path="/guide/command-panel">Command guide</DocsLink>}
+          >
+            Select agents in the roster to limit a command. Sending with no selection intentionally asks for confirmation before reaching every agent.
+          </OnboardingHint>
+        </div>
         <h3 className="text-xs font-bold text-muted tracking-wide mb-4">Quick Prompts</h3>
         <div className="flex flex-col gap-2">
           {quickPrompts.length === 0 ? (
