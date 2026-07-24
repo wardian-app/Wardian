@@ -153,7 +153,7 @@ For Rust workspaces, Wardian sets `CARGO_TARGET_DIR` for provider runtimes in wo
 
 Wardian-created worktrees are real Git worktrees. They are created through `git worktree add`, so they appear in `git worktree list` for the source checkout.
 
-Wardian also discovers Git worktrees that already belong to a known source workspace, even when they were created outside Wardian. Discovered worktrees with no assigned agent appear as joinable shared worktrees. Unassigned worktrees under `<source-checkout>.wt/` can also be deleted from the same list; legacy Wardian worktrees under `<wardian-home>/agents/<session-id>/worktrees/` remain recognized and deletable. Wardian asks for confirmation, removes Wardian-generated cache redirects, and then runs a non-force `git worktree remove`, so dirty or otherwise unsafe removals fail with Git's error.
+Wardian also discovers Git worktrees that already belong to a known source workspace, even when they were created outside Wardian. Discovered worktrees with no assigned agent appear as joinable shared worktrees. Unassigned worktrees under `<source-checkout>.wt/` can also be deleted from the same list; legacy Wardian worktrees under `<wardian-home>/agents/<session-id>/worktrees/` remain recognized and deletable. Wardian asks for confirmation, warns that local changes will be discarded, removes Wardian-generated cache redirects, and then runs `git worktree remove --force`. Deleting the folder keeps its branch; creating the same worktree name later reattaches that preserved branch.
 
 If a target worktree folder already exists but Git does not recognize it as a worktree for the source checkout, Wardian refuses to assign it. Create it with `git worktree add` or remove the folder and let Wardian create it.
 
