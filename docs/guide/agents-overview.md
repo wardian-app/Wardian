@@ -47,7 +47,7 @@ Auto adds columns only when the pane can support their preferred working width a
 ## Important Boundaries
 
 - Closing Agents closes only that Workbench presentation. Agents keep running.
-- Closing an individual agent-session tab also leaves the runtime alive. Use Delete, Pause, Restart, or Clear only when you intend to alter the agent lifecycle.
+- Closing an individual agent-session tab also leaves the runtime alive. Use Pause, Start Session, Restart Session, Start Fresh, or Delete Agent only when you intend to alter the agent lifecycle.
 - Roster selection and Agents focus are separate. Roster selection targets tools; Agents focus chooses the agent shown in Single mode.
 - Grid is not a global navigation destination. It is an Agents mode retained for multi-agent compatibility and control.
 

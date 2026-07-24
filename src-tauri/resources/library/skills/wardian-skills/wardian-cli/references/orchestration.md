@@ -12,11 +12,15 @@ for the same `WARDIAN_HOME`:
 ```bash
 wardian agent pause reviewer-a1
 wardian agent resume reviewer-a1
-wardian agent kill reviewer-a1
+wardian agent restart reviewer-a1
+wardian agent kill reviewer-a1 --confirm
 ```
 
-Pause only when it is safe to stop a provider turn. Kill is terminal for that
-session; inspect the target and its outstanding work before using it.
+Pause only when it is safe to stop a provider turn. Restart replaces the
+provider process while preserving the Wardian agent, habitat, and saved session
+history. Kill is terminal for that agent: it removes its habitat and session
+history (but not project files), and requires `--confirm`; inspect the target
+and its outstanding work before using it.
 
 ## Wait For A State Change
 

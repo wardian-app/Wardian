@@ -10,8 +10,8 @@ const actionButtonClass =
 export const RemoteAgentActions: React.FC<{ agent: RemoteAgentSummary; compact?: boolean }> = ({ agent, compact = false }) => {
   const runAgentAction = useRemoteStore((state) => state.runAgentAction);
   const isOff = isRemoteAgentOff(agent.status);
-  const confirmAndRun = (action: "clear" | "kill", label: string) => {
-    if (window.confirm(`${label} ${agent.session_name}?`)) {
+  const confirmAndRun = (action: "clear" | "kill", message: string) => {
+    if (window.confirm(message)) {
       void runAgentAction(action, agent.session_id);
     }
   };
@@ -19,23 +19,23 @@ export const RemoteAgentActions: React.FC<{ agent: RemoteAgentSummary; compact?:
   return (
     <div className={`mt-3 grid gap-2 ${compact ? "grid-cols-3" : "grid-cols-3"}`}>
       {isOff ? (
-        <button type="button" onClick={() => void runAgentAction("resume", agent.session_id)} className={actionButtonClass}>
+        <button type="button" title="Start the paused agent session." onClick={() => void runAgentAction("resume", agent.session_id)} className={actionButtonClass}>
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
-          Resume
+          Start Session
         </button>
       ) : (
-        <button type="button" onClick={() => void runAgentAction("pause", agent.session_id)} className={actionButtonClass}>
+        <button type="button" title="Pause this agent session." onClick={() => void runAgentAction("pause", agent.session_id)} className={actionButtonClass}>
           <Pause className="h-3.5 w-3.5" aria-hidden="true" />
           Pause
         </button>
       )}
-      <button type="button" onClick={() => confirmAndRun("clear", "Clear")} className={actionButtonClass}>
+      <button type="button" title="Starts a new provider session while keeping the Wardian agent, habitat, and saved history." onClick={() => confirmAndRun("clear", `Start a fresh provider session for ${agent.session_name}? Wardian keeps the agent, habitat, and saved history.`)} className={actionButtonClass}>
         <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-        Clear
+        Start Fresh
       </button>
-      <button type="button" onClick={() => confirmAndRun("kill", "Kill")} className={actionButtonClass}>
+      <button type="button" title="Permanently removes this Wardian agent, its habitat, and its session history." onClick={() => confirmAndRun("kill", `Delete ${agent.session_name}? This permanently removes its Wardian habitat and session history; project files remain.`)} className={actionButtonClass}>
         <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-        Kill
+        Delete Agent
       </button>
     </div>
   );

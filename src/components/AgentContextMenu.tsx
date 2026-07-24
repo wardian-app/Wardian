@@ -237,6 +237,7 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
       <button
         data-testid="context-start"
         className="context-menu-item"
+        title="Restart the provider and continue this agent session."
         onClick={async () => {
           await forEachTarget(onRestart);
           onClose();
@@ -245,28 +246,29 @@ export const AgentContextMenu: React.FC<AgentContextMenuProps> = ({
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
         {isTeam
           ? anyTargetOff && anyTargetRunning
-            ? 'Restart / Start Team'
+            ? 'Restart / Start Team Session'
             : allTargetsOff
               ? 'Start Team'
-              : 'Restart Team'
+              : 'Restart Team Session'
           : isBulk
           ? anyTargetOff && anyTargetRunning
-            ? 'Restart / Start Selected'
+            ? 'Restart / Start Selected Sessions'
             : allTargetsOff
               ? 'Start Selected'
-              : 'Restart Selected'
-          : offAgentIds.has(agentId) ? 'Start' : 'Restart'}
+              : 'Restart Selected Sessions'
+          : offAgentIds.has(agentId) ? 'Start Session' : 'Restart Session'}
       </button>
       <button
         data-testid="context-clear"
         className="context-menu-item"
+        title="Start a new provider session while keeping this Wardian agent, habitat, and saved history."
         onClick={async () => {
           await forEachTarget(onClear);
           onClose();
         }}
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 15l8-8a2 2 0 012.8 0l4.2 4.2a2 2 0 010 2.8l-5 5H8l-4-4zM13 19h7" /></svg>
-        {isTeam ? 'Clear Team' : isBulk ? 'Clear Selected' : 'Clear'}
+        {isTeam ? 'Start Fresh Team' : isBulk ? 'Start Fresh Selected' : 'Start Fresh'}
       </button>
 
       <div className="context-menu-divider" />

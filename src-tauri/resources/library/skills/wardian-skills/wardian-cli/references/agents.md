@@ -63,8 +63,10 @@ source agent's provider, class, workspace, and context unless overridden.
 Use `agent update` instead of editing `settings/state.json`. It updates live
 and persisted state together. It can update class and workspace atomically,
 regenerates class instruction includes after a class change, and reports
-`updated_fields` plus `restart_required`; restart when required before relying
-on the new class or workspace. Do not use it to move a managed-worktree agent.
+`updated_fields` plus `restart_required`; run `wardian agent restart <target>`
+when required before relying on the new class or workspace. Restart preserves
+the Wardian agent, habitat, and saved session history. Do not use it to move a
+managed-worktree agent.
 
 ## Assign A Managed Workspace
 

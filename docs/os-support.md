@@ -40,6 +40,6 @@ Wardian is fully supported on Linux.
 
 If a terminal appears frozen or fails to render:
 
-1. **Check PTY Lifecycle**: If the agent's PTY dies, the status will turn **Gray (Off)**. Use the **Restart** action in the Command Matrix to re-initialize.
+1. **Check PTY Lifecycle**: If the agent's PTY dies, the status will turn **Gray (Off)**. Use **Start Session** to re-initialize it.
 2. **Provider Logs**: Inspect the raw provider output using the **Dynamic Terminal Grid** (1x1 or focused view) to identify any CLI-level errors (e.g., authentication failure).
 3. **Shell Compatibility**: Ensure the default shell on your system is supported by the agent provider you are using.

@@ -640,6 +640,13 @@ pub enum AgentCommand {
     },
     Kill {
         target: String,
+        /// Confirm permanent removal of the agent, its habitat, and its session history.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Restart the provider while preserving the Wardian agent and its history.
+    Restart {
+        target: String,
     },
     Pause {
         target: String,
@@ -1421,14 +1428,26 @@ mod tests {
 
     #[test]
     fn parses_agent_kill() {
-        let cli = Cli::try_parse_from(["wardian", "agent", "kill", "coder-a1"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["wardian", "agent", "kill", "coder-a1", "--confirm"]).unwrap();
         let Command::Agent(args) = cli.command else {
             panic!()
         };
         assert!(matches!(
             args.command,
-            Some(AgentCommand::Kill { target }) if target == "coder-a1"
+            Some(AgentCommand::Kill { target, confirm: true }) if target == "coder-a1"
         ));
+    }
+
+    #[test]
+    fn parses_agent_restart() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "restart", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(
+            matches!(args.command, Some(AgentCommand::Restart { target }) if target == "coder-a1")
+        );
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub enum ControlRequest {
     AgentKill {
         target: String,
     },
+    AgentRestart {
+        target: String,
+    },
     AgentPause {
         target: String,
     },
@@ -803,6 +806,16 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"agent_kill""#));
+        assert!(json.contains(r#""target":"coder-a1""#));
+    }
+
+    #[test]
+    fn agent_restart_request_serializes_with_target() {
+        let req = ControlRequest::AgentRestart {
+            target: "coder-a1".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"agent_restart""#));
         assert!(json.contains(r#""target":"coder-a1""#));
     }
 
