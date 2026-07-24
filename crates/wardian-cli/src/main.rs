@@ -1115,12 +1115,38 @@ fn handle_send(args: SendArgs) -> Result<String, CliError> {
 
 fn handle_ask(args: AskArgs) -> Result<String, CliError> {
     validate_single_agent_target(&args.target, "ask")?;
+    for target in &args.targets {
+        validate_single_agent_target(target, "ask")?;
+    }
     validate_ask_thread(args.thread.as_deref())?;
     let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
     let timeout = parse_timeout(&args.timeout)?;
     let condition = normalize_ask_condition(args.until.as_deref().unwrap_or("status:idle"))?;
+    let mut targets = vec![args.target.clone()];
+    targets.extend(args.targets);
+    targets.sort();
+    targets.dedup();
+
+    if targets.len() > 1 && condition == "reply" {
+        let response = live::ask_agents(
+            &targets,
+            &message,
+            args.thread.as_deref(),
+            Some(args.tail),
+            timeout,
+        )
+        .map_err(control_error)?;
+        return render_ask_many_response(&response);
+    }
+    if targets.len() > 1 {
+        return Err(CliError::backend(
+            ExitCode::Generic,
+            "not_supported",
+            "multi-target wardian ask requires --until reply",
+        ));
+    }
     let response = live::ask_agent(
-        &args.target,
+        &targets[0],
         &message,
         args.thread.as_deref(),
         &condition,
@@ -1128,7 +1154,7 @@ fn handle_ask(args: AskArgs) -> Result<String, CliError> {
         timeout,
     )
     .map_err(control_error)?;
-    render_ask_response(&args.target, &condition, response)
+    render_ask_response(&targets[0], &condition, response)
 }
 
 fn handle_reply(args: ReplyArgs) -> Result<String, CliError> {
@@ -1290,6 +1316,14 @@ fn render_ask_response(
     serde_json::to_string_pretty(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|e| CliError::generic(e.to_string()))
+}
+
+fn render_ask_many_response(
+    ask: &wardian_core::control::AskManyResponse,
+) -> Result<String, CliError> {
+    serde_json::to_string_pretty(ask)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn parse_include(include: Option<&str>) -> Vec<String> {

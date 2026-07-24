@@ -510,6 +510,10 @@ pub struct AskArgs {
     /// Target agent name or UUID. Broadcast and class targets are not supported.
     pub target: String,
 
+    /// Additional explicit target names or UUIDs, separated by commas. Broadcast and class targets are not supported.
+    #[arg(long, value_delimiter = ',')]
+    pub targets: Vec<String>,
+
     /// Message text (omit when using --stdin or --file)
     pub message: Option<String>,
 
@@ -1777,6 +1781,23 @@ mod tests {
         assert_eq!(args.until.as_deref(), Some("reply"));
         assert_eq!(args.timeout, "10m");
         assert_eq!(args.tail, 65536);
+    }
+
+    #[test]
+    fn parses_ask_with_explicit_additional_targets() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "ask",
+            "reviewer-a1",
+            "review this",
+            "--targets",
+            "reviewer-a2,reviewer-a3",
+        ])
+        .unwrap();
+        let Command::Ask(args) = cli.command else {
+            panic!("expected Ask command")
+        };
+        assert_eq!(args.targets, vec!["reviewer-a2", "reviewer-a3"]);
     }
 
     #[test]

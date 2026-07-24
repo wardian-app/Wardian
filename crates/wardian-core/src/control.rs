@@ -118,6 +118,15 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<MessageOrigin>,
     },
+    AskMany {
+        targets: Vec<String>,
+        message: String,
+        thread: Option<String>,
+        tail_bytes: Option<usize>,
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<MessageOrigin>,
+    },
     SubmitReply {
         request_id: String,
         status: ReplyStatus,
@@ -571,6 +580,45 @@ pub struct AskResponse {
     pub watch: AgentWatchResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watch_error: Option<WatchEvidenceError>,
+}
+
+/// One recipient's accountable result from an explicit multi-target ask.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskTargetResponse {
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub outcome: AskTargetOutcome,
+    pub delivery: Vec<DeliveryDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<StructuredReply>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch: Option<AgentWatchResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch_error: Option<WatchEvidenceError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WatchEvidenceError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AskTargetOutcome {
+    /// A structured reply was received before the shared deadline.
+    Completed,
+    /// The shared deadline elapsed; the request was closed with a failed reply.
+    TimedOut,
+    /// The target could not receive its request; any created request was closed.
+    DeliveryFailed,
+    /// The control plane stopped waiting; the request was closed with a failed reply.
+    Cancelled,
+}
+
+/// Aggregated response for a scoped, accountable fan-out ask.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AskManyResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub targets: Vec<AskTargetResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1172,6 +1220,58 @@ mod tests {
         assert!(json.contains(r#""tail_bytes":65536"#));
         assert!(json.contains(r#""timeout_ms":30000"#));
         assert_eq!(roundtrip, req);
+    }
+
+    #[test]
+    fn ask_many_request_and_response_keep_each_target_correlation() {
+        let req = ControlRequest::AskMany {
+            targets: vec!["reviewer-a1".to_string(), "reviewer-a2".to_string()],
+            message: "review this".to_string(),
+            thread: None,
+            tail_bytes: Some(65_536),
+            timeout_ms: Some(30_000),
+            origin: None,
+        };
+        let request_json = serde_json::to_string(&req).unwrap();
+        assert!(request_json.contains(r#""command":"ask_many""#));
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&request_json).unwrap(),
+            req
+        );
+
+        let response = AskManyResponse {
+            schema: CONTROL_SCHEMA,
+            ok: true,
+            targets: vec![
+                AskTargetResponse {
+                    target: "reviewer-a1".to_string(),
+                    request_id: Some("ask_a".to_string()),
+                    outcome: AskTargetOutcome::Completed,
+                    delivery: Vec::new(),
+                    reply: None,
+                    watch: None,
+                    watch_error: None,
+                    failure: None,
+                },
+                AskTargetResponse {
+                    target: "reviewer-a2".to_string(),
+                    request_id: Some("ask_b".to_string()),
+                    outcome: AskTargetOutcome::TimedOut,
+                    delivery: Vec::new(),
+                    reply: None,
+                    watch: None,
+                    watch_error: None,
+                    failure: Some(WatchEvidenceError {
+                        code: "watch_timeout".to_string(),
+                        message: "structured reply timed out".to_string(),
+                    }),
+                },
+            ],
+        };
+        let response_json = serde_json::to_string(&response).unwrap();
+        let roundtrip: AskManyResponse = serde_json::from_str(&response_json).unwrap();
+        assert_eq!(roundtrip.targets[0].request_id.as_deref(), Some("ask_a"));
+        assert_eq!(roundtrip.targets[1].outcome, AskTargetOutcome::TimedOut);
     }
 
     #[test]

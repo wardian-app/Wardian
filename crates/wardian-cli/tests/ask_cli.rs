@@ -69,6 +69,21 @@ fn ask_rejects_all_before_app_lookup() {
 }
 
 #[test]
+fn ask_rejects_multi_target_broadcast_before_app_lookup() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args(["ask", "reviewer-a1", "review this", "--targets", "all"])
+        .env("WARDIAN_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""code":"not_supported""#));
+    assert!(stderr.contains("single agent name or uuid"));
+}
+
+#[test]
 fn ask_rejects_class_selector_with_thread_before_app_lookup() {
     let home = TempDir::new().unwrap();
     let output = Command::new(bin())
