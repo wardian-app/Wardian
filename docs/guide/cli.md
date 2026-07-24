@@ -181,6 +181,7 @@ wardian conversation list --agent <agent-id-or-name>
 wardian conversation list --scope all
 wardian conversation show <conversation-id>
 wardian ask reviewer-a1 --stdin --timeout 10m
+wardian ask reviewer-a1 "review this" --targets reviewer-a2,reviewer-a3 --timeout 10m
 wardian reply ask_0123456789abcdef --status done --stdin
 wardian send "review this" --to coder-a1
 wardian send --as-command "/goal test" --to coder-a1
@@ -215,6 +216,14 @@ Hand a bounded review task to a peer and wait for response evidence:
 
 ```bash
 wardian ask reviewer-a1 --file review-prompt.md --timeout 10m
+```
+
+Ask several named peers for individually accountable replies. The initial target
+and each comma-separated `--targets` value are explicit names or UUIDs; `all`
+and `class:<ClassName>` are not accepted:
+
+```bash
+wardian ask reviewer-a1 --file review-prompt.md --targets reviewer-a2,reviewer-a3 --timeout 10m
 ```
 
 Answer a structured ask from inside the target agent session:
@@ -374,11 +383,11 @@ Team mutation validation rejects duplicate team names, unknown agents, ambiguous
 
 Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
 
-`ask <target>` sends one prompt to one live Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. Wardian appends reply instructions to the delivered prompt and waits for the target to execute `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when the task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete the ask.
+`ask <target>` sends a prompt to one live Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. Add comma-separated `--targets <name-or-uuid,...>` to fan the same structured request out to several explicitly named peers. Wardian appends reply instructions to each delivered prompt and waits for every target to execute `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when each task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete an ask.
 
-The JSON response includes `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. `reply.status` can be `done`, `blocked`, or `failed`; timeout remains a separate `watch_timeout` error. If the target runtime is booting, busy, action-required, or missing a safe input channel, Wardian keeps the interaction queued and reports the delivery state instead of relying on a fixed sleep before terminal injection.
+Single-target JSON responses include `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. Multi-target responses contain `targets[]`, with a separate `request_id`, delivery evidence, reply/watch evidence, and outcome for each target. Outcomes are `completed`, `timed_out`, `delivery_failed`, or `cancelled`. Wardian delivers all multi-target requests before waiting; the shared timeout closes outstanding interactions with a failed reply, and cancelled requests are closed the same way, so late replies are rejected. `reply.status` can be `done`, `blocked`, or `failed`. If a target runtime is booting, busy, action-required, or missing a safe input channel, Wardian keeps the interaction queued and reports the delivery state instead of relying on a fixed sleep before terminal injection.
 
-Use `--until output:<token>` only when you explicitly need the older output-substring mode, such as manual provider output matching or compatibility with agents that cannot run `wardian reply`. Output markers are weaker evidence than structured replies because they are derived from transcript or terminal output. Other explicit watch conditions such as `status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the watch-based behavior. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
+Use `--until output:<token>` only when you explicitly need the older output-substring mode, such as manual provider output matching or compatibility with agents that cannot run `wardian reply`. Output markers are weaker evidence than structured replies because they are derived from transcript or terminal output. Other explicit watch conditions such as `status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the watch-based behavior. Multi-target asks require the default `--until reply` mode. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
 
 `reply <request-id> --status done|blocked|failed --stdin` records a structured reply through the live control endpoint. Wardian resolves the request ID against the interaction store. Unknown request IDs fail deterministically, and duplicate replies are rejected unless a future explicit idempotency policy says otherwise. When run from a Wardian-managed agent terminal, `WARDIAN_SESSION_ID` is used to verify that the reply came from the target agent for that request. Replies submitted outside a Wardian-managed session are accepted for this first live-control slice so a human terminal can unblock a request, but that caller identity is not authenticated.
 

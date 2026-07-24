@@ -14,12 +14,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
-    AskResponse, CodexPluginDiagnostic, ControlRequest, ConversationListResponse, ConversationShowResponse,
-    DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationKind,
-    InboxNotificationPayload, InboxNotificationResponse, InteractionBodyRef, InteractionStatus,
-    MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
-    QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
-    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
+    AskManyResponse, AskResponse, AskTargetOutcome, AskTargetResponse, CodexPluginDiagnostic,
+    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
+    DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationKind, InboxNotificationPayload,
+    InboxNotificationResponse, InteractionBodyRef, InteractionStatus, MessageInputMode,
+    MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence, QueuePolicy,
+    ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply, WatchAgentSnapshot,
+    WatchDeliverySnapshot, WatchEvidenceError,
 };
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
@@ -623,6 +624,26 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             handle_structured_ask(
                 app,
                 &target,
+                &message,
+                thread.as_deref(),
+                tail_bytes,
+                Duration::from_millis(timeout_ms.unwrap_or(30_000)),
+                origin.as_ref(),
+            )
+            .await
+        }
+
+        ControlRequest::AskMany {
+            targets,
+            message,
+            thread,
+            tail_bytes,
+            timeout_ms,
+            origin,
+        } => {
+            handle_structured_ask_many(
+                app,
+                &targets,
                 &message,
                 thread.as_deref(),
                 tail_bytes,
@@ -2164,6 +2185,309 @@ async fn handle_structured_ask(
         watch_result,
     );
     ok_json(&response)
+}
+
+/// Delivers every valid request before waiting for any reply. Each pending request
+/// shares one deadline; a timeout is recorded as a terminal failed reply so a
+/// later `wardian reply` cannot revive an expired correlation.
+async fn handle_structured_ask_many(
+    app: &AppHandle,
+    targets: &[String],
+    message: &str,
+    thread: Option<&str>,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+    origin: Option<&MessageOrigin>,
+) -> Result<String, ControlError> {
+    validate_send_message_thread(thread)?;
+    if targets.len() < 2 {
+        return Err(ControlError::bad_request(
+            "multi-target ask requires at least two explicit targets",
+        ));
+    }
+
+    let state = app.state::<AppState>();
+    let wardian_home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
+    let sender_session_id =
+        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
+    let mut pending = Vec::new();
+    let mut results = Vec::with_capacity(targets.len());
+
+    for target in targets {
+        validate_watch_target(target)?;
+        let Some(target_uuid) = resolve_target_uuid_in_state(&state, target).await else {
+            results.push(ask_target_failure(
+                target,
+                AskTargetOutcome::DeliveryFailed,
+                "not_found",
+                format!("agent not found: {target}"),
+            ));
+            continue;
+        };
+        let watch_state = match agent_watch_state(&state, &target_uuid).await {
+            Ok(watch_state) => watch_state,
+            Err(error) => {
+                results.push(ask_target_failure(
+                    target,
+                    AskTargetOutcome::DeliveryFailed,
+                    error.code(),
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+        let initial_cursor = match watch_state.lock() {
+            Ok(watch) => watch.latest_cursor(),
+            Err(_) => {
+                results.push(ask_target_failure(
+                    target,
+                    AskTargetOutcome::DeliveryFailed,
+                    "request_failed",
+                    "watch state lock poisoned".to_string(),
+                ));
+                continue;
+            }
+        };
+        let request_id = new_ask_request_id();
+        let structured_delivery = match build_structured_ask_delivery_message(
+            &wardian_home,
+            &target_uuid,
+            message,
+            &request_id,
+        ) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                results.push(ask_target_failure(
+                    target,
+                    AskTargetOutcome::DeliveryFailed,
+                    error.code(),
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+        let body_ref = structured_delivery
+            .body_file
+            .as_ref()
+            .map(|path| InteractionBodyRef::File {
+                path: path.display().to_string(),
+            })
+            .unwrap_or_else(|| InteractionBodyRef::Inline {
+                body: message.to_string(),
+            });
+        let task = state
+            .interactions
+            .create_task_with_id(
+                request_id.clone(),
+                sender_session_id.clone(),
+                target_uuid.clone(),
+                body_ref,
+            )
+            .await;
+        let _ = app.emit("pair-activity-changed", ());
+        let mut payload = serde_json::json!({
+            "request_id": task.id,
+            "target_session_id": target_uuid,
+            "status": "pending",
+            "created_at": task.created_at,
+        });
+        if let Some(body_file) = structured_delivery.body_file.as_deref() {
+            if let Some(payload) = payload.as_object_mut() {
+                payload.insert(
+                    "body_file".to_string(),
+                    serde_json::Value::String(body_file.display().to_string()),
+                );
+            }
+        }
+        push_watch_event_for_agent(&state, &target_uuid, "request", payload).await?;
+
+        match deliver_message_to_target(
+            Some(app),
+            &state,
+            target,
+            &structured_delivery.prompt,
+            thread,
+            MessageInputMode::Message,
+            QueuePolicy::QueueIfBusy,
+            None,
+            origin,
+            false,
+        )
+        .await
+        {
+            Ok(delivery) => pending.push((
+                target.clone(),
+                target_uuid,
+                request_id,
+                delivery,
+                watch_state,
+                initial_cursor,
+            )),
+            Err(error) => {
+                let reply = fail_structured_ask_request(
+                    &state,
+                    &request_id,
+                    &target_uuid,
+                    &format!("delivery failed: {error}"),
+                    Some(app),
+                )
+                .await;
+                results.push(AskTargetResponse {
+                    target: target.clone(),
+                    request_id: Some(request_id),
+                    outcome: AskTargetOutcome::DeliveryFailed,
+                    delivery: Vec::new(),
+                    reply,
+                    watch: None,
+                    watch_error: None,
+                    failure: Some(WatchEvidenceError {
+                        code: error.code().to_string(),
+                        message: error.to_string(),
+                    }),
+                });
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + timeout;
+    for (target, target_uuid, request_id, delivery, watch_state, initial_cursor) in pending {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let reply = wait_for_structured_reply(&state, &request_id, remaining).await;
+        let fallback_agent = ask_fallback_agent_snapshot(&state, &target_uuid, &target).await;
+        let watch_result = structured_ask_watch_response(
+            &state,
+            &target_uuid,
+            watch_state,
+            &initial_cursor,
+            tail_bytes,
+        )
+        .await;
+        let (outcome, reply, failure) = match reply {
+            Ok(reply) => (AskTargetOutcome::Completed, Some(reply), None),
+            Err(error) if error.code() == "watch_timeout" => {
+                let reply = fail_structured_ask_request(
+                    &state,
+                    &request_id,
+                    &target_uuid,
+                    "structured reply timed out",
+                    Some(app),
+                )
+                .await;
+                (
+                    AskTargetOutcome::TimedOut,
+                    reply,
+                    Some(WatchEvidenceError {
+                        code: error.code().to_string(),
+                        message: error.to_string(),
+                    }),
+                )
+            }
+            Err(error) => {
+                let reply = fail_structured_ask_request(
+                    &state,
+                    &request_id,
+                    &target_uuid,
+                    &format!("ask cancelled: {error}"),
+                    Some(app),
+                )
+                .await;
+                (
+                    AskTargetOutcome::Cancelled,
+                    reply,
+                    Some(WatchEvidenceError {
+                        code: error.code().to_string(),
+                        message: error.to_string(),
+                    }),
+                )
+            }
+        };
+        let (watch, watch_error) = ask_watch_parts(fallback_agent, watch_result);
+        results.push(AskTargetResponse {
+            target,
+            request_id: Some(request_id),
+            outcome,
+            delivery,
+            reply,
+            watch: Some(watch),
+            watch_error,
+            failure,
+        });
+    }
+
+    ok_json(&AskManyResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        ok: true,
+        targets: results,
+    })
+}
+
+fn ask_target_failure(
+    target: &str,
+    outcome: AskTargetOutcome,
+    code: &str,
+    message: String,
+) -> AskTargetResponse {
+    AskTargetResponse {
+        target: target.to_string(),
+        request_id: None,
+        outcome,
+        delivery: Vec::new(),
+        reply: None,
+        watch: None,
+        watch_error: None,
+        failure: Some(WatchEvidenceError {
+            code: code.to_string(),
+            message,
+        }),
+    }
+}
+
+fn ask_watch_parts(
+    fallback_agent: WatchAgentSnapshot,
+    watch_result: Result<AgentWatchResponse, ControlError>,
+) -> (AgentWatchResponse, Option<WatchEvidenceError>) {
+    match watch_result {
+        Ok(watch) => (watch, None),
+        Err(error) => (
+            minimal_ask_watch_response(fallback_agent),
+            Some(WatchEvidenceError {
+                code: error.code().to_string(),
+                message: error.to_string(),
+            }),
+        ),
+    }
+}
+
+async fn fail_structured_ask_request(
+    state: &AppState,
+    request_id: &str,
+    target_session_id: &str,
+    body: &str,
+    app: Option<&AppHandle>,
+) -> Option<StructuredReply> {
+    let reply = state
+        .interactions
+        .fail_task_with_reply(request_id, target_session_id, body)
+        .await
+        .ok()?;
+    if let Some(app) = app {
+        let _ = app.emit("pair-activity-changed", ());
+    }
+    let _ = push_watch_event_for_agent(
+        state,
+        &reply.target_session_id,
+        "reply",
+        serde_json::json!({
+            "request_id": reply.request_id,
+            "status": reply.status,
+            "target_session_id": reply.target_session_id,
+            "source_session_id": reply.source_session_id,
+            "replied_at": reply.replied_at,
+        }),
+    )
+    .await;
+    Some(reply)
 }
 
 async fn structured_ask_watch_response(
@@ -6180,6 +6504,57 @@ mod tests {
         );
         assert_eq!(response.watch.agent.uuid, "agent-1");
         assert_eq!(response.watch.output.text, "");
+    }
+
+    #[test]
+    fn multi_ask_delivery_failure_keeps_target_scoped_evidence() {
+        let result = ask_target_failure(
+            "missing-reviewer",
+            AskTargetOutcome::DeliveryFailed,
+            "not_found",
+            "agent not found: missing-reviewer".to_string(),
+        );
+
+        assert_eq!(result.target, "missing-reviewer");
+        assert_eq!(result.outcome, AskTargetOutcome::DeliveryFailed);
+        assert!(result.request_id.is_none());
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("not_found")
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_ask_timeout_records_a_terminal_reply() {
+        let state = AppState::new();
+        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
+        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
+
+        let reply = fail_structured_ask_request(
+            &state,
+            &request_id,
+            "agent-1",
+            "structured reply timed out",
+            None,
+        )
+        .await
+        .expect("timeout should record a terminal reply");
+
+        assert_eq!(reply.status, wardian_core::control::ReplyStatus::Failed);
+        assert_eq!(reply.body, "structured reply timed out");
+        let late = submit_structured_reply(
+            &state,
+            &request_id,
+            wardian_core::control::ReplyStatus::Done,
+            "late",
+            Some(&wardian_core::control::MessageOrigin::WardianAgent {
+                session_id: "agent-1".to_string(),
+            }),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(late.code(), "duplicate_reply");
     }
 
     #[tokio::test]

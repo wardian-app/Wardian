@@ -7,10 +7,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
-    AskResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
-    DeliveryDetail, InboxNotificationPayload, InboxNotificationResponse, MessageInputMode,
-    MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
-    WatchEvent, WatchEvidenceError, WorkflowRunResponse,
+    AskManyResponse, AskResponse, ControlRequest, ConversationListResponse,
+    ConversationShowResponse, DeliveryDetail, InboxNotificationPayload, InboxNotificationResponse,
+    MessageInputMode, MessageOrigin, QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse,
+    StructuredReply, WatchEvent, WatchEvidenceError, WorkflowRunResponse,
 };
 use wardian_core::identity::AgentIdentity;
 
@@ -755,6 +755,32 @@ pub fn ask_agent(
         output_echo_guard: ask_prompt_echo_guard(condition, message),
         target_scope: None,
     })
+}
+
+pub fn ask_agents(
+    targets: &[String],
+    message: &str,
+    thread: Option<&str>,
+    tail_bytes: Option<usize>,
+    timeout: Duration,
+) -> io::Result<AskManyResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::Ask {
+            requested: timeout,
+            target: targets.join(","),
+        },
+        send_request(ControlRequest::AskMany {
+            targets: targets.to_vec(),
+            message: message.to_string(),
+            thread: thread.map(str::to_string),
+            tail_bytes,
+            timeout_ms: Some(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+            origin: current_message_origin(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
 }
 
 fn ask_agent_structured(
