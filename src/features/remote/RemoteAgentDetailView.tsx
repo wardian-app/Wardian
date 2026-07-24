@@ -1035,7 +1035,10 @@ function decodeRemoteTerminalSnapshot(snapshot: TerminalSnapshot) {
       // payload follows the same bounded plain-text recovery path.
     }
   }
-  return [...(snapshot.scrollback ?? []), snapshot.visible_grid]
+  const scrollback = snapshot.formatted_scrollback?.length === snapshot.scrollback?.length
+    ? snapshot.formatted_scrollback
+    : snapshot.scrollback ?? [];
+  return [...scrollback, snapshot.visible_grid]
     .filter(Boolean)
     .join("\r\n");
 }

@@ -2293,6 +2293,156 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("restores formatted broker scrollback when available", async () => {
+    const formattedVisibleGrid = "\u001b[Hvisible broker grid";
+    const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
+    const snapshot = {
+      ...modernSnapshot(),
+      terminal_state_base64: encodedVisibleGrid,
+      scrollback: ["unstyled retained row"],
+      formatted_scrollback: ["\u001b[31mstyled retained row\u001b[m"],
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-formatted-scrollback"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-formatted-scrollback").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-formatted-scrollback"
+        provider="claude"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenCalledWith(
+        `\u001b[31mstyled retained row\u001b[m\r\n${formattedVisibleGrid}`,
+        expect.any(Function),
+      );
+    });
+  });
+
+  it("uses the plain visible grid when a broker snapshot geometry differs from the card", async () => {
+    const formattedVisibleGrid = "\u001b[Hformatted canonical grid";
+    const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
+    const snapshot = {
+      ...modernSnapshot(),
+      geometry: { cols: 120, rows: 40 },
+      terminal_state_base64: encodedVisibleGrid,
+      visible_grid: "plain visible grid",
+      scrollback: ["oldest retained row", "newer retained row"],
+      formatted_scrollback: ["\u001b[31moldest retained row\u001b[m", "newer retained row"],
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-geometry-fallback"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-geometry-fallback").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-geometry-fallback"
+        provider="claude"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenCalledWith(
+        "\u001b[31moldest retained row\u001b[m\r\nnewer retained row\r\nplain visible grid",
+        expect.any(Function),
+      );
+      expect(renderer.write).not.toHaveBeenCalledWith(
+        expect.stringContaining("formatted canonical grid"),
+        expect.any(Function),
+      );
+      expect(
+        window.__wardianTerminalDebug?.snapshot("snapshot-geometry-fallback")?.snapshotReplays,
+      ).toEqual([
+        expect.objectContaining({
+          brokerGeometry: { cols: 120, rows: 40 },
+          brokerScrollbackRows: 2,
+          brokerFormattedScrollbackRows: 2,
+          appliedFormattedState: false,
+          rendererBefore: expect.objectContaining({ cols: 80, rows: 24 }),
+          rendererAfter: expect.objectContaining({ cols: 80, rows: 24 }),
+          parserAfter: expect.objectContaining({ cols: 80, rows: 24 }),
+        }),
+      ]);
+    });
+  });
+
+  it("reserves enough local history for narrow-card snapshot reflow", async () => {
+    const snapshot = {
+      ...modernSnapshot(),
+      geometry: { cols: 120, rows: 40 },
+      scrollback: Array.from({ length: 1_000 }, (_, index) => `retained row ${index}`),
+    };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return {
+          ...modernRegistrationResult(request?.presentation_id ?? "snapshot-reflow-capacity"),
+          initial_snapshot: snapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult("snapshot-reflow-capacity").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="snapshot-reflow-capacity"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getLatestTerminalInstance().options.scrollback).toBe(2_000);
+    });
+  });
+
   it("does not consume OpenCode's live focus reply while normalizing a restored snapshot", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const focusMode = "\u001b[?1004h";

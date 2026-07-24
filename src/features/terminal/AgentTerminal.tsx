@@ -212,6 +212,28 @@ type TerminalDebugEnv = {
   VITE_WARDIAN_TERMINAL_DEBUG?: string;
 };
 
+type SnapshotReplayTrace = {
+  at: number;
+  snapshotId: string;
+  sequenceBarrier: number;
+  brokerGeometry: { cols: number; rows: number };
+  brokerScrollbackRows: number;
+  brokerFormattedScrollbackRows: number;
+  appliedFormattedState: boolean;
+  parserBefore: TerminalBufferMetrics;
+  parserAfter: TerminalBufferMetrics;
+  rendererBefore: TerminalBufferMetrics | null;
+  rendererAfter: TerminalBufferMetrics | null;
+};
+
+type TerminalBufferMetrics = {
+  cols: number;
+  rows: number;
+  baseY: number;
+  bufferLength: number;
+  viewportY: number;
+};
+
 export function shouldExposeTerminalDebug(env: TerminalDebugEnv = import.meta.env) {
   return env.DEV === true || env.VITE_WARDIAN_TERMINAL_DEBUG === "1";
 }
@@ -283,6 +305,7 @@ declare global {
           viewport_unchanged: number;
         } | null;
         scrollTraces: { position: number; at: number; stack: string }[] | null;
+        snapshotReplays: SnapshotReplayTrace[] | null;
         usesViewportRedraws: boolean;
         supportsViewportRedrawInPlace: boolean;
         lines: string[];
@@ -469,6 +492,7 @@ if (typeof window !== "undefined" && shouldExposeTerminalDebug()) {
           provider: entry.provider ?? null,
           wheelStats: wheelDebugStats.get(presentationId) ?? null,
           scrollTraces: scrollTraces.get(presentationId) ?? null,
+          snapshotReplays: snapshotReplayTraces.get(presentationId) ?? null,
           usesViewportRedraws: providerUsesViewportRedraws(entry.provider),
           supportsViewportRedrawInPlace: supportsViewportRedrawInPlace(term),
           lines,
@@ -855,6 +879,27 @@ const wheelDebugStats = new Map<string, WheelDebugStats>();
 // builds only) so native E2E can identify what moved the viewport.
 type ScrollTraceEntry = { position: number; at: number; stack: string };
 const scrollTraces = new Map<string, ScrollTraceEntry[]>();
+const snapshotReplayTraces = new Map<string, SnapshotReplayTrace[]>();
+
+function terminalBufferMetrics(term: Terminal | HeadlessTerminal): TerminalBufferMetrics {
+  const buffer = term.buffer.active;
+  return {
+    cols: term.cols,
+    rows: term.rows,
+    baseY: buffer.baseY ?? 0,
+    bufferLength: buffer.length ?? term.rows,
+    viewportY: buffer.viewportY ?? 0,
+  };
+}
+
+function recordSnapshotReplay(sessionId: string, trace: SnapshotReplayTrace) {
+  const traces = snapshotReplayTraces.get(sessionId) ?? [];
+  traces.push(trace);
+  if (traces.length > 8) {
+    traces.splice(0, traces.length - 8);
+  }
+  snapshotReplayTraces.set(sessionId, traces);
+}
 
 function recordScrollTrace(sessionId: string, position: number) {
   const trace = scrollTraces.get(sessionId) ?? [];
@@ -1516,16 +1561,19 @@ async function resetTerminalOutputBuffers(
   }
 }
 
-function decodeTerminalSnapshot(snapshot: TerminalSnapshot) {
-  if (snapshot.terminal_state_base64) {
+function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: boolean) {
+  const scrollback = snapshot.formatted_scrollback?.length === snapshot.scrollback.length
+    ? snapshot.formatted_scrollback
+    : snapshot.scrollback;
+  if (useFormattedState && snapshot.terminal_state_base64) {
     try {
       const binary = atob(snapshot.terminal_state_base64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       // vt100's formatted state restores the visible grid and cursor, but not
-      // the parser's scrollback. Prepend the broker's oldest-first plain-text
-      // projection so every snapshot boundary (registration, resize, resync,
-      // or replay-gap recovery) retains the history xterm has already shown.
-      return [...snapshot.scrollback, new TextDecoder().decode(bytes)]
+      // the parser's scrollback. Prepend the broker's oldest-first row-local
+      // projection (formatted when available) so every snapshot boundary
+      // retains history without replaying another geometry-bound full frame.
+      return [...scrollback, new TextDecoder().decode(bytes)]
         .filter(Boolean)
         .join("\r\n");
     } catch {
@@ -1533,7 +1581,27 @@ function decodeTerminalSnapshot(snapshot: TerminalSnapshot) {
       // bounded plain-text projection is the recovery fallback.
     }
   }
-  return [...snapshot.scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
+  return [...scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
+}
+
+function reserveRendererScrollbackForSnapshot(
+  renderer: TerminalRendererEntry | null,
+  snapshot: TerminalSnapshot,
+) {
+  if (!renderer || snapshot.scrollback.length === 0 || renderer.term.cols >= snapshot.geometry.cols) {
+    return;
+  }
+  // Broker scrollback is stored as visual rows at the canonical terminal
+  // width. Replaying those rows into a narrower card makes xterm reflow each
+  // one into multiple physical rows. Keep enough local capacity for that
+  // reflow; otherwise its default 1,000-line cap immediately evicts the
+  // oldest history during the restore itself.
+  const reflowRowsPerSnapshotRow = Math.ceil(snapshot.geometry.cols / renderer.term.cols);
+  const requiredScrollback = snapshot.scrollback.length * reflowRowsPerSnapshotRow;
+  renderer.term.options.scrollback = Math.max(
+    Number(renderer.term.options.scrollback ?? TERMINAL_SCROLLBACK_LINES),
+    requiredScrollback,
+  );
 }
 
 function applyCanonicalGeometry(entry: TerminalSessionEntry, cols: number, rows: number) {
@@ -1558,19 +1626,52 @@ async function applyBrokerSnapshot(
   }
   entry.generation = snapshot.runtime_generation;
   entry.brokerDecoder = new TextDecoder();
+  const renderer = entry.renderer;
+  // vt100's formatted state is an absolute, geometry-dependent paint. A card
+  // may be restored into a different local viewport after a watchlist or
+  // surface transition; replaying that frame there wraps it into scrollback.
+  // In that case the broker's plain projection is the stable reconstruction.
+  const rendererMatchesSnapshot = !renderer || (
+    renderer.term.cols === snapshot.geometry.cols &&
+    renderer.term.rows === snapshot.geometry.rows
+  );
+  const snapshotTrace = shouldExposeTerminalDebug()
+    ? {
+        at: Date.now(),
+        snapshotId: snapshot.snapshot_id,
+        sequenceBarrier: snapshot.sequence_barrier,
+        brokerGeometry: snapshot.geometry,
+        brokerScrollbackRows: snapshot.scrollback.length,
+        brokerFormattedScrollbackRows: snapshot.formatted_scrollback?.length ?? 0,
+        appliedFormattedState: rendererMatchesSnapshot && Boolean(snapshot.terminal_state_base64),
+        parserBefore: terminalBufferMetrics(entry.parser),
+        rendererBefore: renderer ? terminalBufferMetrics(renderer.term) : null,
+      }
+    : null;
+  reserveRendererScrollbackForSnapshot(renderer, snapshot);
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
-  const state = decodeTerminalSnapshot(snapshot);
-  if (state) {
-    // Restored snapshots must pass through the same provider capability and
-    // theme normalization as live output. Writing raw broker state here
-    // regressed Codex composer recoloring and color-probe filtering.
-    await writeTerminalOutputBatch(terminalKey, entry, [state], {
-      resetBeforeWrite: true,
-      recordOutput: false,
-      queueCapabilityResponses: false,
-    });
-  } else {
-    await resetTerminalOutputBuffers(entry);
+  const state = decodeTerminalSnapshot(snapshot, rendererMatchesSnapshot);
+  try {
+    if (state) {
+      // Restored snapshots must pass through the same provider capability and
+      // theme normalization as live output. Writing raw broker state here
+      // regressed Codex composer recoloring and color-probe filtering.
+      await writeTerminalOutputBatch(terminalKey, entry, [state], {
+        resetBeforeWrite: true,
+        recordOutput: false,
+        queueCapabilityResponses: false,
+      });
+    } else {
+      await resetTerminalOutputBuffers(entry);
+    }
+  } finally {
+    if (snapshotTrace) {
+      recordSnapshotReplay(terminalKey, {
+        ...snapshotTrace,
+        parserAfter: terminalBufferMetrics(entry.parser),
+        rendererAfter: entry.renderer ? terminalBufferMetrics(entry.renderer.term) : null,
+      });
+    }
   }
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
