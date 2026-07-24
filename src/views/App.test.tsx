@@ -71,11 +71,18 @@ vi.mock("../features/terminal/UserTerminalPanel", () => ({
 }));
 
 vi.mock("./GraphView", () => ({
-  GraphView: ({ filteredAgents }: { filteredAgents: unknown[] }) => {
+  GraphView: ({
+    filteredAgents,
+    onOpenAgent,
+  }: {
+    filteredAgents: unknown[];
+    onOpenAgent?: (agentId: string) => void;
+  }) => {
     graphViewFilteredAgentsSpy(filteredAgents);
     return (
       <div data-testid="graph-view">
         <div data-testid="graph-canvas" />
+        <button type="button" onClick={() => onOpenAgent?.("agent-1")}>Open graph agent</button>
       </div>
     );
   },
@@ -911,6 +918,44 @@ describe("Workbench persistence boot integration", () => {
       expect(screen.getAllByTestId("workbench-group")).toHaveLength(2);
       expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(2);
     });
+    expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+  });
+
+  it("retargets an adjacent Agent Session when Graph opens an agent", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    render(<App />);
+    await screen.findByTestId("agent-grid");
+    await openWorkbenchSurface("graph");
+
+    const betaRow = await waitFor(() => {
+      const row = screen.getAllByText("Beta")
+        .map((node) => node.closest("div.watchlist-row"))
+        .find((candidate): candidate is HTMLElement => Boolean(candidate));
+      if (!row) throw new Error("Beta roster row not found");
+      return row;
+    });
+    const activeGroup = screen.getByTestId("workbench-group");
+    vi.spyOn(activeGroup, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+      toJSON: () => ({}),
+    });
+    fireEvent.contextMenu(betaRow);
+    fireEvent.click(within(screen.getByTestId("agent-context-menu"))
+      .getByRole("button", { name: "Open to Side" }));
+    await screen.findByRole("heading", { name: "Beta" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open graph agent" }));
+
+    await screen.findByRole("heading", { name: "Alpha" });
+    expect(screen.getAllByTestId("workbench-group")).toHaveLength(2);
+    expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(1);
     expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
   });
 

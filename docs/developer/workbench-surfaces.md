@@ -104,6 +104,23 @@ non-JSON values fail validation.
 Normal Agent Session opens use `focus_resource`. The agent runtime is shared;
 duplicate surfaces are independent presentations of it.
 
+### Contextual resource targeting
+
+`NavigationService.open_contextually(source_surface_id, request)` is an opt-in
+path for a resource-aware surface that wants to reuse a neighboring
+presentation. It is currently used only for Agent Session opens from Graph,
+Garden, and Inbox. The service derives normalized bounds from the persisted
+split tree and considers only active tabs in panes that share a non-zero edge
+with the source pane. The longest shared edge wins; tree order resolves a tie.
+
+The service falls back to the ordinary open policy when no eligible target
+exists, when the workbench is zoomed to one pane, or when the request is not a
+`focus_resource` surface. An accepted target reuses `rebind_resource`, then
+focuses the target pane. A cancelled or stale rebind does not create a fallback
+surface. This keeps dirty-close behavior, presentation provenance cleanup, and
+runtime ownership in the existing navigation path rather than duplicating them
+inside view components.
+
 Files also uses `focus_resource`. Its durable navigation key is either
 `file:<canonical-path>` or `artifact:<artifact-id>`. Syntactic Windows absolute drive, UNC, and
 extended-length paths normalize separators for identity; POSIX paths preserve

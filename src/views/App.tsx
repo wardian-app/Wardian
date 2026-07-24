@@ -1017,6 +1017,15 @@ function AppBody() {
     });
   }, [workbenchNavigation]);
 
+  const openAgentFromSurface = useCallback((sourceSurfaceId: string, sessionId: string) => {
+    void workbenchNavigation.open_contextually(sourceSurfaceId, {
+      surface_type: "agent-session",
+      resource_key: sessionId,
+    }).catch((error) => {
+      console.error("contextual agent open failed", error);
+    });
+  }, [workbenchNavigation]);
+
   const openAgentToSide = useCallback((sessionId: string) => {
     workbenchNavigation.open_to_side({
       surface_type: "agent-session",
@@ -1245,7 +1254,7 @@ function AppBody() {
           surface_id={surface.surface_id}
           state={{}}
           visibility={visibility}
-          onOpenAgent={openAgent}
+          onOpenAgent={(sessionId) => openAgentFromSurface(surface.surface_id, sessionId)}
           onSendAgentPrompt={sendCommand}
         />
       );
@@ -1269,7 +1278,7 @@ function AppBody() {
           teams={teams}
           interactions={agentInteractions}
           onSelectionChange={setSelectedAgentIds}
-          onOpenAgent={openAgent}
+          onOpenAgent={(sessionId) => openAgentFromSurface(surface.surface_id, sessionId)}
           on_state_change={(state) => {
             workbenchPersistence.store.getState().apply_commands([{
               type: "update_surface_state",
@@ -1315,7 +1324,7 @@ function AppBody() {
           selectedAgentIds={selectedAgentIds}
           offAgentIds={offAgentIds}
           onSelectionChange={setSelectedAgentIds}
-          onOpenAgent={openAgent}
+          onOpenAgent={(sessionId) => openAgentFromSurface(surface.surface_id, sessionId)}
           on_state_change={(state) => {
             workbenchPersistence.store.getState().apply_commands([{
               type: "update_surface_state",
