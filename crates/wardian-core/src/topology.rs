@@ -81,6 +81,21 @@ pub fn save_topology(home: &Path, topology: &Topology) -> io::Result<()> {
     Ok(())
 }
 
+/// Load topology, prune references to unknown agents, and persist only when
+/// reconciliation removed stale records. The returned flag reports whether
+/// the on-disk topology changed.
+pub fn load_reconciled_topology(
+    home: &Path,
+    known_agents: &BTreeSet<String>,
+) -> io::Result<(Topology, bool)> {
+    let mut topology = load_topology(home);
+    let changed = topology.retain_agents(known_agents);
+    if changed {
+        save_topology(home, &topology)?;
+    }
+    Ok((topology, changed))
+}
+
 fn canonicalize(topology: &mut Topology) {
     let mut seen = BTreeSet::new();
     let mut edges = Vec::new();
@@ -237,14 +252,22 @@ impl Topology {
         true
     }
 
-    /// Drop edges/ignores referencing agents not in `known` (deleted-agent GC).
-    pub fn retain_agents(&mut self, known: &BTreeSet<String>) {
+    /// Drop edges and pair state referencing agents not in `known`.
+    ///
+    /// Returns whether any stale record was removed.
+    pub fn retain_agents(&mut self, known: &BTreeSet<String>) -> bool {
+        let edge_count = self.edges.len();
+        let ignored_count = self.ignored_pairs.len();
+        let suppressed_count = self.suppressed_seed_pairs.len();
         self.edges
             .retain(|edge| known.contains(&edge.a) && known.contains(&edge.b));
         self.ignored_pairs
             .retain(|pair| known.contains(&pair.a) && known.contains(&pair.b));
         self.suppressed_seed_pairs
             .retain(|pair| known.contains(&pair.a) && known.contains(&pair.b));
+        self.edges.len() != edge_count
+            || self.ignored_pairs.len() != ignored_count
+            || self.suppressed_seed_pairs.len() != suppressed_count
     }
 
     /// Manual neighbors of `uuid`, sorted, deduped.
@@ -607,9 +630,44 @@ mod tests {
         topology.add_edge("a", "gone", "t");
         topology.ignore_pair("gone", "b");
         let known: BTreeSet<String> = ["a".to_string(), "b".to_string()].into();
-        topology.retain_agents(&known);
+        assert!(topology.retain_agents(&known));
         assert_eq!(topology.edges.len(), 1);
         assert!(topology.ignored_pairs.is_empty());
+        assert!(!topology.retain_agents(&known));
+    }
+
+    #[test]
+    fn load_reconciled_topology_prunes_stale_records_and_preserves_known_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut topology = Topology::default();
+        topology.add_edge("kept-a", "kept-b", "kept");
+        topology.add_edge("kept-a", "missing", "stale");
+        topology.ignore_pair("kept-a", "kept-b");
+        topology.ignore_pair("kept-b", "missing");
+        topology.suppressed_seed_pairs.push(IgnoredPair {
+            a: "kept-a".into(),
+            b: "kept-b".into(),
+        });
+        topology.suppressed_seed_pairs.push(IgnoredPair {
+            a: "kept-a".into(),
+            b: "missing".into(),
+        });
+        save_topology(temp.path(), &topology).unwrap();
+        let known = BTreeSet::from(["kept-a".to_string(), "kept-b".to_string()]);
+
+        let (reconciled, changed) = load_reconciled_topology(temp.path(), &known).unwrap();
+
+        assert!(changed);
+        assert_eq!(reconciled.edges.len(), 1);
+        assert!(reconciled.is_ignored("kept-a", "kept-b"));
+        assert_eq!(reconciled.ignored_pairs.len(), 1);
+        assert!(reconciled.is_seed_suppressed("kept-a", "kept-b"));
+        assert_eq!(reconciled.suppressed_seed_pairs.len(), 1);
+
+        let saved = load_topology(temp.path());
+        assert_eq!(saved, reconciled);
+        let (_, changed_again) = load_reconciled_topology(temp.path(), &known).unwrap();
+        assert!(!changed_again);
     }
 
     #[test]
