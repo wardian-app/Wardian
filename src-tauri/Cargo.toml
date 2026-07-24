@@ -1,6 +1,6 @@
 [package]
 name = "Wardian"
-version = "0.4.3"
+version = "0.4.4"
 description = "Where local agent work becomes visible, durable, and malleable."
 authors = ["Tan Gemicioglu"]
 edition = "2021"
