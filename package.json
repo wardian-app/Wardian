@@ -1,7 +1,7 @@
 {
   "name": "wardian",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "description": "Where local agent work becomes visible, durable, and malleable.",
   "license": "MIT",
