@@ -1061,10 +1061,26 @@ pub(crate) fn create_worktree_with_build_caches(
 
     let workspace = path_to_git_arg(&workspace_path)?;
     let worktree = path_to_git_arg(&worktree_path)?;
-    run_git(&workspace, &["worktree", "add", &worktree, "-b", branch])?;
+    let branch_exists = local_branch_exists(&workspace, branch)?;
+    if branch_exists {
+        run_git(&workspace, &["worktree", "add", &worktree, branch])?;
+    } else {
+        run_git(&workspace, &["worktree", "add", &worktree, "-b", branch])?;
+    }
 
     let worktree_path = absolute_existing_path(&worktree_path)?;
     setup_worktree_build_caches(&worktree_path, &workspace_path)
+}
+
+fn local_branch_exists(workspace: &str, branch: &str) -> Result<bool, String> {
+    let reference = format!("refs/heads/{branch}");
+    Ok(!run_git_allowing_status(
+        workspace,
+        &["rev-parse", "--verify", "--quiet", &reference],
+        &[0, 1],
+    )?
+    .trim()
+    .is_empty())
 }
 
 pub(crate) fn remove_worktree(workspace_path: &Path, worktree_path: &Path) -> Result<(), String> {
@@ -1790,6 +1806,35 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
             "wardian/repo-agent"
         );
         assert!(worktree.join(".cargo").join("config.toml").exists());
+    }
+
+    #[test]
+    fn create_worktree_with_build_caches_reuses_a_preserved_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let first_worktree = temp.path().join("first-worktree");
+        let reused_worktree = temp.path().join("reused-worktree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("README.md"), "initial\n").unwrap();
+
+        let cwd = workspace.to_str().unwrap();
+        run_git(cwd, &["init"]).unwrap();
+        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
+        run_git(cwd, &["add", "README.md"]).unwrap();
+        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &first_worktree, "wardian/reused").unwrap();
+        remove_worktree_without_force(&workspace, &first_worktree).unwrap();
+
+        create_worktree_with_build_caches(&workspace, &reused_worktree, "wardian/reused").unwrap();
+
+        assert_eq!(
+            run_git(reused_worktree.to_str().unwrap(), &["branch", "--show-current"])
+                .unwrap()
+                .trim(),
+            "wardian/reused"
+        );
     }
 
     #[test]

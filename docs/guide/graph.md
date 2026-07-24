@@ -73,7 +73,7 @@ The graph is backed by `<WARDIAN_HOME>/topology.json` (default: `~/.wardian/topo
 }
 ```
 
-Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly — the backend watches it and an open Graph view refreshes live — or use the UI, or use the CLI (`wardian graph link/unlink/ignore`, see the [CLI guide](./cli.md#graph)). Edges are undirected and canonicalized (`a < b` lexicographically). `suppressed_seed_pairs` records team-member pairs that should not be recreated by later team-seed passes after you delete a team-born edge. When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the file is saved at the current schema version.
+Manual edges include connections you created by dragging plus edges seeded when you created or modified teams. You can edit this file directly — the backend watches it and an open Graph view refreshes live — or use the UI, or use the CLI (`wardian graph link/unlink/ignore`, see the [CLI guide](./cli.md#graph)). Edges are undirected and canonicalized (`a < b` lexicographically). When Wardian loads topology for the Graph view or a `wardian graph` command, it removes any edge or pair state that references a UUID absent from the current roster and persists that repair atomically. `suppressed_seed_pairs` records team-member pairs that should not be recreated by later team-seed passes after you delete a team-born edge. When you first launch Wardian after upgrading, existing team memberships are automatically seeded into topology.json, and the file is saved at the current schema version.
 
 ## Teams and Topology Seeding
 

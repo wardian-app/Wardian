@@ -36,7 +36,7 @@ The topology shapes **default visibility and target resolution, never permission
 - Edges are **undirected and canonical**: `a < b` lexicographically; deduped on save (same canonicalization as `graphProjection.ts` edge keys).
 - Written atomically (temp file + rename), like the watchlist state file.
 - Only **manual** edges are stored. Workspace fallback is resolved at read time, but team membership seeds ordinary manual edges instead of producing read-time rule edges.
-- Edges reference agent UUIDs. Edges naming deleted agents are ignored at read time and garbage-collected on the next save.
+- Edges reference agent UUIDs. Graph-surface reads reconcile references to deleted agents and atomically persist the repair; resolver calls still exclude unknown UUIDs defensively.
 - `ignored_pairs` holds ghost-edge dismissals (see UI section) so they are durable and inspectable on disk. (rev. 2026-07-03: with team edges seeded as manual, ignores no longer apply to anything but ghosts.)
 - `suppressed_seed_pairs` holds team-seed tombstones. Removing a team-backed edge while both agents remain on a team records the pair here so later seed passes do not recreate it; manually adding the edge clears the tombstone.
 - A missing or corrupt file resolves to an empty topology — it must never block agent listing.

@@ -134,6 +134,44 @@ fn show_excludes_ignored_pairs_from_unmapped() {
 }
 
 #[test]
+fn show_reconciles_dangling_references_and_preserves_known_topology() {
+    let home = seed_home();
+    let mut topology = Topology::default();
+    topology.add_edge("uuid-1", "uuid-2", "2026-07-03T08:00:00Z");
+    topology.add_edge("uuid-1", "missing-agent", "2026-07-03T08:01:00Z");
+    topology.ignore_pair("uuid-1", "uuid-2");
+    topology.ignore_pair("uuid-2", "missing-agent");
+    topology
+        .suppressed_seed_pairs
+        .push(wardian_core::topology::IgnoredPair {
+            a: "uuid-1".into(),
+            b: "uuid-2".into(),
+        });
+    topology
+        .suppressed_seed_pairs
+        .push(wardian_core::topology::IgnoredPair {
+            a: "uuid-1".into(),
+            b: "missing-agent".into(),
+        });
+    save_topology(home.path(), &topology).unwrap();
+
+    let body = stdout_json(&run_graph(&home, None, &["show"]));
+
+    assert_eq!(body["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(body["edges"][0]["a"], "uuid-1");
+    assert_eq!(body["edges"][0]["b"], "uuid-2");
+    assert_eq!(body["ignored_pairs"].as_array().unwrap().len(), 1);
+    assert_eq!(body["ignored_pairs"][0]["a"], "uuid-1");
+    assert_eq!(body["ignored_pairs"][0]["b"], "uuid-2");
+
+    let saved = load_topology(home.path());
+    assert_eq!(saved.edges.len(), 1);
+    assert_eq!(saved.ignored_pairs.len(), 1);
+    assert_eq!(saved.suppressed_seed_pairs.len(), 1);
+    assert!(saved.is_seed_suppressed("uuid-1", "uuid-2"));
+}
+
+#[test]
 fn neighbors_defaults_to_self_in_session() {
     let home = seed_home();
     let body = stdout_json(&run_graph(&home, Some("uuid-1"), &["neighbors"]));

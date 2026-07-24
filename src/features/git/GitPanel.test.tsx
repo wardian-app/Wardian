@@ -3346,7 +3346,7 @@ describe("GitPanel", () => {
       expect(mockInvoke).toHaveBeenCalledWith("delete_agent_worktree", {
         worktreeFolder: "C:/repo-worktree",
         sourceFolder: "C:/repo",
-        force: false,
+        force: true,
       }),
     );
     await waitFor(() => {
@@ -3355,8 +3355,7 @@ describe("GitPanel", () => {
     expect(onAgentsUpdated).toHaveBeenCalled();
   });
 
-  it("offers a force delete only when the selected worktree has local changes", async () => {
-    let deleteCalls = 0;
+  it("force deletes a selected worktree after confirmation", async () => {
     mockInvoke.mockImplementation(async (command) => {
       if (command === "get_explorer_root") return "C:/repo";
       if (command === "list_agent_worktrees") {
@@ -3374,10 +3373,6 @@ describe("GitPanel", () => {
       if (command === "git_status") return { branch: "main", ahead: 0, behind: 0, files: [] };
       if (command === "git_log") return [];
       if (command === "delete_agent_worktree") {
-        deleteCalls += 1;
-        if (deleteCalls === 1) {
-          throw new Error("fatal: 'C:/repo-worktree' contains modified or untracked files, use --force to delete it");
-        }
         return null;
       }
       return null;
@@ -3388,12 +3383,8 @@ describe("GitPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete repo-worktree worktree" }));
     fireEvent.click(await screen.findByText("Confirm"));
 
-    expect(await screen.findByRole("dialog", { name: "Force delete repo-worktree?" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Force delete — discard changes" }));
-    expect(screen.queryByRole("dialog", { name: "Force delete repo-worktree?" })).not.toBeInTheDocument();
-
     await waitFor(() =>
-      expect(mockInvoke).toHaveBeenLastCalledWith("delete_agent_worktree", {
+      expect(mockInvoke).toHaveBeenCalledWith("delete_agent_worktree", {
         worktreeFolder: "C:/repo-worktree",
         sourceFolder: "C:/repo",
         force: true,

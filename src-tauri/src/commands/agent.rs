@@ -170,13 +170,9 @@ impl DeletedAgentReferenceCleanup {
             remaining_agent_ids,
         )?;
 
-        let mut topology = wardian_core::topology::load_topology(home);
-        let before_topology = topology.clone();
-        topology.retain_agents(remaining_agent_ids);
-        let topology_changed = topology != before_topology;
-        if topology_changed {
-            wardian_core::topology::save_topology(home, &topology).map_err(|e| e.to_string())?;
-        }
+        let (_, topology_changed) =
+            wardian_core::topology::load_reconciled_topology(home, remaining_agent_ids)
+                .map_err(|e| e.to_string())?;
 
         Ok(Self {
             watchlists_changed,
@@ -1610,6 +1606,16 @@ fn find_deletable_worktree_for_source(
             workspace_paths_match(&worktree.source_folder, &normalized_source_folder)
                 && workspace_paths_match(&worktree.worktree_folder, &normalized_worktree_folder)
         })
+}
+
+fn worktree_deletion_is_already_complete(
+    worktree_folder: &str,
+    discovered: &[DiscoveredGitWorktree],
+) -> bool {
+    !discovered
+        .iter()
+        .any(|worktree| workspace_paths_match(&worktree.worktree_folder, worktree_folder))
+        && !std::path::Path::new(worktree_folder).exists()
 }
 
 fn validate_assignable_worktree_for_agent(
@@ -3343,11 +3349,6 @@ pub async fn delete_agent_worktree(
     if source_folder.is_empty() {
         return Err("Source folder is required".to_string());
     }
-    let worktree_path = std::path::Path::new(&worktree_folder);
-    if !worktree_path.is_dir() {
-        return Err("Worktree folder does not exist".to_string());
-    }
-
     let wardian_home = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Unable to resolve Wardian home".to_string())?;
     let configs = {
@@ -3372,6 +3373,17 @@ pub async fn delete_agent_worktree(
                 })
             })
             .collect();
+    let worktree_is_registered = discovered
+        .iter()
+        .any(|worktree| workspace_paths_match(&worktree.worktree_folder, &worktree_folder));
+    if !worktree_is_registered {
+        if worktree_deletion_is_already_complete(&worktree_folder, &discovered) {
+            // A second click or a delayed UI refresh can legitimately target a worktree
+            // Git has already removed. Treat that as completed cleanup, not an ownership error.
+            return Ok(());
+        }
+        return Err("Selected worktree is not registered with its source workspace".to_string());
+    }
     let managed_worktree = find_deletable_worktree_for_source(
         &configs,
         &wardian_home,
@@ -3477,7 +3489,7 @@ mod tests {
         strip_claude_embedded_stream_flags, take_agent_runtime_for_termination,
         terminal_cleared_payload, update_agent_fields_in_state,
         find_deletable_worktree_for_source, validate_assignable_worktree_for_agent,
-        validate_deletable_agent_worktree,
+        validate_deletable_agent_worktree, worktree_deletion_is_already_complete,
         workspace_paths_match, AgentOrderPlacement, AgentWorktreeSummary, CloneProfileCopyPlan,
         CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
         GIT_WORKTREE_DISCOVERY_CONCURRENCY,
@@ -5822,6 +5834,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             discovered,
         )
         .is_none());
+    }
+
+    #[test]
+    fn completed_worktree_deletion_is_idempotent() {
+        let missing_worktree = tempfile::tempdir().expect("temp dir").path().join("deleted");
+
+        assert!(worktree_deletion_is_already_complete(
+            &normalize_workspace_record_path(&missing_worktree),
+            &[]
+        ));
     }
 
     #[test]

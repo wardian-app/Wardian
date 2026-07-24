@@ -1,9 +1,9 @@
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tauri::{AppHandle, Emitter};
 use wardian_core::topology::{
-    load_topology, pair_activity_from_records, resolve_neighbors, save_topology, PairActivity,
-    Topology,
+    load_reconciled_topology, load_topology, pair_activity_from_records, resolve_neighbors,
+    save_topology, PairActivity, Topology,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,8 +34,28 @@ pub async fn get_topology(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<TopologySnapshot, String> {
     let home = home()?;
-    let topology = load_topology(&home);
     let refs = agent_refs(&state).await;
+    let topology = match wardian_core::db::get_all_agents() {
+        Ok(persisted_agents) => {
+            // State restoration happens asynchronously at startup. The persisted
+            // roster prevents an early Graph request from treating not-yet-restored
+            // agents as deleted; live state also covers a newly spawned agent.
+            let mut known_agents: BTreeSet<String> = persisted_agents
+                .into_iter()
+                .map(|agent| agent.session_id)
+                .collect();
+            known_agents.extend(refs.iter().map(|agent| agent.uuid.clone()));
+            load_reconciled_topology(&home, &known_agents)
+                .map(|(topology, _)| topology)
+                .map_err(|error| error.to_string())?
+        }
+        Err(error) => {
+            crate::manager::log_debug(&format!(
+                "[WARDIAN] topology reconciliation skipped because the persisted roster could not be read: {error}"
+            ));
+            load_topology(&home)
+        }
+    };
 
     let edges = snapshot_edges(&topology);
 

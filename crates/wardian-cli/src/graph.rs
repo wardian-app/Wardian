@@ -5,8 +5,8 @@ use crate::errors::{CliError, ExitCode};
 use crate::live;
 use wardian_core::identity::{self, AgentIdentity, ListFilters, Scope};
 use wardian_core::topology::{
-    load_topology, pair_activity_from_records, resolve_neighbors, save_topology, AgentRef,
-    PairActivity, Topology,
+    load_reconciled_topology, load_topology, pair_activity_from_records, resolve_neighbors,
+    save_topology, AgentRef, PairActivity, Topology,
 };
 
 /// Full agent roster: live control endpoint when the app runs, DB fallback otherwise.
@@ -32,6 +32,39 @@ fn agent_snapshot() -> Result<Vec<AgentIdentity>, CliError> {
 fn wardian_home() -> Result<std::path::PathBuf, CliError> {
     wardian_core::paths::wardian_home()
         .ok_or_else(|| CliError::generic("Could not determine Wardian home"))
+}
+
+/// Reconcile persisted topology against the roster before graph commands
+/// surface or mutate it. Normal graph reads do not write unless stale records
+/// must be removed.
+fn reconciled_topology(
+    home: &std::path::Path,
+    agents: &[AgentIdentity],
+) -> Result<Topology, CliError> {
+    let Ok(conn) = crate::open_db() else {
+        return Ok(load_topology(home));
+    };
+    let persisted_agents = identity::list_agents(
+        &conn,
+        &ListFilters {
+            scope: Scope::All,
+            caller_workspace: None,
+            status: None,
+            class: None,
+            workspace: None,
+        },
+    );
+    let Ok(persisted_agents) = persisted_agents else {
+        return Ok(load_topology(home));
+    };
+    let mut known_agents: BTreeSet<String> = persisted_agents
+        .into_iter()
+        .map(|agent| agent.uuid)
+        .collect();
+    known_agents.extend(agents.iter().map(|agent| agent.uuid.clone()));
+    load_reconciled_topology(home, &known_agents)
+        .map(|(topology, _)| topology)
+        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 /// UUID match wins; otherwise a unique name match. Duplicated names are ambiguous.
@@ -167,7 +200,7 @@ fn handle_mutation(
     let (x, y) = resolve_pair(&agents, &ctx, a, b)?;
 
     let home = wardian_home()?;
-    let mut topology = load_topology(&home);
+    let mut topology = reconciled_topology(&home, &agents)?;
     let created_at = chrono::Utc::now().to_rfc3339();
     let changed = match kind {
         Mutation::Link => topology.add_edge(&x, &y, &created_at),
@@ -202,7 +235,8 @@ fn handle_mutation(
 
 fn render_graph_show(pretty: bool) -> Result<String, CliError> {
     let agents = agent_snapshot()?;
-    let topology = load_topology(&wardian_home()?);
+    let home = wardian_home()?;
+    let topology = reconciled_topology(&home, &agents)?;
     // Activity is best-effort here: structure must render even if interactions
     // can't be read (e.g. table missing in an older DB).
     let activity = load_pair_activity().unwrap_or_default();
@@ -237,7 +271,8 @@ fn render_graph_neighbors(target: Option<&str>, pretty: bool) -> Result<String, 
             resolve_endpoint(&agents, &session_id)?.uuid.clone()
         }
     };
-    let topology = load_topology(&wardian_home()?);
+    let home = wardian_home()?;
+    let topology = reconciled_topology(&home, &agents)?;
     let refs: Vec<AgentRef> = agents
         .iter()
         .map(|agent| AgentRef {
@@ -276,7 +311,8 @@ fn render_graph_neighbors(target: Option<&str>, pretty: bool) -> Result<String, 
 
 fn render_graph_activity(pretty: bool) -> Result<String, CliError> {
     let agents = agent_snapshot()?;
-    let topology = load_topology(&wardian_home()?);
+    let home = wardian_home()?;
+    let topology = reconciled_topology(&home, &agents)?;
     let activity = load_pair_activity().map_err(CliError::generic)?;
     let unmapped: BTreeSet<(String, String)> = unmapped_key_set(&topology, &activity, &agents);
     let names = name_index(&agents);
