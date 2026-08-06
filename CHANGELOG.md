@@ -4,6 +4,15 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.5.3](https://github.com/wardian-app/Wardian/compare/v0.5.2...v0.5.3) (2026-08-06)
+
+
+### Bug Fixes
+
+* **chat:** polish composer model and file input ([#843](https://github.com/wardian-app/Wardian/issues/843)) ([016855f](https://github.com/wardian-app/Wardian/commit/016855f92c7b533c6ba81f7d83743913019e0f27))
+* harden terminal recovery after foregrounding ([#847](https://github.com/wardian-app/Wardian/issues/847)) ([67f5183](https://github.com/wardian-app/Wardian/commit/67f51837ac46684ee53aa5541f85b3bf69809959))
+* **views:** unify Garden and Graph zoom ([#845](https://github.com/wardian-app/Wardian/issues/845)) ([32ae3dd](https://github.com/wardian-app/Wardian/commit/32ae3ddd50d4e19e9dd0d8eb37d894c3a08d17f3))
+
 ## [0.5.2](https://github.com/wardian-app/Wardian/compare/v0.5.1...v0.5.2) (2026-08-04)
 
 
