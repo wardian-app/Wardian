@@ -49,18 +49,7 @@ pub async fn run_headless_process_prompt(
             .map_err(|error| error.to_string())?,
     };
 
-    let value = crate::manager::run_headless_with_options(crate::manager::HeadlessRunOptions {
-        cwd: &request.cwd,
-        prompt: &request.prompt,
-        wardian_session_id: &request.session_id,
-        resume_session: request.resume_session.as_deref(),
-        output_format: "json",
-        provider_name: &request.provider,
-        config_override: request.config_override.as_ref(),
-        timeout: request.timeout,
-        lease_owner: request.lease_owner.clone(),
-    })
-    .await;
+    let value = run_with_session_lease_retries(&request).await;
 
     match value {
         Ok(value) => {
@@ -111,6 +100,65 @@ pub async fn run_headless_process_prompt(
                 .await?;
             Err(error)
         }
+    }
+}
+
+/// Runs the headless prompt, retrying only a launch that Prime's session lease
+/// refused.
+///
+/// Prime is the only provider that guards its session file with a lease keyed
+/// to the owning process, so a resume issued while the previous worker is still
+/// exiting fails for a reason that clears on its own. Every other failure, and
+/// every other provider, is returned on the first attempt. Retries are
+/// deliberately not recorded as separate delivery attempts: one prompt still
+/// produces one attempt row, whose outcome is the one the caller sees.
+async fn run_with_session_lease_retries(
+    request: &HeadlessProcessPromptRequest,
+) -> Result<serde_json::Value, String> {
+    let mut backoff = session_lease_retry_backoff(&request.provider).iter();
+
+    loop {
+        let outcome =
+            crate::manager::run_headless_with_options(crate::manager::HeadlessRunOptions {
+                cwd: &request.cwd,
+                prompt: &request.prompt,
+                wardian_session_id: &request.session_id,
+                resume_session: request.resume_session.as_deref(),
+                output_format: "json",
+                provider_name: &request.provider,
+                config_override: request.config_override.as_ref(),
+                timeout: request.timeout,
+                lease_owner: request.lease_owner.clone(),
+            })
+            .await;
+
+        let Err(error) = outcome else {
+            return outcome;
+        };
+        if !crate::providers::PrimeProvider::is_session_lease_conflict(&error) {
+            return Err(error);
+        }
+        let Some(delay) = backoff.next() else {
+            return Err(error);
+        };
+
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] Prime session lease busy for {} (owner {}); retrying in {}ms",
+            request.session_id,
+            crate::providers::PrimeProvider::session_lease_conflict_owner(&error)
+                .unwrap_or_else(|| "unnamed".to_string()),
+            delay.as_millis()
+        ));
+        tokio::time::sleep(*delay).await;
+    }
+}
+
+/// The retry schedule for a provider, empty for everything but Prime.
+fn session_lease_retry_backoff(provider: &str) -> &'static [Duration] {
+    if provider.eq_ignore_ascii_case("prime") {
+        &crate::providers::PrimeProvider::SESSION_LEASE_RETRY_BACKOFF
+    } else {
+        &[]
     }
 }
 
@@ -369,6 +417,74 @@ mod tests {
 
         assert!(error.contains("exceeded its"));
         assert!(started.elapsed() < Duration::from_secs(2));
+        let attempts = wardian_core::db::list_interaction_delivery_attempts(&interaction.id)
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].delivery_state, "failed");
+    }
+
+    #[test]
+    fn only_prime_retries_a_busy_session_lease() {
+        assert!(!session_lease_retry_backoff("prime").is_empty());
+        assert!(!session_lease_retry_backoff("Prime").is_empty());
+        // No other provider leases its session file, so a failure there is
+        // final and must surface immediately.
+        for provider in [
+            "claude",
+            "codex",
+            "gemini",
+            "opencode",
+            "antigravity",
+            "mock",
+        ] {
+            assert!(session_lease_retry_backoff(provider).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_prime_launch_still_records_one_attempt() {
+        if !node_available() {
+            return;
+        }
+        let _env = TestEnv::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = crate::state::AppState::new();
+        let interaction = state
+            .interactions
+            .create_message_durable(
+                None,
+                vec!["agent-1".to_string()],
+                InteractionBodyRef::Inline {
+                    body: "hello".to_string(),
+                },
+            )
+            .await
+            .expect("interaction");
+
+        // The isolated WARDIAN_HOME has no Prime kernel environment, so this
+        // fails the readiness gate rather than the session lease. That is the
+        // point: a non-lease failure must return on the first attempt instead
+        // of sitting through the backoff or recording extra attempt rows.
+        let started = std::time::Instant::now();
+        run_headless_process_prompt(
+            &state,
+            HeadlessProcessPromptRequest {
+                node: "audit".to_string(),
+                provider: "prime".to_string(),
+                cwd: workspace.path().to_path_buf(),
+                prompt: "hello".to_string(),
+                session_id: "agent-1".to_string(),
+                resume_session: None,
+                config_override: None,
+                interaction_id: Some(interaction.id.clone()),
+                timeout: Duration::from_secs(20),
+                lease_owner: None,
+            },
+        )
+        .await
+        .expect_err("prime headless run should fail without a lease conflict");
+
+        assert!(started.elapsed() < Duration::from_secs(10));
         let attempts = wardian_core::db::list_interaction_delivery_attempts(&interaction.id)
             .expect("attempts");
         assert_eq!(attempts.len(), 1);

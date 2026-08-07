@@ -14,7 +14,7 @@ import {
 
 // Gemini is deprecated. Keep the real delivery matrix aligned with the
 // providers Wardian currently supports for new agent sessions.
-export const PROVIDERS = ["codex", "claude", "opencode", "antigravity"];
+export const PROVIDERS = ["codex", "claude", "opencode", "antigravity", "prime"];
 
 export const INPUT_CASES = [
   {
@@ -38,6 +38,9 @@ const DEFAULT_CASES = ["mailbox-short"];
 const DEFAULT_PROVIDER_MODELS = {
   claude: "haiku",
   opencode: "opencode/deepseek-v4-flash-free",
+  // Prime is a meta-provider, so its model id has to name the backend too:
+  // a bare `gpt-5.3-codex-spark` resolves to azure-openai-responses instead.
+  prime: "openai-codex/gpt-5.3-codex-spark",
 };
 
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";

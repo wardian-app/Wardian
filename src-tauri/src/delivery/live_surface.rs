@@ -265,6 +265,71 @@ pub async fn submit_live_surface_prompt(
                 .await);
             }
         }
+    } else if provider == "prime" {
+        // Prime's daemon is the agent and the TUI is only one of its clients,
+        // so Wardian hands the message to the supervisor instead of typing it.
+        // That answers with an acknowledgement, which is a fact about the
+        // message rather than an inference from what the screen paints next --
+        // so there is no readiness wait and no turn-start cursor here.
+        let bound_provider_session = {
+            let agents = state.agents.lock().await;
+            agents
+                .get(&request.session_id)
+                .and_then(|agent| agent.config.lock().ok())
+                .and_then(|config| config.resume_session.clone())
+        };
+        let selector = crate::delivery::prime_send::wait_for_worker_selector(
+            &request.session_id,
+            bound_provider_session.as_deref(),
+        )
+        .await
+        .unwrap_or_default();
+
+        match crate::delivery::prime_send::deliver(crate::delivery::prime_send::PrimeSendRequest {
+            selector: &selector,
+            prompt: &request.prompt,
+        })
+        .await
+        {
+            Ok(outcome) => {
+                if let Some(detail) = payload_sent_detail.clone() {
+                    persist_live_surface_delivery_detail(
+                        state,
+                        &interaction_id,
+                        &request.session_id,
+                        &detail,
+                    )
+                    .await
+                    .map_err(|message| LiveSurfaceDeliveryError {
+                        message,
+                        detail: Some(detail.clone()),
+                        retry_safe: true,
+                    })?;
+                    crate::control::push_delivery_for_delivery_service(
+                        state,
+                        &request.session_id,
+                        &detail,
+                    )
+                    .await;
+                }
+                outcome
+            }
+            Err(error) => {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] Prime send for {} failed at {}: {}",
+                    request.session_id, error.phase, error.message
+                ));
+                return Err(record_terminal_delivery_error(
+                    state,
+                    &request,
+                    &interaction_id,
+                    &name,
+                    &provider,
+                    error,
+                )
+                .await);
+            }
+        }
     } else {
         if let Err(message) =
             crate::control::wait_for_terminal_ready_for_delivery_service(state, &request.session_id)

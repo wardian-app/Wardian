@@ -919,7 +919,11 @@ async fn canonical_scrollback_policy_ignores_fragmented_erase_scrollback() {
     let broker = Arc::new(TerminalSessionBroker::with_timer(timer));
     let (runtime, _, _) = runtime();
     let generation = broker
-        .start_or_replace_runtime("session-1", runtime.ignore_scrollback_erase(), geometry(80, 4))
+        .start_or_replace_runtime(
+            "session-1",
+            runtime.ignore_scrollback_erase(),
+            geometry(80, 4),
+        )
         .await
         .expect("start scrollback-preserving runtime");
     broker

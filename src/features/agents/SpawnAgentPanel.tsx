@@ -302,7 +302,12 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
             }}
           >
             {providerOptions.map((option) => (
-              <option key={option.value} value={option.value} disabled={!option.available}>
+              <option
+                key={option.value}
+                value={option.value}
+                disabled={!option.available}
+                title={option.reason ?? undefined}
+              >
                 {option.label}
               </option>
             ))}

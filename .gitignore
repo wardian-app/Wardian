@@ -74,6 +74,8 @@ e2e/test-results/
 e2e/playwright-report/
 e2e/screenshots/
 playwright-report/
+# Running `playwright test` without --config lands output at the repo root.
+test-results/
 
 # Coverage reports
 coverage/

@@ -160,7 +160,7 @@ pub fn resolve_agent_with_catalog(
 fn is_known_provider(value: &str) -> bool {
     matches!(
         value,
-        "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "mock"
+        "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "prime" | "mock"
     )
 }
 

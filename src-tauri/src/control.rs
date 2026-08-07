@@ -2351,6 +2351,11 @@ async fn wait_for_terminal_ready_for_control_send(
             antigravity_output_has_ready_prompt,
         )
         .await
+    } else if info.provider == "prime" {
+        // Prime's status never leaves its spawn value on the interactive path,
+        // because the TUI emits nothing parse_output can read, so the generic
+        // "is the agent idle" fallback below would never let a message through.
+        wait_for_terminal_output(state, &info.uuid, 15_000, prime_output_has_ready_prompt).await
     } else if provider_input_has_known_not_ready_state(state, &info.uuid).await {
         Err(format!("Agent {} provider input is not ready", info.uuid))
     } else if current_agent_status_is_idle(state, &info.uuid).await? {
@@ -2694,6 +2699,60 @@ pub(crate) fn antigravity_output_has_ready_prompt(output: &str) -> bool {
 
 fn antigravity_ready_prompt_footer_line(line: &str) -> bool {
     line.contains("Press up to edit queued messages") || line.contains("? for shortcuts")
+}
+
+/// Words Prime Agent's TUI puts beside its spinner while a turn is running.
+///
+/// Prime Agent 0.7.0 renders `<spinner> Waiting · 3s`, switching the word as
+/// the turn progresses (`Thinking`, `Writing`) and appending token counts. The
+/// separator is what distinguishes the status line from the same word appearing
+/// in agent output.
+const PRIME_WORKING_WORDS: [&str; 4] = ["Waiting", "Thinking", "Writing", "Running"];
+
+/// True when Prime Agent's TUI is showing a turn in progress.
+///
+/// This is the only turn-start signal the interactive transport has: the TUI
+/// publishes no structured events, so without it a delivered message is
+/// recorded as failed even though the model answered it.
+pub(crate) fn prime_output_is_working(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    cleaned
+        .lines()
+        .map(str::trim)
+        .any(prime_working_status_line)
+}
+
+fn prime_working_status_line(line: &str) -> bool {
+    PRIME_WORKING_WORDS.iter().any(|word| {
+        line.split_once(word)
+            // `Thinking · 2s`, not a message that merely mentions thinking.
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('·'))
+    })
+}
+
+/// True when Prime Agent's TUI is back at its idle prompt.
+///
+/// The footer carries `? for shortcuts` only while input is accepted; during a
+/// turn Prime renders the same footer without it.
+pub(crate) fn prime_output_has_ready_prompt(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    let lines = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    // Scan back from the end: an idle footer earlier in the buffer says
+    // nothing about the state Prime is in now.
+    for line in lines.iter().rev().take(8) {
+        if prime_working_status_line(line) {
+            return false;
+        }
+        if line.contains("? for shortcuts") {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) async fn mark_delivered_agents_prompt_started(

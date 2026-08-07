@@ -132,11 +132,7 @@ fn snapshot_state_path(workspace: &str) -> Result<PathBuf, String> {
     Ok(snapshot_dir()?.join(format!("{}.json", workspace_key(workspace))))
 }
 
-pub(crate) fn snapshot_ref_name(
-    agent_id: &str,
-    conversation_id: &str,
-    turn_index: u64,
-) -> String {
+pub(crate) fn snapshot_ref_name(agent_id: &str, conversation_id: &str, turn_index: u64) -> String {
     format!(
         "{}/{}/{}/{}",
         SNAPSHOT_REF_ROOT,
@@ -151,7 +147,13 @@ pub(crate) fn snapshot_ref_name(
 fn sanitize_ref_component(value: &str) -> String {
     let cleaned: String = value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if cleaned.is_empty() {
         "unknown".to_string()
@@ -232,8 +234,7 @@ fn save_state(workspace: &str, state: &ChangeSnapshotIndex) -> Result<(), String
     }
     let raw = serde_json::to_string_pretty(state)
         .map_err(|error| format!("Failed to serialize snapshot state: {}", error))?;
-    std::fs::write(&path, raw)
-        .map_err(|error| format!("Failed to write snapshot state: {}", error))
+    std::fs::write(&path, raw).map_err(|error| format!("Failed to write snapshot state: {}", error))
 }
 
 /// Takes one snapshot of the working tree.
@@ -267,7 +268,9 @@ pub(crate) fn take_snapshot(request: &SnapshotRequest) -> Result<SnapshotOutcome
         ],
         &env,
     )?;
-    let tree_id = run_git_with_env(cwd, &["write-tree"], &env)?.trim().to_string();
+    let tree_id = run_git_with_env(cwd, &["write-tree"], &env)?
+        .trim()
+        .to_string();
     if tree_id.is_empty() {
         return Err("write-tree produced no tree".to_string());
     }
@@ -286,9 +289,12 @@ pub(crate) fn take_snapshot(request: &SnapshotRequest) -> Result<SnapshotOutcome
     );
     // Parentless: no `-p`. The commit is independently deletable, so retention is
     // a ref drop plus garbage collection with no history rewriting.
-    let commit_id = run_git(cwd, &["commit-tree", tree_id.as_str(), "-m", message.as_str()])?
-        .trim()
-        .to_string();
+    let commit_id = run_git(
+        cwd,
+        &["commit-tree", tree_id.as_str(), "-m", message.as_str()],
+    )?
+    .trim()
+    .to_string();
     if commit_id.is_empty() {
         return Err("commit-tree produced no commit".to_string());
     }
@@ -312,11 +318,11 @@ pub(crate) fn take_snapshot(request: &SnapshotRequest) -> Result<SnapshotOutcome
     state.schema = CHANGE_SNAPSHOT_SCHEMA;
     state.workspace = cwd.to_string();
     state.last_tree_id = Some(tree_id);
-    state
-        .snapshots
-        .retain(|existing| existing.turn_index != snapshot.turn_index
+    state.snapshots.retain(|existing| {
+        existing.turn_index != snapshot.turn_index
             || existing.conversation_id != snapshot.conversation_id
-            || existing.agent_id != snapshot.agent_id);
+            || existing.agent_id != snapshot.agent_id
+    });
     state.snapshots.push(snapshot.clone());
 
     let dropped = apply_retention(&mut state);
@@ -420,9 +426,7 @@ pub(crate) fn first_snapshot_commit(
         .snapshots
         .iter()
         .filter(|snapshot| snapshot.agent_id == agent_id)
-        .filter(|snapshot| {
-            conversation_id.is_none_or(|id| snapshot.conversation_id == id)
-        })
+        .filter(|snapshot| conversation_id.is_none_or(|id| snapshot.conversation_id == id))
         .map(|snapshot| snapshot.commit_id.clone())
         .next()
 }
@@ -431,7 +435,11 @@ pub(crate) fn first_snapshot_commit(
 /// can orphan a snapshot, and an orphaned baseline must degrade to Phase 1
 /// rather than error.
 pub(crate) fn commit_resolves(cwd: &str, commit: &str) -> bool {
-    run_git(cwd, &["rev-parse", "--verify", &format!("{}^{{commit}}", commit)]).is_ok()
+    run_git(
+        cwd,
+        &["rev-parse", "--verify", &format!("{}^{{commit}}", commit)],
+    )
+    .is_ok()
 }
 
 /// Removes every snapshot ref for an agent, used when an agent is deleted.
@@ -507,7 +515,9 @@ fn latest_turn_for_conversation(
     let (records, _skipped) = archive
         .turn_records_for_conversations_resilient(std::slice::from_ref(&entry))
         .ok()?;
-    let (_entry, turn) = records.into_iter().max_by_key(|(_, turn)| turn.turn_index)?;
+    let (_entry, turn) = records
+        .into_iter()
+        .max_by_key(|(_, turn)| turn.turn_index)?;
     Some((
         turn.turn_index,
         turn.files.written.clone(),
@@ -524,7 +534,9 @@ pub(crate) async fn snapshot_completed_turn(state: &AppState, session_id: &str) 
     let Some(cwd) = agent_workspace(state, session_id).await else {
         return;
     };
-    let Ok(Some(conversation_id)) = state.conversation_archive.active_conversation_id(session_id)
+    let Ok(Some(conversation_id)) = state
+        .conversation_archive
+        .active_conversation_id(session_id)
     else {
         return;
     };
@@ -576,7 +588,10 @@ mod tests {
 
     #[test]
     fn a_read_only_turn_is_skipped_without_a_tree_walk() {
-        assert!(!turn_may_have_written(&[], &["read".to_string(), "grep".to_string()]));
+        assert!(!turn_may_have_written(
+            &[],
+            &["read".to_string(), "grep".to_string()]
+        ));
         assert!(!turn_may_have_written(&[], &[]));
     }
 
@@ -712,7 +727,10 @@ mod tests {
 
     #[test]
     fn divergence_needs_both_thresholds_crossed_independently() {
-        assert!(!baseline_diverged(SNAPSHOT_DIVERGENCE_TURNS, SNAPSHOT_DIVERGENCE_PATHS));
+        assert!(!baseline_diverged(
+            SNAPSHOT_DIVERGENCE_TURNS,
+            SNAPSHOT_DIVERGENCE_PATHS
+        ));
         assert!(baseline_diverged(SNAPSHOT_DIVERGENCE_TURNS + 1, 0));
         assert!(baseline_diverged(0, SNAPSHOT_DIVERGENCE_PATHS + 1));
     }
@@ -751,7 +769,12 @@ mod tests {
             run_git(cwd, &["config", "user.name", "Test"]).unwrap();
             run_git(cwd, &["config", "commit.gpgsign", "false"]).unwrap();
 
-            let this = Self { _home: home, repo, previous_home, _env_guard };
+            let this = Self {
+                _home: home,
+                repo,
+                previous_home,
+                _env_guard,
+            };
             this.write("tracked.txt", "one\n");
             run_git(this.cwd(), &["add", "-A"]).unwrap();
             run_git(this.cwd(), &["commit", "-m", "initial"]).unwrap();
@@ -854,7 +877,10 @@ mod tests {
         let outcome = take_snapshot(&repo.request(2)).unwrap();
 
         assert!(matches!(outcome, SnapshotOutcome::Created(_)));
-        assert!(index_path.is_file(), "the index must be re-seeded, not left missing");
+        assert!(
+            index_path.is_file(),
+            "the index must be re-seeded, not left missing"
+        );
     }
 
     #[test]
@@ -878,7 +904,10 @@ mod tests {
         let repo = TestRepo::new();
         repo.write("added.txt", "new\n");
         take_snapshot(&repo.request(1)).unwrap();
-        assert_eq!(take_snapshot(&repo.request(2)).unwrap(), SnapshotOutcome::TreeUnchanged);
+        assert_eq!(
+            take_snapshot(&repo.request(2)).unwrap(),
+            SnapshotOutcome::TreeUnchanged
+        );
 
         repo.write("added.txt", "changed\n");
         let outcome = take_snapshot(&repo.request(3)).unwrap();
@@ -981,7 +1010,10 @@ mod tests {
             Some(latest.commit_id.clone()),
         );
         assert!(commit_resolves(repo.cwd(), &latest.commit_id));
-        assert!(!commit_resolves(repo.cwd(), "0000000000000000000000000000000000000000"));
+        assert!(!commit_resolves(
+            repo.cwd(),
+            "0000000000000000000000000000000000000000"
+        ));
     }
 
     // ---- Budget gate ------------------------------------------------------
@@ -1005,7 +1037,10 @@ mod tests {
     fn snapshots_stay_within_their_measured_budgets() {
         let repo = TestRepo::new();
         for index in 0..300 {
-            repo.write(&format!("file-{index:03}.txt"), &format!("contents {index}\n"));
+            repo.write(
+                &format!("file-{index:03}.txt"),
+                &format!("contents {index}\n"),
+            );
         }
         run_git(repo.cwd(), &["add", "-A"]).unwrap();
         run_git(repo.cwd(), &["commit", "-m", "fixture"]).unwrap();
@@ -1051,7 +1086,10 @@ mod tests {
         let refs_before = repo.git(&["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_ROOT]);
 
         for turn in 2..6u64 {
-            assert_eq!(take_snapshot(&repo.request(turn)).unwrap(), SnapshotOutcome::TreeUnchanged);
+            assert_eq!(
+                take_snapshot(&repo.request(turn)).unwrap(),
+                SnapshotOutcome::TreeUnchanged
+            );
         }
 
         assert_eq!(

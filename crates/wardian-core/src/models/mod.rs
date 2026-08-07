@@ -14,7 +14,7 @@ pub mod workflow;
 pub use agent_config::{
     AgentClassDefinition, AgentConfig, AntigravityProviderConfig, ClaudeProviderConfig,
     CodexProviderConfig, GeminiProviderConfig, MockProviderConfig, OpenCodeProviderConfig,
-    ProviderConfig, ProviderConfigEncoding,
+    PrimeProviderConfig, ProviderConfig, ProviderConfigEncoding,
 };
 pub use agent_telemetry::AgentTelemetry;
 pub use app_telemetry::AppTelemetry;

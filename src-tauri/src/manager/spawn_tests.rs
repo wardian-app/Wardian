@@ -48,13 +48,10 @@ fn conflicting_caller_owned_init_leaves_identity_and_timestamp_unchanged() {
     for provider in ["claude", "gemini", "mock"] {
         let config = config(provider, "wardian-id", Some("expected-id"), None);
         let timestamp = Arc::new(Mutex::new(None));
-        assert!(handle_provider_init_event(
-            provider,
-            &init("conflicting-id"),
-            &config,
-            &timestamp,
-        )
-        .is_err());
+        assert!(
+            handle_provider_init_event(provider, &init("conflicting-id"), &config, &timestamp,)
+                .is_err()
+        );
         assert_eq!(
             config.lock().unwrap().resume_session.as_deref(),
             Some("expected-id")
@@ -78,13 +75,10 @@ fn matching_resumed_codex_init_confirms_exact_thread() {
 fn malformed_fresh_codex_init_does_not_capture_identity_or_timestamp() {
     let config = config("codex", "wardian-id", None, None);
     let timestamp = Arc::new(Mutex::new(None));
-    assert!(handle_provider_init_event(
-        "codex",
-        &init("not-a-thread-id"),
-        &config,
-        &timestamp,
-    )
-    .is_err());
+    assert!(
+        handle_provider_init_event("codex", &init("not-a-thread-id"), &config, &timestamp,)
+            .is_err()
+    );
     assert_eq!(config.lock().unwrap().resume_session, None);
     assert_eq!(*timestamp.lock().unwrap(), None);
 }

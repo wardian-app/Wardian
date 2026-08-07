@@ -123,6 +123,63 @@ pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std:
     Ok(())
 }
 
+/// Marks persisted Prime agents whose daemon worker is still running with no
+/// client attached.
+///
+/// Prime is the only provider whose sessions outlive the app: closing Wardian
+/// detaches the client but leaves a resident worker spending tokens. Without
+/// this pass those agents come back as `Off`, which is a lie the user cannot
+/// act on. `prime-agent list --all --json` is the only way to see them.
+///
+/// This runs after `reconcile_headless_agents`, which has already written `Off`
+/// for every agent with no live process, so it only ever upgrades a status.
+pub async fn reconcile_prime_detached_agents() -> std::result::Result<(), String> {
+    // resume_session lives in the persisted configs, not the database rows.
+    let prime_agents = manager::persisted_agent_configs()
+        .into_iter()
+        .filter(|config| config.provider.eq_ignore_ascii_case("prime"))
+        .collect::<Vec<_>>();
+
+    // Nothing to reconcile means no reason to pay for a CLI launch, which
+    // would otherwise start Prime's daemon on every app start.
+    if prime_agents.is_empty() {
+        return Ok(());
+    }
+
+    let provider = crate::providers::ProviderFactory::resolve("prime")?;
+    let (program, base_args) = provider.get_executable();
+    let output = tokio::process::Command::new(&program)
+        .args(base_args)
+        .args(crate::providers::PrimeProvider::list_args())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("could not list Prime sessions: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("prime-agent list exited with {}", output.status));
+    }
+
+    let sessions = crate::providers::PrimeProvider::parse_list_output(&String::from_utf8_lossy(
+        &output.stdout,
+    ))?;
+    let resume_sessions = prime_agents
+        .iter()
+        .map(|config| (config.session_id.as_str(), config.resume_session.as_deref()))
+        .collect::<Vec<_>>();
+
+    for (session_id, worker) in
+        crate::providers::PrimeProvider::detached_agent_sessions(&sessions, resume_sessions)
+    {
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] Prime agent {session_id} is still running detached in worker {}",
+            worker.id
+        ));
+        let _ = wardian_core::db::update_agent_status(&session_id, "Detached", None);
+    }
+
+    Ok(())
+}
+
 async fn emit_metrics_tick(metrics_handle: tauri::AppHandle) {
     let state = metrics_handle.state::<AppState>();
     let metrics = manager::get_all_metrics(&state).await;
@@ -270,6 +327,12 @@ pub fn run() {
                 );
             }
 
+            // Prime Agent cannot build its own IPython kernel on Windows, and
+            // that kernel is the only tool it exposes to the model. Building it
+            // here means a user who picks Prime later finds it ready instead of
+            // being handed setup instructions. No-ops when it already exists.
+            crate::providers::prime_kernel::start_background_provisioning();
+
             let control_endpoint_claim = control::claim_control_endpoint().map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
@@ -333,6 +396,14 @@ pub fn run() {
 
                 if let Err(e) = reconcile_headless_agents().await {
                     eprintln!("Failed to reconcile headless agents: {}", e);
+                }
+                // Must follow the headless pass, which writes Off for every
+                // agent without a live process; a detached Prime worker is one
+                // of those and needs the truer status.
+                if let Err(e) = reconcile_prime_detached_agents().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Prime detached-worker reconciliation skipped: {e}"
+                    ));
                 }
                 crate::workflow::schedule::start_scheduler(app_handle.clone()).await;
 
@@ -427,10 +498,17 @@ pub fn run() {
                                     .cloned()
                                     .unwrap_or((None, None, None));
 
-                                if last_status.as_deref() == Some("Headless") {
+                                // A detached Prime worker is already running the
+                                // session. Spawning a client for it would either
+                                // lose the lease race or start a second worker,
+                                // so it is restored inert like a headless agent
+                                // and left for the user to reattach.
+                                if matches!(last_status.as_deref(), Some("Headless") | Some("Detached"))
+                                {
+                                    let status = last_status.as_deref().unwrap_or("Headless");
                                     let agent = restored_agent_without_process(
                                         config.clone(),
-                                        "Headless",
+                                        status,
                                         String::new(),
                                         last_pid,
                                         last_born,

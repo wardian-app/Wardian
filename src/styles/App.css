@@ -22,6 +22,10 @@
   --color-wardian-error: #dc2626;
   --color-wardian-off: #4b5563;
   --color-wardian-headless: #8b5cf6;
+  /* Running outside this app: alive and spending tokens, but not attached.
+     Deliberately adjacent to headless violet rather than to idle or
+     processing, since the agent is not one this window is driving. */
+  --color-wardian-detached: #7c3aed;
 
   /* Workflow Node Semantics */
   --color-workflow-agent: #3b82f6;
@@ -242,6 +246,7 @@
   --color-wardian-error: #ef4444;
   --color-wardian-off: #6e7681;
   --color-wardian-headless: #a78bfa;
+  --color-wardian-detached: #c4b5fd;
 
   /* Structural Components for Dark Mode */
   --color-wardian-sidebar-primary: #141414;

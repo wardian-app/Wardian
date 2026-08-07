@@ -392,6 +392,68 @@ export const AdvancedSettings: React.FC<AdvancedSettingsProps> = ({
                     />
                 </div>
               )}
+
+              {provider === 'prime' && providerConfig.type === 'prime' && (
+                <>
+                  <div>
+                    <label
+                      htmlFor="prime-goal"
+                      className="block text-[10px] font-bold text-muted-neutral mb-1"
+                    >
+                      Persistent Goal
+                    </label>
+                    <input
+                      id="prime-goal"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-1.5 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors"
+                      placeholder="Objective carried across turns"
+                      value={providerConfig.goal || ""}
+                      onChange={(e) => updateProviderConfigField("goal", e.target.value || undefined)}
+                    />
+                    <p className="mt-1 text-[10px] text-muted-neutral">
+                      Only seeds a new session. Resumed sessions keep their existing goal.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="flex items-center gap-2 text-[10px] font-bold text-muted-neutral">
+                      <input
+                        type="checkbox"
+                        checked={providerConfig.autonomous ?? false}
+                        onChange={(e) => updateProviderConfigField("autonomous", e.target.checked || undefined)}
+                      />
+                      Autonomous Mode
+                    </label>
+                    <p className="mt-1 text-[10px] text-muted-neutral">
+                      Keeps requesting work until every gate passes or a budget is reached.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="prime-autonomous-gates"
+                      className="block text-[10px] font-bold text-muted-neutral mb-1"
+                    >
+                      Completion Gates
+                    </label>
+                    <textarea
+                      id="prime-autonomous-gates"
+                      className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors h-16 resize-none font-mono"
+                      placeholder={"npm run lint\ncargo clippy"}
+                      value={(providerConfig.autonomous_gates || []).join("\n")}
+                      onChange={(e) => {
+                        const gates = e.target.value
+                          .split("\n")
+                          .map((gate) => gate.trim())
+                          .filter((gate) => gate.length > 0);
+                        updateProviderConfigField("autonomous_gates", gates.length > 0 ? gates : undefined);
+                      }}
+                    />
+                    <p className="mt-1 text-[10px] text-muted-neutral">
+                      One shell command per line. All must pass before the run can finish.
+                    </p>
+                  </div>
+                </>
+              )}
           </div>
 
           {/* Custom Arguments */}

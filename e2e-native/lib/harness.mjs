@@ -615,6 +615,7 @@ export function formatAppShellTimeoutMessage({
     details.push(
       "The native WebView appears to be loading the Vite dev server, but the dev server is not reachable.",
       "Start it with `npm run vite`, or rebuild the debug app with `npm run tauri -- build --debug --no-bundle` before using the fast native runner.",
+      "Note: any plain `cargo build`, `cargo test`, or `cargo clippy --fix` in src-tauri relinks that same binary path as a dev build that loads devUrl, so a rebuild is needed again after one of those.",
     );
   }
 

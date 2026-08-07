@@ -45,9 +45,8 @@ pub struct ResolvedFire {
 /// find a blueprint nested in a library subfolder, not just one that sits
 /// flat in `library/workflows` with a filename matching its id.
 pub fn resolve_fire(req: &FireRequest) -> Result<ResolvedFire, String> {
-    let path = wardian_core::workflow::resolve_blueprint_path(&req.blueprint_id).ok_or_else(
-        || format!("could not resolve blueprint path for {}", req.blueprint_id),
-    )?;
+    let path = wardian_core::workflow::resolve_blueprint_path(&req.blueprint_id)
+        .ok_or_else(|| format!("could not resolve blueprint path for {}", req.blueprint_id))?;
     let blueprint =
         wardian_core::workflow::parse_file(&path).map_err(|err| format!("parse failed: {err}"))?;
     let run_id = wardian_core::engine::driver::new_run_id();

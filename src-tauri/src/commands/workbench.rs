@@ -285,10 +285,7 @@ mod tests {
             .expect("load migrated document")
             .document
             .expect("migrated document");
-        assert_eq!(
-            migrated.surfaces["surface-queue"].surface_type,
-            "inbox"
-        );
+        assert_eq!(migrated.surfaces["surface-queue"].surface_type, "inbox");
         assert_eq!(migrated.recently_closed[0].surface.surface_type, "inbox");
     }
 }

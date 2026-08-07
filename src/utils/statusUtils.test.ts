@@ -85,6 +85,17 @@ describe("deriveEffectiveStatus", () => {
     expect(deriveEffectiveStatus("", undefined, "Headless", true)).toBe("Headless");
   });
 
+  it("keeps Detached visible for an off agent whose provider worker still runs", () => {
+    // Prime leaves a resident worker behind when the app closes, so the
+    // persisted off flag must not hide an agent that is genuinely alive.
+    expect(deriveEffectiveStatus("", undefined, "Detached", true)).toBe("Detached");
+  });
+
+  it("does not let a stale terminal title override Detached", () => {
+    expect(deriveEffectiveStatus("Ready", undefined, "Detached")).toBe("Detached");
+    expect(deriveEffectiveStatus("Working", "Stale thought", "Detached")).toBe("Detached");
+  });
+
   it("normalizes raw provider variants before deriving a status", () => {
     expect(deriveEffectiveStatus("", undefined, "Processing")).toBe("Processing...");
     expect(deriveEffectiveStatus("", undefined, "Action Required")).toBe("Action Needed");
@@ -249,6 +260,14 @@ describe("deriveCurrentThought", () => {
       current_status: "Headless",
     }, true);
     expect(result).toEqual({ thought: "Headless", status: "Headless" });
+  });
+
+  it("reports a detached worker as running elsewhere rather than Off", () => {
+    const result = deriveCurrentThought("", undefined, {
+      ...baseMetrics,
+      current_status: "Detached",
+    }, true);
+    expect(result).toEqual({ thought: "Running elsewhere", status: "Detached" });
   });
 });
 

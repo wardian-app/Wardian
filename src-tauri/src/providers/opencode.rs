@@ -390,7 +390,12 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(temp.path().join("opencode.cmd").to_string_lossy().to_string())
+            Some(
+                temp.path()
+                    .join("opencode.cmd")
+                    .to_string_lossy()
+                    .to_string()
+            )
         );
     }
 
@@ -418,7 +423,12 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(temp.path().join("opencode.ps1").to_string_lossy().to_string())
+            Some(
+                temp.path()
+                    .join("opencode.ps1")
+                    .to_string_lossy()
+                    .to_string()
+            )
         );
     }
 
@@ -438,7 +448,12 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(temp.path().join("opencode.cmd").to_string_lossy().to_string())
+            Some(
+                temp.path()
+                    .join("opencode.cmd")
+                    .to_string_lossy()
+                    .to_string()
+            )
         );
     }
 
@@ -459,7 +474,13 @@ mod tests {
 
         assert_eq!(
             resolved,
-            Some(shim_dir.path().join("opencode.cmd").to_string_lossy().to_string())
+            Some(
+                shim_dir
+                    .path()
+                    .join("opencode.cmd")
+                    .to_string_lossy()
+                    .to_string()
+            )
         );
     }
 

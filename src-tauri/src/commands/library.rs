@@ -101,7 +101,10 @@ fn discover_skill_watch_targets(skills_dir: &Path) -> Result<Vec<PathBuf>, Strin
 /// external-link discovery is deliberately scoped to library skills only —
 /// deployed (target-side) skill junctions under `classes/*/.agents/skills`
 /// are not separately watched.
-fn discover_library_watch_targets(home: &Path, library_root: &Path) -> Result<Vec<PathBuf>, String> {
+fn discover_library_watch_targets(
+    home: &Path,
+    library_root: &Path,
+) -> Result<Vec<PathBuf>, String> {
     let mut targets = vec![library_root
         .canonicalize()
         .unwrap_or_else(|_| library_root.to_path_buf())];
@@ -358,7 +361,8 @@ fn resolve_deployed_skill_source_strict(
     deployed_path: &Path,
     sources: &[library::SkillSource],
 ) -> Option<String> {
-    if let Ok(marker) = fs::read_to_string(deployed_path.join(library::DEPLOYED_SKILL_SOURCE_FILE)) {
+    if let Ok(marker) = fs::read_to_string(deployed_path.join(library::DEPLOYED_SKILL_SOURCE_FILE))
+    {
         let marker = marker.trim().replace('\\', "/");
         if !marker.is_empty() && sources.iter().any(|s| s.rel_path == marker) {
             return Some(marker);

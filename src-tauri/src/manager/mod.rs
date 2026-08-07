@@ -147,12 +147,186 @@ pub(crate) fn cleanup_stale_persisted_session_processes() {
     }
 }
 
+/// Providers whose agent process must not be terminated by killing its process
+/// tree.
+///
+/// Prime Agent runs one machine-wide supervisor daemon, and that supervisor is
+/// a live descendant of whichever client first started it. Measured parent
+/// chain on Windows:
+///
+/// ```text
+/// node.exe --mode daemon   <- supervisor, serving every Prime session
+///   \_ node.exe            <- the prime-agent client that happened to start it
+///        \_ pwsh.exe       <- that client's shell
+/// ```
+///
+/// If Wardian spawned the client that started the supervisor, `taskkill /T`
+/// would reach the supervisor and take down every other Prime Agent session on
+/// the machine, including ones the user launched from their own terminal.
+/// Prime's own `stop <agent>` is the correct teardown; the client is then a
+/// plain PTY child that dies on its own.
+fn provider_forbids_process_tree_kill(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("prime")
+}
+
+/// Asks the supervisor which worker owns a pinned session directory.
+///
+/// Runs synchronously on the teardown path: one short listing is cheaper than
+/// leaving a worker running, and the answer is needed before the stop request
+/// can be addressed.
+fn prime_stop_selector_from_daemon(
+    program: &str,
+    base_args: &[String],
+    session_dir: &std::path::Path,
+) -> Option<String> {
+    let output = crate::utils::process::new_silent_std_command(program)
+        .args(base_args)
+        .args(crate::providers::PrimeProvider::list_args())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let sessions = crate::providers::PrimeProvider::parse_list_output(&String::from_utf8_lossy(
+        &output.stdout,
+    ))
+    .ok()?;
+    crate::providers::PrimeProvider::stop_selector_for_session_dir(&sessions, session_dir)
+}
+
+/// How long teardown waits for `prime-agent stop` to reach the supervisor.
+///
+/// Generous enough for a cold Node start plus a named-pipe round trip, short
+/// enough that quitting with several Prime agents does not feel hung.
+const PRIME_WORKER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Runs `prime-agent stop` and waits for it, because Wardian cannot outlive it.
+///
+/// This used to be dispatched fire-and-forget, on the reasoning that the
+/// request travels to the supervisor over its own socket and so does not depend
+/// on the client being torn down. That was wrong in the case that matters most.
+/// Wardian assigns its own process to a `kill_on_job_close` job object, so every
+/// child it spawns dies with it -- and on app quit the stop client was killed
+/// during Node's startup, before it had connected to anything. The worker then
+/// survived, still holding a model session.
+fn run_prime_worker_stop(command: &mut std::process::Command) -> Result<bool, String> {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let deadline = std::time::Instant::now() + PRIME_WORKER_STOP_TIMEOUT;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        if std::time::Instant::now() >= deadline {
+            // Leave it running rather than killing it: it may still land, and
+            // the job object will collect it if Wardian exits first.
+            return Err(format!(
+                "timed out after {}s",
+                PRIME_WORKER_STOP_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Asks Prime Agent's supervisor to stop one root session tree.
+///
+/// Killing the PTY only detaches the client: the daemon worker keeps running
+/// and keeps spending tokens. `prime-agent shutdown` is never used here, since
+/// it stops every agent on the machine.
+fn request_prime_worker_stop(agent: &ActiveAgent) {
+    let Ok(config) = agent.config.lock() else {
+        return;
+    };
+
+    // Prime's own daemon id when Wardian has observed one, otherwise the active
+    // session id, which `stop` also accepts.
+    let target = config
+        .prime_config()
+        .daemon_agent_id
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            config
+                .resume_session
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+        });
+    let session_id = config.session_id.clone();
+    drop(config);
+
+    let Ok(provider) = crate::providers::ProviderFactory::resolve("prime") else {
+        return;
+    };
+    let (program, base_args) = provider.get_executable();
+
+    // An agent torn down before its first reply has no identity of its own, but
+    // its worker is already registered under the session directory Wardian
+    // pinned for it. Ask the supervisor which one that is rather than leaking it.
+    let target = target.or_else(|| {
+        let session_dir = crate::providers::prime::session_dir_for_agent(&session_id)?;
+        let selector = prime_stop_selector_from_daemon(&program, &base_args, &session_dir)
+            .or_else(|| {
+                log_debug(&format!(
+                    "[Wardian] Prime agent {session_id} matched no daemon worker for {}",
+                    session_dir.display()
+                ));
+                None
+            })?;
+        Some(selector)
+    });
+
+    let Some(target) = target else {
+        log_debug(&format!(
+            "[Wardian] Prime agent {session_id} has no known daemon id; its worker may outlive the client"
+        ));
+        return;
+    };
+
+    let mut command = crate::utils::process::new_silent_std_command(&program);
+    command
+        .args(base_args)
+        .args(crate::providers::PrimeProvider::stop_args(target.trim()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    match run_prime_worker_stop(&mut command) {
+        Ok(true) => log_debug(&format!(
+            "[Wardian] Stopped Prime worker for {session_id} (agent {})",
+            target.trim()
+        )),
+        Ok(false) => log_debug(&format!(
+            "[Wardian] Prime refused the worker stop for {session_id} (agent {})",
+            target.trim()
+        )),
+        Err(err) => log_debug(&format!(
+            "[Wardian] Failed to stop the Prime worker for {session_id}: {err}"
+        )),
+    }
+}
+
 pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
+    let provider = agent
+        .config
+        .lock()
+        .ok()
+        .map(|config| config.provider.clone())
+        .unwrap_or_default();
+    let tree_kill_forbidden = provider_forbids_process_tree_kill(&provider);
+
+    if provider.eq_ignore_ascii_case("prime") {
+        request_prime_worker_stop(agent);
+    }
+
     // IMPORTANT: Kill the process tree FIRST while the parent is still alive.
     // If we kill the PTY child (cmd.exe) first, its children (claude.exe, node.exe,
     // etc.) become orphaned and taskkill /T can no longer enumerate them via parent PID.
     #[cfg(windows)]
-    {
+    if !tree_kill_forbidden {
         if let Some(pid) = agent.process_id {
             if let Err(err) = force_kill_process_tree(pid) {
                 let sid = agent.config.lock().unwrap().session_id.clone();
@@ -187,10 +361,23 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
 
     // Drop the Job Object last as a final safety net — its KILL_ON_JOB_CLOSE flag
     // will terminate any remaining processes still assigned to the job.
+    //
+    // The same shared-supervisor hazard applies here: the job would otherwise
+    // reap a daemon that other agents depend on, so it is released without
+    // killing rather than closed.
     #[cfg(windows)]
     {
-        let _ = agent.job_object.take();
+        if tree_kill_forbidden {
+            if let Some(job) = agent.job_object.take() {
+                crate::utils::process::release_job_without_killing(job);
+            }
+        } else {
+            let _ = agent.job_object.take();
+        }
     }
+
+    #[cfg(not(windows))]
+    let _ = tree_kill_forbidden;
 
     agent.process_id = None;
 }
@@ -768,17 +955,29 @@ pub(crate) fn strip_standalone_flag(args: Vec<String>, flag: &str) -> Vec<String
     args.into_iter().filter(|arg| arg != flag).collect()
 }
 
+/// Every agent config persisted in `settings/state.json`.
+///
+/// The database tracks status and identity, but provider-owned fields such as
+/// `resume_session` live only here, so anything that needs them has to read
+/// this file.
+pub(crate) fn persisted_agent_configs() -> Vec<AgentConfig> {
+    let Some(wardian_home) = get_wardian_home() else {
+        return Vec::new();
+    };
+    let state_path = wardian_home.join("settings/state.json");
+    let Ok(contents) = std::fs::read_to_string(state_path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<AgentConfig>>(&contents).unwrap_or_default()
+}
+
 pub(crate) fn persisted_agent_config(session_id: &str) -> Option<AgentConfig> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return None;
     }
 
-    let wardian_home = get_wardian_home()?;
-    let state_path = wardian_home.join("settings/state.json");
-    let contents = std::fs::read_to_string(state_path).ok()?;
-    let configs = serde_json::from_str::<Vec<AgentConfig>>(&contents).ok()?;
-    configs
+    persisted_agent_configs()
         .into_iter()
         .find(|config| config.session_id == session_id)
 }
@@ -966,6 +1165,12 @@ pub(crate) fn apply_interactive_provider_runtime_env(
         }
     }
 
+    if provider_name == "prime" {
+        if let Some((key, value)) = prime_kernel_runtime_env() {
+            cmd.env(key, value);
+        }
+    }
+
     let _ = (provider_name, cmd);
 
     Ok(())
@@ -988,9 +1193,30 @@ pub(crate) fn apply_process_provider_runtime_env(
         }
     }
 
+    if provider_name == "prime" {
+        if let Some((key, value)) = prime_kernel_runtime_env() {
+            cmd.env(key, value);
+        }
+    }
+
     let _ = (provider_name, cmd);
 
     Ok(())
+}
+
+/// Kernel interpreter Prime Agent should use, as a spawn environment entry.
+///
+/// Readiness resolves an interpreter Prime cannot find on its own, so a launch
+/// that does not pass it along would clear the gate and then fail every tool
+/// call. Returns `None` when no interpreter was resolved, in which case the
+/// child keeps whatever the app process inherited.
+pub(crate) fn prime_kernel_runtime_env() -> Option<(&'static str, String)> {
+    crate::providers::prime::kernel_python().map(|python| {
+        (
+            crate::providers::prime::KERNEL_PYTHON_ENV,
+            python.to_string_lossy().to_string(),
+        )
+    })
 }
 
 pub(crate) fn claude_terminal_runtime_env() -> [(&'static str, &'static str); 2] {
@@ -1068,6 +1294,62 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn prime_worker_stop_waits_for_the_client_to_finish() {
+        // The point of waiting: Wardian's own job object kills this child when
+        // the app exits, so a stop that has not completed has not happened.
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/C", "exit 0"]);
+        } else {
+            command.args(["-c", "exit 0"]);
+        }
+
+        assert_eq!(run_prime_worker_stop(&mut command), Ok(true));
+    }
+
+    #[test]
+    fn prime_worker_stop_reports_a_refusal_rather_than_claiming_success() {
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/C", "exit 3"]);
+        } else {
+            command.args(["-c", "exit 3"]);
+        }
+
+        assert_eq!(run_prime_worker_stop(&mut command), Ok(false));
+    }
+
+    #[test]
+    fn prime_worker_stop_reports_a_launch_failure() {
+        let mut command = std::process::Command::new("wardian-no-such-binary-for-tests");
+        assert!(run_prime_worker_stop(&mut command).is_err());
+    }
+
+    #[test]
+    fn only_prime_forbids_process_tree_kill() {
+        // Prime's shared supervisor is a live descendant of the client that
+        // started it, so a tree kill reaches other agents' daemon.
+        assert!(provider_forbids_process_tree_kill("prime"));
+        assert!(provider_forbids_process_tree_kill("Prime"));
+
+        // Every other provider dies with its PTY and must keep the tree kill.
+        for provider in [
+            "claude",
+            "codex",
+            "gemini",
+            "antigravity",
+            "opencode",
+            "mock",
+            "",
+        ] {
+            assert!(
+                !provider_forbids_process_tree_kill(provider),
+                "{provider} must keep process-tree termination"
+            );
+        }
+    }
 
     #[test]
     fn try_save_state_snapshot_reports_write_failures() {
@@ -1274,6 +1556,54 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[test]
+    /// Readiness resolves an interpreter Prime cannot discover on its own, so a
+    /// launch that clears the gate without passing it along produces an agent
+    /// that fails every tool call.
+    #[test]
+    fn a_prime_launch_carries_the_resolved_kernel_interpreter() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let python = temp.path().join("python-for-prime");
+        std::fs::write(&python, "").expect("write interpreter");
+        std::env::set_var(crate::providers::prime::KERNEL_PYTHON_ENV, &python);
+
+        let mut interactive = CommandBuilder::new("prime-agent");
+        apply_interactive_provider_runtime_env("prime", &mut interactive).unwrap();
+        let carried = interactive
+            .iter_extra_env_as_str()
+            .find(|(key, _)| key.eq_ignore_ascii_case(crate::providers::prime::KERNEL_PYTHON_ENV))
+            .map(|(_, value)| value.to_string());
+
+        let mut process = tokio::process::Command::new("prime-agent");
+        apply_process_provider_runtime_env("prime", &mut process).unwrap();
+        let carried_by_process = process
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| {
+                key.to_string_lossy()
+                    .eq_ignore_ascii_case(crate::providers::prime::KERNEL_PYTHON_ENV)
+            })
+            .and_then(|(_, value)| value.map(|value| value.to_string_lossy().to_string()));
+
+        std::env::remove_var(crate::providers::prime::KERNEL_PYTHON_ENV);
+        assert_eq!(carried.as_deref(), python.to_str());
+        assert_eq!(carried_by_process.as_deref(), python.to_str());
+    }
+
+    /// Only Prime needs the kernel interpreter, and leaking it into every
+    /// provider would point unrelated tooling at a Wardian-managed venv.
+    #[test]
+    fn other_providers_do_not_receive_the_prime_kernel_interpreter() {
+        let mut interactive = CommandBuilder::new("claude");
+        apply_interactive_provider_runtime_env("claude", &mut interactive).unwrap();
+
+        assert!(!interactive
+            .iter_extra_env_as_str()
+            .any(|(key, _)| key
+                .eq_ignore_ascii_case(crate::providers::prime::KERNEL_PYTHON_ENV)));
+    }
+
     #[test]
     fn provider_runtime_env_does_not_inject_shell_or_node_hooks() {
         let _guard = crate::utils::wardian_test_env_lock();

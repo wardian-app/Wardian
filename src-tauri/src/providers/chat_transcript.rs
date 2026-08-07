@@ -70,6 +70,7 @@ pub fn normalize_chat_line(
         "gemini" => normalize_gemini(session_id, &provider, &parsed, sequence),
         "antigravity" => normalize_antigravity(session_id, &provider, &parsed, sequence),
         "opencode" => normalize_opencode(session_id, &provider, &parsed, sequence),
+        "prime" => normalize_prime(session_id, &provider, &parsed, sequence),
         "mock" => normalize_mock(session_id, &provider, &parsed, sequence),
         _ => normalize_fallback_json(session_id, &provider, &parsed, raw_line, sequence),
     }
@@ -885,6 +886,131 @@ fn antigravity_tool_title(tool_name: &str) -> &'static str {
         "REPLACE_FILE_CONTENT" | "MULTI_REPLACE_FILE_CONTENT" => "Edit file",
         _ => "Tool call",
     }
+}
+
+/// Normalizes Prime Agent's `--mode json` event stream.
+///
+/// Prime emits fully typed messages, so this reads structured content blocks
+/// rather than scraping text. Only terminal events are projected: the
+/// incremental `message_update` deltas are skipped because `message_end`
+/// carries the same content already assembled.
+fn normalize_prime(
+    session_id: &str,
+    provider: &str,
+    parsed: &Value,
+    sequence: u64,
+) -> Option<AgentChatEvent> {
+    let msg_type = str_field(parsed, "type")?;
+    match msg_type {
+        "turn_start" => Some(status_event(
+            session_id,
+            provider,
+            sequence,
+            AgentChatStatus::Processing,
+            msg_type,
+            parsed,
+        )),
+        "agent_end" => Some(status_event(
+            session_id,
+            provider,
+            sequence,
+            AgentChatStatus::Succeeded,
+            msg_type,
+            parsed,
+        )),
+        // message_start would duplicate message_end for every message, and
+        // message_update is a streaming delta of the same content.
+        "message_end" => {
+            let message = parsed.get("message")?;
+            let role = match str_field(message, "role")? {
+                "user" => AgentChatRole::User,
+                "assistant" => AgentChatRole::Assistant,
+                // Tool results arrive as their own role and are reported by the
+                // tool_execution_end arm, which carries the error flag.
+                _ => return None,
+            };
+            message_event(
+                session_id,
+                provider,
+                sequence,
+                role,
+                prime_content_text(message)?,
+                "stream_json".to_string(),
+                None,
+                msg_type,
+            )
+        }
+        "tool_execution_start" => Some(tool_call_event(
+            session_id,
+            provider,
+            sequence,
+            "stream_json".to_string(),
+            str_field(parsed, "toolCallId").map(str::to_string),
+            prime_tool_command(parsed),
+            None,
+            str_field(parsed, "toolName").unwrap_or("tool"),
+            AgentChatStatus::Running,
+        )),
+        "tool_execution_end" => {
+            let is_error = parsed
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let status = if is_error {
+                AgentChatStatus::Failed
+            } else {
+                AgentChatStatus::Succeeded
+            };
+            Some(event(
+                session_id,
+                provider,
+                sequence,
+                AgentChatEventKind::ToolResult,
+                EventFields {
+                    role: Some(AgentChatRole::Tool),
+                    text: parsed
+                        .get("result")
+                        .and_then(prime_content_blocks_text)
+                        .or_else(|| text_from_value(parsed)),
+                    status: Some(status),
+                    turn_id: str_field(parsed, "toolCallId").map(str::to_string),
+                    source: Some("stream_json".to_string()),
+                    title: str_field(parsed, "toolName").map(str::to_string),
+                    ..Default::default()
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Concatenates the `text` blocks of a Prime message, skipping tool calls and
+/// reasoning blocks.
+fn prime_content_text(message: &Value) -> Option<String> {
+    prime_content_blocks_text(message)
+}
+
+fn prime_content_blocks_text(value: &Value) -> Option<String> {
+    let text = value
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|block| str_field(block, "type") == Some("text"))
+        .filter_map(|block| str_field(block, "text"))
+        .collect::<Vec<_>>()
+        .join("");
+
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Prime's only built-in tool is an IPython kernel, so the interesting payload
+/// is the `code` argument rather than a shell command line.
+fn prime_tool_command(parsed: &Value) -> Option<String> {
+    let args = parsed.get("args")?;
+    str_field(args, "code")
+        .or_else(|| str_field(args, "command"))
+        .map(str::to_string)
 }
 
 fn normalize_opencode(
@@ -1833,6 +1959,98 @@ mod tests {
         );
         assert_eq!(finish.kind, AgentChatEventKind::Status);
         assert_eq!(finish.status, Some(AgentChatStatus::Succeeded));
+    }
+
+    // Prime Agent fixtures are verbatim lines captured from
+    // `prime-agent 0.7.0 --mode json`.
+
+    #[test]
+    fn prime_assistant_message_keeps_only_text_blocks() {
+        let message = one(
+            "prime",
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Checking the working directory."},{"type":"toolCall","id":"tool:1","name":"ipython","arguments":{"code":"print(1)"}}],"api":"faux","provider":"faux","model":"faux-1"}}"#,
+        );
+
+        assert_eq!(message.kind, AgentChatEventKind::Message);
+        assert_eq!(message.role, Some(AgentChatRole::Assistant));
+        assert_eq!(
+            message.text.as_deref(),
+            Some("Checking the working directory.")
+        );
+    }
+
+    #[test]
+    fn prime_user_message_is_normalized() {
+        let message = one(
+            "prime",
+            r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"say hello"}],"timestamp":1785977507950}}"#,
+        );
+
+        assert_eq!(message.role, Some(AgentChatRole::User));
+        assert_eq!(message.text.as_deref(), Some("say hello"));
+    }
+
+    #[test]
+    fn prime_tool_call_reports_the_ipython_code() {
+        let tool = one(
+            "prime",
+            r#"{"type":"tool_execution_start","toolCallId":"tool:1785977507893:ud84py8ketn","toolName":"ipython","args":{"code":"print('wardian-spike-ok')"}}"#,
+        );
+
+        assert_eq!(tool.kind, AgentChatEventKind::ToolCall);
+        assert_eq!(tool.title.as_deref(), Some("ipython"));
+        assert_eq!(tool.command.as_deref(), Some("print('wardian-spike-ok')"));
+        assert_eq!(tool.status, Some(AgentChatStatus::Running));
+    }
+
+    #[test]
+    fn prime_tool_result_distinguishes_success_from_failure() {
+        let ok = one(
+            "prime",
+            r#"{"type":"tool_execution_end","toolCallId":"tool:1","toolName":"ipython","result":{"content":[{"type":"text","text":"wardian-spike-ok\n"}],"details":{"status":"ok"}},"isError":false}"#,
+        );
+        assert_eq!(ok.kind, AgentChatEventKind::ToolResult);
+        assert_eq!(ok.status, Some(AgentChatStatus::Succeeded));
+        // Surrounding whitespace is trimmed, matching the other providers.
+        assert_eq!(ok.text.as_deref(), Some("wardian-spike-ok"));
+
+        let failed = one(
+            "prime",
+            r#"{"type":"tool_execution_end","toolCallId":"tool:1","toolName":"ipython","result":{"content":[{"type":"text","text":"Failed to set up the Python kernel runtime."}],"details":{}},"isError":true}"#,
+        );
+        assert_eq!(failed.status, Some(AgentChatStatus::Failed));
+    }
+
+    #[test]
+    fn prime_turn_and_agent_lifecycle_map_to_status_events() {
+        let started = one("prime", r#"{"type":"turn_start"}"#);
+        assert_eq!(started.kind, AgentChatEventKind::Status);
+        assert_eq!(started.status, Some(AgentChatStatus::Processing));
+
+        let ended = one("prime", r#"{"type":"agent_end","messages":[]}"#);
+        assert_eq!(ended.kind, AgentChatEventKind::Status);
+        assert_eq!(ended.status, Some(AgentChatStatus::Succeeded));
+    }
+
+    #[test]
+    fn prime_streaming_deltas_and_tool_results_do_not_duplicate_messages() {
+        // message_update is a delta of content that message_end repeats in full.
+        assert!(normalize_chat_line(
+            "agent-1",
+            "prime",
+            r#"{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Do"}]},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Do"}}"#,
+            1
+        )
+        .is_none());
+
+        // toolResult messages are reported by tool_execution_end instead.
+        assert!(normalize_chat_line(
+            "agent-1",
+            "prime",
+            r#"{"type":"message_end","message":{"role":"toolResult","toolCallId":"tool:1","content":[{"type":"text","text":"stdout"}]}}"#,
+            1
+        )
+        .is_none());
     }
 
     #[test]
