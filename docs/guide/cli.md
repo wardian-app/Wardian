@@ -159,6 +159,7 @@ wardian watchlist add-agent <watchlist-name-or-id> <agent-name-or-uuid>
 wardian watchlist remove-agent <watchlist-name-or-id> <agent-name-or-uuid>
 wardian watchlist delete <watchlist-name-or-id>
 wardian workflow node-types
+wardian workflow list
 wardian workflow validate <path-to-workflow.md>
 wardian workflow exec <path-to-library-workflow.md> --provider codex --workspace <absolute-workspace-path>
 wardian workflow runs
@@ -311,6 +312,7 @@ wardian agent watch Librarian --include raw_output --raw
 Run a saved workflow through the app-owned backend:
 
 ```bash
+wardian workflow list
 wardian workflow validate <absolute-workspace-path>/library/workflows/autoreview.md
 wardian workflow exec <absolute-workspace-path>/library/workflows/autoreview.md \
   --provider codex \
@@ -324,6 +326,7 @@ wardian workflow run-show autoreview <run-id>
 PowerShell:
 
 ```powershell
+wardian workflow list
 wardian workflow validate <absolute-workspace-path>\library\workflows\autoreview.md
 wardian workflow exec <absolute-workspace-path>\library\workflows\autoreview.md `
   --provider codex `
@@ -336,7 +339,14 @@ wardian workflow run-show autoreview <run-id>
 
 By default, `workflow exec` is a live-control command: it requires the desktop app to be running for the same `WARDIAN_HOME`, routes execution through app-owned runtime state, and accepts workflow files under `<wardian-home>/library/workflows`. The `mock` executor is reserved for workflow-engine fixture tests and should not be used as a normal CLI launch path.
 
-Use `workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and `workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under `<wardian-home>/logs/workflows`.
+Use `workflow list` to discover Library blueprints before running them. Its JSON
+rows include the parsed `blueprint_id`, display `name`, `entry_ref`, and absolute
+`workflow_path`; the id comes from blueprint frontmatter rather than the
+filename. Use `workflow list --pretty` for one human-readable row per entry.
+Malformed blueprints remain in the listing with an `error` field. Use
+`workflow runs`, `workflow run-show <blueprint-id> <run-id>`, and
+`workflow replay <blueprint-id> <run-id>` to inspect durable run artifacts under
+`<wardian-home>/logs/workflows`.
 
 Author and deploy Library assets from an agent terminal:
 
@@ -372,13 +382,13 @@ wardian library deploy skills/review/planner --clear
 wardian library read classes/Reviewer
 ```
 
-`wardian library` is a disk-backed authoring surface for reusable assets. It can list, show, read, create, edit, move, delete, tag, star, and deploy Library entries without the desktop app running. `list --flat` emits entry rows only, including when no section is supplied. Prompt and workflow refs must end in `.md`, and skills cannot contain other skills. `deploy --targets` requires existing targets and deduplicates repeated refs; use explicit `deploy --clear` to remove the final target safely. Class definitions and instruction files initialize on first class access. Workflow entries under `library/workflows` are blueprint files only: use `wardian workflow validate`, `wardian workflow parse`, `wardian workflow normalize`, `wardian workflow exec`, `wardian workflow schedule`, and `wardian workflow runs` for workflow-specific behavior.
+`wardian library` is a disk-backed authoring surface for reusable assets. It can list, show, read, create, edit, move, delete, tag, star, and deploy Library entries without the desktop app running. `list --flat` emits entry rows only, including when no section is supplied. Prompt and workflow refs must end in `.md`, and skills cannot contain other skills. `deploy --targets` requires existing targets and deduplicates repeated refs; use explicit `deploy --clear` to remove the final target safely. Class definitions and instruction files initialize on first class access. Workflow entries under `library/workflows` are blueprint files only: use `wardian workflow list` for discovery and the other `wardian workflow` verbs for workflow-specific behavior.
 
 Use `conversation list` and `conversation show <conversation-id>` to inspect durable agent-owned conversation archives. Inside a Wardian-managed agent terminal, `conversation list` defaults to that agent through `WARDIAN_SESSION_ID`. Outside a managed agent terminal, pass `--agent <agent-id-or-name>` or `--scope all`. `show` returns the manifest and agent-readable `conversation.jsonl` narrative, not provider-private raw logs. Wardian refreshes `turns.jsonl` whenever it refreshes the normalized archive, including open conversations, so readers can use `manifest.json` plus `turns.jsonl` as the cheap per-request index and fall back to `conversation.jsonl` only for full detail. A `turns.jsonl` row means one user-originated request plus following assistant, tool, and lifecycle records until the next user-originated request or boundary; provider tool-call IDs do not create separate turn rows. Context rows such as AGENTS.md injections, goal continuations, and lifecycle-only records are typed in `request.kind` so agents can skip them when building summaries. Agents and external tools should use this CLI surface or bounded reads of `agents/<agent-id>/conversations/index.jsonl`; do not recursively crawl under `agents/*`, because agent directories can contain worktrees, provider caches, screenshots, and dependencies. Direct readers must treat `index.jsonl` as append-only upsert history and keep the latest row per `conversation_id`.
 
 Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `workflow exec`, and `send`.
 
-`workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `library`, `conversation list`, `conversation show`, `team`, and `watchlist` can run from disk without the desktop app.
+`workflow list`, `workflow validate`, `workflow parse`, `workflow normalize`, `workflow node-types`, `workflow runs`, `workflow run-show`, `workflow replay`, `library`, `conversation list`, `conversation show`, `team`, and `watchlist` can run from disk without the desktop app.
 
 `agent spawn` requires both `--provider` and `--class` so the created agent's runtime and role are explicit.
 

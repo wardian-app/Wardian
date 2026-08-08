@@ -278,6 +278,8 @@ pub enum WorkflowCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List workflow blueprints in the Library.
+    List,
     /// Validate a blueprint `.md` file and report diagnostics.
     Validate { path: String },
     /// Launch a workflow blueprint and write a durable run.

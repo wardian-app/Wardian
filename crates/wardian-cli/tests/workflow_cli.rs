@@ -70,6 +70,90 @@ fn workflow_command(home: &TempDir, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn workflow_output(home: &TempDir, args: &[&str]) -> String {
+    let output = Command::new(bin())
+        .args(args)
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "status: {:?}\nstderr: {}\nstdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn workflow_list_uses_declared_ids_and_reports_parse_errors_per_row() {
+    let home = TempDir::new().unwrap();
+    let workflows_dir = home.path().join("library").join("workflows");
+    let nested_dir = workflows_dir.join("nested");
+    std::fs::create_dir_all(&nested_dir).unwrap();
+
+    let declared_path = nested_dir.join("filename-does-not-match-id.md");
+    let declared_blueprint = DEMO_BLUEPRINT
+        .replace("id: demo", "id: declared-id")
+        .replace("name: Demo", "name: Declared Name");
+    std::fs::write(&declared_path, declared_blueprint).unwrap();
+
+    let malformed_path = workflows_dir.join("broken.md");
+    std::fs::write(&malformed_path, "not a workflow blueprint").unwrap();
+
+    let listed = workflow_command(&home, &["workflow", "list"]);
+    assert_eq!(listed["schema"], 1);
+    let workflows = listed["workflows"].as_array().unwrap();
+    assert_eq!(workflows.len(), 2);
+
+    let declared = workflows
+        .iter()
+        .find(|workflow| workflow["entry_ref"] == "workflows/nested/filename-does-not-match-id.md")
+        .unwrap();
+    assert_eq!(declared["blueprint_id"], "declared-id");
+    assert_eq!(declared["name"], "Declared Name");
+    assert_eq!(
+        declared["workflow_path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/"),
+        declared_path.to_string_lossy().replace('\\', "/")
+    );
+    assert!(declared["workflow_path"]
+        .as_str()
+        .unwrap()
+        .parse::<std::path::PathBuf>()
+        .unwrap()
+        .is_absolute());
+    assert!(declared["error"].is_null());
+
+    let malformed = workflows
+        .iter()
+        .find(|workflow| workflow["entry_ref"] == "workflows/broken.md")
+        .unwrap();
+    assert!(malformed["blueprint_id"].is_null());
+    assert_eq!(malformed["name"], "broken");
+    assert_eq!(
+        malformed["workflow_path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/"),
+        malformed_path.to_string_lossy().replace('\\', "/")
+    );
+    assert!(malformed["error"]
+        .as_str()
+        .unwrap()
+        .contains("front-matter"));
+
+    let pretty = workflow_output(&home, &["workflow", "list", "--pretty"]);
+    assert!(pretty.contains("declared-id"));
+    assert!(pretty.contains("<unparseable>"));
+    assert!(serde_json::from_str::<serde_json::Value>(&pretty).is_err());
+}
+
 #[test]
 fn workflow_exec_runs_show_replay_round_trip() {
     let home = TempDir::new().unwrap();

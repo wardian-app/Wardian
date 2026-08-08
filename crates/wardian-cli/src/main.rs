@@ -29,6 +29,7 @@ use wardian_core::control::{
     WorkflowRunResponse,
 };
 use wardian_core::identity::{self, ListFilters, Scope};
+use wardian_core::models::{LibraryEntry, LibraryIndexNode};
 
 fn main() {
     std::process::exit(run());
@@ -468,6 +469,7 @@ struct AgentWatchCliOptions<'a> {
 fn handle_workflow(args: WorkflowArgs) -> Result<String, CliError> {
     match args.command {
         WorkflowCommand::NodeTypes { json } => render_workflow_node_types(json),
+        WorkflowCommand::List => render_workflow_list(args.pretty),
         WorkflowCommand::Validate { path } => render_workflow_validate(&path),
         WorkflowCommand::Exec {
             path,
@@ -518,6 +520,89 @@ fn render_workflow_node_types(json: bool) -> Result<String, CliError> {
         ));
     }
     Ok(lines)
+}
+
+fn render_workflow_list(pretty: bool) -> Result<String, CliError> {
+    let home = wardian_core::paths::wardian_home()
+        .ok_or_else(|| CliError::generic("could not resolve Wardian home"))?;
+    let index = wardian_core::library::build_library_index(&home)
+        .map_err(|error| CliError::generic(error.to_string()))?;
+    let mut entries = Vec::new();
+    if let Some(section) = index.sections.get("workflows") {
+        flatten_library_entries(&section.tree.children, &mut entries);
+    }
+
+    let workflows_root = wardian_core::library::LibrarySectionId::Workflows.root_for_home(&home);
+    let mut workflows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let workflow_path = absolute_path(&workflows_root.join(&entry.path))?;
+        let mut row = serde_json::json!({
+            "blueprint_id": serde_json::Value::Null,
+            "name": entry.name,
+            "entry_ref": entry.entry_ref,
+            "workflow_path": workflow_path.to_string_lossy(),
+            "error": serde_json::Value::Null,
+        });
+
+        match wardian_core::workflow::parse_file(&workflow_path) {
+            Ok(blueprint) => {
+                row["blueprint_id"] = serde_json::json!(blueprint.id);
+                row["name"] = serde_json::json!(blueprint.name);
+            }
+            Err(error) => {
+                row["error"] = serde_json::json!(error.to_string());
+            }
+        }
+        workflows.push(row);
+    }
+
+    if pretty {
+        return Ok(render_workflow_list_pretty(&workflows));
+    }
+
+    render_json(serde_json::json!({
+        "schema": 1,
+        "workflows": workflows,
+    }))
+}
+
+fn flatten_library_entries(nodes: &[LibraryIndexNode], entries: &mut Vec<LibraryEntry>) {
+    for node in nodes {
+        match node {
+            LibraryIndexNode::Entry(entry) => entries.push(entry.clone()),
+            LibraryIndexNode::Folder(folder) => {
+                flatten_library_entries(&folder.children, entries);
+            }
+        }
+    }
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, CliError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(path))
+        .map_err(|error| CliError::generic(error.to_string()))
+}
+
+fn render_workflow_list_pretty(workflows: &[serde_json::Value]) -> String {
+    if workflows.is_empty() {
+        return "(no workflows)\n".to_string();
+    }
+
+    let mut output = String::new();
+    for workflow in workflows {
+        let blueprint_id = workflow["blueprint_id"].as_str().unwrap_or("<unparseable>");
+        let name = workflow["name"].as_str().unwrap_or_default();
+        let entry_ref = workflow["entry_ref"].as_str().unwrap_or_default();
+        let path = workflow["workflow_path"].as_str().unwrap_or_default();
+        output.push_str(&format!("{blueprint_id}  {name}  {entry_ref}  {path}\n"));
+        if let Some(error) = workflow["error"].as_str() {
+            output.push_str(&format!("  error: {error}\n"));
+        }
+    }
+    output
 }
 
 fn render_workflow_validate(path: &str) -> Result<String, CliError> {
