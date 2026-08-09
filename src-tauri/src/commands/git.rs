@@ -384,7 +384,11 @@ pub async fn git_current_branch(cwd: String) -> Result<String, String> {
     Ok(branch.trim().to_string())
 }
 
-fn build_git_log_args(count: u32, revision: Option<&str>, all: bool) -> Result<Vec<String>, String> {
+fn build_git_log_args(
+    count: u32,
+    revision: Option<&str>,
+    all: bool,
+) -> Result<Vec<String>, String> {
     let count_str = format!("-{}", count);
     let mut args = vec![
         "log".to_string(),
@@ -398,7 +402,10 @@ fn build_git_log_args(count: u32, revision: Option<&str>, all: bool) -> Result<V
         return Ok(args);
     }
 
-    if let Some(revision) = revision.map(str::trim).filter(|revision| !revision.is_empty()) {
+    if let Some(revision) = revision
+        .map(str::trim)
+        .filter(|revision| !revision.is_empty())
+    {
         if revision.starts_with('-') {
             return Err("History revision must be a branch, tag, or commit.".to_string());
         }
@@ -711,11 +718,7 @@ pub async fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn git_apply_diff_hunk(
-    cwd: String,
-    patch: String,
-    reverse: bool,
-) -> Result<(), String> {
+pub async fn git_apply_diff_hunk(cwd: String, patch: String, reverse: bool) -> Result<(), String> {
     if patch.trim().is_empty() {
         return Err("Diff hunk patch is required.".to_string());
     }
@@ -890,7 +893,10 @@ pub async fn git_commit_all_signed(cwd: String, message: String) -> Result<(), S
 
 #[tauri::command]
 pub async fn git_commit_signed_no_verify(cwd: String, message: String) -> Result<(), String> {
-    run_git(&cwd, &["commit", "--signoff", "--no-verify", "-m", &message])?;
+    run_git(
+        &cwd,
+        &["commit", "--signoff", "--no-verify", "-m", &message],
+    )?;
     Ok(())
 }
 
@@ -899,14 +905,20 @@ pub async fn git_commit_staged_signed_no_verify(
     cwd: String,
     message: String,
 ) -> Result<(), String> {
-    run_git(&cwd, &["commit", "--signoff", "--no-verify", "-m", &message])?;
+    run_git(
+        &cwd,
+        &["commit", "--signoff", "--no-verify", "-m", &message],
+    )?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn git_commit_all_signed_no_verify(cwd: String, message: String) -> Result<(), String> {
     run_git(&cwd, &["add", "--all"])?;
-    run_git(&cwd, &["commit", "--signoff", "--no-verify", "-m", &message])?;
+    run_git(
+        &cwd,
+        &["commit", "--signoff", "--no-verify", "-m", &message],
+    )?;
     Ok(())
 }
 
@@ -1312,7 +1324,14 @@ fn remove_worktree_with_options(
     let result = if force {
         run_git(
             &workspace,
-            &["-c", "core.longpaths=true", "worktree", "remove", &worktree, "--force"],
+            &[
+                "-c",
+                "core.longpaths=true",
+                "worktree",
+                "remove",
+                &worktree,
+                "--force",
+            ],
         )
     } else {
         run_git(
@@ -1901,14 +1920,22 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
         fs::write(temp.path().join("tracked.txt"), "old\n").unwrap();
         run_git(cwd, &["add", "tracked.txt"]).unwrap();
         run_git(cwd, &["commit", "-m", "initial"]).unwrap();
-        let parent = run_git(cwd, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let parent = run_git(cwd, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
 
         fs::write(temp.path().join("tracked.txt"), "new\n").unwrap();
         run_git(cwd, &["add", "tracked.txt"]).unwrap();
         run_git(cwd, &["commit", "-m", "change tracked"]).unwrap();
-        let hash = run_git(cwd, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let hash = run_git(cwd, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
 
-        let diff = git_commit_diff(cwd.to_string(), hash, Some(parent)).await.unwrap();
+        let diff = git_commit_diff(cwd.to_string(), hash, Some(parent))
+            .await
+            .unwrap();
 
         assert!(diff.contains("diff --git a/tracked.txt b/tracked.txt"));
         assert!(diff.contains("-old"));
@@ -2014,9 +2041,12 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
         create_worktree_with_build_caches(&workspace, &reused_worktree, "wardian/reused").unwrap();
 
         assert_eq!(
-            run_git(reused_worktree.to_str().unwrap(), &["branch", "--show-current"])
-                .unwrap()
-                .trim(),
+            run_git(
+                reused_worktree.to_str().unwrap(),
+                &["branch", "--show-current"]
+            )
+            .unwrap()
+            .trim(),
             "wardian/reused"
         );
     }
@@ -2670,8 +2700,11 @@ bare
             .await
             .unwrap();
 
-        let staged = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
-            .unwrap();
+        let staged = run_git(
+            cwd,
+            &["diff", "--cached", "--no-color", "--", "tracked.txt"],
+        )
+        .unwrap();
         assert!(staged.contains("+changed 02"), "{staged}");
         assert!(!staged.contains("+changed 20"), "{staged}");
 
@@ -2708,16 +2741,22 @@ bare
             + "\n";
         std::fs::write(temp.path().join("tracked.txt"), updated).unwrap();
         run_git(cwd, &["add", "tracked.txt"]).unwrap();
-        let diff = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
-            .unwrap();
+        let diff = run_git(
+            cwd,
+            &["diff", "--cached", "--no-color", "--", "tracked.txt"],
+        )
+        .unwrap();
         let patch = first_hunk_patch(&diff);
 
         git_apply_diff_hunk(cwd.to_string(), patch, true)
             .await
             .unwrap();
 
-        let staged = run_git(cwd, &["diff", "--cached", "--no-color", "--", "tracked.txt"])
-            .unwrap();
+        let staged = run_git(
+            cwd,
+            &["diff", "--cached", "--no-color", "--", "tracked.txt"],
+        )
+        .unwrap();
         assert!(!staged.contains("+changed 02"), "{staged}");
         assert!(staged.contains("+changed 20"), "{staged}");
 
@@ -3225,7 +3264,10 @@ bare
         .unwrap();
 
         let message = run_git(cwd, &["log", "-1", "--pretty=%B"]).unwrap();
-        assert!(message.contains("signed off staged bypass hook"), "{message}");
+        assert!(
+            message.contains("signed off staged bypass hook"),
+            "{message}"
+        );
         assert!(
             message.contains("Signed-off-by: Wardian Test <test@example.com>"),
             "{message}"

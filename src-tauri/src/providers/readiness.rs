@@ -38,6 +38,10 @@ const USER_FACING_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
         id: "opencode",
         display_name: "OpenCode",
     },
+    ProviderDescriptor {
+        id: "prime",
+        display_name: "Prime Agent",
+    },
 ];
 
 pub fn user_facing_provider_descriptors() -> &'static [ProviderDescriptor] {
@@ -66,21 +70,141 @@ pub fn provider_readiness(provider_id: &str) -> ProviderReadiness {
     };
 
     let (executable, base_args) = provider.get_executable();
-    readiness_from_launch_parts(&provider_id, &display_name, &executable, &base_args, None)
+    let readiness =
+        readiness_from_launch_parts(&provider_id, &display_name, &executable, &base_args, None);
+
+    if provider_id == "prime" && readiness.available {
+        if let Some(reason) = prime_kernel_blocker() {
+            return blocked_by_runtime(readiness, reason);
+        }
+    }
+
+    readiness
 }
 
+/// Marks a provider whose CLI resolved but whose runtime dependency is missing.
+///
+/// The executable is kept deliberately. It is the signal that the CLI was found
+/// and something else blocks the launch, which is what stops the UI from
+/// telling a user to reinstall software they already have.
+fn blocked_by_runtime(readiness: ProviderReadiness, reason: String) -> ProviderReadiness {
+    ProviderReadiness {
+        available: false,
+        reason: Some(reason),
+        ..readiness
+    }
+}
+
+/// Prime Agent's only tool is an IPython kernel, so a resolvable binary with no
+/// usable kernel yields an agent that fails every tool call. Returns a reason
+/// when the kernel cannot be satisfied.
+///
+/// This is deliberately a filesystem check rather than a live `ipython` call:
+/// readiness populates the provider list on every render, and executing a real
+/// agent turn per refresh would be far too slow.
+///
+/// `prime-agent doctor` is *not* the probe here. It inspects background
+/// services and reports success on an install whose kernel is entirely broken.
+fn prime_kernel_blocker() -> Option<String> {
+    if crate::providers::prime::kernel_python().is_some() {
+        return None;
+    }
+
+    // Reading provisioning progress is a lock and a clone. Starting or waiting
+    // on the work would not be: this runs on every provider-list paint.
+    if let Some(progress) = prime_provisioning_progress(
+        &crate::providers::prime_kernel::provisioning_state(),
+    ) {
+        return Some(progress);
+    }
+
+    // Prime Agent 0.7.0's own bootstrap is broken on Windows (it assumes the
+    // POSIX `bin/python` virtualenv layout), so a missing Wardian-managed
+    // environment is fatal there. On other platforms its bootstrap is expected
+    // to work, so absence is not treated as a blocker.
+    #[cfg(target_os = "windows")]
+    {
+        Some(prime_kernel_blocker_reason(
+            crate::providers::prime::wardian_kernel_venv_dir().as_deref(),
+        ))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// Turns provisioning progress into the blocker text, when it has something to
+/// say that the generic "set it up yourself" message does not.
+///
+/// `Done` returns `None` on purpose: the environment was published but this
+/// call already failed to find an interpreter, so the generic instructions are
+/// the honest answer rather than a claim that setup succeeded.
+fn prime_provisioning_progress(
+    state: &crate::providers::prime_kernel::ProvisioningState,
+) -> Option<String> {
+    use crate::providers::prime_kernel::ProvisioningState;
+
+    match state {
+        ProvisioningState::Running => Some(
+            "Wardian is setting up Prime Agent's Python kernel. This runs once and takes a minute; Prime Agent becomes available when it finishes."
+                .to_string(),
+        ),
+        ProvisioningState::Failed(reason) => Some(reason.clone()),
+        ProvisioningState::Idle | ProvisioningState::Done => None,
+    }
+}
+
+/// Explains a missing kernel in terms of the path the running build actually
+/// uses.
+///
+/// A debug build resolves its Wardian home under `target/`, not `~/.wardian`,
+/// so a `<WARDIAN_HOME>` placeholder sends the user to build a virtualenv the
+/// app will never look at.
+#[cfg(target_os = "windows")]
+fn prime_kernel_blocker_reason(venv_dir: Option<&Path>) -> String {
+    let location = match venv_dir {
+        Some(dir) => format!("at {}", dir.display()),
+        None => "under the Wardian home".to_string(),
+    };
+
+    format!(
+        "Prime Agent is installed but its Python kernel is not set up. Prime Agent 0.7.0 cannot bootstrap the kernel on Windows. Create a virtualenv {location} with ipykernel and Prime's bundled prime-agent-runtime, or set PRIME_AGENT_KERNEL_PYTHON to an interpreter that has them. See docs/guide/provider-readiness.md."
+    )
+}
+
+/// Readiness check for an actual launch, which may block where the render-path
+/// check may not.
+///
+/// A Prime launch started while the kernel is still being provisioned waits for
+/// it. Failing here instead would tell the user to set up something Wardian is
+/// already most of the way through building.
 pub fn ensure_provider_available_for_launch(provider_id: &str) -> Result<(), String> {
     let readiness = provider_readiness(provider_id);
     if readiness.available {
         return Ok(());
     }
 
-    Err(readiness.reason.unwrap_or_else(|| {
+    if provider_id.trim().eq_ignore_ascii_case("prime") {
+        crate::providers::prime_kernel::wait_for_in_flight_provisioning();
+        let readiness = provider_readiness(provider_id);
+        if readiness.available {
+            return Ok(());
+        }
+        return Err(unavailable_launch_error(readiness));
+    }
+
+    Err(unavailable_launch_error(readiness))
+}
+
+fn unavailable_launch_error(readiness: ProviderReadiness) -> String {
+    readiness.reason.unwrap_or_else(|| {
         format!(
             "{} is not available. See docs/guide/provider-readiness.md.",
             readiness.display_name
         )
-    }))
+    })
 }
 
 pub fn readiness_from_launch_parts(
@@ -154,6 +278,13 @@ fn resolve_executable(executable: &str, path_override: Option<&str>) -> Option<P
     }
 
     find_executable_on_path(executable, path_override)
+}
+
+/// Resolves a helper tool the same way provider executables are resolved, so a
+/// tool Wardian shells out to is found under the app's environment rather than
+/// the user's shell.
+pub fn find_executable_for_provisioning(name: &str) -> Option<PathBuf> {
+    find_executable_on_path(name, None)
 }
 
 fn find_executable_on_path(name: &str, path_override: Option<&str>) -> Option<PathBuf> {
@@ -264,8 +395,25 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec!["claude", "codex", "gemini", "antigravity", "opencode"]
+            vec![
+                "claude",
+                "codex",
+                "gemini",
+                "antigravity",
+                "opencode",
+                "prime"
+            ]
         );
+    }
+
+    #[test]
+    fn prime_descriptor_uses_the_full_product_name() {
+        let descriptor = user_facing_provider_descriptors()
+            .iter()
+            .find(|provider| provider.id == "prime")
+            .expect("prime descriptor");
+
+        assert_eq!(descriptor.display_name, "Prime Agent");
     }
 
     #[test]
@@ -307,6 +455,94 @@ mod tests {
             Some(value) => std::env::set_var("PATHEXT", value),
             None => std::env::remove_var("PATHEXT"),
         }
+    }
+
+    /// The point of the message is that the reader can act on it, and a debug
+    /// build's home is nowhere near `~/.wardian`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_kernel_blocker_names_the_path_this_build_actually_reads() {
+        let reason = prime_kernel_blocker_reason(Some(Path::new(
+            r"D:\work\target\debug\.wardian\prime-kernel-venv",
+        )));
+
+        assert!(reason.contains(r"D:\work\target\debug\.wardian\prime-kernel-venv"));
+        assert!(!reason.contains("<WARDIAN_HOME>"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_kernel_blocker_still_reads_without_a_resolvable_home() {
+        let reason = prime_kernel_blocker_reason(None);
+
+        assert!(reason.contains("under the Wardian home"));
+        assert!(reason.contains("PRIME_AGENT_KERNEL_PYTHON"));
+    }
+
+    /// The user should learn that setup is under way from the same place they
+    /// would otherwise be told to do it themselves.
+    #[test]
+    fn an_in_flight_provision_is_reported_instead_of_setup_instructions() {
+        use crate::providers::prime_kernel::ProvisioningState;
+
+        let progress =
+            prime_provisioning_progress(&ProvisioningState::Running).expect("progress text");
+
+        assert!(progress.contains("setting up"));
+        assert!(!progress.contains("Create a virtualenv"));
+    }
+
+    #[test]
+    fn a_failed_provision_reports_its_own_reason() {
+        use crate::providers::prime_kernel::ProvisioningState;
+
+        let reason = prime_provisioning_progress(&ProvisioningState::Failed(
+            "uv exploded".to_string(),
+        ));
+
+        assert_eq!(reason.as_deref(), Some("uv exploded"));
+    }
+
+    /// Reaching `Done` while the interpreter is still missing means something
+    /// removed it, so the honest answer is the ordinary setup instructions
+    /// rather than a claim that provisioning worked.
+    #[test]
+    fn a_finished_provision_with_no_kernel_falls_back_to_instructions() {
+        use crate::providers::prime_kernel::ProvisioningState;
+
+        assert_eq!(prime_provisioning_progress(&ProvisioningState::Done), None);
+        assert_eq!(prime_provisioning_progress(&ProvisioningState::Idle), None);
+    }
+
+    #[test]
+    fn a_runtime_blocker_keeps_the_resolved_executable() {
+        let resolved = ProviderReadiness {
+            provider: "prime".to_string(),
+            display_name: "Prime Agent".to_string(),
+            available: true,
+            executable: Some("/npm/prime-agent".to_string()),
+            reason: None,
+        };
+
+        let blocked = blocked_by_runtime(resolved, "kernel is not set up".to_string());
+
+        assert!(!blocked.available);
+        assert_eq!(blocked.executable.as_deref(), Some("/npm/prime-agent"));
+        assert_eq!(blocked.reason.as_deref(), Some("kernel is not set up"));
+    }
+
+    #[test]
+    fn a_missing_executable_reports_no_executable() {
+        let readiness = readiness_from_launch_parts(
+            "prime",
+            "Prime Agent",
+            "definitely-not-a-wardian-provider",
+            &[],
+            None,
+        );
+
+        assert!(!readiness.available);
+        assert!(readiness.executable.is_none());
     }
 
     #[test]

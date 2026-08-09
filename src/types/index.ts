@@ -1,5 +1,5 @@
-export type ProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "mock";
-export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode";
+export type ProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "prime" | "mock";
+export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "prime";
 
 export type GridCardDisplayMode = "terminal" | "chat";
 
@@ -122,6 +122,33 @@ export interface OpenCodeProviderConfig {
     port?: number;
 }
 
+/**
+ * Prime Agent runtime options.
+ *
+ * Prime Agent is a meta-provider: `AgentConfig.model` carries a composite
+ * `provider/model[:thinking]` value, so this holds only what that cannot express.
+ */
+export interface PrimeProviderConfig {
+    type: "prime";
+    /** off | minimal | low | medium | high | xhigh | max */
+    thinking?: string;
+    /** Allowlist for `--tools`; `ipython` is the only built-in tool. */
+    tools?: string[];
+    no_builtin_tools?: boolean;
+    extensions?: string[];
+    skills?: string[];
+    goal?: string;
+    autonomous?: boolean;
+    autonomous_gates?: string[];
+    autonomous_max_turns?: number;
+    autonomous_max_tokens?: number;
+    /**
+     * Prime's short daemon id for the worker, as shown by `prime-agent list`.
+     * Informational: `stop` also accepts the session UUID Wardian persists.
+     */
+    daemon_agent_id?: string;
+}
+
 export interface MockProviderConfig {
     type: "mock";
 }
@@ -153,6 +180,7 @@ export type ProviderConfig =
     | CodexProviderConfig
     | AntigravityProviderConfig
     | OpenCodeProviderConfig
+    | PrimeProviderConfig
     | MockProviderConfig;
 
 export interface AgentConfig {

@@ -129,6 +129,16 @@ fn apply_provider_identity_with_environment(
             }
             capture_or_confirm_provider_identity(provider, config, candidate)
         }
+        // Prime's session header carries the UUID its daemon names the
+        // transcript after, and that same value is what `--resume` accepts.
+        // Wardian never chooses it, so a fresh spawn captures and a resume
+        // confirms.
+        "prime" => {
+            if uuid::Uuid::parse_str(candidate).is_err() {
+                return Err("prime returned a malformed session identity".to_string());
+            }
+            capture_or_confirm_provider_identity(provider, config, candidate)
+        }
         "antigravity" => capture_or_confirm_provider_identity(provider, config, candidate),
         _ => Err(format!(
             "{provider} does not define an initialization identity contract"
@@ -360,6 +370,42 @@ mod tests {
         )
         .is_err());
         assert_eq!(malformed.resume_session, None);
+    }
+
+    #[test]
+    fn prime_captures_its_daemon_owned_session_uuid() {
+        let id = "019fd4bc-e365-74c0-a386-5af7124f3beb";
+        let mut fresh = test_config("prime", None, None);
+        assert_eq!(
+            apply_provider_identity_with_environment("prime", &mut fresh, id, Vec::new()),
+            Ok(ProviderIdentityOutcome::Captured),
+        );
+        assert_eq!(fresh.resume_session.as_deref(), Some(id));
+
+        // The daemon's short activity id is not the session UUID, and
+        // resuming with it would silently start a new transcript.
+        let mut short = test_config("prime", None, None);
+        let error = apply_provider_identity_with_environment(
+            "prime",
+            &mut short,
+            "b32e30bfde83",
+            Vec::new(),
+        )
+        .expect_err("the short daemon id must not pass as a session identity");
+        assert!(!error.contains("b32e30bfde83"));
+        assert_eq!(short.resume_session, None);
+    }
+
+    #[test]
+    fn prime_resume_rejects_a_different_session_uuid() {
+        let expected = "019fd4bc-e365-74c0-a386-5af7124f3beb";
+        let candidate = "019fd4bc-e365-74c0-a386-5af7124f3bec";
+        let mut config = test_config("prime", Some(expected), None);
+        let error =
+            apply_provider_identity_with_environment("prime", &mut config, candidate, Vec::new())
+                .expect_err("conflicting Prime session must fail");
+        assert!(!error.contains(candidate));
+        assert_eq!(config.resume_session.as_deref(), Some(expected));
     }
 
     #[test]

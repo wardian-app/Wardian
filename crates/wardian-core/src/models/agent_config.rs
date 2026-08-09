@@ -16,6 +16,7 @@ fn provider_key(provider: &str) -> &str {
         "codex" => "codex",
         "antigravity" => "antigravity",
         "opencode" => "opencode",
+        "prime" => "prime",
         "mock" => "mock",
         _ => "",
     }
@@ -23,7 +24,7 @@ fn provider_key(provider: &str) -> &str {
 
 fn provider_type_name(provider: &str) -> String {
     match provider_key(provider) {
-        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "mock" => {
+        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "prime" | "mock" => {
             provider_key(provider).to_string()
         }
         _ => {
@@ -40,7 +41,7 @@ fn provider_type_name(provider: &str) -> String {
 fn is_known_provider_type(provider: &str) -> bool {
     matches!(
         provider,
-        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "mock"
+        "claude" | "gemini" | "codex" | "antigravity" | "opencode" | "prime" | "mock"
     )
 }
 
@@ -58,6 +59,7 @@ pub enum ProviderConfig {
     Codex(CodexProviderConfig),
     Antigravity(AntigravityProviderConfig),
     OpenCode(OpenCodeProviderConfig),
+    Prime(PrimeProviderConfig),
     Mock(MockProviderConfig),
     Unknown(serde_json::Value),
 }
@@ -159,6 +161,50 @@ pub struct OpenCodeProviderConfig {
     pub port: Option<u16>,
 }
 
+/// Prime Agent runtime options.
+///
+/// Prime Agent is a meta-provider: `AgentConfig::model` carries a composite
+/// `provider/model[:thinking]` value rather than a bare model id, so this
+/// struct holds only the options that are not expressible there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PrimeProviderConfig {
+    /// `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Allowlist passed to `--tools`. `ipython` is the only built-in tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_builtin_tools: Option<bool>,
+    /// Repeatable `-e/--extension` sources (path, npm specifier, or git URL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    /// Repeatable `--skill` paths, in addition to habitat discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Persistent objective seeded on a new root session (`--goal`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autonomous: Option<bool>,
+    /// Repeatable `--autonomous-gate` shell commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autonomous_gates: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autonomous_max_turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autonomous_max_tokens: Option<u64>,
+    /// Prime's short daemon id for the worker, distinct from the session UUID
+    /// and shown by `prime-agent list`. It is not required for teardown: the
+    /// supervisor resolves a `stop` selector against the daemon id, the session
+    /// UUID, and the session name alike, and Wardian already persists the UUID
+    /// in `resume_session`. Recorded when observed so Wardian can name a worker
+    /// the way Prime's own tooling does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MockProviderConfig {
@@ -176,6 +222,7 @@ impl ProviderConfig {
             Self::Codex(_) => "codex",
             Self::Antigravity(_) => "antigravity",
             Self::OpenCode(_) => "opencode",
+            Self::Prime(_) => "prime",
             Self::Mock(_) => "mock",
             Self::Unknown(value) => value
                 .get("type")
@@ -190,6 +237,7 @@ impl ProviderConfig {
             "codex" => Self::Codex(CodexProviderConfig::default()),
             "antigravity" => Self::Antigravity(AntigravityProviderConfig::default()),
             "opencode" => Self::OpenCode(OpenCodeProviderConfig::default()),
+            "prime" => Self::Prime(PrimeProviderConfig::default()),
             "mock" => Self::Mock(MockProviderConfig::default()),
             "claude" => Self::Claude(ClaudeProviderConfig::default()),
             "" => {
@@ -200,7 +248,9 @@ impl ProviderConfig {
                     Self::Unknown(serde_json::json!({ "type": provider_type }))
                 }
             }
-            _ => unreachable!("provider_key only returns known provider keys or an empty marker"),
+            // Same fail-soft rationale as `legacy_provider_config`: this feeds
+            // deserialization, where a panic costs a hung IPC response.
+            _ => Self::Unknown(serde_json::json!({ "type": provider_type_name(provider) })),
         }
     }
 
@@ -238,6 +288,7 @@ impl ProviderConfig {
             "opencode" => {
                 serde_json::from_value::<OpenCodeProviderConfig>(value).map(Self::OpenCode)
             }
+            "prime" => serde_json::from_value::<PrimeProviderConfig>(value).map(Self::Prime),
             "mock" => serde_json::from_value::<MockProviderConfig>(value).map(Self::Mock),
             _ => Ok(Self::Unknown(value)),
         }
@@ -255,6 +306,7 @@ impl Serialize for ProviderConfig {
             Self::Codex(config) => Self::to_value_with_type("codex", config),
             Self::Antigravity(config) => Self::to_value_with_type("antigravity", config),
             Self::OpenCode(config) => Self::to_value_with_type("opencode", config),
+            Self::Prime(config) => Self::to_value_with_type("prime", config),
             Self::Mock(config) => Self::to_value_with_type("mock", config),
             Self::Unknown(value) => value.clone(),
         };
@@ -507,6 +559,10 @@ impl AgentConfigCompat {
                 reasoning_effort: None,
             }),
             "antigravity" => ProviderConfig::Antigravity(AntigravityProviderConfig::default()),
+            // Prime Agent post-dates the legacy flat encoding, so there are no
+            // top-level mirror fields to read back; its options live only in
+            // provider_config. Same shape as Antigravity above.
+            "prime" => ProviderConfig::Prime(PrimeProviderConfig::default()),
             "opencode" => ProviderConfig::OpenCode(OpenCodeProviderConfig {
                 agent: self.opencode_agent.clone(),
                 port: self.opencode_port,
@@ -530,8 +586,11 @@ impl AgentConfigCompat {
                 mcp_config: self.mcp_config.clone(),
                 reasoning_effort: None,
             }),
-            "" => ProviderConfig::default_for_provider(&self.provider),
-            _ => unreachable!("provider_key only returns known provider keys or an empty marker"),
+            // Reached only if a provider gains a `provider_key` entry without a
+            // legacy arm here. This runs inside `Deserialize`, and a panic there
+            // leaves a Tauri command with no response at all, so it fails soft
+            // onto the provider's own default instead.
+            _ => ProviderConfig::default_for_provider(&self.provider),
         }
     }
 }
@@ -697,6 +756,15 @@ impl AgentConfig {
         }
     }
 
+    pub fn prime_config(&self) -> PrimeProviderConfig {
+        match &self.provider_config {
+            ProviderConfig::Prime(config) if provider_key(&self.provider) == "prime" => {
+                config.clone()
+            }
+            _ => PrimeProviderConfig::default(),
+        }
+    }
+
     pub fn reset_provider_config_for_provider(&mut self) {
         let encoding = self.provider_config_encoding;
         self.provider_config = ProviderConfig::default_for_provider(&self.provider);
@@ -789,7 +857,11 @@ impl AgentConfig {
                 self.opencode_agent = config.agent.clone();
                 self.opencode_port = config.port;
             }
-            ProviderConfig::Mock(_) | ProviderConfig::Unknown(_) => {}
+            // Prime Agent post-dates the legacy flat encoding, so it has no
+            // top-level mirror fields. Its options live only in provider_config.
+            ProviderConfig::Prime(_)
+            | ProviderConfig::Mock(_)
+            | ProviderConfig::Unknown(_) => {}
         }
     }
 
@@ -907,6 +979,39 @@ mod tests {
     use super::*;
     use crate::conversations::AgentConversationLoggingSetting;
     use crate::models::AgentSessionPersistenceOverride;
+
+    /// Every provider must survive the flat-JSON shape a Tauri caller sends.
+    ///
+    /// This runs inside `Deserialize`, so a miss is not a returned error: the
+    /// command unwinds without ever answering and the caller's promise hangs
+    /// forever. Prime shipped exactly that way, unreachable from the UI, with
+    /// the whole suite green -- nothing had deserialized a bare provider name.
+    #[test]
+    fn every_provider_deserializes_from_a_bare_provider_name() {
+        for provider in [
+            "claude",
+            "gemini",
+            "codex",
+            "antigravity",
+            "opencode",
+            "prime",
+            "mock",
+            "some-future-provider",
+            "",
+        ] {
+            let json = format!(r#"{{"provider":{}}}"#, serde_json::json!(provider));
+            let config: AgentConfig = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("{provider:?} failed to deserialize: {error}"));
+            assert_eq!(config.provider, provider);
+        }
+    }
+
+    #[test]
+    fn prime_config_survives_a_bare_provider_name() {
+        let config: AgentConfig = serde_json::from_str(r#"{"provider":"prime"}"#).unwrap();
+        assert!(matches!(config.provider_config, ProviderConfig::Prime(_)));
+        assert_eq!(config.prime_config(), PrimeProviderConfig::default());
+    }
 
     #[test]
     fn agent_config_serde_roundtrip() {

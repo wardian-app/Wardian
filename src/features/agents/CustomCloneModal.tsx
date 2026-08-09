@@ -10,7 +10,7 @@ import type {
   UserFacingProviderName,
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
-import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName, resolveEffectiveProvider } from "./providerOptions";
+import { buildProviderOptions, buildUngatedProviderOptions, isUserFacingProviderName, providerDisplayName, resolveEffectiveProvider } from "./providerOptions";
 
 interface CustomCloneModalProps {
   sourceSessionId: string;
@@ -131,7 +131,9 @@ export const CustomCloneModal: React.FC<CustomCloneModalProps> = ({
     if (!resolved.provider) {
       setProviderNote(resolved.note);
     } else if (provider && currentOption && !currentOption.available) {
-      setProviderNote(`${currentOption.label.replace(" - not installed", "")} is not installed. Using ${providerOptions.find((option) => option.value === resolved.provider)?.label ?? resolved.provider}.`);
+      const executable = providerReadiness.find((entry) => entry.provider === provider)?.executable;
+      const problem = executable ? "needs setup" : "is not installed";
+      setProviderNote(`${providerDisplayName(currentOption.value)} ${problem}. Using ${providerOptions.find((option) => option.value === resolved.provider)?.label ?? resolved.provider}.`);
     } else {
       setProviderNote(resolved.note);
     }

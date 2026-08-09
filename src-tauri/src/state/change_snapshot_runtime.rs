@@ -52,7 +52,9 @@ impl Default for ChangeSnapshotRuntime {
 
 impl std::fmt::Debug for ChangeSnapshotRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("ChangeSnapshotRuntime").finish_non_exhaustive()
+        formatter
+            .debug_struct("ChangeSnapshotRuntime")
+            .finish_non_exhaustive()
     }
 }
 
@@ -66,7 +68,10 @@ impl ChangeSnapshotRuntime {
 
     #[cfg(test)]
     fn with_snapshot_fn(snapshot_fn: SnapshotFn) -> Self {
-        Self { slots: Mutex::new(HashMap::new()), snapshot_fn }
+        Self {
+            slots: Mutex::new(HashMap::new()),
+            snapshot_fn,
+        }
     }
 
     /// Runs a snapshot for the workspace, or folds the request into a run
@@ -175,9 +180,7 @@ mod tests {
                 if first_call.fetch_add(1, Ordering::SeqCst) == 0 {
                     entered_fn.notify_one();
                     let gate = Arc::clone(&gate_fn);
-                    tokio::task::block_in_place(|| {
-                        tauri::async_runtime::block_on(gate.notified())
-                    });
+                    tokio::task::block_in_place(|| tauri::async_runtime::block_on(gate.notified()));
                 }
                 Ok(created(request.turn_index))
             },
@@ -214,15 +217,17 @@ mod tests {
     async fn sequential_requests_each_run() {
         let observed: Arc<StdMutex<Vec<u64>>> = Arc::new(StdMutex::new(Vec::new()));
         let observed_fn = Arc::clone(&observed);
-        let runtime = ChangeSnapshotRuntime::with_snapshot_fn(Arc::new(
-            move |request: &SnapshotRequest| {
+        let runtime =
+            ChangeSnapshotRuntime::with_snapshot_fn(Arc::new(move |request: &SnapshotRequest| {
                 observed_fn.lock().unwrap().push(request.turn_index);
                 Ok(created(request.turn_index))
-            },
-        ));
+            }));
 
         for turn in 1..=3u64 {
-            assert_eq!(runtime.snapshot(request("/w", turn)).await, SnapshotDispatch::Ran(1));
+            assert_eq!(
+                runtime.snapshot(request("/w", turn)).await,
+                SnapshotDispatch::Ran(1)
+            );
         }
 
         assert_eq!(*observed.lock().unwrap(), vec![1, 2, 3]);
@@ -232,17 +237,25 @@ mod tests {
     async fn separate_workspaces_do_not_block_each_other() {
         let observed: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let observed_fn = Arc::clone(&observed);
-        let runtime = ChangeSnapshotRuntime::with_snapshot_fn(Arc::new(
-            move |request: &SnapshotRequest| {
+        let runtime =
+            ChangeSnapshotRuntime::with_snapshot_fn(Arc::new(move |request: &SnapshotRequest| {
                 observed_fn.lock().unwrap().push(request.cwd.clone());
                 Ok(created(request.turn_index))
-            },
-        ));
+            }));
 
-        assert_eq!(runtime.snapshot(request("/a", 1)).await, SnapshotDispatch::Ran(1));
-        assert_eq!(runtime.snapshot(request("/b", 1)).await, SnapshotDispatch::Ran(1));
+        assert_eq!(
+            runtime.snapshot(request("/a", 1)).await,
+            SnapshotDispatch::Ran(1)
+        );
+        assert_eq!(
+            runtime.snapshot(request("/b", 1)).await,
+            SnapshotDispatch::Ran(1)
+        );
 
-        assert_eq!(*observed.lock().unwrap(), vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
         assert!(runtime.is_idle("/a").await);
         assert!(runtime.is_idle("/b").await);
     }
@@ -253,11 +266,17 @@ mod tests {
             Err("git exploded".to_string())
         }));
 
-        assert_eq!(runtime.snapshot(request("/w", 1)).await, SnapshotDispatch::Ran(1));
+        assert_eq!(
+            runtime.snapshot(request("/w", 1)).await,
+            SnapshotDispatch::Ran(1)
+        );
 
         // A failure must not wedge the workspace into a permanently in-flight
         // state, which would silently stop every later snapshot.
         assert!(runtime.is_idle("/w").await);
-        assert_eq!(runtime.snapshot(request("/w", 2)).await, SnapshotDispatch::Ran(1));
+        assert_eq!(
+            runtime.snapshot(request("/w", 2)).await,
+            SnapshotDispatch::Ran(1)
+        );
     }
 }

@@ -142,6 +142,7 @@ async fn discover_model_catalog(provider: &str) -> ProviderModelCatalog {
             },
         },
         "opencode" => discover_opencode_catalog(provider, version).await,
+        "prime" => discover_prime_catalog(provider, version).await,
         "antigravity" => discover_line_catalog(provider, version, &["models"]).await,
         "claude" => {
             discover_alias_catalog(
@@ -240,6 +241,114 @@ async fn discover_alias_catalog(
             .collect(),
         refresh_error: None,
     }
+}
+
+/// Prime Agent's reasoning levels, shared by every model whose catalog row
+/// reports thinking support.
+const PRIME_THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+async fn discover_prime_catalog(provider: &str, version: Option<String>) -> ProviderModelCatalog {
+    match provider_command_output(provider, &["model", "list"]).await {
+        Ok(output) => {
+            let models = parse_prime_catalog(&output);
+            if models.is_empty() {
+                ProviderModelCatalog {
+                    provider: provider.to_string(),
+                    version,
+                    source: "unavailable".to_string(),
+                    models,
+                    // `model list` exits 0 with a login hint when no provider
+                    // credentials are configured, so an empty catalog is the
+                    // normal signed-out state rather than a hard failure.
+                    refresh_error: Some(
+                        "Prime Agent has no models available. Run `prime-agent` and use /login to authenticate a model provider."
+                            .to_string(),
+                    ),
+                }
+            } else {
+                ProviderModelCatalog {
+                    provider: provider.to_string(),
+                    version,
+                    source: "live_catalog".to_string(),
+                    models,
+                    refresh_error: None,
+                }
+            }
+        }
+        Err(error) => ProviderModelCatalog {
+            provider: provider.to_string(),
+            version,
+            source: "unavailable".to_string(),
+            models: Vec::new(),
+            refresh_error: Some(error),
+        },
+    }
+}
+
+/// Parses the padded table printed by `prime-agent model list`:
+///
+/// ```text
+/// provider   model            context  max-out  thinking  images
+/// anthropic  claude-opus-5    200K     64K      yes       yes
+/// ```
+///
+/// Prime Agent is a meta-provider, so the selectable identifier is the
+/// composite `provider/model` that `--model` accepts, not the bare model id.
+fn parse_prime_catalog(output: &str) -> Vec<ProviderModelOption> {
+    let mut models = Vec::new();
+    let mut seen_header = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            continue;
+        }
+
+        let columns: Vec<&str> = trimmed
+            .split("  ")
+            .map(str::trim)
+            .filter(|column| !column.is_empty())
+            .collect();
+        if columns.len() < 2 {
+            continue;
+        }
+
+        if !seen_header {
+            // Skip everything up to and including the header row so warning
+            // lines printed before the table cannot be parsed as models.
+            if columns[0] == "provider" && columns[1] == "model" {
+                seen_header = true;
+            }
+            continue;
+        }
+
+        let (model_provider, model_id) = (columns[0], columns[1]);
+        if model_provider.is_empty() || model_id.is_empty() {
+            continue;
+        }
+
+        let supports_thinking = columns
+            .get(4)
+            .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+        let effort_options: Vec<String> = if supports_thinking {
+            PRIME_THINKING_LEVELS
+                .iter()
+                .map(|level| (*level).to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        models.push(ProviderModelOption {
+            id: format!("{model_provider}/{model_id}"),
+            display_name: format!("{model_id} ({model_provider})"),
+            default_effort: supports_thinking.then(|| "medium".to_string()),
+            effort_options,
+            is_default: false,
+        });
+    }
+
+    models
 }
 
 async fn discover_line_catalog(
@@ -433,6 +542,68 @@ fn is_user_facing_provider(provider: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_prime_catalogue_into_composite_ids() {
+        let output = concat!(
+            "provider   model             context  max-out  thinking  images\n",
+            "anthropic  claude-opus-5     200K     64K      yes       yes\n",
+            "google     gemini-3-flash    1M       8K       no        yes\n",
+        );
+
+        let models = parse_prime_catalog(output);
+
+        assert_eq!(models.len(), 2);
+        // --model takes provider/id, so the bare model id is not selectable.
+        assert_eq!(models[0].id, "anthropic/claude-opus-5");
+        assert_eq!(models[0].display_name, "claude-opus-5 (anthropic)");
+        assert_eq!(models[0].default_effort.as_deref(), Some("medium"));
+        assert!(models[0].effort_options.contains(&"xhigh".to_string()));
+
+        assert_eq!(models[1].id, "google/gemini-3-flash");
+        assert!(models[1].effort_options.is_empty());
+        assert_eq!(models[1].default_effort, None);
+    }
+
+    #[test]
+    fn prime_catalogue_keeps_provider_prefix_when_model_ids_contain_slashes() {
+        // Verbatim rows from `prime-agent 0.7.0 model list`. Prime Inference
+        // model ids embed their own vendor prefix, and Prime resolves
+        // `${provider}/${id}` as a single canonical reference, so the provider
+        // segment must still be prepended.
+        let output = concat!(
+            "provider         model                     context  max-out  thinking  images\n",
+            "openai-codex     gpt-5.3-codex-spark       128K     128K     yes       no    \n",
+            "prime-inference  anthropic/claude-opus-5   1M       128K     yes       yes   \n",
+        );
+
+        let models = parse_prime_catalog(output);
+
+        assert_eq!(models[0].id, "openai-codex/gpt-5.3-codex-spark");
+        assert_eq!(models[1].id, "prime-inference/anthropic/claude-opus-5");
+        assert_eq!(
+            models[1].display_name,
+            "anthropic/claude-opus-5 (prime-inference)"
+        );
+        // Trailing padding on the final column must not leak into parsing.
+        assert!(models[0].effort_options.contains(&"high".to_string()));
+    }
+
+    #[test]
+    fn prime_catalogue_ignores_preamble_and_signed_out_output() {
+        let with_warning = concat!(
+            "Warning: errors loading models.json:\n",
+            "provider   model          context  max-out  thinking  images\n",
+            "anthropic  claude-opus-5  200K     64K      yes       yes\n",
+        );
+        assert_eq!(parse_prime_catalog(with_warning).len(), 1);
+
+        let signed_out = concat!(
+            "No models available. Use /login to log into a provider via OAuth or API key. See:\n",
+            "  C:\\path\\docs\\providers.md\n",
+        );
+        assert!(parse_prime_catalog(signed_out).is_empty());
+    }
 
     #[test]
     fn parses_current_codex_catalogue_shape() {

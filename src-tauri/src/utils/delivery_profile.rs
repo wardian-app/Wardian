@@ -80,6 +80,26 @@ pub fn delivery_profile(provider: &str) -> DeliveryProfile {
             input_ready_markers: &[">"],
             busy_markers: &["Working"],
         },
+        // Prime Agent will be driven over its RPC command channel rather than
+        // by emulated keystrokes, but until that transport lands it runs on the
+        // interactive TUI like every other provider, so this profile carries
+        // the real submit behaviour.
+        //
+        // The marker lists stay empty on purpose: Prime's turn boundaries are
+        // read as screen-state edges by `PrimeTurnGate` rather than as
+        // substring hits, because its busy and idle footers differ only by a
+        // shortcuts hint and a marker match would end every turn immediately.
+        "prime" => DeliveryProfile {
+            provider: normalized,
+            submit_key: SubmitKey::CarriageReturn,
+            submit_delay_ms: 500,
+            bracketed_paste: BracketedPasteProfile {
+                enabled: true,
+                min_bytes: 2048,
+            },
+            input_ready_markers: &[],
+            busy_markers: &[],
+        },
         "antigravity" => DeliveryProfile {
             provider: normalized,
             submit_key: SubmitKey::CarriageReturn,
@@ -129,7 +149,14 @@ mod tests {
 
     #[test]
     fn every_user_provider_has_a_profile() {
-        for provider in ["codex", "claude", "gemini", "opencode", "antigravity"] {
+        for provider in [
+            "codex",
+            "claude",
+            "gemini",
+            "opencode",
+            "antigravity",
+            "prime",
+        ] {
             let profile = delivery_profile(provider);
             assert_eq!(profile.provider, provider);
         }

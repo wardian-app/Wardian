@@ -10,7 +10,7 @@ import {
 } from "../../types";
 
 function isKnownProviderName(provider: string | undefined): provider is ProviderName {
-  return provider === "claude" || provider === "codex" || provider === "gemini" || provider === "antigravity" || provider === "opencode" || provider === "mock";
+  return provider === "claude" || provider === "codex" || provider === "gemini" || provider === "antigravity" || provider === "opencode" || provider === "prime" || provider === "mock";
 }
 
 function providerValue(provider: AgentConfig["provider"]): string {
@@ -34,6 +34,8 @@ export function defaultProviderConfig(provider: AgentConfig["provider"]): Provid
       return { type: "antigravity" };
     case "opencode":
       return { type: "opencode" };
+    case "prime":
+      return { type: "prime" };
     case "mock":
       return { type: "mock" };
     case "claude":
@@ -102,6 +104,10 @@ function legacyProviderConfig(config: AgentConfig, provider: ProviderName): Prov
       };
       return stripUndefined(opencode);
     }
+    // Prime Agent post-dates the legacy flat encoding, so it has no top-level
+    // mirror fields to recover.
+    case "prime":
+      return { type: "prime" };
     case "mock":
       return { type: "mock" };
     case "claude":

@@ -1,8 +1,7 @@
-use crate::providers::antigravity::{
-    changed_workspace_conversation, AntigravityProvider,
-};
+use crate::providers::antigravity::{changed_workspace_conversation, AntigravityProvider};
 use crate::providers::codex::CodexProvider;
 use crate::providers::opencode::OpenCodeProvider;
+use crate::providers::prime::PrimeProvider;
 use crate::providers::ProviderFactory;
 use crate::utils::fs::*;
 use crate::utils::process::new_headless_command;
@@ -288,6 +287,27 @@ pub(crate) fn headless_provider_args(
             provider_args
                 .push(crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt));
         }
+        "prime" => {
+            // Prime Agent emits the same structured event stream in print mode
+            // as interactively, so headless runs reuse get_spawn_args verbatim
+            // and only add the run mode. `output_format` is ignored: --mode json
+            // is the only machine-readable print format Prime offers.
+            if let Some(config) = config_override {
+                let mut config = config.clone();
+                config.resume_session = resume_session.map(str::to_string);
+                provider_args.extend(provider.get_spawn_args(&config, resume_session.is_some()));
+                PrimeProvider::append_autonomous_args(&mut provider_args, &config);
+            } else if let Some(resume_id) = resume_session.filter(|s| !s.trim().is_empty()) {
+                provider_args.push("--resume".to_string());
+                provider_args.push(resume_id.to_string());
+            }
+            provider_args.push("--cwd".to_string());
+            provider_args.push(provider_cwd.to_string_lossy().to_string());
+            provider_args.push("--mode".to_string());
+            provider_args.push("json".to_string());
+            provider_args.push("--print".to_string());
+            provider_args.push(prompt.to_string());
+        }
         "antigravity" => {
             if let Some(config) = config_override {
                 let mut config = config.clone();
@@ -340,9 +360,8 @@ pub async fn run_headless_with_options(
             .resume_session
             .is_none_or(|value| value.trim().is_empty())
     {
-        AntigravityProvider::antigravity_home().and_then(|home| {
-            AntigravityProvider::conversation_for_workspace(&home, options.cwd)
-        })
+        AntigravityProvider::antigravity_home()
+            .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, options.cwd))
     } else {
         None
     };
@@ -631,9 +650,8 @@ pub async fn run_headless_with_options(
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
             .or_else(|| {
-                let after = AntigravityProvider::antigravity_home().and_then(|home| {
-                    AntigravityProvider::conversation_for_workspace(&home, cwd)
-                });
+                let after = AntigravityProvider::antigravity_home()
+                    .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd));
                 changed_workspace_conversation(
                     antigravity_workspace_before.as_deref(),
                     after.as_deref(),
@@ -921,11 +939,7 @@ pub async fn obtain_session_id(
     };
 
     if provider_name == "codex" {
-        append_codex_bootstrap_args(
-            &mut provider_args,
-            &provider_cwd,
-            config,
-        );
+        append_codex_bootstrap_args(&mut provider_args, &provider_cwd, config);
     } else if provider_name == "opencode" {
         provider_args.push("run".to_string());
         if let Some(config) = config {
@@ -1104,11 +1118,7 @@ pub async fn obtain_session_id(
                     provider: provider_name.to_string(),
                     ..Default::default()
                 });
-                super::apply_provider_identity(
-                    provider_name,
-                    &mut identity_config,
-                    candidate,
-                )?;
+                super::apply_provider_identity(provider_name, &mut identity_config, candidate)?;
             }
             if session_id_res.is_none() && !stderr_output.trim().is_empty() {
                 log_debug(&format!(
@@ -1175,6 +1185,14 @@ fn bootstrap_output_session_id(provider_name: &str, output: &str) -> Option<Stri
                 .and_then(|value| value.as_str())
                 .filter(|value| value.starts_with("ses_") && value.len() > "ses_".len())
                 .map(str::to_string),
+            // Prime Agent's first stream line is its session header.
+            "prime" if parsed.get("type").and_then(|value| value.as_str()) == Some("session") => {
+                parsed
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+            }
             _ => None,
         }
     })
@@ -1590,10 +1608,10 @@ mod tests {
         let home = tempfile::tempdir().expect("Codex home");
         let cwd = Path::new("D:/Development/Wardian");
 
-        let session_id = materialize_codex_session_rollout(home.path(), cwd)
-            .expect("materialize Codex rollout");
-        let rollout_path = codex_session_file_path_in(home.path(), &session_id)
-            .expect("locate Codex rollout");
+        let session_id =
+            materialize_codex_session_rollout(home.path(), cwd).expect("materialize Codex rollout");
+        let rollout_path =
+            codex_session_file_path_in(home.path(), &session_id).expect("locate Codex rollout");
         let rollout: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(rollout_path).expect("read Codex rollout"),
         )
@@ -1669,8 +1687,9 @@ mod tests {
         );
 
         let exec_index = args.iter().position(|arg| arg == "exec").unwrap();
-        assert!(args[..exec_index]
-            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(
+            args[..exec_index].contains(&"--dangerously-bypass-approvals-and-sandbox".to_string())
+        );
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"--ask-for-approval".to_string()));
         assert_eq!(config.folder, cwd.to_string_lossy());
@@ -1872,11 +1891,7 @@ mod tests {
         };
         let mut args = Vec::new();
 
-        append_codex_bootstrap_args(
-            &mut args,
-            Path::new("/workspace"),
-            Some(&config),
-        );
+        append_codex_bootstrap_args(&mut args, Path::new("/workspace"), Some(&config));
 
         let exec_index = args.iter().position(|arg| arg == "exec").unwrap();
         let policy_index = args

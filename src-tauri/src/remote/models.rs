@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use wardian_core::control::MessageInputMode;
 use std::collections::{HashMap, VecDeque};
+use wardian_core::control::MessageInputMode;
 
 pub const REMOTE_SETTINGS_SCHEMA_VERSION: u8 = 1;
 pub const REMOTE_AUDIT_SCHEMA_VERSION: u8 = 1;

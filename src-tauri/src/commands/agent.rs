@@ -2772,10 +2772,12 @@ pub async fn kill_agent(
             }
         }
         if let Some(home) = crate::utils::fs::get_wardian_home() {
-            if let Err(error) = crate::commands::change_review::remove_change_review_watermarks_for_agent(
-                &home,
-                &session_id,
-            ) {
+            if let Err(error) =
+                crate::commands::change_review::remove_change_review_watermarks_for_agent(
+                    &home,
+                    &session_id,
+                )
+            {
                 manager::log_debug(&format!(
                     "[WARDIAN] Failed to clean change review watermarks for {}: {}",
                     session_id, error

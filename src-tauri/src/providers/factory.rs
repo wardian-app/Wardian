@@ -4,6 +4,7 @@ use crate::providers::codex::CodexProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::mock::MockProvider;
 use crate::providers::opencode::OpenCodeProvider;
+use crate::providers::prime::PrimeProvider;
 use std::sync::Arc;
 use wardian_core::models::provider::AgentProvider;
 
@@ -14,7 +15,7 @@ pub struct ProviderFactory;
 impl ProviderFactory {
     /// Returns an `Arc<dyn AgentProvider>` for the given provider name.
     ///
-    /// Currently supported: `"gemini"`, `"claude"`, `"codex"`, `"antigravity"`, `"opencode"`, and `"mock"`.
+    /// Currently supported: `"gemini"`, `"claude"`, `"codex"`, `"antigravity"`, `"opencode"`, `"prime"`, and `"mock"`.
     /// Returns `Err` for unknown provider names.
     pub fn resolve(provider_name: &str) -> Result<Arc<dyn AgentProvider>, String> {
         let lower = provider_name.to_lowercase();
@@ -24,9 +25,10 @@ impl ProviderFactory {
             "codex" => Ok(Arc::new(CodexProvider::new())),
             "antigravity" => Ok(Arc::new(AntigravityProvider::new())),
             "opencode" => Ok(Arc::new(OpenCodeProvider::new())),
+            "prime" => Ok(Arc::new(PrimeProvider::new())),
             "mock" => Ok(Arc::new(MockProvider::new())),
             other => Err(format!(
-                "Unknown provider '{}'. Supported providers: gemini, claude, codex, antigravity, opencode, mock",
+                "Unknown provider '{}'. Supported providers: gemini, claude, codex, antigravity, opencode, prime, mock",
                 other
             )),
         }
@@ -70,6 +72,25 @@ mod tests {
         let provider = ProviderFactory::resolve("opencode");
         assert!(provider.is_ok());
         assert_eq!(provider.unwrap().name(), "OpenCode");
+    }
+
+    #[test]
+    fn resolve_prime_succeeds() {
+        let provider = ProviderFactory::resolve("prime");
+        assert!(provider.is_ok());
+        assert_eq!(provider.unwrap().name(), "Prime Agent");
+    }
+
+    #[test]
+    fn resolve_prime_case_insensitive() {
+        assert!(ProviderFactory::resolve("Prime").is_ok());
+        assert!(ProviderFactory::resolve("PRIME").is_ok());
+    }
+
+    #[test]
+    fn resolved_prime_provider_uses_agents_md() {
+        let provider = ProviderFactory::resolve("prime").unwrap();
+        assert_eq!(provider.get_instruction_filename(), "AGENTS.md");
     }
 
     #[test]

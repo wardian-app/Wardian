@@ -115,8 +115,7 @@ impl AgentRunner for TauriHeadlessAgentRunner {
             // registered agent rather than `spec.session_id`.
             let _lifecycle_guard = if spec.lease_owner.is_some() {
                 let agent_session_id = registered_agent_session_id.as_deref().ok_or_else(|| {
-                    "registered background workflow run is missing its agent session id"
-                        .to_string()
+                    "registered background workflow run is missing its agent session id".to_string()
                 })?;
                 Some(state.lock_agent_lifecycle(agent_session_id).await)
             } else {
@@ -167,7 +166,8 @@ impl AgentRunner for TauriHeadlessAgentRunner {
                         agent_session_id
                     ));
                 }
-                let emit_headless_status = current_config.is_off || is_offline_agent_status(&current_status);
+                let emit_headless_status =
+                    current_config.is_off || is_offline_agent_status(&current_status);
                 if emit_headless_status {
                     let _ = self.app.emit(
                         "agent-status-updated",
@@ -231,10 +231,12 @@ impl AgentRunner for TauriHeadlessAgentRunner {
                             }
                         }
                     }
-                    Err(error) => crate::manager::log_debug(&format!(
+                    Err(error) => {
+                        crate::manager::log_debug(&format!(
                         "[workflow] headless lifecycle-gate lease release failed for {}: {error}",
                         registered_agent_session_id.as_deref().unwrap_or("<ephemeral>")
-                    )),
+                    ))
+                    }
                 }
             }
 

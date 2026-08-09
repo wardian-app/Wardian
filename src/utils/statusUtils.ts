@@ -9,6 +9,8 @@ export type AgentDisplayStatus =
   | "Off"
   | "Headless"
   | "Restoring"
+  /** Alive in a provider-owned worker that this app is not attached to. */
+  | "Detached"
   | "Error";
 
 /**
@@ -36,6 +38,8 @@ export function normalizeAgentStatus(status: string | undefined): AgentDisplaySt
       return "Headless";
     case "restoring":
       return "Restoring";
+    case "detached":
+      return "Detached";
     case "error":
     case "failed":
       return "Error";
@@ -57,6 +61,7 @@ export function formatAgentStatusLabel(status: string | undefined): string {
     case "Off":
     case "Headless":
     case "Restoring":
+    case "Detached":
     case "Error":
       return normalizeAgentStatus(status)!;
     default:
@@ -75,6 +80,8 @@ export function getAgentStatusColorToken(status: string | undefined): string {
       return "var(--color-wardian-warning)";
     case "Headless":
       return "var(--color-wardian-headless)";
+    case "Detached":
+      return "var(--color-wardian-detached)";
     case "Error":
       return "var(--color-wardian-error)";
     case "Off":
@@ -97,6 +104,8 @@ export function getAgentStatusIndicatorClass(status: string | undefined): string
       return "bg-wardian-warning";
     case "Headless":
       return "bg-wardian-headless";
+    case "Detached":
+      return "bg-wardian-detached";
     case "Error":
       return "bg-wardian-error";
     case "Off":
@@ -119,9 +128,12 @@ export function deriveEffectiveStatus(
 ): AgentDisplayStatus {
   let effectiveStatus: AgentDisplayStatus = normalizeAgentStatus(metricsStatus) ?? "Pending...";
 
-  // Backend "Headless" and "Restoring" statuses are authoritative — pass them through unchanged.
+  // Backend "Headless", "Restoring", and "Detached" statuses are authoritative — pass them through unchanged.
   if (effectiveStatus === "Headless") return "Headless";
   if (effectiveStatus === "Restoring") return "Restoring";
+  // A detached worker has no PTY to read a title from, and it outranks the
+  // persisted off flag: the agent really is running, just not here.
+  if (effectiveStatus === "Detached") return "Detached";
 
   // An agent remains configured as off while Wardian runs a one-shot provider
   // process for it. That lease-derived Headless state must be visible instead
@@ -185,18 +197,24 @@ export function deriveCurrentThought(
 ): { thought: string; status: AgentDisplayStatus } {
   let effectiveStatus = deriveEffectiveStatus(rawTitle, liveThought, metrics?.current_status, isOff);
   let currentThought = cleanThought(liveThought || rawTitle.trim());
-  const isHeadless = normalizeAgentStatus(metrics?.current_status) === "Headless";
+  const normalizedMetricsStatus = normalizeAgentStatus(metrics?.current_status);
+  const isHeadless = normalizedMetricsStatus === "Headless";
+  const isDetached = normalizedMetricsStatus === "Detached";
 
   if (!liveThought && rawTitle.startsWith("OC | ")) {
     currentThought = cleanThought(rawTitle.slice(5).trim());
   }
 
-  if (isOff && !isHeadless) {
+  if (isOff && !isHeadless && !isDetached) {
     return { thought: "Off", status: "Off" };
   }
 
   if (isHeadless) {
     return { thought: "Headless", status: "Headless" };
+  }
+
+  if (isDetached) {
+    return { thought: "Running elsewhere", status: "Detached" };
   }
 
   // Restoring placeholders have no live PTY yet — skip the uptime-based
@@ -418,6 +436,8 @@ export function getAgentStatusTextClass(status: string): string {
   switch (normalizeAgentStatus(status)) {
     case "Headless":
       return "text-wardian-headless";
+    case "Detached":
+      return "text-wardian-detached";
     case "Processing...":
       return "text-wardian-processing";
     case "Restoring":
@@ -435,6 +455,12 @@ export function getStatusColorClass(effectiveStatus: string): string {
   const normalizedStatus = normalizeAgentStatus(effectiveStatus);
   if (normalizedStatus === "Headless") {
     return "bg-wardian-headless shadow-[0_0_10px_var(--color-wardian-headless)] animate-pulse";
+  }
+  // Glow without a pulse: the worker is alive, but nothing here is streaming
+  // from it, so an animated indicator would imply live output that has no
+  // source.
+  if (normalizedStatus === "Detached") {
+    return "bg-wardian-detached shadow-[0_0_10px_var(--color-wardian-detached)]";
   }
   if (normalizedStatus === "Processing...") {
     return "bg-wardian-processing shadow-[0_0_8px_var(--color-wardian-processing)] animate-pulse";

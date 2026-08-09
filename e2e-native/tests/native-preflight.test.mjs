@@ -248,4 +248,7 @@ test("native app shell timeout explains dev server connection failures", () => {
   assert.match(message, /Vite dev server/);
   assert.match(message, /npm run vite/);
   assert.match(message, /npm run tauri -- build --debug --no-bundle/);
+  // The usual cause is not a missing build but a later `cargo test` relinking
+  // the same path as a dev build, which is invisible unless the message says so.
+  assert.match(message, /cargo test/);
 });

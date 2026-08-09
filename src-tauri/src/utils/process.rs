@@ -179,6 +179,35 @@ fn app_process_supervisor_limit_info() -> win32job::ExtendedLimitInfo {
     info
 }
 
+/// Drops a job handle without killing the processes still assigned to it.
+///
+/// Closing a `KILL_ON_JOB_CLOSE` job terminates every remaining member. That is
+/// the desired safety net for ordinary providers, but Prime Agent's shared
+/// supervisor daemon can be a member of one agent's job while serving every
+/// other Prime session on the machine. Clearing the flag before the handle
+/// drops releases those processes instead of reaping them.
+#[cfg(windows)]
+pub fn release_job_without_killing(job: win32job::Job) {
+    match job.query_extended_limit_info() {
+        Ok(mut info) => {
+            // Zeroes LimitFlags, which drops KILL_ON_JOB_CLOSE. The job is
+            // being released, so the other limits no longer matter.
+            info.clear_limits();
+            if let Err(err) = job.set_extended_limit_info(&info) {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] Failed to clear kill-on-job-close before releasing job: {err}"
+                ));
+            }
+        }
+        Err(err) => {
+            crate::manager::log_debug(&format!(
+                "[Wardian] Failed to query job limits before releasing job: {err}"
+            ));
+        }
+    }
+    drop(job);
+}
+
 #[cfg(windows)]
 pub fn create_kill_on_close_job(context: &str) -> Result<win32job::Job, String> {
     let job = win32job::Job::create()
