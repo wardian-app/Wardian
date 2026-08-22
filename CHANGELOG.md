@@ -4,6 +4,28 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.5.4](https://github.com/wardian-app/Wardian/compare/v0.5.3...v0.5.4) (2026-08-22)
+
+
+### Features
+
+* **chat:** compress transcript and support pasted images ([#911](https://github.com/wardian-app/Wardian/issues/911)) ([7fe810c](https://github.com/wardian-app/Wardian/commit/7fe810cd2ffdc81eea40e86d21b756f0f0b4af97))
+* **cli:** add live agent rename and guarded deletion ([#925](https://github.com/wardian-app/Wardian/issues/925)) ([f55bcff](https://github.com/wardian-app/Wardian/commit/f55bcffdd912b7a4424bc763d92ae4ebffda1f69))
+* **dashboard:** add a per-provider activity strip ([#924](https://github.com/wardian-app/Wardian/issues/924)) ([9b73466](https://github.com/wardian-app/Wardian/commit/9b73466980a26dd0e12cc1fbcbb0581cc21549c8))
+* **remote:** add mobile Inbox triage ([#918](https://github.com/wardian-app/Wardian/issues/918)) ([ac40652](https://github.com/wardian-app/Wardian/commit/ac4065286ddcc72f9a31ee68e90c21e509516b34))
+
+
+### Bug Fixes
+
+* **chat:** make the composer send button consistent ([#935](https://github.com/wardian-app/Wardian/issues/935)) ([43e84b7](https://github.com/wardian-app/Wardian/commit/43e84b726c5a6ab19c23fa49240822e486b5bebe))
+* **chat:** remove provider launch cards from chat transcripts ([#932](https://github.com/wardian-app/Wardian/issues/932)) ([654108c](https://github.com/wardian-app/Wardian/commit/654108caa94992e588397fecf5b7efc6ece79db6))
+* **inbox:** lazy-load older history on scroll ([#936](https://github.com/wardian-app/Wardian/issues/936)) ([740101a](https://github.com/wardian-app/Wardian/commit/740101a777e9bb23c088a90ba59e688dcd7c1bf9))
+* **inbox:** make desktop provider choices durable ([#922](https://github.com/wardian-app/Wardian/issues/922)) ([0a3fb4f](https://github.com/wardian-app/Wardian/commit/0a3fb4f2723b0bbcf432538b8af3217c9174ebd2))
+* **opencode:** resume identity guard, remote error detail, permission-prompt detection ([#930](https://github.com/wardian-app/Wardian/issues/930)) ([735b241](https://github.com/wardian-app/Wardian/commit/735b2417520f3b434cfe7a638dcd449299ee519d))
+* **ui:** standardize interactive cursors ([#913](https://github.com/wardian-app/Wardian/issues/913)) ([4f9c796](https://github.com/wardian-app/Wardian/commit/4f9c796f330a0368b6ee0b9f56814b50adf7a8b3))
+* **window:** reduce minimize/restore stall ([#915](https://github.com/wardian-app/Wardian/issues/915)) ([86468aa](https://github.com/wardian-app/Wardian/commit/86468aaee6da91776171820d6914090e9ebe854c))
+* **workbench:** equalize tab widths ([#919](https://github.com/wardian-app/Wardian/issues/919)) ([c170473](https://github.com/wardian-app/Wardian/commit/c1704732e4f9bad47054b7ba671d498edf28e0f2))
+
 ## [0.5.3](https://github.com/wardian-app/Wardian/compare/v0.5.2...v0.5.3) (2026-08-16)
 
 
