@@ -1584,6 +1584,68 @@ describe("AgentChatView", () => {
     expect(input).toHaveValue("");
   });
 
+  it("completes slash commands from the composer and routes them as commands", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_transcript") return Promise.resolve([]);
+      if (command === "submit_prompt_to_agent") {
+        expect(args).toEqual({
+          sessionId: "agent-1",
+          prompt: "/compact",
+          inputMode: "command",
+        });
+        return Promise.resolve(undefined);
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" agent={{ session_name: "Alpha", agent_class: "Coder", provider: "codex" }} status="Idle" />);
+    expect(await screen.findByText("No chat transcript yet")).toBeInTheDocument();
+
+    const input = await screen.findByLabelText("Message agent");
+    fireEvent.change(input, { target: { value: "/co" } });
+    const menu = await screen.findByRole("listbox", { name: "Slash commands" });
+    expect(within(menu).getByText("/compact")).toBeInTheDocument();
+    expect(within(menu).queryByText("/cost")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input).toHaveValue("/compact ");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      sessionId: "agent-1",
+      prompt: "/compact",
+      inputMode: "command",
+    }));
+  });
+
+  it("dismisses the slash menu with escape and submits plain messages without a mode flag", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_transcript") return Promise.resolve([]);
+      if (command === "submit_prompt_to_agent") {
+        expect(args).toEqual({ sessionId: "agent-1", prompt: "just text /with/slashes later" });
+        return Promise.resolve(undefined);
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<AgentChatView sessionId="agent-1" agent={{ session_name: "Alpha", agent_class: "Coder", provider: "codex" }} status="Idle" />);
+    expect(await screen.findByText("No chat transcript yet")).toBeInTheDocument();
+
+    const input = await screen.findByLabelText("Message agent");
+    fireEvent.change(input, { target: { value: "/" } });
+    expect(await screen.findByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "just text /with/slashes later" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      sessionId: "agent-1",
+      prompt: "just text /with/slashes later",
+    }));
+  });
+
   it("persists chat model and applies it to the live provider", async () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "load_agent_chat_transcript") return Promise.resolve([]);

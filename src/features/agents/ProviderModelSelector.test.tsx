@@ -80,6 +80,62 @@ describe("ProviderModelSelector", () => {
     expect(screen.queryByRole("button", { name: "Refresh models" })).not.toBeInTheDocument();
   });
 
+  it("drops a superseded catalog load when the provider changes mid-flight", async () => {
+    let resolveCodexLoad: (catalog: unknown) => void = () => {};
+    invokeMock.mockImplementation((command, args) => {
+      if (command !== "list_provider_model_catalog") return Promise.reject(new Error("unexpected"));
+      if ((args as { provider: string }).provider === "codex") {
+        return new Promise((resolve) => {
+          resolveCodexLoad = resolve;
+        });
+      }
+      return Promise.resolve({
+        provider: "claude",
+        version: "claude-code 2.1",
+        source: "provider_aliases",
+        refresh_error: null,
+        models: [
+          { id: "claude-sonnet", display_name: "Sonnet", effort_options: [], default_effort: null, is_default: true },
+        ],
+      });
+    });
+
+    const { rerender } = render(
+      <ProviderModelSelector
+        idPrefix="race"
+        provider="codex"
+        selection={{}}
+        onSelectionChange={() => {}}
+      />,
+    );
+    rerender(
+      <ProviderModelSelector
+        idPrefix="race"
+        provider="claude"
+        selection={{}}
+        onSelectionChange={() => {}}
+      />,
+    );
+
+    await screen.findByRole("option", { name: "Sonnet" });
+
+    // The slow codex discovery resolves after the switch; it must not land.
+    await act(async () => {
+      resolveCodexLoad({
+        provider: "codex",
+        version: "codex-cli 0.146.0",
+        source: "live_catalog",
+        refresh_error: null,
+        models: [
+          { id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol", effort_options: ["low"], default_effort: "low", is_default: true },
+        ],
+      });
+    });
+
+    expect(screen.getByRole("option", { name: "Sonnet" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "GPT-5.6 Sol" })).not.toBeInTheDocument();
+  });
+
   it("does not expose Codex's hidden Work Mode alias", async () => {
     invokeMock.mockResolvedValue({
       provider: "codex",

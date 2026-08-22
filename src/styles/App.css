@@ -771,10 +771,9 @@ summary,
 }
 
 .chat-message-user {
-  max-width: min(92%, 48ch);
-  border-inline-end: 2px solid var(--color-wardian-accent);
-  border-radius: 4px 0 0 4px;
-  background: color-mix(in srgb, var(--color-wardian-accent), transparent 94%);
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-wardian-accent), transparent 72%);
+  background: color-mix(in srgb, var(--color-wardian-accent), transparent 88%);
 }
 
 .chat-row-actions {
@@ -795,6 +794,38 @@ summary,
   position: absolute;
   top: 6px;
   right: 6px;
+}
+
+/* Message rows keep their actions in flow below the content, hover-revealed,
+   so they can never detach from the text they belong to. Collapsed to zero
+   height when idle: an invisible action strip under every message read as
+   blank lines between turns. */
+.chat-row-actions--inline {
+  display: grid;
+  grid-template-rows: 0fr;
+  margin-top: 0;
+  opacity: 0;
+  transition: grid-template-rows 140ms ease, opacity 140ms ease;
+}
+
+.chat-row-actions--inline > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-row-actions--start {
+  justify-items: start;
+}
+
+.chat-row-actions--end {
+  justify-items: end;
+}
+
+.chat-row:hover .chat-row-actions--inline,
+.chat-row:focus-within .chat-row-actions--inline {
+  grid-template-rows: 1fr;
+  margin-top: 4px;
+  opacity: 1;
 }
 
 .chat-row-actions--with-toggle {
@@ -830,6 +861,15 @@ summary,
   min-width: 164px;
 }
 
+.chat-slash-menu {
+  position: absolute;
+  inset-inline: 0;
+  bottom: calc(100% + 6px);
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 30;
+}
+
 .chat-copy-menu-item {
   min-height: 32px;
 }
@@ -845,6 +885,22 @@ summary,
     min-height: 44px;
   }
 
+  /* Touch has no hover: message actions pin over the content's corner and the
+     content reserves room for them, instead of a collapsed row that could not
+     be revealed. */
+  .chat-row .chat-row-actions--inline {
+    display: block;
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    margin-top: 0;
+    opacity: 1;
+  }
+
+  .chat-message-content {
+    padding-right: 2.75rem;
+  }
+
   .chat-row-actions--overlay {
     top: 2px;
     right: 4px;
@@ -852,10 +908,6 @@ summary,
 
   .chat-row-actions--with-toggle {
     right: 48px;
-  }
-
-  .chat-message-content {
-    padding-right: 2.75rem;
   }
 
   .chat-activity-row {
@@ -887,10 +939,6 @@ summary,
 
   .chat-message-user {
     max-width: 96%;
-  }
-
-  .chat-message-content {
-    padding-right: 2.75rem;
   }
 
   .chat-activity-detail {

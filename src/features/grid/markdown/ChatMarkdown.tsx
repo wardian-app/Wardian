@@ -91,7 +91,7 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
       const raw = String(children).replace(/\n$/, "");
       const language = /language-([A-Za-z0-9_-]+)/.exec(className ?? "")?.[1] ?? "text";
       if (!className) {
-        return <code className="rounded bg-[var(--color-wardian-sidebar-primary)] px-1 py-0.5 text-[12px]">{children}</code>;
+        return <code className="break-words rounded bg-[var(--color-wardian-sidebar-primary)] px-1 py-0.5 text-[12px]">{children}</code>;
       }
       return (
         <div className="relative">

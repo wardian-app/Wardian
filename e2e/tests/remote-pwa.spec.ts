@@ -536,7 +536,7 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     }),
   );
   await page.getByRole("button", { name: "Chat", exact: true }).click();
-  await expect(page.getByLabel("user message")).toHaveClass(/\bw-full\b/);
+  await expect(page.getByLabel("user message")).toHaveClass(/\bitems-end\b/);
   await expect(page.getByLabel("assistant message")).toHaveClass(/\bw-full\b/);
   await expect(page.getByTestId("chat-work-group")).toHaveAttribute("data-expanded", "false");
   await captureFeatureScreenshot("chat-collapsed-work.png", page.locator('[data-testid="remote-agent-detail"]'));

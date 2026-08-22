@@ -54,12 +54,26 @@ export function flattenPromptForInjection(content: string): string {
 export async function submitInputToAgent(
   sessionId: string,
   input: string,
+  inputMode: "message" | "command" = isSlashCommand(input) ? "command" : "message",
 ): Promise<PromptDeliveryDetail | undefined> {
   if (!sessionId || !input.trim()) {
     return undefined;
   }
 
-  return invoke<PromptDeliveryDetail>("submit_prompt_to_agent", { sessionId, prompt: input });
+  return invoke<PromptDeliveryDetail>("submit_prompt_to_agent", {
+    sessionId,
+    prompt: input,
+    ...(inputMode === "command" ? { inputMode: "command" as const } : {}),
+  });
+}
+
+/**
+ * Provider CLIs treat a leading "/" as an interactive command rather than
+ * prompt text. Routing these through the command channel keeps them off the
+ * headless path when an agent is off or errored, matching the remote PWA.
+ */
+export function isSlashCommand(input: string): boolean {
+  return input.trimStart().startsWith("/");
 }
 
 export async function submitInboxProviderChoice(

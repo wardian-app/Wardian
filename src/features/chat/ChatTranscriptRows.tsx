@@ -46,12 +46,9 @@ const ROLE_CLASSES: Record<AgentChatRole, string> = {
 };
 
 /**
- * How much width a message may take.
- *
- * `bubble` right-aligns the user's own messages at 92% width, which reads as a
- * conversation on a desktop pane wide enough to spare the margin. `full_width`
- * is for the remote PWA, where the viewport is a phone and a 92% bubble spends
- * scarce horizontal space on nothing.
+ * Historical surface selector kept for remote callers; message geometry is now
+ * role-driven (user messages are right-aligned bubbles on every surface), so
+ * both values render identically.
  */
 export type ChatMessageLayout = "bubble" | "full_width";
 
@@ -74,7 +71,6 @@ export function ChatTranscriptRow({
   row,
   agentIsWorking,
   isSubmitting,
-  layout = "bubble",
   linkHandling,
   onApprovalSubmit,
   onOpenFile,
@@ -83,7 +79,7 @@ export function ChatTranscriptRow({
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
   if (row.kind === "work_group") return <WorkGroupRow agentIsWorking={agentIsWorking} row={row} />;
   return row.event.kind === "message" ? (
-    <MessageRow event={row.event} layout={layout} linkHandling={linkHandling} />
+    <MessageRow event={row.event} linkHandling={linkHandling} />
   ) : (
     <ActivityEvent
       agentIsWorking={agentIsWorking}
@@ -98,40 +94,55 @@ export function ChatTranscriptRow({
 
 export function MessageRow({
   event,
-  layout = "bubble",
   linkHandling,
 }: {
   event: AgentChatEvent;
-  layout?: ChatMessageLayout;
   linkHandling?: ChatMarkdownLinkHandling;
 }) {
   const role = event.role ?? "assistant";
   const text = event.text?.trimEnd() || event.title || "";
-  const isUser = role === "user";
-  const fullWidth = layout === "full_width";
   const isAssistant = role === "assistant";
-  const messageLayout = isAssistant ? "w-full max-w-[76ch] px-1 py-0.5" : fullWidth ? "w-full" : "max-w-[92%]";
-  const messageSurface = isAssistant
-    ? ""
-    : isUser
-      ? "px-2.5 py-1.5"
-      : "rounded-[var(--density-card-radius)] border px-3 py-2.5";
+  const isCardRole = role === "system" || role === "tool";
+  const content = text ? (
+    <ChatMarkdown linkHandling={linkHandling} source={text} />
+  ) : (
+    <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
+  );
+
+  if (isCardRole) {
+    return (
+      <article aria-label={`${role} message`} className="chat-row relative flex justify-start">
+        <div
+          className={`chat-message-content group/message relative max-w-[92%] rounded-[var(--density-card-radius)] border px-3 py-2.5 ${ROLE_CLASSES[role]}`}
+        >
+          {content}
+        </div>
+      </article>
+    );
+  }
 
   return (
     <article
       aria-label={`${role} message`}
-      className={`chat-row relative ${isAssistant || fullWidth ? "w-full" : `flex ${isUser ? "justify-end" : "justify-start"}`}`}
+      className={`chat-row group/chat-message flex w-full flex-col ${
+        isAssistant ? "max-w-[76ch] items-start px-1 py-0.5" : "items-end"
+      }`}
     >
       <div
-        className={`chat-message-content group/message relative ${messageLayout} ${messageSurface} ${ROLE_CLASSES[role]}`}
+        className={`chat-message-content min-w-0 max-w-full break-words ${isAssistant ? "" : "chat-message-user max-w-[92%] px-3 py-2"}`}
+        data-testid={isAssistant ? undefined : "chat-user-bubble"}
       >
-        {text ? <ChatRowActions actions={[{ label: "Copy message", value: text }]} className="chat-row-actions--overlay" /> : null}
-        {text ? (
-          <ChatMarkdown linkHandling={linkHandling} source={text} />
-        ) : (
-          <div className="text-[13px] leading-5 text-muted-neutral">No message content</div>
-        )}
+        {content}
       </div>
+      {text ? (
+        <div
+          className={`chat-row-actions--inline ${
+            isAssistant ? "chat-row-actions--start" : "chat-row-actions--end"
+          }`}
+        >
+          <ChatRowActions actions={[{ label: "Copy message", value: text }]} />
+        </div>
+      ) : null}
     </article>
   );
 }

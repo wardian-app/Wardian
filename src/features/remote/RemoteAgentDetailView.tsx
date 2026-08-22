@@ -1050,7 +1050,7 @@ function ChatPane({
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
+    <section className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
       {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
       {loading && visibleEvents.length === 0 && (
         <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">

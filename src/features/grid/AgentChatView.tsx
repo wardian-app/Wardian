@@ -16,6 +16,7 @@ import {
   type ChatAttachment,
 } from "../../utils/terminalInput";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
+import { matchingSlashCommands } from "../chat/slashCommands";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
@@ -476,8 +477,58 @@ function ChatComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autoFocusConsumedRef = useRef(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const placeholder = disabledReason ?? (hasActionRequired ? "Respond to action required..." : "Message agent...");
   const canSubmit = (draft.trim().length > 0 || attachments.length > 0) && !disabledReason;
+  const slashMatches = useMemo(
+    () => matchingSlashCommands(draft, agent?.provider),
+    [agent?.provider, draft],
+  );
+  const showSlashMenu =
+    !disabledReason && !slashDismissed && slashMatches.length > 0 && slashIndex < slashMatches.length;
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashMatches]);
+
+  const applySlashCommand = (command: string) => {
+    onChange(`${command} `);
+    setSlashDismissed(false);
+    textareaRef.current?.focus();
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSlashMenu) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSlashIndex((index) => (index + 1) % slashMatches.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSlashIndex((index) => (index - 1 + slashMatches.length) % slashMatches.length);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSlashDismissed(true);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        // A visible completion list owns Enter so a partially typed command
+        // completes instead of submitting mid-word.
+        event.preventDefault();
+        applySlashCommand(slashMatches[slashIndex].command);
+        return;
+      }
+    }
+    if (shouldSubmitComposerKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (canSubmit) onSubmit();
+    }
+  };
 
   const chooseAttachments = async () => {
     try {
@@ -594,7 +645,7 @@ function ChatComposer({
 
   return (
     <form
-      className="chat-composer mx-2.5 mb-2.5 rounded-xl border border-wardian-light bg-[var(--color-wardian-input-bg)] px-3 pb-1 pt-1.5 shadow-sm"
+      className="chat-composer relative mx-2.5 mb-2.5 rounded-xl border border-wardian-light bg-[var(--color-wardian-input-bg)] px-3 pb-1 pt-1.5 shadow-sm"
       data-testid="chat-composer"
       ref={composerRef}
       onDragOver={(event) => {
@@ -662,18 +713,45 @@ function ChatComposer({
           {attachmentError}
         </div>
       ) : null}
+      {showSlashMenu ? (
+        <ul
+          aria-label="Slash commands"
+          className="chat-slash-menu wardian-menu p-1"
+          role="listbox"
+        >
+          {slashMatches.map((entry, index) => (
+            <li key={entry.command}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === slashIndex}
+                className={`flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-[12px] leading-4 ${
+                  index === slashIndex
+                    ? "bg-[var(--color-wardian-card-bg-muted)] text-primary"
+                    : "text-muted-neutral hover:text-primary"
+                }`}
+                onMouseDown={(mouseEvent) => {
+                  mouseEvent.preventDefault();
+                  applySlashCommand(entry.command);
+                }}
+              >
+                <span className="shrink-0 font-mono font-semibold">{entry.command}</span>
+                <span className="min-w-0 truncate">{entry.description}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <textarea
         aria-label="Message agent"
+        aria-expanded={showSlashMenu}
         className="max-h-28 min-h-7 w-full resize-none bg-transparent px-0 py-0 text-[13px] leading-5 text-primary outline-none placeholder:text-muted-neutral disabled:cursor-not-allowed disabled:opacity-70"
         disabled={Boolean(disabledReason)}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (shouldSubmitComposerKey(event)) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (canSubmit) onSubmit();
-          }
+        onChange={(event) => {
+          setSlashDismissed(false);
+          onChange(event.target.value);
         }}
+        onKeyDown={handleComposerKeyDown}
         placeholder={placeholder}
         ref={textareaRef}
         rows={1}
@@ -741,19 +819,26 @@ function ChatModelSelection({
   }));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // Rollback target for a failed save. A ref rather than render-scope state:
+  // two rapid changes must roll back to the last persisted value, not to a
+  // snapshot the first change already superseded.
+  const selectionRef = useRef(selection);
 
   useEffect(() => {
-    setSelection({
+    const nextSelection = {
       model: agent?.model,
       reasoning_effort: reasoningEffortForConfig(agent ?? {}),
-    });
+    };
+    selectionRef.current = nextSelection;
+    setSelection(nextSelection);
     setSaveError(null);
   }, [agent?.model, agent?.provider_config, sessionId]);
 
   if (!provider?.trim()) return null;
 
   const saveSelection = async (nextSelection: ModelSelection) => {
-    const previousSelection = selection;
+    const previousSelection = selectionRef.current;
+    selectionRef.current = nextSelection;
     let persisted = false;
     setSelection(nextSelection);
     setSaveError(null);
@@ -764,16 +849,21 @@ function ChatModelSelection({
         model: nextSelection.model ?? null,
         reasoningEffort: nextSelection.reasoning_effort ?? null,
       });
-      setSelection({
+      const savedSelection = {
         model: saved.model,
         reasoning_effort: reasoningEffortForConfig(saved),
-      });
+      };
+      selectionRef.current = savedSelection;
+      setSelection(savedSelection);
       persisted = true;
       if (saved.model) {
         await submitInputToAgent(sessionId, `/model ${saved.model}`);
       }
     } catch (reason) {
-      if (!persisted) setSelection(previousSelection);
+      if (!persisted) {
+        selectionRef.current = previousSelection;
+        setSelection(previousSelection);
+      }
       setSaveError(persisted ? `Saved, but the live model could not be changed: ${errorMessage(reason)}` : errorMessage(reason));
     } finally {
       setIsSaving(false);

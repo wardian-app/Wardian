@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { AgentConfig, ProviderModelCatalog } from "../../types";
 
@@ -29,31 +29,44 @@ export function ProviderModelSelector({
   const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Superseded catalog loads must never land: switching agents (and therefore
+  // providers) faster than discovery completes would show provider A's models
+  // under provider B.
+  const loadEpochRef = useRef(0);
 
-  const loadCatalog = useCallback(async (forceRefresh: boolean) => {
-    if (!provider?.trim()) {
-      setCatalog(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const nextCatalog = await invoke<ProviderModelCatalog>("list_provider_model_catalog", {
-        provider,
-        forceRefresh,
-      });
-      if (!nextCatalog || !Array.isArray(nextCatalog.models)) {
-        throw new Error("Provider returned an invalid model catalogue.");
+  const loadCatalog = useCallback(
+    async (forceRefresh: boolean) => {
+      if (!provider?.trim()) {
+        loadEpochRef.current += 1;
+        setCatalog(null);
+        setLoading(false);
+        setError(null);
+        return;
       }
-      setCatalog(nextCatalog);
-      setError(nextCatalog.refresh_error);
-    } catch (reason) {
-      setCatalog(null);
-      setError(errorMessage(reason));
-    } finally {
-      setLoading(false);
-    }
-  }, [provider]);
+      const epoch = ++loadEpochRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const nextCatalog = await invoke<ProviderModelCatalog>("list_provider_model_catalog", {
+          provider,
+          forceRefresh,
+        });
+        if (epoch !== loadEpochRef.current) return;
+        if (!nextCatalog || !Array.isArray(nextCatalog.models)) {
+          throw new Error("Provider returned an invalid model catalogue.");
+        }
+        setCatalog(nextCatalog);
+        setError(nextCatalog.refresh_error);
+      } catch (reason) {
+        if (epoch !== loadEpochRef.current) return;
+        setCatalog(null);
+        setError(errorMessage(reason));
+      } finally {
+        if (epoch === loadEpochRef.current) setLoading(false);
+      }
+    },
+    [provider],
+  );
 
   useEffect(() => {
     void loadCatalog(false);
