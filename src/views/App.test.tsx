@@ -2949,7 +2949,7 @@ describe("Broadcast", () => {
     const commandTab = screen.getByTitle("Command");
     fireEvent.click(commandTab);
 
-    expect(await screen.findByPlaceholderText("Broadcast to all agents...")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Select an agent to send a command")).toBeDisabled();
   });
 
   it("renders Execute Broadcast button when Command tab is active", async () => {
@@ -2961,7 +2961,7 @@ describe("Broadcast", () => {
     const commandTab = screen.getByTitle("Command");
     fireEvent.click(commandTab);
 
-    expect(await screen.getByText("Execute Broadcast")).toBeInTheDocument();
+    expect(await screen.getByText("Execute Broadcast")).toBeDisabled();
   });
 });
 

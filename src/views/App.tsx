@@ -1099,16 +1099,10 @@ function AppBody() {
 
   async function broadcastInput(e: React.FormEvent) {
     e.preventDefault();
-    if (!broadcastMessage) return;
+    if (!broadcastMessage || selectedAgentIds.size === 0) return;
+
     try {
-      if (selectedAgentIds.size > 0) {
-        await submitInputToAgents(selectedAgentIds, broadcastMessage);
-      } else {
-        await submitInputToAgents(
-          agents.map((agent) => agent.session_id),
-          broadcastMessage,
-        );
-      }
+      await submitInputToAgents(selectedAgentIds, broadcastMessage);
       setBroadcastMessage("");
     } catch (e) { console.error(e); }
   }

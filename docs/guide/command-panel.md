@@ -11,7 +11,8 @@ Use it when you need to send the same instruction to selected agents, run a star
 1. **Quick Prompts**
 2. **Broadcast**
 
-Both modes operate on your current agent selection in the right roster.
+Both modes operate on your current agent selection in the right roster. Select
+at least one agent before Wardian enables prompt injection or broadcasting.
 
 ## When to Use It
 
@@ -37,7 +38,7 @@ What happens when you click a quick prompt:
 - Wardian reads the prompt content
 - flattens multiline content into terminal-safe input
 - sends it to selected agents
-- if no agents are selected, asks for confirmation before sending to all agents
+- stays disabled until you select at least one agent
 
 Tips:
 
@@ -49,8 +50,7 @@ Tips:
 
 Broadcast sends freeform text from the textarea to:
 
-- selected agents, or
-- all agents (after confirmation if nothing is selected)
+- selected agents
 
 Behavior:
 
@@ -64,7 +64,7 @@ Behavior:
 
 - **Single selected agent**: command goes to that one agent
 - **Multi-select**: command goes to all selected agents
-- **No selection**: confirmation prompt appears before sending to all active agents
+- **No selection**: prompt and broadcast controls remain disabled
 
 Roster selection is a targeting action, not navigation. If you also want a selected agent's terminal visible, use **Open** or **Open to Side** from the roster. Changing Workbench tabs does not change the Command target set.
 
@@ -78,7 +78,7 @@ Roster selection is a targeting action, not navigation. If you also want a selec
 
 - Broadcasts record delivery evidence, but unverified terminal submission does
   not guarantee that a provider accepts or completes the instruction.
-- No selection means "all active agents" only after confirmation.
+- Command never sends to all active agents as a fallback; select the intended targets first.
 - Quick Prompts only lists prompts starred in the Library.
 - Use [Wardian CLI](./cli.md) for scriptable waits, marker watching, or structured peer asks.
 

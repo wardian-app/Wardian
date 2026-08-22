@@ -16,23 +16,13 @@ test.describe("Critical browser flows", () => {
     await page.close();
   });
 
-  test("command broadcast asks for confirmation when no agents are selected", async () => {
+  test("command broadcast requires an agent selection", async () => {
     await page.locator('[data-testid="sidebar-tab-command"]').click();
     await expect(page.locator('[data-testid="command-panel"]')).toBeVisible();
 
     const textarea = page.locator('[data-testid="broadcast-textarea"]');
-    await textarea.fill("status check");
-    await page.locator('[data-testid="broadcast-submit"]').click();
-
-    const dialog = page.locator("#confirm-dialog-panel");
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(
-      "No agents selected. This will broadcast to ALL agents. Are you sure?",
-    );
-
-    await page.getByRole("button", { name: "Cancel" }).click();
-    await expect(dialog).toBeHidden();
-    await expect(textarea).toHaveValue("status check");
+    await expect(textarea).toBeDisabled();
+    await expect(page.locator('[data-testid="broadcast-submit"]')).toBeDisabled();
   });
 
   test("workflow builder can add a manual trigger block from the library", async () => {
