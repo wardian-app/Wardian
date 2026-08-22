@@ -103,6 +103,7 @@ describe("CustomTitleBar navigation", () => {
     );
 
     expect(container.firstElementChild).not.toHaveAttribute("data-tauri-drag-region");
+    expect(container.querySelectorAll(".titlebar-drag-spacer[data-tauri-drag-region]")).toHaveLength(2);
     expect(screen.getByText("CPU 0.0%")).toBeInTheDocument();
     expect(screen.getByText("MEM 0MB")).toBeInTheDocument();
     expect(screen.getByText("0 Active")).toBeInTheDocument();

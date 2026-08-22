@@ -101,6 +101,7 @@ summary,
   background: transparent;
   user-select: none;
   pointer-events: none;
+  -webkit-app-region: drag;
   z-index: 52;
 }
 
@@ -108,7 +109,7 @@ summary,
 .titlebar-zone {
   display: flex;
   align-items: center;
-  -webkit-app-region: no-drag;
+  -webkit-app-region: drag;
   background: var(--color-wardian-sidebar-primary);
   border-bottom: 1px solid var(--color-wardian-border);
   pointer-events: auto;
@@ -172,6 +173,13 @@ summary,
   height: 100%;
 }
 
+.titlebar-drag-spacer {
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-width: 1px;
+  -webkit-app-region: drag;
+}
+
 /* ── Panel Toggle Buttons ────────────────────────────── */
 .titlebar-toggle {
   display: flex;
@@ -184,6 +192,7 @@ summary,
   background: transparent;
   color: var(--color-wardian-text-muted-neutral);
   cursor: pointer;
+  -webkit-app-region: no-drag;
   transition: color 0.15s, background 0.15s;
 }
 
@@ -221,6 +230,7 @@ summary,
   align-items: stretch;
   height: var(--topbar-height);
   margin-left: 4px;
+  -webkit-app-region: no-drag;
 }
 
 .titlebar-winbtn {
@@ -233,6 +243,7 @@ summary,
   background: transparent;
   color: var(--color-wardian-text-muted-neutral);
   cursor: pointer;
+  -webkit-app-region: no-drag;
   transition: background 0.1s, color 0.1s;
 }
 

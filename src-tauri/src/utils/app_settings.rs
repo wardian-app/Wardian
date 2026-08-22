@@ -125,10 +125,7 @@ fn default_watchlist_new_agent_position() -> String {
 }
 
 fn default_titlebar_telemetry_visible() -> bool {
-    titlebar_telemetry_visible_default_for_build(
-        cfg!(debug_assertions),
-        option_env!("WARDIAN_UPDATE_CHANNEL"),
-    )
+    false
 }
 
 fn default_external_editor() -> String {
@@ -137,18 +134,6 @@ fn default_external_editor() -> String {
 
 fn default_workbench_new_tab_action() -> String {
     "home".to_string()
-}
-
-fn titlebar_telemetry_visible_default_for_build(
-    debug_build: bool,
-    update_channel: Option<&str>,
-) -> bool {
-    let official_stable_release = !debug_build
-        && update_channel
-            .map(str::trim)
-            .filter(|channel| !channel.is_empty())
-            == Some("stable");
-    !official_stable_release
 }
 
 pub fn load_app_settings() -> Result<AppSettings, String> {
@@ -313,18 +298,6 @@ fn app_settings_document_from_overrides(
 }
 
 fn app_settings_from_overrides(overrides: &AppSettingsOverrides) -> AppSettings {
-    app_settings_from_overrides_for_build(
-        overrides,
-        cfg!(debug_assertions),
-        option_env!("WARDIAN_UPDATE_CHANNEL"),
-    )
-}
-
-fn app_settings_from_overrides_for_build(
-    overrides: &AppSettingsOverrides,
-    debug_build: bool,
-    update_channel: Option<&str>,
-) -> AppSettings {
     let defaults = AppSettings::default();
     normalize_app_settings(AppSettings {
         theme: overrides.theme.clone().unwrap_or(defaults.theme),
@@ -346,9 +319,9 @@ fn app_settings_from_overrides_for_build(
             .watchlist_new_agent_position
             .clone()
             .unwrap_or(defaults.watchlist_new_agent_position),
-        titlebar_telemetry_visible: overrides.titlebar_telemetry_visible.unwrap_or_else(|| {
-            titlebar_telemetry_visible_default_for_build(debug_build, update_channel)
-        }),
+        titlebar_telemetry_visible: overrides
+            .titlebar_telemetry_visible
+            .unwrap_or(defaults.titlebar_telemetry_visible),
         external_editor: overrides
             .external_editor
             .clone()
@@ -525,7 +498,7 @@ mod tests {
         assert_eq!(settings.terminal_font_family, None);
         assert_eq!(settings.grid_card_display_mode, "terminal");
         assert_eq!(settings.watchlist_new_agent_position, "top");
-        assert!(settings.titlebar_telemetry_visible);
+        assert!(!settings.titlebar_telemetry_visible);
         assert_eq!(settings.external_editor, "system");
         assert_eq!(settings.external_editor_custom_executable, None);
         assert_eq!(settings.file_open_actions, FileOpenActions::default());
@@ -588,31 +561,6 @@ mod tests {
         assert!(serialized["overrides"]
             .get("workbench_new_tab_action")
             .is_none());
-    }
-
-    #[test]
-    fn app_settings_defaults_titlebar_telemetry_visible_for_non_stable_build() {
-        let debug_settings = app_settings_from_overrides_for_build(
-            &AppSettingsOverrides::default(),
-            true,
-            Some("stable"),
-        );
-        let unmarked_release_settings =
-            app_settings_from_overrides_for_build(&AppSettingsOverrides::default(), false, None);
-
-        assert!(debug_settings.titlebar_telemetry_visible);
-        assert!(unmarked_release_settings.titlebar_telemetry_visible);
-    }
-
-    #[test]
-    fn app_settings_defaults_titlebar_telemetry_hidden_for_stable_release_context() {
-        let settings = app_settings_from_overrides_for_build(
-            &AppSettingsOverrides::default(),
-            false,
-            Some("stable"),
-        );
-
-        assert!(!settings.titlebar_telemetry_visible);
     }
 
     #[test]

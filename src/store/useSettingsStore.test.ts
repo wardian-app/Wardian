@@ -22,7 +22,7 @@ function resetAppPreferences() {
     terminalFontFamily: '',
     gridCardDisplayMode: 'terminal',
     watchlistNewAgentPosition: 'top',
-    titlebarTelemetryVisible: true,
+    titlebarTelemetryVisible: false,
     externalEditor: 'system',
     externalEditorCustomExecutable: '',
     fileOpenActions: { text: 'wardian', image: 'wardian', pdf: 'wardian' },
@@ -324,7 +324,24 @@ describe('app settings persistence', () => {
       pdf: 'external',
     });
     expect(JSON.parse(localStorage.getItem('wardian-settings') ?? '{}')).toEqual(
-      expect.objectContaining({ version: 4 }),
+      expect.objectContaining({ version: 5 }),
+    );
+  });
+
+  it('resets the former visible telemetry default during local preference migration', async () => {
+    localStorage.setItem('wardian-settings', JSON.stringify({
+      state: { titlebarTelemetryVisible: true },
+      version: 4,
+    }));
+
+    await useSettingsStore.persist.rehydrate();
+
+    expect(useSettingsStore.getState().titlebarTelemetryVisible).toBe(false);
+    expect(JSON.parse(localStorage.getItem('wardian-settings') ?? '{}')).toEqual(
+      expect.objectContaining({
+        version: 5,
+        state: expect.objectContaining({ titlebarTelemetryVisible: false }),
+      }),
     );
   });
 
@@ -509,11 +526,10 @@ describe('app settings persistence', () => {
       terminal_font_family: 'Cascadia Mono, monospace',
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
-      titlebar_telemetry_visible: false,
     });
   });
 
-  it('keeps migrated local preferences when missing backend settings use stable titlebar defaults', async () => {
+  it('keeps migrated local preferences when missing backend settings use hidden titlebar defaults', async () => {
     useSettingsStore.setState({
       theme: 'dark',
       autoPatchGemini: true,
@@ -554,7 +570,6 @@ describe('app settings persistence', () => {
       terminal_font_family: 'Cascadia Mono, monospace',
       grid_card_display_mode: 'chat',
       watchlist_new_agent_position: 'bottom',
-      titlebar_telemetry_visible: false,
     });
   });
 
@@ -655,7 +670,6 @@ describe('app settings persistence', () => {
           terminal_font_family: 'Cascadia Mono, monospace',
           grid_card_display_mode: 'chat',
           watchlist_new_agent_position: 'bottom',
-          titlebar_telemetry_visible: false,
         },
       }),
     });
@@ -678,7 +692,7 @@ describe('app settings persistence', () => {
       terminal_font_family: null,
       grid_card_display_mode: 'terminal',
       watchlist_new_agent_position: 'top',
-      titlebar_telemetry_visible: true,
+      titlebar_telemetry_visible: false,
     });
 
     await useSettingsStore.getState().loadAppSettings();

@@ -7,10 +7,6 @@ cluster beside the left sidebar toggle. This is useful in development and
 agent-heavy workflows, but it can feel too diagnostic for normal installed
 desktop use.
 
-Wardian already distinguishes official stable release builds from development,
-prerelease, and local source-built binaries for the in-app updater. The telemetry
-default should follow that same build eligibility boundary so official installed
-stable builds start quieter without hiding diagnostics from development builds.
 
 ## Decision
 
@@ -22,13 +18,8 @@ status columns.
 
 Default behavior:
 
-- Official stable release build: hidden by default.
-- Development build, prerelease build, or unmarked source-built release binary:
-  visible by default.
-
-The official stable release check uses the same local build facts as updater
-eligibility: a non-debug build whose compile-time `WARDIAN_UPDATE_CHANNEL` is
-`stable`.
+- Every build: hidden by default.
+- An explicit **Show** choice remains visible across restarts and upgrades.
 
 ## UX
 
@@ -54,15 +45,15 @@ The setting lives in the existing sparse app settings document:
 }
 ```
 
-When no override exists, the backend computes the effective default for the
-current build. Existing settings files continue to load because missing fields
-inherit the current default.
+When no override exists, the backend uses the hidden default. Existing settings
+files continue to load because missing fields inherit the current default;
+explicit `true` overrides remain respected.
 
 ## Testing
 
 Coverage includes:
 
-- backend default behavior for non-stable and stable release contexts
+- backend hidden-default behavior across build contexts
 - sparse app settings override persistence
 - frontend settings store load, save, and migration behavior
 - Settings modal rendering and save behavior

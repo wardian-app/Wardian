@@ -87,7 +87,7 @@ async function bootWorkbench(
           terminal_font_family: null,
           grid_card_display_mode: "chat",
           watchlist_new_agent_position: "top",
-          titlebar_telemetry_visible: true,
+          titlebar_telemetry_visible: false,
           external_editor: "system",
           external_editor_custom_executable: null,
           explorer_file_click_action: "preview",
@@ -521,6 +521,17 @@ test("uses real top-edge tab groups as responsive window chrome", async ({ page 
   await bootWorkbench(page, twoGroupDocument());
 
   await expect(page.getByTestId("titlebar-center")).toHaveCount(0);
+  await expect(page.locator(".titlebar-left")).toHaveCSS("-webkit-app-region", "drag");
+  await expect(page.locator(".titlebar-right")).toHaveCSS("-webkit-app-region", "drag");
+  await expect(page.locator(".titlebar-drag-spacer")).toHaveCount(2);
+  await expect(page.locator(".titlebar-drag-spacer").first())
+    .toHaveAttribute("data-tauri-drag-region", "");
+  await expect(page.locator(".titlebar-drag-spacer").last())
+    .toHaveAttribute("data-tauri-drag-region", "");
+  await expect(page.locator(".titlebar-toggle").first())
+    .toHaveCSS("-webkit-app-region", "no-drag");
+  await expect(page.locator(".titlebar-winbtn").first())
+    .toHaveCSS("-webkit-app-region", "no-drag");
   const groups = page.getByTestId("workbench-group");
   for (const groupId of ["group-1", "group-2"]) {
     const group = groups.and(page.locator(`[data-group-id="${groupId}"]`));
@@ -531,6 +542,8 @@ test("uses real top-edge tab groups as responsive window chrome", async ({ page 
     expect(bounds?.height).toBe(36);
     await expect(header.locator(".dv-void-container"))
       .toHaveAttribute("data-tauri-drag-region", "");
+    await expect(header.locator(".dv-void-container"))
+      .toHaveCSS("-webkit-app-region", "drag");
   }
 
   const firstGroup = groups.and(page.locator('[data-group-id="group-1"]'));
@@ -542,6 +555,8 @@ test("uses real top-edge tab groups as responsive window chrome", async ({ page 
   ]);
   expect(tabBounds).not.toBeNull();
   expect(actionBounds).not.toBeNull();
+  await expect(finalTab).toHaveCSS("-webkit-app-region", "no-drag");
+  await expect(newSurface).toHaveCSS("-webkit-app-region", "no-drag");
   const separation = actionBounds!.x - (tabBounds!.x + tabBounds!.width);
   expect(separation).toBeGreaterThanOrEqual(-1);
   expect(separation).toBeLessThanOrEqual(8);

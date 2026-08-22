@@ -136,9 +136,8 @@ collection or remove telemetry from Dashboard, Grid, Graph, or Watchlist views.
 
 ![Settings Appearance section showing the Top bar telemetry visibility control](../assets/screenshots/settings/titlebar-telemetry-setting.png)
 
-Official installed stable release builds hide top bar telemetry by default.
-Development builds, prerelease builds, and unmarked local source-built release
-binaries show it by default.
+Top bar telemetry is hidden by default in every build. Choose **Show** when you
+want the CPU, memory, and active-agent counts beside the left sidebar toggle.
 
 ## Agents
 

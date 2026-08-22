@@ -273,7 +273,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   terminal_font_family: null,
   grid_card_display_mode: 'terminal',
   watchlist_new_agent_position: 'top',
-  titlebar_telemetry_visible: true,
+  titlebar_telemetry_visible: false,
   external_editor: 'system',
   external_editor_custom_executable: null,
   file_open_actions: DEFAULT_FILE_OPEN_ACTIONS,
@@ -507,7 +507,7 @@ export const useSettingsStore = create<SettingsState>()(
       terminalFontFamily: '',
       gridCardDisplayMode: 'terminal',
       watchlistNewAgentPosition: 'top',
-      titlebarTelemetryVisible: true,
+      titlebarTelemetryVisible: false,
       externalEditor: 'system',
       externalEditorCustomExecutable: '',
       fileOpenActions: DEFAULT_FILE_OPEN_ACTIONS,
@@ -846,7 +846,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'wardian-settings',
-      version: 4,
+      version: 5,
       migrate: (persistedState) => {
         const state = persistedState as Partial<PersistedSettingsState> & {
           grid_card_display_mode?: GridCardDisplayMode;
@@ -859,7 +859,10 @@ export const useSettingsStore = create<SettingsState>()(
           terminalFontFamily: state.terminalFontFamily?.trim() ?? '',
           gridCardDisplayMode: normalizeGridCardDisplayMode(state.gridCardDisplayMode ?? state.grid_card_display_mode),
           watchlistNewAgentPosition: normalizeWatchlistNewAgentPosition(state.watchlistNewAgentPosition),
-          titlebarTelemetryVisible: typeof state.titlebarTelemetryVisible === 'boolean' ? state.titlebarTelemetryVisible : true,
+          // Version 4 persisted the former visible default, so a legacy true
+          // value is not distinguishable from an implicit default. Reset it;
+          // explicit Show choices made under the new schema remain intact.
+          titlebarTelemetryVisible: false,
           externalEditor: normalizeExternalEditorSetting(state.externalEditor),
           externalEditorCustomExecutable: state.externalEditorCustomExecutable?.trim() ?? '',
           fileOpenActions: state.fileOpenActions

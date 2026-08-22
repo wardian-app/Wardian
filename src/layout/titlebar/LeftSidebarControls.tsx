@@ -52,6 +52,7 @@ export const LeftSidebarControls: React.FC<LeftSidebarControlsProps> = ({
           </span>
         </div>
       )}
+      <div className="titlebar-drag-spacer" data-tauri-drag-region="" aria-hidden="true" />
     </div>
   );
 };

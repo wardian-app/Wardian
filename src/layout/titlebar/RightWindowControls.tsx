@@ -62,6 +62,7 @@ export const RightWindowControls: React.FC<RightWindowControlsProps> = ({
 
   return (
     <div className="titlebar-zone titlebar-right">
+      <div className="titlebar-drag-spacer" data-tauri-drag-region="" aria-hidden="true" />
       <div className="titlebar-right-content">
         {/* ── Right Sidebar Toggle ───────────────────── */}
         <button

@@ -10,6 +10,15 @@ function cssBlock(selector: string) {
 }
 
 describe("titlebar chrome", () => {
+  it("makes empty titlebar chrome draggable while keeping controls interactive", () => {
+    expect(cssBlock(".titlebar")).toContain("-webkit-app-region: drag");
+    expect(cssBlock(".titlebar-zone")).toContain("-webkit-app-region: drag");
+    expect(cssBlock(".titlebar-drag-spacer")).toContain("-webkit-app-region: drag");
+    expect(cssBlock(".titlebar-toggle")).toContain("-webkit-app-region: no-drag");
+    expect(cssBlock(".titlebar-window-controls")).toContain("-webkit-app-region: no-drag");
+    expect(cssBlock(".titlebar-winbtn")).toContain("-webkit-app-region: no-drag");
+  });
+
   it("does not draw vertical column seams in the app header", () => {
     expect(cssBlock(".titlebar-left")).not.toContain("border-right");
     expect(cssBlock(".titlebar-right")).not.toContain("border-left");
