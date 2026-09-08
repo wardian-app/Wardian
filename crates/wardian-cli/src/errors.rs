@@ -244,6 +244,30 @@ impl CliError {
     }
 }
 
+/// Render command-line parse failures outside the MCP protocol loop.
+pub(crate) fn handle_parse_error(error: clap::Error) -> i32 {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        print!("{error}");
+        return ExitCode::Success as i32;
+    }
+
+    parse_error(error).emit();
+    ExitCode::Generic as i32
+}
+
+/// Preserve the CLI invalid-arguments envelope for Clap failures.
+pub(crate) fn parse_error(error: clap::Error) -> CliError {
+    let mut result = CliError::backend(ExitCode::Generic, "invalid_arguments", error.to_string());
+    result.hint = Some(
+        "Use `wardian schema <command path>` or `<command> --help` to inspect accepted arguments."
+            .to_string(),
+    );
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

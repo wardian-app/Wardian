@@ -11,6 +11,7 @@ mod json_input;
 mod library;
 mod listener;
 mod live;
+mod mcp;
 mod memory;
 mod output;
 mod schema;
@@ -23,7 +24,7 @@ use args::{
     NotifyCommand, QueuePolicyArg, ReplyArgs, ReplyStatusArg, ScheduleDefinitionArgs, SendArgs,
 };
 use clap::Parser;
-use errors::{CliError, ExitCode};
+use errors::{handle_parse_error, parse_error, CliError, ExitCode};
 use output::{render_list, render_show, RenderOptions};
 use std::{
     collections::HashMap,
@@ -61,6 +62,9 @@ fn run() -> i32 {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error),
     };
+    if let Command::Mcp { command } = &cli.command {
+        return mcp::run(command);
+    }
     // Static discovery must work without a home, migrations, or running app.
     if let Command::Schema { path } = &cli.command {
         return finish(schema::render(path));
@@ -90,6 +94,7 @@ fn run() -> i32 {
         return error.code_i32();
     }
     let result = match cli.command {
+        Command::Mcp { .. } => unreachable!("MCP runs before home migration"),
         Command::Schema { path } => schema::render(&path),
         Command::Agent(args) => handle_agent(args),
         Command::Artifact(args) => artifact::handle_artifact(args),
@@ -124,28 +129,6 @@ fn finish(result: Result<String, CliError>) -> i32 {
             error.code_i32()
         }
     }
-}
-
-fn handle_parse_error(error: clap::Error) -> i32 {
-    if matches!(
-        error.kind(),
-        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-    ) {
-        print!("{error}");
-        return ExitCode::Success as i32;
-    }
-
-    parse_error(error).emit();
-    ExitCode::Generic as i32
-}
-
-fn parse_error(error: clap::Error) -> CliError {
-    let mut result = CliError::backend(ExitCode::Generic, "invalid_arguments", error.to_string());
-    result.hint = Some(
-        "Use `wardian schema <command path>` or `<command> --help` to inspect accepted arguments."
-            .to_string(),
-    );
-    result
 }
 
 // ---------------------------------------------------------------------------

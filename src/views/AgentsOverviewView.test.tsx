@@ -601,6 +601,73 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(screen.queryByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 
+  it.each(['Processing...', 'Processing'])('shows backend startup %s before the Off config commits and hides failed resume', (status) => {
+    const startingAgent = { ...agents[0], provider: 'codex', is_off: true };
+    const deriveCurrentThought = vi.fn<React.ComponentProps<typeof AgentsOverviewView>['deriveCurrentThought']>(
+      (_title, _thought, metric, isOff) => ({ thought: '', status: isOff ? 'Off' : metric?.current_status ?? 'Idle' }),
+    );
+    const props = {
+      ...gridProps(null, [startingAgent], vi.fn(), { offAgentIds: new Set(['agent-1']) }),
+      deriveCurrentThought,
+    };
+    const metric: AgentTelemetry = {
+      session_id: 'agent-1', current_status: status, cpu_usage: 0, memory_mb: 0,
+      uptime_seconds: 0, query_count: 0, init_timestamp: null, log_path: null,
+    };
+    const { rerender } = render(<AgentsOverviewView {...props} />);
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+
+    // An authoritative status arrives independently of any frontend resume call.
+    rerender(<AgentsOverviewView {...props} telemetry={{ 'agent-1': metric }} />);
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(deriveCurrentThought).toHaveBeenLastCalledWith('', undefined, metric, false);
+    expect(terminalRenderSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: 'agent-1', visibility: 'visible', renderState: 'mounted',
+    }));
+    expect(props.offAgentIds.has('agent-1')).toBe(true);
+    expect(startingAgent.is_off).toBe(true);
+
+    // list_agents still returns Off while the backend awaits attachment.
+    rerender(<AgentsOverviewView {...props} filteredAgents={[{ ...startingAgent }]} telemetry={{ 'agent-1': metric }} />);
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+
+    // Failed resume restores status without a successful invoke or config commit.
+    rerender(<AgentsOverviewView {...props} telemetry={{ 'agent-1': { ...metric, current_status: 'Off' } }} />);
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+    expect(props.onQuery).not.toHaveBeenCalled();
+  });
+
+  it('exposes startup terminal from chat mode and restores the preference after resume commits', () => {
+    useSettingsStore.getState().setGridCardDisplayMode('chat');
+    const startingAgent = { ...agents[0], provider: 'codex', is_off: true };
+    const props = gridProps(null, [startingAgent], vi.fn(), {
+      offAgentIds: new Set(['agent-1']),
+      telemetry: { 'agent-1': {
+        session_id: 'agent-1', current_status: 'Processing...', cpu_usage: 0, memory_mb: 0,
+        uptime_seconds: 0, query_count: 0, init_timestamp: null, log_path: null,
+      } },
+    });
+    const { rerender } = render(<AgentsOverviewView {...props} />);
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-agent-1')).not.toBeInTheDocument();
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
+
+    rerender(<AgentsOverviewView {...props} filteredAgents={[{ ...startingAgent, is_off: false }]} offAgentIds={new Set()} />);
+    expect(screen.getByTestId('chat-agent-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+  });
+
+  it.each(['Off', 'Idle', 'Error'])('keeps paused agents hidden with %s telemetry', (status) => {
+    renderGrid(null, [{ ...agents[0], is_off: true }], vi.fn(), {
+      offAgentIds: new Set(['agent-1']),
+      telemetry: { 'agent-1': {
+        session_id: 'agent-1', current_status: status, cpu_usage: 0, memory_mb: 0,
+        uptime_seconds: 0, query_count: 0, init_timestamp: null, log_path: null,
+      } },
+    });
+    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
+  });
+
   it('keeps an off agent visible in the grid while it is headless', () => {
     renderGrid(null, agents, vi.fn(), {
       offAgentIds: new Set(['agent-1']),

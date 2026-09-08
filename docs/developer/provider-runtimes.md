@@ -216,7 +216,10 @@ Current sequence:
 1. Create or update the agent's projected `CODEX_HOME` under `.wardian/agents/<wardian-agent-id>/habitat/.codex`.
 2. Generate a distinct provider UUID and write a minimal `session_meta` rollout at `sessions/<year>/<month>/<day>/rollout-<timestamp>-<provider-id>.jsonl`.
 3. Validate that Codex resolves the rollout from that same projected home.
-4. Launch interactive Codex with the real workspace as `--cd` and resume the exact provider UUID.
+4. Start the Wardian-owned local daemon without loading a thread. The ordinary
+   TUI resumes the selected provider UUID under the same home and real workspace.
+   Wardian requires that exact thread to appear in the owned daemon before
+   subscribing and enabling peer delivery. No model bootstrap turn is required.
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
@@ -260,6 +263,23 @@ Wardian treats these as the important lifecycle markers:
 - `task_complete` / `turn.completed`: idle
 
 Codex commentary events like `agent_message` should not be used as hard status transitions.
+
+The shared app-server event reader observes turns started through either the
+TUI or Wardian. A named Wardian inbox output without an originating model
+call is non-waking context; it must not mark an idle agent as processing.
+V2 peer information, follow-up work, and interruption use native WebSocket
+operations through a private local socket and the configured Codex executable's
+`app-server proxy` tunnel. MCP exposes the model-facing
+tools and explicit receiver. See [agent messaging tools](./agent-messaging-tools.md).
+
+For long canonical homes, owner startup recovers pending launch settings and
+then prepares a private compact physical home before config/MCP projection.
+The logical habitat path remains an owned directory link. Matching agent and
+slot records authorize that link; arbitrary links remain invalid. A separate
+preparation lock fences migration against ordinary refresh and index writes.
+Refresh resolves completed mappings without moving homes or recovering a live
+startup overlay. The provider executable, normal TUI invocation and shell `HOME`
+are unchanged. See [the removal criteria](https://github.com/wardian-app/Wardian/issues/1235).
 
 ### Known operational edge cases
 

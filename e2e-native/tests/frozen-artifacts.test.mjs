@@ -129,6 +129,50 @@ test("a later CLI freeze cannot replace runtime payloads already in use", () => 
   }
 });
 
+test("Unicode runtime paths survive both freeze orders without replacing existing payloads", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-frozen-unicode-"));
+  try {
+    const builds = ["app", "cli"].map((label) => path.join(root, label));
+    const payloads = [
+      path.join("conpty", "x64", "conpty.dll"),
+      path.join("resources", "bin", "wardian-cli.exe"),
+      path.join("resources", "nested-é中", "payload-é中.txt"),
+    ];
+    for (const [index, build] of builds.entries()) {
+      fs.mkdirSync(build, { recursive: true });
+      fs.writeFileSync(path.join(build, index === 0 ? "Wardian.exe" : "wardian-cli.exe"), `binary-${index}`);
+      for (const payload of payloads) {
+        fs.mkdirSync(path.dirname(path.join(build, payload)), { recursive: true });
+        fs.writeFileSync(path.join(build, payload), `payload-${index}`);
+      }
+      fs.writeFileSync(path.join(build, "resources", `only-${index}-é中.txt`), `unique-${index}`);
+    }
+
+    for (const order of [[0, 1], [1, 0]]) {
+      const frozenDir = path.join(root, `home-é中-${order[0]}`, FROZEN_BIN_DIR);
+      for (const index of order) {
+        const name = index === 0 ? "Wardian.exe" : "wardian-cli.exe";
+        freezeArtifact(path.join(builds[index], name), frozenDir);
+        assert.equal(fs.readFileSync(path.join(frozenDir, name), "utf8"), `binary-${index}`);
+        for (const payload of payloads) {
+          assert.equal(
+            fs.readFileSync(path.join(frozenDir, payload), "utf8"),
+            `payload-${order[0]}`,
+            "each freeze must use the exact Unicode path and preserve the first payload bytes",
+          );
+        }
+        assert.equal(
+          fs.readFileSync(path.join(frozenDir, "resources", `only-${index}-é中.txt`), "utf8"),
+          `unique-${index}`,
+          "the second freeze must still add missing files",
+        );
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("each run freezes into its own home, so runs cannot share a binary", () => {
   const sharedTarget = scratch("shared");
   const homeA = scratch("run-a");
