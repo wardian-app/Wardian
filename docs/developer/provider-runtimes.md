@@ -68,6 +68,12 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - The Chat view also replays Wardian's durable conversation archive before the bounded live provider data, so already captured rows remain visible when a provider artifact is temporarily unavailable.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
+### Prompt delivery
+
+- Antigravity's editor honors bracketed paste. Wardian wraps multiline prompts, and single-line prompts of 2048 bytes or more, in `ESC[200~` … `ESC[201~`, then sends one carriage return as a separate write. Short single-line prompts keep the simple literal path.
+- This supersedes an earlier assumption that Antigravity did not support bracketed paste. That assumption made Wardian send long multiline prompts literally, so the editor treated the embedded newlines as submits and could retain the prompt unsent with no turn produced. A native protocol experiment against Antigravity 1.1.27 sent raw `ESC[200~ payload ESC[201~` for a 6886-byte, 285-line prompt; the editor collapsed it into a single paste entry, and one carriage return produced a provider-native answer containing all three independent random labels placed at the payload's beginning, middle, and end.
+- The 500 ms submit settle delay is unchanged. The experiment's 267 ms editor-application time is one machine's measurement, not a guarantee, so delivery still depends on the existing bounded turn receipt and still fails closed with no automatic retry when that receipt does not arrive.
+
 ### Practical implications
 
 - Do not use Gemini's `--include-directories`, `--session-id`, or stream output assumptions for Antigravity.
@@ -91,6 +97,13 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude reads `CLAUDE.md`.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
+- Ordinary habitat preparation materializes existing owned common/class/agent
+  `CLAUDE.md` bridges from sibling canonical `AGENTS.md`; habitat generation and
+  the subsequent memory append also refresh the habitat bridge. These are
+  bootstrap snapshots, with no live refresh guarantee. Exact legacy stubs and
+  unchanged versioned/hash-marked projections are eligible; customized files and
+  links are preserved. Nested imports are copied verbatim and retain provider
+  consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
@@ -114,6 +127,15 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 powershell -NoProfile -Command "wardian --version"
 bash -lc "wardian --version"
 ```
+
+### Headless result output
+
+Claude's verbose JSON output can contain an event array ending in a result.
+Wardian extracts that terminal answer and its provider session ID before
+passing the answer to automation. Intermediate messages remain diagnostic
+data. Existing single-object responses are also supported. Missing, ambiguous
+or unsuccessful terminal results fail the task instead of exposing event data
+as a successful answer.
 
 ## Codex
 
@@ -311,6 +333,22 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - OpenCode session IDs are discovered from JSON output during `opencode run --format json`, or captured from `opencode session list` while the interactive TUI runs.
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.
+
+### Headless prompt input
+
+Wardian sends the complete headless OpenCode prompt as UTF-8 on stdin, then
+closes the pipe to signal EOF. It supplies no positional message: OpenCode's
+`run` parser reconstructs positional messages with literal quotes. Whitespace,
+line endings, quotes, backslashes, and Unicode therefore remain part of the
+original prompt. Model, agent, session, output-format, and directory flags still
+use the ordinary argument path.
+
+The execution deadline and conversation-lease heartbeat also cover blocked
+stdin writes. Failed or cancelled delivery terminates the owned process tree;
+a failed write can represent partial delivery and is never automatically retried
+by this transport. OpenCode failure errors retain the exit code but omit raw
+provider stderr, which can echo private input. Input fidelity does not guarantee
+that the provider's answer satisfies the requested task.
 
 ### Practical implications
 
