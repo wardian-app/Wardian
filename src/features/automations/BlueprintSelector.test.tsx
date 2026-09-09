@@ -38,6 +38,44 @@ describe('BlueprintSelector', () => {
     expect(onNew).toHaveBeenCalled();
   });
 
+  it('shows only workflows assigned to selected agents while preserving the open workflow', async () => {
+    invokeMock.mockResolvedValueOnce(blueprintPage([
+      { id: 'selected', name: 'Selected workflow', path: '/x/selected.md' },
+      { id: 'other', name: 'Other workflow', path: '/x/other.md' },
+      { id: 'open', name: 'Open workflow', path: '/x/open.md' },
+    ]));
+
+    render(
+      <BlueprintSelector
+        selectedPath="/x/open.md"
+        visibleBlueprintIds={new Set(['selected'])}
+        onOpen={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText('Selected workflow')).toBeInTheDocument());
+    expect(screen.getByText('Open workflow')).toBeInTheDocument();
+    expect(screen.queryByText('Other workflow')).toBeNull();
+  });
+
+  it('explains when no saved workflow belongs to the selected agents', async () => {
+    invokeMock.mockResolvedValueOnce(blueprintPage([
+      { id: 'other', name: 'Other workflow', path: '/x/other.md' },
+    ]));
+
+    render(
+      <BlueprintSelector
+        visibleBlueprintIds={new Set()}
+        onOpen={() => {}}
+        onNew={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText('No workflows for selected agents')).toBeInTheDocument();
+    expect(screen.queryByText('Other workflow')).toBeNull();
+  });
+
   it('marks a partial automation catalog', async () => {
     invokeMock.mockResolvedValueOnce({
       blueprints: [{ id: 'wf', name: 'WF', path: '/x/wf.md' }],

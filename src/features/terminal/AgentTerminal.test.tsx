@@ -2311,7 +2311,7 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       const renderer = getLatestTerminalInstance();
       expect(renderer.write).toHaveBeenCalledWith(
-        `oldest retained row\r\nnewer retained row\r\n${formattedVisibleGrid}`,
+        `oldest retained row\r\nnewer retained row${"\r\n".repeat(snapshot.geometry.rows)}${formattedVisibleGrid}`,
         expect.any(Function),
       );
     });
@@ -2357,7 +2357,7 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       const renderer = getLatestTerminalInstance();
       expect(renderer.write).toHaveBeenCalledWith(
-        `\u001b[31mstyled retained row\u001b[m\r\n${formattedVisibleGrid}`,
+        `\u001b[31mstyled retained row\u001b[m${"\r\n".repeat(snapshot.geometry.rows)}${formattedVisibleGrid}`,
         expect.any(Function),
       );
     });

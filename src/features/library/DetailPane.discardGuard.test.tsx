@@ -99,6 +99,7 @@ describe('DetailPane — discard-confirm Cancel preserves the dirty draft (regre
 
     render(<DetailPane selectedAgentIds={new Set()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     const textarea = await screen.findByTestId('markdown-editor-textarea');
     expect(textarea).toHaveValue('# Alpha original');
 
@@ -144,6 +145,7 @@ describe('DetailPane — discard-confirm Cancel preserves the dirty draft (regre
       await useLibraryStore.getState().select('skills/alpha');
     });
     render(<DetailPane surfaceId="library-1" selectedAgentIds={new Set()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     const textarea = await screen.findByTestId('markdown-editor-textarea');
     fireEvent.change(textarea, { target: { value: '# First dirty draft' } });
     await waitFor(() => expect(

@@ -17,7 +17,7 @@ import { mergeEntriesIntoTree } from '../features/library/libraryListUtils';
 // param is kept on the wire for interface stability, but only `"library"` is
 // ever sent or expected here.
 const LIBRARY_WATCH_TYPE = 'library';
-const DEFAULT_LIBRARY_DETAIL_WIDTH = 480;
+const DEFAULT_LIBRARY_DETAIL_WIDTH = 640;
 const MIN_LIBRARY_DETAIL_WIDTH = 360;
 const MAX_LIBRARY_DETAIL_FRACTION = 0.7;
 

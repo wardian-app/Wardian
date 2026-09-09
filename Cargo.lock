@@ -15,6 +15,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "hmac",
+ "junction",
  "libc",
  "notify",
  "objc2-app-kit",

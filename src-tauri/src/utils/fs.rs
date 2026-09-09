@@ -6,6 +6,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::utils::logging::log_debug;
 use fs2::FileExt;
 
+mod claude_instructions;
+
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -108,6 +110,9 @@ pub fn provider_uses_projected_workspace(provider: &str) -> bool {
     matches!(provider, "codex" | "gemini" | "opencode")
 }
 
+/// Prepare the generated habitat for an ordinary provider launch. Claude also
+/// refreshes existing owned instruction bridges in its managed include roots;
+/// canonical AGENTS.md files and custom or linked CLAUDE.md files stay intact.
 pub fn prepare_provider_habitat(
     provider: &str,
     workspace_root: &std::path::Path,
@@ -120,7 +125,17 @@ pub fn prepare_provider_habitat(
 
     let habitat_root = prepare_habitat_workspace(workspace_root, class_name, session_id)?;
     if provider == "codex" {
-        ensure_codex_home_projection(&habitat_root, workspace_root)?;
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        let _preparation = super::codex_home::acquire_preparation(&wardian_home, session_id)?;
+        ensure_codex_home_projection(&habitat_root, workspace_root, session_id)?;
+        if let super::codex_messaging::Registration::Unavailable(reason) =
+            super::codex_messaging::ensure_managed_messaging(&wardian_home, session_id)?
+        {
+            log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
+        }
+    } else if provider == "claude" {
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        claude_instructions::refresh_managed_roots(&wardian_home, class_name, session_id)?;
     }
 
     Ok(Some(habitat_root))
@@ -128,6 +143,8 @@ pub fn prepare_provider_habitat(
 
 /// Add Wardian's runtime-owned memory contract and startup brief to the
 /// generated habitat instructions without touching user-authored files.
+/// Refresh the owned Claude sibling snapshot after the append so it includes
+/// the final launch-time memory text; preserve custom or linked Claude files.
 pub fn append_habitat_memory_instructions(
     habitat_root: &std::path::Path,
     startup_brief: Option<&str>,
@@ -137,7 +154,8 @@ pub fn append_habitat_memory_instructions(
         std::fs::read_to_string(&path).unwrap_or_else(|_| "# Wardian Habitat\n".into());
     content.push('\n');
     content.push_str(&wardian_memory_instructions(startup_brief));
-    std::fs::write(path, content).map_err(|error| error.to_string())
+    std::fs::write(path, content).map_err(|error| error.to_string())?;
+    claude_instructions::refresh_habitat(habitat_root)
 }
 
 /// Build the provider-neutral memory context used by both generated habitat
@@ -511,7 +529,10 @@ fn habitat_root_for_session(
     Ok(wardian_home.join("agents").join(trimmed).join("habitat"))
 }
 
-fn prepare_habitat_workspace(
+/// Prepare instructions, skills and the workspace link without reading or
+/// reconciling Codex config. Interactive startup defers that projection to the
+/// exclusive owner, which must first recover any interrupted launch overlay.
+pub(crate) fn prepare_habitat_workspace(
     workspace_root: &std::path::Path,
     class_name: &str,
     session_id: &str,
@@ -569,14 +590,23 @@ fn projected_link_matches_target(link: &std::path::Path, target: &std::path::Pat
     }
 }
 
-fn ensure_codex_home_projection(
+/// Project Codex config/assets after neutral habitat preparation. A new owner
+/// must recover its launch journal under its gate before calling this; ordinary
+/// refresh callers must never recover a potentially live startup overlay.
+pub(crate) fn ensure_codex_home_projection(
     habitat_root: &std::path::Path,
     workspace_root: &std::path::Path,
+    agent_id: &str,
 ) -> Result<(), String> {
     let real_codex_home = dirs::home_dir()
         .ok_or("Could not find user home directory")?
         .join(".codex");
-    let projected_home = habitat_codex_home(habitat_root);
+    #[cfg(test)]
+    let real_codex_home = super::codex_messaging::TEST_NATIVE_HOME
+        .with(|home| home.borrow().clone())
+        .unwrap_or(real_codex_home);
+    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
     let wardian_skills = habitat_root.join(".agents").join("skills");
     sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
 
@@ -962,7 +992,15 @@ pub(crate) fn observe_codex_indexes() {
     };
     for entry in entries.flatten() {
         let session_id = entry.file_name().to_string_lossy().into_owned();
-        let projected_home = entry.path().join("habitat").join(".codex");
+        let Ok(_preparation) = super::codex_home::acquire_preparation(&wardian_home, &session_id)
+        else {
+            continue;
+        };
+        let Ok(projected_home) =
+            super::codex_home::resolve_managed_home(&wardian_home, &session_id)
+        else {
+            continue;
+        };
         if !projected_home.is_dir() {
             continue;
         }
@@ -1184,9 +1222,23 @@ fn reconcile_codex_config(
     let mut agent = agent_content
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| format!("Could not parse agent Codex config.toml: {error}"))?;
+    let local_messaging = agent
+        .get("mcp_servers")
+        .and_then(super::codex_messaging::local_registration);
 
     merge_codex_config_items(base.as_item(), agent.as_item_mut(), real_codex_home);
     let rendered = rewrite_codex_home_paths(&agent.to_string(), real_codex_home, projected_home);
+    // A local command/env may intentionally point into the native Codex home.
+    // Preserve it through path rewriting as well as the provider-table merge.
+    let rendered = if let Some((key, entry)) = local_messaging {
+        let mut document = rendered
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| format!("Could not parse reconciled Codex config.toml: {error}"))?;
+        document["mcp_servers"][key] = entry;
+        document.to_string()
+    } else {
+        rendered
+    };
     std::fs::write(agent_config_path, rendered).map_err(|error| error.to_string())
 }
 
@@ -1250,15 +1302,21 @@ fn merge_codex_provider_table(
     remove_stale_servers: bool,
     real_codex_home: &std::path::Path,
 ) {
-    let Some(base_table) = base.as_table() else {
+    let local_messaging = remove_stale_servers
+        .then(|| super::codex_messaging::local_registration(agent))
+        .flatten();
+    let Some(base_table) = base.as_table_like() else {
         if agent.is_none() {
             *agent = base.clone();
         }
         return;
     };
 
-    let Some(agent_table) = agent.as_table_mut() else {
+    let Some(agent_table) = agent.as_table_like_mut() else {
         *agent = base.clone();
+        if let Some((key, entry)) = local_messaging {
+            agent[key] = entry;
+        }
         return;
     };
 
@@ -1266,7 +1324,11 @@ fn merge_codex_provider_table(
         let stale_keys = agent_table
             .iter()
             .filter(|(key, value)| {
-                base_table.get(key).is_none() && is_codex_managed_mcp_server(value, real_codex_home)
+                !local_messaging
+                    .as_ref()
+                    .is_some_and(|(local_key, _)| local_key == key)
+                    && base_table.get(key).is_none()
+                    && is_codex_managed_mcp_server(value, real_codex_home)
             })
             .map(|(key, _)| key.to_string())
             .collect::<Vec<_>>();
@@ -1277,8 +1339,14 @@ fn merge_codex_provider_table(
 
     // Native Codex owns these provider-generated records. Agent-only entries
     // remain available, while matching native entries refresh stale runtimes.
-    for (key, base_value) in base_table {
-        agent_table[key] = base_value.clone();
+    for (key, base_value) in base_table.iter() {
+        if local_messaging
+            .as_ref()
+            .is_some_and(|(local_key, _)| *local_key == key)
+        {
+            continue;
+        }
+        agent_table.insert(key, base_value.clone());
     }
 }
 
@@ -1652,11 +1720,8 @@ fn write_habitat_instruction_files(
     };
     std::fs::write(habitat_root.join("AGENTS.md"), agents_md).map_err(|e| e.to_string())?;
 
-    for stub_name in ["GEMINI.md", "CLAUDE.md"] {
-        std::fs::write(habitat_root.join(stub_name), "@AGENTS.md\n").map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+    std::fs::write(habitat_root.join("GEMINI.md"), "@AGENTS.md\n").map_err(|e| e.to_string())?;
+    claude_instructions::refresh_habitat(habitat_root)
 }
 
 fn build_habitat_skill_projection(
@@ -2076,6 +2141,13 @@ mod tests {
         assert!(agents_md.contains("Source: Agent"));
         assert!(!agents_md.contains(&wardian_home.to_string_lossy().to_string()));
         assert!(!agents_md.contains("agent-1/AGENTS.md"));
+        let claude_md =
+            std::fs::read_to_string(habitat_root.join("CLAUDE.md")).expect("read CLAUDE.md");
+        assert!(
+            claude_md.ends_with(&agents_md),
+            "Claude must load the managed instruction text directly"
+        );
+        assert_ne!(claude_md.trim(), "@AGENTS.md");
         assert_eq!(
             std::fs::read_to_string(habitat_root.join("GEMINI.md")).expect("read GEMINI.md"),
             "@AGENTS.md\n"
@@ -2531,6 +2603,99 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_config_projection_merges_inline_mcp_tables_without_losing_agent_entries() {
+        for base_inline in [false, true] {
+            for agent_inline in [false, true] {
+                let root = tempfile::tempdir().expect("private config fixture");
+                let real_home = root.path().join("native");
+                let projected_home = root.path().join("agent");
+                std::fs::create_dir_all(&real_home).unwrap();
+                std::fs::create_dir_all(&projected_home).unwrap();
+                let native = real_home.to_string_lossy().replace('\\', "/");
+                let projected = projected_home.to_string_lossy().replace('\\', "/");
+                let shared_command = format!("{native}/runtime.exe");
+                let local_command = format!("{native}/local-wardian.exe");
+                let stale_command = format!("{native}/plugins/cache/stale/mcp.exe");
+                let base = if base_inline {
+                    format!(
+                        "mcp_servers = {{ shared = {{ command = '{shared_command}' }}, added = {{ command = 'new-shared' }}, wardian = {{ command = 'global-wardian' }} }}\n"
+                    )
+                } else {
+                    format!(
+                        "[mcp_servers.shared]\ncommand = '{shared_command}'\n[mcp_servers.added]\ncommand = 'new-shared'\n[mcp_servers.wardian]\ncommand = 'global-wardian'\n"
+                    )
+                };
+                let agent = if agent_inline {
+                    format!(
+                        "model = 'agent-model'\nmcp_servers = {{ shared = {{ command = 'old-shared' }}, agent_only = {{ command = 'agent-custom', enabled = false, args = ['--local'], env = {{ CUSTOM = 'keep' }} }}, stale_provider = {{ command = '{stale_command}' }}, wardian = {{ command = '{local_command}', enabled = false }} }}\n"
+                    )
+                } else {
+                    format!(
+                        "model = 'agent-model'\n[mcp_servers.shared]\ncommand = 'old-shared'\n[mcp_servers.agent_only]\ncommand = 'agent-custom'\nenabled = false\nargs = ['--local']\n[mcp_servers.agent_only.env]\nCUSTOM = 'keep'\n[mcp_servers.stale_provider]\ncommand = '{stale_command}'\n[mcp_servers.wardian]\ncommand = '{local_command}'\nenabled = false\n"
+                    )
+                };
+                let base_path = real_home.join("config.toml");
+                let agent_path = projected_home.join("config.toml");
+                std::fs::write(&base_path, &base).unwrap();
+                std::fs::write(&agent_path, agent).unwrap();
+                let mut previous = None;
+                for _ in 0..2 {
+                    super::reconcile_codex_config(
+                        &base_path,
+                        &agent_path,
+                        &real_home,
+                        &projected_home,
+                    )
+                    .unwrap();
+                    let rendered = std::fs::read_to_string(&agent_path).unwrap();
+                    let config = rendered.parse::<toml_edit::DocumentMut>().unwrap();
+                    let servers = config["mcp_servers"].as_table_like().unwrap();
+                    assert_eq!(servers.len(), 4, "{base_inline}/{agent_inline}: {rendered}");
+                    assert_eq!(config["model"].as_str(), Some("agent-model"));
+                    assert_eq!(
+                        config["mcp_servers"]["agent_only"]["command"].as_str(),
+                        Some("agent-custom")
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["agent_only"]["enabled"].as_bool(),
+                        Some(false)
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["agent_only"]["args"][0].as_str(),
+                        Some("--local")
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["agent_only"]["env"]["CUSTOM"].as_str(),
+                        Some("keep")
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["shared"]["command"].as_str(),
+                        Some(format!("{projected}/runtime.exe").as_str())
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["added"]["command"].as_str(),
+                        Some("new-shared")
+                    );
+                    assert!(servers.get("stale_provider").is_none());
+                    assert_eq!(
+                        config["mcp_servers"]["wardian"]["command"].as_str(),
+                        Some(local_command.as_str())
+                    );
+                    assert_eq!(
+                        config["mcp_servers"]["wardian"]["enabled"].as_bool(),
+                        Some(false)
+                    );
+                    if let Some(previous) = previous {
+                        assert_eq!(rendered, previous, "repeated projection must be idempotent");
+                    }
+                    previous = Some(rendered);
+                }
+                assert_eq!(std::fs::read_to_string(&base_path).unwrap(), base);
+            }
+        }
     }
 
     #[test]

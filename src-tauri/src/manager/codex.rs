@@ -79,6 +79,11 @@ pub(crate) fn codex_provider_session_is_excluded(candidate: &str, excluded: &[St
 
 pub(crate) fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     for line in lines.iter().rev() {
+        if line["type"] == "response_item"
+            && crate::providers::codex::CodexProvider::is_nonwaking_inbox_output(&line["payload"])
+        {
+            continue;
+        }
         let event_type = line.get("type").and_then(|value| value.as_str());
         let payload_type = line
             .get("payload")
@@ -620,6 +625,33 @@ mod tests {
             codex_status_from_log(&lines).as_deref(),
             Some("Processing...")
         );
+    }
+
+    #[test]
+    fn completed_turn_remains_idle_after_retained_native_inbox_append() {
+        // Actual no-auth 0.153.4 injection persisted this item with zero turns.
+        // The preceding completion and later activity are synthetic boundaries.
+        let inbox: serde_json::Value = serde_json::from_str(include_str!(
+            "../providers/fixtures/codex-0.153.4-inbox-output.json"
+        ))
+        .unwrap();
+        let mut lines = vec![
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete"}}),
+            inbox.clone(),
+        ];
+        assert_eq!(codex_status_from_log(&lines).as_deref(), Some("Idle"));
+        assert_eq!(codex_status_from_log(std::slice::from_ref(&inbox)), None);
+        for activity in [
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"real-call"}}),
+        ] {
+            lines.push(activity);
+            lines.push(inbox.clone());
+            assert_eq!(
+                codex_status_from_log(&lines).as_deref(),
+                Some("Processing...")
+            );
+        }
     }
 
     #[test]

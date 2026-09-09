@@ -12,6 +12,16 @@ impl Default for CodexProvider {
 }
 
 impl CodexProvider {
+    /// A no-turn host inbox append has no originating model call. Its body is
+    /// deliberately irrelevant: quoted packets or model tool results cannot
+    /// opt out of activity tracking by mentioning this operation.
+    pub(crate) fn is_nonwaking_inbox_output(item: &serde_json::Value) -> bool {
+        item["type"] == "function_call_output"
+            && item["name"] == "wardian_inbox_delivery"
+            && item["namespace"] == "wardian"
+            && item.get("call_id").is_none_or(serde_json::Value::is_null)
+    }
+
     pub fn new() -> Self {
         CodexProvider
     }
@@ -114,6 +124,60 @@ impl CodexProvider {
     ) {
         let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
         self.append_common_args_with_runtime_policy(args, config, is_exec_mode, &runtime_policy);
+    }
+
+    /// App-server owns execution policy; the attached TUI must not replace it.
+    /// Reject launch forms whose semantics have not been verified for remote mode.
+    pub(crate) fn shared_server_args(&self, config: &AgentConfig) -> Result<Vec<String>, String> {
+        let codex = config.codex_config();
+        if codex
+            .profile
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || config
+                .custom_args
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err("shared Codex does not yet support profile/custom launch arguments".into());
+        }
+        let global = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        let policy = effective_codex_runtime_policy(&codex, &global);
+        if policy.approval_policy == "untrusted" && !policy.full_auto {
+            return Err(
+                "installed Codex rejects untrusted; choose an explicit supported policy".into(),
+            );
+        }
+        let mut args = vec!["app-server".to_owned()];
+        let mut set = |key: &str, value: &str| {
+            args.extend(["-c".into(), format!("{key}={}", toml_basic_string(value))]);
+        };
+        if let Some(model) = &config.model {
+            set("model", model);
+        }
+        if let Some(effort) = &codex.reasoning_effort {
+            set("model_reasoning_effort", effort);
+        }
+        if policy.full_auto {
+            set("sandbox_mode", "danger-full-access");
+            set("approval_policy", "never");
+        } else if policy.approval_policy == "approve-for-me" {
+            set("sandbox_mode", "workspace-write");
+            set("approval_policy", "on-request");
+            set("approvals_reviewer", "guardian_subagent");
+        } else {
+            set("sandbox_mode", &policy.sandbox_mode);
+            set("approval_policy", &policy.approval_policy);
+        }
+        if codex.search.unwrap_or(false) {
+            set("web_search", "live");
+        }
+        if policy.trust_workspaces {
+            if let Some(project) = codex_trusted_project_override(&config.folder) {
+                args.extend(["-c".into(), project]);
+            }
+        }
+        Ok(args)
     }
 
     /// Append the flags that are valid before the `exec` subcommand.
@@ -543,6 +607,9 @@ impl AgentProvider for CodexProvider {
             }
             "response_item" => {
                 let payload = parsed.get("payload")?;
+                if Self::is_nonwaking_inbox_output(payload) {
+                    return Some(AgentEvent::Unknown);
+                }
                 let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match payload_type {
                     "function_call" => {
@@ -614,6 +681,45 @@ mod tests {
 
     fn make_provider() -> CodexProvider {
         CodexProvider::new()
+    }
+
+    #[test]
+    fn retained_inbox_output_is_status_neutral_only_with_exact_host_structure() {
+        let p = make_provider();
+        let retained: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/codex-0.153.4-inbox-output.json")).unwrap();
+        assert!(matches!(
+            p.parse_output(&retained.to_string()),
+            Some(AgentEvent::Unknown)
+        ));
+        let mut with_null = retained.clone();
+        with_null["payload"]["call_id"] = serde_json::Value::Null;
+        assert!(matches!(
+            p.parse_output(&with_null.to_string()),
+            Some(AgentEvent::Unknown)
+        ));
+        for (key, value) in [
+            ("call_id", "actual-model-call"),
+            ("namespace", "foreign"),
+            ("name", "wardian_task_delivery"),
+        ] {
+            let mut candidate = retained.clone();
+            candidate["payload"][key] = serde_json::json!(value);
+            assert!(
+                matches!(
+                    p.parse_output(&candidate.to_string()),
+                    Some(AgentEvent::Generating)
+                ),
+                "{key}"
+            );
+        }
+        let quoted = serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"call","output":retained.to_string()
+        }});
+        assert!(matches!(
+            p.parse_output(&quoted.to_string()),
+            Some(AgentEvent::Generating)
+        ));
     }
 
     #[test]
