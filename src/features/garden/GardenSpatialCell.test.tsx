@@ -68,11 +68,25 @@ describe("GardenSpatialCell", () => {
     expect(reader).not.toBeVisible();
     expect(shell).toHaveAttribute("data-garden-world", JSON.stringify(input.bounds));
     view.rerender(<GardenSpatialCell {...input} />);
-    expect(shell).toHaveStyle({ opacity: "1", pointerEvents: "auto" });
+    expect(shell).toHaveStyle({ opacity: "1", pointerEvents: "none" });
     expect(reader).toBeVisible();
     expect(reader).toHaveAttribute("aria-hidden", "false");
     expect(reader).not.toHaveAttribute("inert");
     expect(shell).toHaveAttribute("data-garden-world", JSON.stringify(input.bounds));
+  });
+
+  it("leaves agent placement hit-testing to the canvas while exposing a readable interior", () => {
+    const input = { ...props(), target: { kind: "agent" as const, id: "agent" }, bounds: { x: 10, y: 20, width: 32, height: 32 } };
+    const view = render(<GardenSpatialCell {...input} camera={{ ...input.camera, scale: 10 }} />);
+    const shell = screen.getByLabelText("Evidence composition");
+    const contents = shell.querySelector(".garden-spatial-contents");
+
+    expect(shell).toHaveStyle({ pointerEvents: "none" });
+    expect(contents).toHaveStyle({ pointerEvents: "none" });
+
+    view.rerender(<GardenSpatialCell {...input} camera={{ ...input.camera, scale: 20 }} />);
+    expect(shell).toHaveStyle({ pointerEvents: "none" });
+    expect(contents).toHaveStyle({ pointerEvents: "auto" });
   });
 
   it("sets receding workspace detail to zero and restores accessible reading on reverse zoom", () => {
