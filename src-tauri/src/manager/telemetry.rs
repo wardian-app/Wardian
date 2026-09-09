@@ -1116,6 +1116,17 @@ fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_init
     {
         return;
     }
+    // An append does not make the rolling log's old turn state belong to this
+    // process. Check the live status here: a composer repaint may have ended
+    // startup while telemetry was reading the log. Never restore stale Starting.
+    if snap.provider == "opencode"
+        && snap
+            .current_status
+            .lock()
+            .is_ok_and(|status| status.eq_ignore_ascii_case("Starting"))
+    {
+        return;
+    }
     set_snapshot_status(snap, next_status);
 }
 
@@ -2111,7 +2122,9 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    include!("telemetry/opencode_startup_tests.rs");
+
     use super::{AgentSnapshot, TelemetryPassTimings, TelemetrySlowAgent};
     use rusqlite::Connection;
     use std::collections::{BTreeSet, HashMap};
@@ -2453,47 +2466,6 @@ mod tests {
         }
         .slow_log_message(std::time::Duration::from_millis(500))
         .is_none());
-    }
-
-    #[test]
-    fn initial_log_replay_does_not_record_status_transition() {
-        let snap = test_snapshot("Off");
-
-        super::set_snapshot_status_from_log(&snap, "Idle", true);
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Off");
-        assert!(snap.last_status_at.lock().unwrap().is_none());
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert!(snapshot.events.is_empty());
-    }
-
-    #[test]
-    fn live_log_update_records_status_transition() {
-        let snap = test_snapshot("Processing...");
-
-        super::set_snapshot_status_from_log(&snap, "Idle", false);
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
-        assert!(snap.last_status_at.lock().unwrap().is_some());
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert_eq!(snapshot.events.len(), 1);
-        assert_eq!(
-            snapshot.events[0]
-                .payload
-                .get("status")
-                .and_then(|value| value.as_str()),
-            Some("idle")
-        );
     }
 
     #[test]

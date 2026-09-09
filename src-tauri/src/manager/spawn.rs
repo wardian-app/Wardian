@@ -73,39 +73,6 @@ fn record_pending_memory_injection(
     true
 }
 
-fn provider_title_has_startup_ready_prompt(provider: &str, title: &str, status: &str) -> bool {
-    if provider != "opencode" || wardian_core::identity::normalize_status(status) != "idle" {
-        return false;
-    }
-    let title = title.trim();
-    title == "OpenCode" || title.starts_with("OC | ")
-}
-
-#[derive(Default)]
-struct OpenCodeStartupMemoryTransition {
-    ready_observed: bool,
-}
-
-impl OpenCodeStartupMemoryTransition {
-    /// Classify the real provider title and promote the pending memory receipt
-    /// exactly once when that title proves the compose surface is ready.
-    fn observe_title(
-        &mut self,
-        pending: &mut Option<PendingMemoryInjection>,
-        provider: &str,
-        title: &str,
-        agent_id: &str,
-    ) -> Option<&'static str> {
-        let status = opencode_status_from_title(title)?;
-        if !self.ready_observed && provider_title_has_startup_ready_prompt(provider, title, status)
-        {
-            self.ready_observed = true;
-            record_pending_memory_injection(pending, agent_id, provider);
-        }
-        Some(status)
-    }
-}
-
 /// Selects the verified Antigravity conversation created by this launch for
 /// log discovery and whether it should be persisted as the resume identity.
 /// A workspace mapping that existed before launch belongs to the prior
@@ -1343,7 +1310,6 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
-        let mut opencode_startup_memory_transition = OpenCodeStartupMemoryTransition::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
@@ -1453,7 +1419,8 @@ pub async fn spawn_agent(
                         None
                     };
                     let startup_screen = if provider_name_for_pty == "codex"
-                        || (startup_prompt_pending && provider_name_for_pty == "claude")
+                        || (startup_prompt_pending
+                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode"))
                     {
                         // Output was applied to the broker above. Read its current
                         // screen so chunk boundaries and erased startup messages
@@ -1663,13 +1630,12 @@ pub async fn spawn_agent(
                             *current_title = title.clone();
                         }
                         if provider_name_for_pty == "opencode" {
-                            if let Some(next_status) = opencode_startup_memory_transition
-                                .observe_title(
-                                    &mut pending_memory_injection,
-                                    &provider_name_for_pty,
-                                    &title,
-                                    &sid_for_pty,
-                                )
+                            // Titles describe turns only after the canonical
+                            // composer has ended startup. A generic title can
+                            // arrive while the resumed session is still loading.
+                            if let Some(next_status) = (!startup_prompt_pending)
+                                .then(|| opencode_status_from_title(&title))
+                                .flatten()
                             {
                                 let was_idle = current_status_clone
                                     .lock()
@@ -1683,21 +1649,6 @@ pub async fn spawn_agent(
                                     &current_status_clone,
                                     next_status,
                                 );
-                                if startup_prompt_pending
-                                    && opencode_startup_memory_transition.ready_observed
-                                {
-                                    startup_prompt_pending = false;
-                                    let readiness_app = pty_app.clone();
-                                    let readiness_session_id = sid_for_pty.clone();
-                                    let observation = startup_observation.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let state = readiness_app.state::<AppState>();
-                                        crate::control::startup_readiness::publish_startup_readiness(
-                                            Some(&readiness_app), state.inner(), &readiness_session_id,
-                                            &observation, wardian_core::control::ProviderReadyEvidence::TitleDetected,
-                                        ).await;
-                                    });
-                                }
                                 // OpenCode's TUI does not expose a separate
                                 // JSON acknowledgement in interactive mode;
                                 // its provider-owned title changes from
@@ -3242,6 +3193,10 @@ mod tests {
             ("claude", "\x1b[2J\x1b[HClaude Code v2.1.263\r\n❯ Try fix typecheck errors", false),
             ("claude", "\r\n────────\r\nHaiku 4.5 | workspace | /rc connecting…\r\n⏵⏵ bypass permissions on (shift+tab to cycle)", false),
             ("claude", "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc", true),
+            ("opencode", "\x1b[2J\x1b[HLoading session...\r\nAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
+            ("opencode", "\x1b[1;1HPermission required", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
         ] {
             let output_broker = broker.clone();
             tokio::task::spawn_blocking(move || {
@@ -3404,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_title_readiness_records_receipt_and_enables_resume_delta() {
+    fn opencode_composer_readiness_records_receipt_and_enables_resume_delta() {
         let temp = tempfile::tempdir().unwrap();
         let store = wardian_core::memory::MemoryStore::open(temp.path().join("memory.db")).unwrap();
         let agent_id = "opencode-memory-agent";
@@ -3442,12 +3397,19 @@ mod tests {
             .into_iter()
             .last()
             .expect("OpenCode title");
-        let mut transition = OpenCodeStartupMemoryTransition::default();
-        assert_eq!(
-            transition.observe_title(&mut pending, "opencode", &title, agent_id,),
-            Some("Idle")
-        );
-        assert!(transition.ready_observed);
+        assert!(!crate::control::provider_output_has_startup_ready_prompt(
+            "opencode", &title
+        ));
+        assert!(pending.is_some());
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            "Ask anything...\nBuild  mimo-v2.5-free\nctrl+p commands",
+        ));
+        assert!(record_pending_memory_injection(
+            &mut pending,
+            agent_id,
+            "opencode"
+        ));
         assert!(!record_pending_memory_injection(
             &mut pending,
             agent_id,
