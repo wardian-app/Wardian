@@ -199,7 +199,7 @@ fn replace_file_without_parent_sync(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn wide_path_null(path: &Path) -> Vec<u16> {
+pub(crate) fn wide_path_null(path: &Path) -> Vec<u16> {
     const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
     const DEVICE_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'.' as u16, b'\\' as u16];
     const UNC_PREFIX: &[u16] = &[

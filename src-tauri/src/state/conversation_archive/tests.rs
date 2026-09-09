@@ -598,6 +598,104 @@ fn claude_provider_provenance_keeps_context_and_tool_results_out_of_user_archive
 }
 
 #[test]
+fn claude_provenance_aliases_deduplicate_pre_fix_context_archive_events() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut context = archive_context("session-one");
+    context.provider = "claude".to_string();
+    context.provider_source_key = Some("claude:session:session-one".to_string());
+
+    let pre_fix_events = [
+        AgentChatEvent {
+            id: "agent-1:provider_log:pre-fix-context".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("Native provider context.".to_string()),
+            title: None,
+            status: None,
+            turn_id: Some("context-1".to_string()),
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({
+                "input_origin": "context_injection",
+                "input_purpose": "context"
+            }),
+        },
+        AgentChatEvent {
+            id: "agent-1:provider_log:pre-fix-internal".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("[Request interrupted by user]".to_string()),
+            title: None,
+            status: None,
+            turn_id: None,
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(2),
+            metadata: serde_json::json!({
+                "input_origin": "provider_internal",
+                "input_purpose": "internal"
+            }),
+        },
+    ];
+    archive
+        .append_chat_events_with_context(context.clone(), &pre_fix_events)
+        .expect("append pre-fix Claude events");
+
+    let replayed_events = pre_fix_events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut event = event.clone();
+            event.id = format!("agent-1:provider_log:raw-{index}");
+            event.role = Some(AgentChatRole::System);
+            let legacy_id = match index {
+                0 => "agent-1:provider_log:pre-fix-context",
+                1 => "agent-1:provider_log:pre-fix-internal",
+                _ => unreachable!("only the two provenance fixtures are expected"),
+            };
+            event.metadata["legacy_event_ids"] = serde_json::json!([legacy_id]);
+            event
+        })
+        .collect::<Vec<_>>();
+    archive
+        .append_chat_events_with_context(context, &replayed_events)
+        .expect("append post-fix Claude events");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+            .expect("read narrative records");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0].event_refs,
+        vec!["agent-1:provider_log:pre-fix-context".to_string()]
+    );
+    assert_eq!(
+        records[1].event_refs,
+        vec!["agent-1:provider_log:pre-fix-internal".to_string()]
+    );
+}
+
+#[test]
 fn codex_context_before_and_after_request_does_not_create_fake_turns() {
     let lines = [
         r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#,

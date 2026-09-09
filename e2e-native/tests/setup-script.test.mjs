@@ -1,6 +1,7 @@
 // @tier nightly — Runs on the nightly schedule; too slow or too broad for every pull request.
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   edgeDriverDownloadUrl,
@@ -9,6 +10,8 @@ import {
   nativeDriverGuidance,
   parseArgs,
   resolveCommand,
+  validateNativeSetupArtifact,
+  validateNativeSetupDependencies,
   webview2RuntimeRoots,
 } from "../../scripts/setup-native-e2e.mjs";
 
@@ -71,4 +74,43 @@ test("native setup searches the installed WebView2 roots", () => {
     "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application",
     "C:\\Users\\runneradmin\\AppData\\Local\\Microsoft\\EdgeWebView\\Application",
   ]);
+});
+
+test("native setup validates package-local Tauri and Selenium dependencies", () => {
+  const packagePaths = {
+    "@tauri-apps/cli/tauri.js": "C:/fixture/node_modules/@tauri-apps/cli/tauri.js",
+    "selenium-webdriver": "C:/fixture/node_modules/selenium-webdriver/index.js",
+  };
+  const resolved = validateNativeSetupDependencies({
+    root: "C:/fixture",
+    requireResolve: (packageName) => packagePaths[packageName],
+  });
+  assert.deepEqual(resolved, packagePaths);
+});
+
+test("native setup reports missing package dependencies before driver setup", () => {
+  assert.throws(
+    () => validateNativeSetupDependencies({
+      root: "C:/fixture",
+      requireResolve: () => { throw new Error("not installed"); },
+    }),
+    /Required Node package is unavailable: @tauri-apps\/cli\/tauri\.js/,
+  );
+});
+
+test("native setup resolves relative app overrides and rejects missing overrides", () => {
+  assert.equal(
+    validateNativeSetupArtifact({
+      root: process.cwd(),
+      env: { WARDIAN_NATIVE_APP: "package.json" },
+    }),
+    path.resolve(process.cwd(), "package.json"),
+  );
+  assert.throws(
+    () => validateNativeSetupArtifact({
+      root: process.cwd(),
+      env: { WARDIAN_NATIVE_APP: "missing-native-artifact.exe" },
+    }),
+    /WARDIAN_NATIVE_APP does not exist/,
+  );
 });

@@ -629,7 +629,23 @@ fn claude_legacy_provider_log_event_id(
     raw_line: &str,
 ) -> String {
     let mut legacy_event = event.clone();
-    if event.role.as_ref() == Some(&AgentChatRole::User) {
+    // Before provenance normalization, Claude context and provider-internal
+    // messages were persisted with the native `user` role. Recreate that role
+    // for the field-derived ID so pre-fix archive refs remain aliases of the
+    // raw-line ID emitted now.
+    if event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::System)
+        && matches!(
+            event
+                .metadata
+                .get("input_origin")
+                .and_then(serde_json::Value::as_str),
+            Some("context_injection" | "provider_internal")
+        )
+    {
+        legacy_event.role = Some(AgentChatRole::User);
+    }
+    if legacy_event.role.as_ref() == Some(&AgentChatRole::User) {
         if let (Some(current_text), Ok(parsed)) = (
             event.text.as_deref(),
             serde_json::from_str::<serde_json::Value>(raw_line),
@@ -1907,6 +1923,42 @@ Do you want to proceed?
     }
 
     #[test]
+    fn claude_provider_log_ids_alias_pre_migration_provenance_roles() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("claude.jsonl");
+        let lines = [
+            r#"{"type":"user","isMeta":true,"uuid":"context-1","message":{"role":"user","content":"Native provider context."}}"#,
+            r#"{"type":"user","parentUuid":"assistant-1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+        ];
+        std::fs::write(&log_path, format!("{}\n", lines.join("\n"))).expect("write log");
+
+        let events = load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[]);
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_eq!(event.role, Some(AgentChatRole::System));
+            assert!(matches!(
+                event.metadata["input_origin"].as_str(),
+                Some("context_injection" | "provider_internal")
+            ));
+            let legacy_id = event
+                .metadata
+                .get("legacy_event_ids")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|ids| ids.first())
+                .and_then(serde_json::Value::as_str)
+                .expect("pre-migration role alias");
+            let mut pre_migration_event = event.clone();
+            pre_migration_event.role = Some(AgentChatRole::User);
+            assert_eq!(
+                legacy_id,
+                stable_provider_log_event_id(&pre_migration_event, &log_path)
+            );
+            assert_ne!(legacy_id, event.id);
+        }
+    }
+
+    #[test]
     fn provider_log_transcript_suppresses_watch_terminal_fallback() {
         let provider_events = vec![AgentChatEvent {
             id: "agent-1:provider:1".to_string(),
@@ -2400,9 +2452,24 @@ Do you want to proceed?
             "raw_type": "tool_result"
         });
 
+        let mut live_context = archived_context.clone();
+        live_context.id = "agent-1:raw:context".to_string();
+        live_context.role = Some(AgentChatRole::System);
+        live_context.metadata = serde_json::json!({
+            "input_origin": "context_injection",
+            "legacy_event_ids": ["agent-1:legacy:context"]
+        });
+        let mut live_internal = archived_internal.clone();
+        live_internal.id = "agent-1:raw:internal".to_string();
+        live_internal.role = Some(AgentChatRole::System);
+        live_internal.metadata = serde_json::json!({
+            "input_origin": "provider_internal",
+            "legacy_event_ids": ["agent-1:legacy:internal"]
+        });
+
         let replayed = merge_chat_events(
-            Vec::new(),
             vec![archived_context, archived_internal, archived_result],
+            vec![live_context, live_internal],
         );
 
         assert_eq!(replayed.len(), 3);

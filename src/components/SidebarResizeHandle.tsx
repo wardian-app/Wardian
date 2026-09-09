@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef } from 'react';
 
 interface Props {
   baseWidth: number;
+  /** Measure a CSS-constrained pane when dragging begins. */
+  getBaseWidth?: () => number;
   edge: 'left' | 'right';
   onResize: (newWidthPx: number) => void;
   onReset: () => void;
@@ -9,7 +11,7 @@ interface Props {
 
 const RESIZING_CLASS = 'sidebar-resizing';
 
-export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize, onReset }) => {
+export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, getBaseWidth, edge, onResize, onReset }) => {
   const startXRef = useRef<number | null>(null);
   const baseRef = useRef<number>(baseWidth);
   const edgeRef = useRef(edge);
@@ -44,7 +46,7 @@ export const SidebarResizeHandle: React.FC<Props> = ({ baseWidth, edge, onResize
     e.preventDefault();
     e.stopPropagation();
     startXRef.current = e.clientX;
-    baseRef.current = baseWidth;
+    baseRef.current = getBaseWidth?.() ?? baseWidth;
     document.documentElement.classList.add(RESIZING_CLASS);
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';

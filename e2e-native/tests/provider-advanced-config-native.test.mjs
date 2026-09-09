@@ -14,6 +14,7 @@ import path from "node:path";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -30,10 +31,6 @@ const providerCommands = {
   opencode: "opencode",
 };
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
-
 function buildCli(harness) {
   const result = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
@@ -45,9 +42,7 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  const candidate = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
-  assert.equal(existsSync(candidate), true, `wardian-cli binary was not found at ${candidate}`);
-  return candidate;
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {
@@ -354,12 +349,12 @@ async function spawnOffAgent(driver, harness, testCase) {
 
 test("per-agent advanced config survives persistence and reaches native provider argv", { timeout: 420000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

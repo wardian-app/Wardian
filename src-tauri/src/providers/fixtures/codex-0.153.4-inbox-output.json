@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-09-07T22:16:17.242Z",
+  "ordinal": 7,
+  "type": "response_item",
+  "payload": {
+    "type": "function_call_output",
+    "id": "fco_01a07df1-8c5a-7861-bcfb-b3956fa28970",
+    "name": "wardian_inbox_delivery",
+    "namespace": "wardian",
+    "output": "{\"message_id\": \"audit1218-info\", \"context\": \"literal peer context audit1218-tool-output\"}",
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "auto-compact-0",
+      "create_time": 1788819377.2428758
+    }
+  }
+}

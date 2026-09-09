@@ -1,4 +1,7 @@
 import React, { useEffect, useState } from 'react';
+import { BookOpen, Code2, Save } from 'lucide-react';
+import { LibraryMarkdown } from './LibraryMarkdown';
+import './library.css';
 
 interface MarkdownEditorProps {
     value: string;
@@ -18,7 +21,7 @@ interface MarkdownEditorProps {
 }
 
 /**
- * Plain monospace textarea editor shared by every per-kind detail panel.
+ * Document preview and source editor shared by every per-kind detail panel.
  * `Ctrl+S`/`Cmd+S` saves; a conflict bar appears when `stale` is true,
  * offering Reload (discard the draft, adopt the on-disk content) or Keep
  * mine (dismiss the nudge locally AND, via `onKeepMine`, resolve the
@@ -36,6 +39,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
     onKeepMine,
 }) => {
     const [dismissed, setDismissed] = useState(false);
+    const [editing, setEditing] = useState(false);
 
     // A fresh external change always deserves a fresh nudge, even if the
     // previous one was dismissed with "Keep mine".
@@ -43,17 +47,26 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         if (stale) setDismissed(false);
     }, [stale]);
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
         const isSaveShortcut = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's';
         if (isSaveShortcut) {
             e.preventDefault();
-            onSave();
+            if (!stale) onSave();
         }
     };
 
     return (
-        <div data-testid="markdown-editor" className="flex flex-col h-full min-h-0">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-wardian-border text-[10px] text-muted-neutral">
+        <div data-testid="markdown-editor" className="library-document flex flex-col h-full min-h-0" onKeyDown={handleKeyDown}>
+            <div className="library-document-toolbar">
+                <div className="wardian-segmented-control" role="group" aria-label="Document mode">
+                    <button type="button" className={`wardian-button gap-1.5 ${!editing ? 'library-mode-active' : 'text-muted'}`} aria-pressed={!editing} onClick={() => setEditing(false)}>
+                        <BookOpen size={14} aria-hidden="true" /> Preview
+                    </button>
+                    <button type="button" data-testid="markdown-editor-edit" className={`wardian-button gap-1.5 ${editing ? 'library-mode-active' : 'text-muted'}`} aria-pressed={editing} onClick={() => setEditing(true)}>
+                        <Code2 size={14} aria-hidden="true" /> Edit
+                    </button>
+                </div>
+                <span className="library-save-status" role="status">
                 {dirty && (
                     <span
                         data-testid="markdown-editor-dirty-dot"
@@ -62,7 +75,10 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                     />
                 )}
                 <span>{dirty ? 'Unsaved changes' : 'Saved'}</span>
-                <span className="ml-auto">Ctrl+S / Cmd+S to save</span>
+                </span>
+                <button type="button" className="wardian-button wardian-button--primary gap-1.5" disabled={!dirty || stale} onClick={onSave} title="Save (Ctrl+S / Cmd+S)">
+                    <Save size={14} aria-hidden="true" /> Save
+                </button>
             </div>
             {stale && !dismissed && (
                 <div
@@ -75,7 +91,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                             type="button"
                             data-testid="markdown-editor-reload"
                             onClick={onReloadExternal}
-                            className="font-bold underline hover:no-underline"
+                            className="wardian-button wardian-button--secondary"
                         >
                             Reload
                         </button>
@@ -86,21 +102,22 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
                                 setDismissed(true);
                                 onKeepMine?.();
                             }}
-                            className="font-bold underline hover:no-underline"
+                            className="wardian-button wardian-button--secondary"
                         >
                             Keep mine
                         </button>
                     </div>
                 </div>
             )}
-            <textarea
+            {editing ? <textarea
+                aria-label="Markdown source"
+                autoFocus
                 data-testid="markdown-editor-textarea"
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
-                onKeyDown={handleKeyDown}
                 spellCheck={false}
-                className="flex-1 min-h-0 w-full resize-none bg-[var(--color-wardian-input-bg)] p-3 font-mono text-xs text-primary focus:outline-none"
-            />
+                className="library-source flex-1 min-h-0 w-full resize-none font-mono text-xs text-primary"
+            /> : <div className="library-document-preview flex-1 min-h-0 overflow-auto"><LibraryMarkdown value={value} /></div>}
         </div>
     );
 };

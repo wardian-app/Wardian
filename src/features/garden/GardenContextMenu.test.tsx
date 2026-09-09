@@ -17,13 +17,13 @@ describe("GardenContextMenu", () => {
         onClose={onClose}
       />,
     );
-    expect(screen.queryByText("Open in Grid")).not.toBeInTheDocument();
+    expect(screen.queryByText("Open agent session")).not.toBeInTheDocument();
     await userEvent.click(screen.getByTestId("garden-reset-layout"));
     expect(onResetLayout).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("offers Open in Grid only when opened over an agent unit", async () => {
+  it("offers Open agent session only when opened over an agent unit", async () => {
     const onOpenAgent = vi.fn();
     render(
       <GardenContextMenu
@@ -35,7 +35,7 @@ describe("GardenContextMenu", () => {
         onClose={vi.fn()}
       />,
     );
-    await userEvent.click(screen.getByText("Open in Grid"));
+    await userEvent.click(screen.getByText("Open agent session"));
     expect(onOpenAgent).toHaveBeenCalledWith("a1");
   });
 });

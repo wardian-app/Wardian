@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -22,10 +23,6 @@ const BETA_PROVIDER_SESSION_ID = `e2e-topology-beta-${RUN_ID}`;
 const BETA_SESSION_NAME = `E2E-TOPOLOGY-BETA-${RUN_ID}`;
 const GAMMA_PROVIDER_SESSION_ID = `e2e-topology-gamma-${RUN_ID}`;
 const GAMMA_SESSION_NAME = `E2E-TOPOLOGY-GAMMA-${RUN_ID}`;
-
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
 
 function buildCli(harness) {
   const result = spawnSync(
@@ -43,28 +40,7 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  const localCandidate = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
-  if (existsSync(localCandidate)) {
-    return localCandidate;
-  }
-
-  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: harness.repoRoot,
-    encoding: "utf8",
-  });
-  assert.equal(
-    metadata.status,
-    0,
-    `cargo metadata failed\nstdout:\n${metadata.stdout}\nstderr:\n${metadata.stderr}`,
-  );
-  const targetDirectory = JSON.parse(metadata.stdout).target_directory;
-  const metadataCandidate = path.join(targetDirectory, "debug", commandName("wardian-cli"));
-  assert.equal(
-    existsSync(metadataCandidate),
-    true,
-    `wardian-cli binary was not found at ${metadataCandidate}`,
-  );
-  return metadataCandidate;
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCliWithEnv(cliPath, harness, args, extraEnv) {
@@ -166,12 +142,12 @@ async function removeTopologyEdge(driver, aUuid, bUuid) {
 
 test("native CLI neighbors scoping reads app-written topology", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -334,12 +310,12 @@ test(
   { timeout: 180000 },
   async (t) => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;

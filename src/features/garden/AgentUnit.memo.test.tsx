@@ -8,8 +8,8 @@ let unitRenders = 0;
 vi.mock("react-konva", () => ({
   Group: ({ children }: any) => <div>{children}</div>,
   Circle: () => <div />,
-  Text: () => {
-    unitRenders += 1;
+  Text: (props: { text: string }) => {
+    if (props.text === "Alpha") unitRenders += 1;
     return <div />;
   },
 }));

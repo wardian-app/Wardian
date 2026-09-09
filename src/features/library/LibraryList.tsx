@@ -1,6 +1,6 @@
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Puzzle, MessageSquare, Layers, Workflow, Star, CircleAlert } from 'lucide-react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { LibraryEntry, LibraryItemMetadata, LibrarySectionId, OrphanDeployment } from '../../types';
 import { ListToolbar } from './ListToolbar';
@@ -20,6 +20,7 @@ interface ListRowItemProps {
     row: ListRow;
     selected: boolean;
     hasRelatedOrphan: boolean;
+    classSkills?: string[];
     onSelect: (entry: LibraryEntry) => void;
     onToggleStar: (entry: LibraryEntry) => void;
     onDragStart: (e: React.DragEvent, entry: LibraryEntry) => void;
@@ -30,6 +31,7 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
     row,
     selected,
     hasRelatedOrphan,
+    classSkills,
     onSelect,
     onToggleStar,
     onDragStart,
@@ -37,6 +39,7 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
     const entry = row.entry;
     if (!entry) return null;
     const showWarning = Boolean(entry.error) || hasRelatedOrphan;
+    const Icon = { skill: Puzzle, prompt: MessageSquare, class: Layers, automation: Workflow }[entry.kind];
 
     return (
         <div
@@ -56,10 +59,11 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
                 onSelect(entry);
             }}
             style={{ paddingLeft: `${12 + row.depth * 16}px` }}
-            className={`flex items-center gap-2 pr-3 py-1.5 border-b border-wardian-border cursor-pointer transition-colors ${
+            className={`library-row flex items-center gap-3 pr-3 py-3 border-b border-wardian-border cursor-pointer transition-colors ${
                 selected ? 'bg-wardian-card-bg-muted' : 'hover:bg-wardian-card-bg-muted'
             }`}
         >
+            <Icon size={18} strokeWidth={1.7} className="shrink-0 text-muted" aria-hidden="true" />
             <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 min-w-0">
                     <span className="text-xs font-medium text-primary truncate">{entry.name}</span>
@@ -72,7 +76,11 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
                         </span>
                     )}
                 </div>
-                {entry.description && <p className="text-[11px] text-muted truncate">{entry.description}</p>}
+                {entry.description && <p className="mt-1 text-xs leading-5 text-muted line-clamp-2">{entry.description}</p>}
+                {classSkills && <div className="mt-2 text-[11px] text-muted-neutral">
+                    <p>AGENTS.md · {classSkills.length} class {classSkills.length === 1 ? 'skill' : 'skills'}</p>
+                    {classSkills.length > 0 && <p className="mt-1 truncate" title={classSkills.join(', ')}>{classSkills.slice(0, 3).map((path) => path.split('/').pop()).join(' · ')}{classSkills.length > 3 ? ` · +${classSkills.length - 3} more` : ''}</p>}
+                </div>}
                 {entry.tags.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-0.5">
                         {entry.tags.map((tag) => (
@@ -101,7 +109,7 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
                     title={entry.error ?? 'A deployed copy of this skill has drifted from its source'}
                     className="shrink-0 text-[10px] text-[var(--color-wardian-warning)]"
                 >
-                    ⚠
+                    <CircleAlert size={14} aria-hidden="true" />
                 </span>
             )}
             <button
@@ -113,11 +121,12 @@ const ListRowItem: React.FC<ListRowItemProps> = ({
                     e.stopPropagation();
                     onToggleStar(entry);
                 }}
-                className={`shrink-0 text-sm leading-none transition-colors ${
+                onKeyDown={(e) => e.stopPropagation()}
+                className={`wardian-icon-button shrink-0 ${
                     entry.is_starred ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'
                 }`}
             >
-                {entry.is_starred ? '★' : '☆'}
+                <Star size={15} fill={entry.is_starred ? 'currentColor' : 'none'} aria-hidden="true" />
             </button>
         </div>
     );
@@ -321,6 +330,9 @@ export const LibraryList: React.FC = () => {
                                 row={row}
                                 selected={selection?.entryRef === row.entry?.entry_ref}
                                 hasRelatedOrphan={row.entry ? relatedOrphan(row.entry, index?.orphans ?? []) : false}
+                                classSkills={row.entry?.kind === 'class' ? Object.entries(index?.deployments ?? {})
+                                    .filter(([ref, targets]) => ref.startsWith('skills/') && targets.some((target) => target.target_type === 'class' && target.target_id === row.entry?.path))
+                                    .map(([ref]) => ref.slice('skills/'.length)).sort() : undefined}
                                 onSelect={(entry) => void select(entry.entry_ref)}
                                 onToggleStar={handleToggleStar}
                                 onDragStart={handleDragStart}
