@@ -27,6 +27,15 @@ const webhookListener: ListenerView = {
   runtime: { armed: false, fire_count: 0, recent_fire_epoch_ms: [], consecutive_failures: 0 },
 };
 
+const assignedListener: ListenerView = {
+  ...webhookListener,
+  id: 'selected-hook',
+  name: 'Selected agent hook',
+  assignments: {
+    reviewer: { target_type: 'agent', agent_id: 'agent-1', conversation: 'current' },
+  },
+};
+
 beforeEach(() => {
   invokeMock.mockReset();
   useListenersStore.setState({ listeners: [], gateway: null, loading: false, error: null });
@@ -91,6 +100,7 @@ describe('ListenersPanel', () => {
       return Promise.resolve(null);
     });
 
+    useListenersStore.setState({ listeners: [webhookListener] });
     render(<ListenersPanel />);
     await waitFor(() => expect(screen.getByTestId('listener-row-saved-hook')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('Edit CI hook'));
@@ -125,5 +135,20 @@ describe('ListenersPanel', () => {
       expect(screen.getAllByText(/refusing to watch a path/i).length).toBeGreaterThan(0),
     );
     expect(screen.getByLabelText('Watch path')).toBeInTheDocument();
+  });
+
+  it('shows only listeners assigned to any selected agent', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'automation_list_blueprints') return Promise.resolve({ blueprints: [], truncated: false, next_offset: null });
+      if (command === 'listener_list') return Promise.resolve([webhookListener, assignedListener]);
+      return Promise.resolve(null);
+    });
+
+    useListenersStore.setState({ listeners: [webhookListener, assignedListener] });
+    render(<ListenersPanel selectedAgentIds={new Set(['agent-1', 'agent-2'])} />);
+
+    await waitFor(() => expect(screen.getByTestId('listener-row-selected-hook')).toBeInTheDocument());
+    expect(screen.queryByTestId('listener-row-saved-hook')).toBeNull();
+    expect(screen.getByText('1 event listener for selected agents')).toBeInTheDocument();
   });
 });

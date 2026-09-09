@@ -1821,8 +1821,8 @@ function AppBody() {
       return (
         <AutomationsSurface
           surface_id={surface.surface_id}
-          theme={theme}
-          visibility={visibility}
+          theme={theme} visibility={visibility}
+          selectedAgentIds={selectedAgentIds}
         />
       );
     }
