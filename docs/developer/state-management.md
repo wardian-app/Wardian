@@ -17,6 +17,12 @@ Located in `src-tauri/src/state/app_state.rs`, the `AppState` is managed as a Ta
 - **`workbench_io_lock: tokio::sync::Mutex<()>`**: Serializes validated,
   compare-and-swap workbench load/save/reset operations against the two durable
   JSON files.
+- **`conversation_archive: ConversationArchiveState`**: Owns per-agent archive
+  serialization and durable provider-log acquisition cursors. The adjacent
+  **`conversation_capture_policy_lock`** serializes global and per-agent logging
+  boundaries before callers enter an archive's per-agent gate. The internal
+  design record `docs/specs/2026-09-09-provider-log-forward-acquisition.md`
+  defines the bounded cursor, continuity, and privacy contract.
 
 ## 🤖 ActiveAgent (The Session Handle)
 Located in `src-tauri/src/state/active_agent.rs`, this struct represents a single live or hibernating agent session.

@@ -3313,6 +3313,59 @@ fn archive_context(provider_session_id: &str) -> ConversationArchiveContext {
     }
 }
 
+#[test]
+fn provider_log_cursor_commits_only_after_archive_append_and_rejects_stale_state() {
+    let (_guard, temp) = isolated_home();
+    let log_path = temp.path().join("provider.jsonl");
+    std::fs::write(
+        &log_path,
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Archived once\"}}\n",
+    )
+    .expect("write provider log");
+    let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &log_path,
+        "codex:session:one",
+        None,
+        true,
+    )
+    .expect("acquire provider batch");
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("one");
+    let mut wrong_agent_events = batch.events.clone();
+    wrong_agent_events[0].session_id = "other-agent".to_string();
+
+    let append_error = archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &wrong_agent_events,
+            None,
+            &batch.next,
+        )
+        .expect_err("failed append must not commit cursor");
+    assert_eq!(append_error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(archive
+        .provider_log_capture_state("agent-1", "codex:session:one")
+        .expect("read capture state")
+        .is_none());
+
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
+        .expect("append and commit provider batch");
+    assert_eq!(
+        archive
+            .provider_log_capture_state("agent-1", "codex:session:one")
+            .expect("read committed state"),
+        Some(batch.next.clone())
+    );
+
+    let stale_error = archive
+        .append_provider_log_batch_with_context(context, &[], None, &batch.next)
+        .expect_err("stale expected state must fail closed");
+    assert_eq!(stale_error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
 fn isolated_home() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
     let guard = crate::utils::wardian_test_env_lock();
     let temp = tempfile::tempdir().expect("temp dir");

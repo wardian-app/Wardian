@@ -3145,6 +3145,14 @@ pub async fn resume_agent(
     let starts_fresh = resolved_session_persistence(&config) == AgentSessionPersistence::Fresh;
     let fresh_pending_boundary =
         if starts_fresh {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                &state,
+                &session_id,
+            )
+            .await
+            .map_err(|error| {
+                format!("Failed to acquire the closing provider log before fresh resume: {error}")
+            })?;
             let snapshot =
                 match crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
                     .await
@@ -3366,7 +3374,7 @@ fn prepare_conversation_boundary(
         global_conversation_logging,
         snapshot.agent_conversation_logging,
     );
-    let capture = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)?;
+    let capture = crate::commands::chat::collect_agent_chat_events_for_boundary(&snapshot)?;
     Ok(PendingConversationBoundary {
         effective_logging,
         capture,
@@ -3991,6 +3999,9 @@ async fn clear_agent_session_inner(
     };
     lifecycle_heartbeat.ensure_active("clear")?;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, &session_id)
+        .await
+        .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
     // Persist the closing evidence while the old runtime is intact, but leave
     // the archive open until the replacement runtime and metadata commit.
     let archive_snapshot = match archive_snapshot {
@@ -4341,75 +4352,116 @@ async fn persist_agent_config_while_lifecycle_locked(
     new_config.validate_provider_config_matches_provider()?;
     new_config.description = normalize_agent_description(&new_config.description)?;
     new_config.mark_provider_config_nested_for_save();
-    let _roster_barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+    let capture_snapshot =
+        crate::commands::chat::agent_archive_capture_snapshot(state, &new_config.session_id)
+            .await?;
+    let (config_handle, previous_config, previous_state_snapshot, created_at) = {
+        let agents = state.agents.lock().await;
+        let order = state.agent_order.lock().await;
+        let agent = agents
+            .get(&new_config.session_id)
+            .ok_or_else(|| format!("Agent {} not found", new_config.session_id))?;
+        let config_handle = agent.config.clone();
+        let previous_config = agent.config.lock().unwrap().clone();
+        let previous_state_snapshot = manager::state_configs_snapshot(&agents, &order);
+        let created_at = agent.init_timestamp.lock().unwrap().clone();
+        (
+            config_handle,
+            previous_config,
+            previous_state_snapshot,
+            created_at,
+        )
+    };
+
+    // If class has changed, auto-update the system_include_directories.
+    let current_class = previous_config.agent_class.clone();
+    if current_class != new_config.agent_class {
+        manager::log_debug(&format!(
+            "[WARDIAN] Agent class changed from {} to {}. Updating system include directories.",
+            current_class, new_config.agent_class
+        ));
+        new_config.system_include_directories =
+            Some(crate::utils::fs::resolve_system_include_directories(
+                &new_config.agent_class,
+                &new_config.session_id,
+            ));
+    }
+
+    let global_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    let previous_logging =
+        effective_conversation_logging(global_logging, previous_config.conversation_logging);
+    let next_logging =
+        effective_conversation_logging(global_logging, new_config.conversation_logging);
+    let _policy_guard = if previous_logging != next_logging {
+        Some(state.conversation_capture_policy_lock.lock().await)
+    } else {
+        None
+    };
+    if previous_logging != ConversationLoggingSetting::Disabled
+        && next_logging == ConversationLoggingSetting::Disabled
+    {
+        crate::commands::chat::record_provider_log_policy_for_snapshot(
+            state,
+            &capture_snapshot,
+            false,
+        )?;
+    }
+
+    let roster_barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
-    let agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-
-    if let Some(agent) = agents.get(&new_config.session_id) {
-        let previous_config = agent.config.lock().unwrap().clone();
-        // If class has changed, auto-update the system_include_directories
-        let current_class = previous_config.agent_class.clone();
-
-        if current_class != new_config.agent_class {
-            manager::log_debug(&format!(
-                "[WARDIAN] Agent class changed from {} to {}. Updating system include directories.",
-                current_class, new_config.agent_class
-            ));
-            new_config.system_include_directories =
-                Some(crate::utils::fs::resolve_system_include_directories(
-                    &new_config.agent_class,
-                    &new_config.session_id,
-                ));
-        }
-
-        let previous_state_snapshot = manager::state_configs_snapshot(&agents, &order);
-        let mut state_snapshot = previous_state_snapshot.clone();
-        let persisted_config = state_snapshot
-            .iter_mut()
-            .find(|config| config.session_id == new_config.session_id)
-            .ok_or_else(|| {
-                format!(
-                    "Agent {} is missing from persisted order",
-                    new_config.session_id
-                )
-            })?;
-        *persisted_config = new_config.clone();
-
-        manager::try_save_state_snapshot_unlocked(&state_snapshot)
-            .map_err(|error| format!("Failed to persist agent configuration: {error}"))?;
-
-        let workspace = crate::utils::fs::resolve_cwd(&new_config.folder, &new_config.session_id)
-            .to_string_lossy()
-            .to_string();
-        let created_at = agent.init_timestamp.lock().unwrap().clone();
-        let project = wardian_core::db::project_name_from_workspace(&workspace);
-        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
-            session_id: &new_config.session_id,
-            session_name: &new_config.session_name,
-            description: &new_config.description,
-            agent_class: &new_config.agent_class,
-            provider: &new_config.provider,
-            workspace: Some(&workspace),
-            project: project.as_deref(),
-            is_off: new_config.is_off,
-            created_at: created_at.as_deref(),
-        })
-        .map_err(|error| {
-            let rollback_error =
-                manager::try_save_state_snapshot_unlocked(&previous_state_snapshot)
-                    .err()
-                    .map(|rollback| format!("; state rollback also failed: {rollback}"))
-                    .unwrap_or_default();
-            format!("Failed to persist agent metadata: {error}{rollback_error}")
+    let mut state_snapshot = previous_state_snapshot.clone();
+    let persisted_config = state_snapshot
+        .iter_mut()
+        .find(|config| config.session_id == new_config.session_id)
+        .ok_or_else(|| {
+            format!(
+                "Agent {} is missing from persisted order",
+                new_config.session_id
+            )
         })?;
+    *persisted_config = new_config.clone();
+    manager::try_save_state_snapshot_unlocked(&state_snapshot)
+        .map_err(|error| format!("Failed to persist agent configuration: {error}"))?;
 
-        *agent.config.lock().unwrap() = new_config;
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", new_config.session_id))
+    let workspace = crate::utils::fs::resolve_cwd(&new_config.folder, &new_config.session_id)
+        .to_string_lossy()
+        .to_string();
+    let project = wardian_core::db::project_name_from_workspace(&workspace);
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &new_config.session_id,
+        session_name: &new_config.session_name,
+        description: &new_config.description,
+        agent_class: &new_config.agent_class,
+        provider: &new_config.provider,
+        workspace: Some(&workspace),
+        project: project.as_deref(),
+        is_off: new_config.is_off,
+        created_at: created_at.as_deref(),
+    })
+    .map_err(|error| {
+        let rollback_error = manager::try_save_state_snapshot_unlocked(&previous_state_snapshot)
+            .err()
+            .map(|rollback| format!("; state rollback also failed: {rollback}"))
+            .unwrap_or_default();
+        format!("Failed to persist agent metadata: {error}{rollback_error}")
+    })?;
+
+    *config_handle.lock().unwrap() = new_config;
+    // Never carry the global roster barrier into the per-agent archive gate.
+    drop(roster_barrier);
+    if previous_logging == ConversationLoggingSetting::Disabled
+        && next_logging != ConversationLoggingSetting::Disabled
+    {
+        crate::commands::chat::record_provider_log_policy_for_snapshot(
+            state,
+            &capture_snapshot,
+            true,
+        )?;
     }
+    Ok(())
 }
 
 struct AgentModelSelectionMutationGuards {
@@ -5183,12 +5235,13 @@ mod tests {
         ensure_provider_available_before_session_bootstrap, find_assignable_worktree,
         find_deletable_worktree_for_source, flatten_clone_file_paths, insert_new_agent_order,
         is_under_managed_agent_worktree_root, is_under_wardian_agent_worktree_root,
-        lock_agent_lifecycle, mark_agent_paused_off, new_agent_order_placement_for_setting,
-        normalize_clone_folder_override, normalize_discovered_git_worktree_path,
-        normalize_existing_workspace_record_path, normalize_spawn_folder,
-        normalize_workspace_record_path, persist_agent_config,
-        persisted_resume_session_for_provider, prepare_agent_for_clear, prepare_clear_config,
-        prepare_conversation_boundary, prepare_restored_config_for_spawn, prepare_resume_config,
+        lifecycle_config_for_session, lock_agent_lifecycle, mark_agent_paused_off,
+        new_agent_order_placement_for_setting, normalize_clone_folder_override,
+        normalize_discovered_git_worktree_path, normalize_existing_workspace_record_path,
+        normalize_spawn_folder, normalize_workspace_record_path, persist_agent_config,
+        persist_agent_config_while_lifecycle_locked, persisted_resume_session_for_provider,
+        prepare_agent_for_clear, prepare_clear_config, prepare_conversation_boundary,
+        prepare_restored_config_for_spawn, prepare_resume_config,
         prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, release_spawn_name_reservation, remove_agent,
         renew_agent_lifecycle_transition_lease, replace_agent_status_incarnation,
@@ -5219,6 +5272,9 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
     use tauri::Manager;
+    use wardian_core::conversations::{
+        AgentConversationLoggingSetting, ConversationLoggingSetting,
+    };
     use wardian_core::models::provider::AgentProvider;
     use wardian_core::models::{
         AgentClassDefinition, AgentConfig, AgentSessionPersistenceOverride,
@@ -9483,6 +9539,101 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         );
         assert!(saved_topology.is_ignored("kept", "other-kept"));
         assert!(!saved_topology.is_ignored("deleted", "other-kept"));
+    }
+
+    #[tokio::test]
+    async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = WardianHomeGuard;
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize isolated state database");
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save enabled global logging");
+        let log_path = temp.path().join("provider.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Before agent disable\"}}\n",
+        )
+        .expect("write initial provider event");
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().expect("agent config");
+            config.session_id = "agent-1".to_string();
+            config.session_name = "Agent One".to_string();
+            config.agent_class = "Coder".to_string();
+            config.provider = "codex".to_string();
+            config.reset_provider_config_for_provider();
+            config.folder = temp.path().to_string_lossy().to_string();
+            config.fresh_provider_session_id = Some("provider-session-1".to_string());
+            config.conversation_logging = AgentConversationLoggingSetting::Default;
+        }
+        *agent.log_path.lock().expect("agent log path") = Some(log_path.clone());
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        state.agent_order.lock().await.push("agent-1".to_string());
+        crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("capture enabled prefix");
+
+        let mut disabled = lifecycle_config_for_session(&state, "agent-1")
+            .await
+            .expect("load agent config");
+        disabled.conversation_logging = AgentConversationLoggingSetting::Disabled;
+        persist_agent_config_while_lifecycle_locked(disabled, &state)
+            .await
+            .expect("disable agent logging");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"SECRET_AGENT_DISABLED\"}}}}")
+            })
+            .expect("append disabled provider event");
+
+        let mut enabled = lifecycle_config_for_session(&state, "agent-1")
+            .await
+            .expect("reload agent config");
+        enabled.conversation_logging = AgentConversationLoggingSetting::Enabled;
+        persist_agent_config_while_lifecycle_locked(enabled, &state)
+            .await
+            .expect("re-enable agent logging");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"After agent re-enable\"}}}}")
+            })
+            .expect("append enabled provider event");
+        crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("capture after agent re-enable");
+
+        let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let archived = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive");
+        let text = archived
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>();
+        assert!(text.contains(&"Before agent disable"));
+        assert!(text.contains(&"After agent re-enable"));
+        assert!(!text.contains(&"SECRET_AGENT_DISABLED"));
     }
 
     #[tokio::test]

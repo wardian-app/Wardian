@@ -402,11 +402,12 @@ fn schedule_agent_status_observation(
             let archive_session_id = status_session_id.clone();
             tauri::async_runtime::spawn(async move {
                 let state = archive_app.state::<AppState>();
-                if let Err(error) = crate::commands::chat::archive_agent_chat_events_for_state(
-                    state.inner(),
-                    &archive_session_id,
-                )
-                .await
+                if let Err(error) =
+                    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                        state.inner(),
+                        &archive_session_id,
+                    )
+                    .await
                 {
                     log_debug(&format!(
                         "[WARDIAN] conversation archive status sync failed for {archive_session_id}: {error}"
