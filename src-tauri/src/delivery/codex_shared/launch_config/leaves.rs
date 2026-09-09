@@ -94,7 +94,7 @@ pub(super) fn parse(args: &[String]) -> Result<Overrides, CodexSharedError> {
         ));
     }
     let mut result = BTreeMap::new();
-    for pair in args[1..].chunks_exact(2) {
+    for pair in args[1..].as_chunks::<2>().0 {
         if pair[0] != "-c" {
             return Err(failure("unexpected non-config Codex launch argument"));
         }
