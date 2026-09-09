@@ -3,12 +3,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const invokeMock = vi.fn();
+const blueprintSelectorMock = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invokeMock(...args) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }));
 
 vi.mock('../features/automations/BlueprintSelector', () => ({
-  BlueprintSelector: ({ onOpen, onNew }: { onOpen: (path: string) => void; onNew: () => void }) => (
-    <div data-testid="blueprint-selector">
+  BlueprintSelector: ({
+    onOpen,
+    onNew,
+    visibleBlueprintIds,
+  }: {
+    onOpen: (path: string) => void;
+    onNew: () => void;
+    visibleBlueprintIds?: ReadonlySet<string>;
+  }) => {
+    blueprintSelectorMock(visibleBlueprintIds);
+    return <div data-testid="blueprint-selector">
       <button type="button" onClick={() => onOpen('<absolute-workspace-path>/library/automations/wf.md')}>
         Open Automation
       </button>
@@ -18,8 +28,8 @@ vi.mock('../features/automations/BlueprintSelector', () => ({
       <button type="button" onClick={onNew}>
         New Automation
       </button>
-    </div>
-  ),
+    </div>;
+  },
 }));
 vi.mock('../features/automations/builder/BuilderCanvas', () => ({
   BuilderCanvas: ({
@@ -163,10 +173,12 @@ vi.mock('../features/automations/run/RunList', () => ({
 import { useBuilderStore } from '../store/useBuilderStore';
 import { useRunStore } from '../features/automations/run/useRunStore';
 import { useSchedulesStore } from '../store/useSchedulesStore';
+import { useListenersStore } from '../store/useListenersStore';
 import { useAutomationsView } from '../store/useAutomationsView';
 import { useOnboardingStore } from '../store/useOnboardingStore';
 import { AutomationsView } from './AutomationsView';
 import type { Blueprint } from '../features/automations/builder/blueprintTypes';
+import type { ListenerView } from '../types/automation';
 
 describe('AutomationsView', () => {
   beforeEach(() => {
@@ -180,18 +192,21 @@ describe('AutomationsView', () => {
         };
       }
       if (command === 'schedule_list') return [];
+      if (command === 'listener_list') return [];
       if (command === 'automation_validate') return { ok: true, diagnostics: [] };
       return null;
     });
     useBuilderStore.getState().reset();
     useRunStore.getState().reset();
     useSchedulesStore.setState({ schedules: [], loading: false, error: null });
+    useListenersStore.setState({ listeners: [], gateway: null, loading: false, error: null });
     useAutomationsView.getState().reset();
     useOnboardingStore.setState({
       dismissedHintIds: [],
       contextualTipsEnabled: true,
       hintsLoaded: true,
     });
+    blueprintSelectorMock.mockReset();
   });
 
   afterEach(() => {
@@ -243,6 +258,93 @@ describe('AutomationsView', () => {
     fireEvent.click(screen.getByRole('button', { name: /show runs/i }));
     expect(screen.getByRole('heading', { name: 'Runs' })).toBeVisible();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('automation_list_runs'));
+  });
+
+  it('scopes the workflow picker and run drawer to any selected agent', async () => {
+    seedBuilderWithEmptyBlueprint();
+    const schedules = [
+      scopedSchedule('schedule-selected', 'wf', 'agent-1'),
+      scopedSchedule('schedule-other', 'other', 'agent-2'),
+    ];
+    const runs = [
+      scopedRun('run-selected', 'wf', 'schedule-selected'),
+      scopedRun('run-other', 'other', 'schedule-other'),
+    ];
+    const listener: ListenerView = {
+      id: 'listener-selected',
+      blueprint_id: 'listener-only',
+      name: 'Selected listener',
+      enabled: true,
+      trigger: {
+        type: 'file_watch',
+        path: '/workspace',
+        recursive: true,
+        patterns: [],
+        ignore: [],
+        events: ['created'],
+        debounce_ms: 250,
+      },
+      input: {},
+      bindings: {},
+      assignments: {
+        reviewer: { target_type: 'agent', agent_id: 'agent-1', conversation: 'current' },
+      },
+      runtime: { armed: true, fire_count: 0, recent_fire_epoch_ms: [], consecutive_failures: 0 },
+      has_secret: false,
+    };
+    useSchedulesStore.setState({ schedules });
+    useListenersStore.setState({ listeners: [listener] });
+    useRunStore.setState({ runs });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'automation_list_runs') return runPage(runs);
+      if (command === 'schedule_list') return schedules;
+      if (command === 'listener_list') return [listener];
+      if (command === 'automation_validate') return { ok: true, diagnostics: [] };
+      return null;
+    });
+
+    render(<AutomationsView theme="dark" selectedAgentIds={new Set(['agent-1'])} />);
+
+    expect(screen.getByTestId('automation-view-agent-scope')).toHaveTextContent('Selected agent');
+    expect(blueprintSelectorMock).toHaveBeenCalledWith(new Set(['wf', 'listener-only']));
+    fireEvent.click(screen.getByRole('button', { name: /show runs/i }));
+    expect(screen.getByRole('button', { name: 'Open wf run-selected' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open other run-other' })).toBeNull();
+  });
+
+  it('keeps a directly observed workflow visible when it falls outside a new agent scope', async () => {
+    seedBuilderWithEmptyBlueprint();
+    const schedules = [scopedSchedule('schedule-selected', 'wf', 'agent-1')];
+    useSchedulesStore.setState({ schedules });
+    useAutomationsView.setState({
+      mode: 'observe',
+      observedBlueprintId: 'out-of-scope',
+      selectedRunId: 'run-other',
+      selectedRunIdsByBlueprint: { 'out-of-scope': 'run-other' },
+    });
+    useRunStore.setState({
+      state: {
+        run_id: 'run-other',
+        blueprint_id: 'out-of-scope',
+        status: 'completed',
+        nodes: {},
+      },
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'automation_list_runs') return runPage([]);
+      if (command === 'schedule_list') return schedules;
+      if (command === 'listener_list') return [];
+      if (command === 'automation_validate') return { ok: true, diagnostics: [] };
+      return null;
+    });
+
+    render(<AutomationsView theme="dark" selectedAgentIds={new Set(['agent-1'])} />);
+
+    expect(blueprintSelectorMock).toHaveBeenCalledWith(new Set(['wf', 'out-of-scope']));
+    await waitFor(() => {
+      expect(useRunStore.getState().state?.run_id).toBe('run-other');
+      expect(useAutomationsView.getState().observedBlueprintId).toBe('out-of-scope');
+    });
   });
 
   it('shows authoring guidance while editing an automation', () => {
@@ -824,5 +926,31 @@ function readRunResult(runId: string, blueprintId = 'wf') {
     ],
     blueprint: automationBlueprint(blueprintId),
     blueprint_path: `<absolute-workspace-path>/library/automations/${blueprintId}.md`,
+  };
+}
+
+function scopedSchedule(id: string, blueprintId: string, agentId: string) {
+  return {
+    id,
+    blueprint_id: blueprintId,
+    name: id,
+    input: {},
+    bindings: {},
+    assignments: {
+      worker: { target_type: 'agent' as const, agent_id: agentId, conversation: 'current' as const },
+    },
+    schedule: { schedule_type: 'daily' as const, time_of_day: '09:00', active: true },
+    is_paused: false,
+  };
+}
+
+function scopedRun(runId: string, blueprintId: string, scheduleId: string) {
+  return {
+    run_id: runId,
+    blueprint_id: blueprintId,
+    schedule_id: scheduleId,
+    status: 'completed' as const,
+    node_count: 1,
+    path: `<absolute-workspace-path>/library/runs/${runId}.json`,
   };
 }
