@@ -1,0 +1,44 @@
+import { test, expect } from "@playwright/test";
+import { installGardenCompositionMock, GARDEN_AGENT } from "../fixtures/gardenComposition";
+
+test("large collections remain findable without moving the agent geography", async ({ page }) => {
+  await installGardenCompositionMock(page, { memoryCount: 300, conversationCount: 60 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await page.locator(`[data-garden-object="agent:${GARDEN_AGENT}"]`).press("Enter");
+  const cell = page.locator(`[data-garden-cell="agent:${GARDEN_AGENT}"]`);
+  const memory = cell.getByRole("region", { name: "Memory", exact: true });
+  await expect(memory.locator('[data-garden-ref^="memory:"]')).toHaveCount(300);
+  const world = await cell.getAttribute("data-garden-world");
+  const before = await cell.boundingBox();
+  await memory.getByRole("searchbox", { name: "Find memory" }).fill("Memory 299:");
+  await memory.getByRole("searchbox", { name: "Find memory" }).press("Enter");
+  const last = memory.locator('[data-garden-ref="memory:dense-memory-299"]');
+  await expect(last).toBeFocused();
+  await expect(last).toBeInViewport();
+  await expect(memory.getByRole("status")).toHaveText("Match 1 of 1");
+  await expect(cell).toHaveAttribute("data-garden-world", world!);
+  expect((await cell.boundingBox())?.x).toBeCloseTo(before!.x, 0);
+  expect((await cell.boundingBox())?.width).toBeCloseTo(before!.width, 0);
+  await last.press("Enter");
+  await expect(page.getByRole("article", { name: "memory record" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  // A later-to-earlier search must clear the sticky search surface as well.
+  const search = memory.getByRole("searchbox", { name: "Find memory" });
+  await search.fill("Keep the five agent regions");
+  await search.press("Enter");
+  const first = memory.getByRole("button", { name: /Keep the five agent regions/ });
+  await expect(first).toBeFocused();
+  const firstBox = await first.boundingBox();
+  const searchBox = await memory.locator(".garden-memory-search").boundingBox();
+  expect(firstBox!.y).toBeGreaterThanOrEqual(searchBox!.y + searchBox!.height);
+  const work = cell.getByRole("region", { name: "Active work", exact: true });
+  await work.getByText("Sessions & Inbox", { exact: true }).click();
+  const conversation = work.locator(".garden-conversation-summary").last();
+  await conversation.scrollIntoViewIfNeeded();
+  await conversation.press("Enter");
+  await expect(work.locator(".garden-conversation-detail")).toHaveCount(1);
+  await expect(work.locator(".garden-conversation-detail")).toContainText("Conversation 59:");
+  await expect(work.locator(".garden-conversation-object")).toHaveCount(60);
+  await expect(cell).toHaveAttribute("data-garden-world", world!);
+});

@@ -39,7 +39,7 @@ const LABEL_MIN_HEIGHT_PX = 36;
  * brightest thing on the map. Deeper cells sit slightly stronger than their
  * parents so nesting reads without borders doing all the work.
  */
-const DEPTH_OPACITY = [0.34, 0.42, 0.5, 0.56];
+const DEPTH_OPACITY = [0.58, 0.7, 0.8, 0.88];
 
 function opacityForDepth(depth: number): number {
   return DEPTH_OPACITY[Math.min(depth, DEPTH_OPACITY.length - 1)];
@@ -132,7 +132,8 @@ const TerrainCellShape: React.FC<{
 }> = ({ cell, scale, theme, paint, selected, highlighted, onSelectPath, onOpenPath }) => {
   const { rect } = cell;
   const fill = cell.depth === 0 ? theme.ground : cell.isDir ? theme.groundDir : theme.groundFile;
-  const cornerRadius = Math.min(rect.width, rect.height) * (cell.depth === 0 ? .18 : .22);
+  // Crisp material edges remain screen-sized while the authored footprint is fixed.
+  const cornerRadius = Math.min(Math.min(rect.width, rect.height) * .08, (cell.isDir ? 8 : 3) / scale);
   const showLabel =
     rect.width * scale >= LABEL_MIN_WIDTH_PX && rect.height * scale >= LABEL_MIN_HEIGHT_PX;
 
@@ -146,12 +147,12 @@ const TerrainCellShape: React.FC<{
         fill={fill}
         opacity={opacityForDepth(cell.depth)}
         stroke={theme.groundBorder}
-        strokeWidth={cell.depth === 0 ? 1.5 : 0.5}
+        strokeWidth={(cell.depth === 0 ? 1.5 : 1) / scale}
         cornerRadius={cornerRadius}
         // Konva's perfect-draw pass allocates an offscreen canvas per shape to
         // composite fill and stroke correctly at partial opacity. At two
-        // thousand ground cells that is the dominant cost, and the artefact it
-        // prevents is invisible on a 0.5px hairline.
+        // thousand ground cells that is the dominant cost. Keep the material
+        // boundary to a screen-sized hairline instead of introducing buffers.
         perfectDrawEnabled={false}
         // Only the base rect listens. The tint, the highlight, and the label sit
         // on top of it, and a hit on any of them is a hit on this cell — so they
@@ -215,8 +216,8 @@ const TerrainCellShape: React.FC<{
           text={paint ? `${cell.name} · ${paint.count} changed · ${paint.agentIds.length} agents` : cell.name}
           fontFamily={theme.font}
           fontSize={12 / scale}
-          fill={theme.labelMuted}
-          opacity={0.85}
+          fill={theme.label}
+          opacity={0.95}
           ellipsis
           wrap="none"
           listening={false}

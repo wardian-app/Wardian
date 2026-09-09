@@ -64,11 +64,20 @@ surrounding geography connected.
 
 *Zoom into an agent cell to reveal contained objects, then approach a record to read it.*
 
+Colored trays, defined rims and shallow raised objects distinguish the five
+regions. Their material colors identify regions; status markings still show
+Idle, Processing, Action Required, Off and Error. Each region keeps its place
+as its collection grows, so a busy agent remains recognizable.
+
 Skills appear as glyphs, memories as individual seeds, routines as execution
 nodes, and connections as endpoints. Short labels emerge as you approach;
 hovering, focusing or selecting an object reveals its label fully. Memory
 seeds keep Stable/Current and scope grouping; enter one for its full text and
-evidence. **Sessions & Inbox** reveals conversation and notification details.
+evidence. Collections show loaded counts. With more than 48 loaded memories,
+**Find memory** searches their text; Enter or **Find next memory** focuses the
+next match without rearranging the collection. Enter that object to read its
+evidence. **Sessions & Inbox** exposes every loaded conversation summary, with
+dates and expandable excerpts, alongside notification details.
 Skill provenance remains in its accessible label and hover description, with
 canonical details available through the skill record.
 

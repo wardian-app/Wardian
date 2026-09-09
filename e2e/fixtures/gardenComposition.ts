@@ -37,7 +37,7 @@ const schedule: AutomationSchedule = {
 };
 
 /** All data is synthetic. The shared bridge records calls and implements file resources and CAS persistence. */
-export async function installGardenCompositionMock(page: Page, options: { memoryCount?: number } = {}) {
+export async function installGardenCompositionMock(page: Page, options: { memoryCount?: number; conversationCount?: number } = {}) {
   return installWorkbenchIpcMock(page, {
     load_result: { source: "primary", notice: null, durable_revision: 0, durable_token: "garden-token",
       document: makeWorkbenchDocument({ surfaces: [makeWorkbenchSurface("garden-main", "garden")],
@@ -60,7 +60,7 @@ export async function installGardenCompositionMock(page: Page, options: { memory
       }) : [memory, { ...memory, memory_id: "memory-current", kind: "current", workspace: null, text: "Collect narrow viewport evidence.", revision_id: "current-1", revision: 1 }],
       memory_get: memory,
       memory_history: [{ ...memory, revision: 1, revision_id: "revision-1", status: "superseded", text: "Keep agent regions stable." }, memory],
-      list_conversations: { schema: 1, conversations: [{ schema: 1, conversation_id: "conversation-design", agent_id: GARDEN_AGENT, agent_name: "Moss Designer", agent_class: "Designer", workspace: GARDEN_ROOT, provider: "claude", provider_session_ids: [], started_at: timestamp, ended_at: null, status: "open", boundary_reason: "spawn", first_prompt_excerpt: "Inspect the cutaway", last_record_excerpt: "Draft ready for evidence review.", record_count: 8, turn_count: 4, has_turns: true, lifecycle_only: false, artifact_count: 2, path: "/synthetic/conversations/design" }] },
+      list_conversations: { schema: 1, conversations: Array.from({ length: options.conversationCount ?? 1 }, (_, index) => ({ schema: 1, conversation_id: index ? `conversation-${index}` : "conversation-design", agent_id: GARDEN_AGENT, agent_name: "Moss Designer", agent_class: "Designer", workspace: GARDEN_ROOT, provider: "claude", provider_session_ids: [], started_at: new Date(Date.parse(timestamp) - index * 86_400_000).toISOString(), ended_at: index ? timestamp : null, status: index ? "closed" : "open", boundary_reason: "spawn", first_prompt_excerpt: "Inspect the cutaway", last_record_excerpt: index ? `Conversation ${index}: Review the recorded design evidence.` : "Draft ready for evidence review.", record_count: 8, turn_count: 4, has_turns: true, lifecycle_only: false, artifact_count: 2, path: `/synthetic/conversations/design-${index}` })) },
       get_library_index: { sections: { skills: { stubbed: false, tree: { name: "Root", path: "", children: [{ kind: "skill", entry_ref: "skills/interface-review", path: "interface-review", name: "Interface Review", description: "Inspect interface evidence", tags: [], is_starred: false, deployment_count: 1 }] } } }, deployments: { "skills/interface-review": [{ target_type: "agent", target_id: GARDEN_AGENT, linked: true }] }, orphans: [] },
       read_library_item: "# Interface Review\nCheck task flow, keyboard access, and evidence.",
       load_change_review_prefs: { schema: 1, baseline: "branch_point" },

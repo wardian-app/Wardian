@@ -1,0 +1,31 @@
+/* A workspace is a tray of physical folders and leaves. Scope every rule so
+   record readers, agent organelles and the shared camera keep their own skin. */
+.garden-workspace-interior {
+  --workspace-material: color-mix(in srgb, var(--color-wardian-accent) 10%, var(--color-wardian-card));
+  --workspace-edge: color-mix(in srgb, var(--color-wardian-accent) 38%, var(--color-wardian-border));
+  color: var(--color-wardian-text);
+  min-width: 0;
+}
+.garden-workspace-interior .garden-interior-heading { gap: 12px; align-items: flex-start; margin-bottom: 18px; }
+.garden-workspace-interior .garden-interior-heading > div { min-width: 0; flex: 1 1 180px; }
+.garden-workspace-interior .garden-interior-heading h2 { margin: 0 0 4px; font-size: 22px; }
+.garden-workspace-interior .garden-path { margin: 0; font-size: 12px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.garden-workspace-interior .garden-interior-heading label { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 12px; border: 1px solid var(--workspace-edge); border-radius: 4px; background: var(--workspace-material); }
+.garden-workspace-interior input { accent-color: var(--color-wardian-accent); }
+.garden-workspace-interior .garden-activity-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); align-items: start; gap: 12px; padding: 12px; border: 1px solid var(--workspace-edge); border-radius: 8px; background: var(--workspace-material); box-shadow: inset 0 2px 0 color-mix(in srgb, var(--workspace-edge) 28%, transparent); }
+.garden-workspace-interior .garden-workspace-tile { position: relative; display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--workspace-edge); border-radius: 4px; background: var(--color-wardian-input-bg); color: var(--color-wardian-text); text-align: left; box-shadow: 0 2px 0 var(--workspace-edge), inset 0 1px 0 var(--color-wardian-bg); }
+.garden-workspace-interior .garden-workspace-directory { background: color-mix(in srgb, var(--color-wardian-accent) 17%, var(--color-wardian-card)); border-radius: 4px 8px 6px 6px; }
+.garden-workspace-interior .garden-workspace-tile:hover { border-color: var(--color-wardian-accent); box-shadow: 0 2px 0 var(--color-wardian-accent), inset 0 1px 0 var(--color-wardian-bg); }
+.garden-workspace-interior .garden-workspace-tile[aria-pressed="true"] { outline: 2px solid var(--color-wardian-accent); outline-offset: 2px; }
+.garden-workspace-interior .garden-workspace-tile:focus-visible { outline: 2px solid var(--color-wardian-accent); outline-offset: 3px; }
+.garden-workspace-mark { width: 48px; height: 42px; overflow: visible; color: var(--color-wardian-accent); }
+.garden-workspace-mark path { fill: color-mix(in srgb, currentColor 18%, var(--color-wardian-input-bg)); stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; }
+.garden-workspace-mark .garden-workspace-mark-back { fill: color-mix(in srgb, currentColor 32%, var(--color-wardian-card)); }
+.garden-workspace-mark .garden-workspace-mark-fold { fill: none; }
+.garden-workspace-interior .garden-workspace-tile-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.garden-workspace-interior .garden-workspace-tile strong { font-size: 14px; font-weight: 600; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.garden-workspace-interior .garden-eyebrow { font-size: 10px; line-height: 1.3; letter-spacing: .04em; }
+.garden-workspace-interior .garden-workspace-counts { font-size: 11px; line-height: 1.45; }
+.garden-workspace-interior .garden-workspace-evidence { grid-column: 1 / -1; padding-top: 7px; border-top: 1px solid var(--workspace-edge); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.garden-workspace-interior .garden-workspace-evidence[data-evidence="inferred"] { border-top-style: dashed; }
+.garden-workspace-interior > button { margin-top: 12px; border-radius: 4px; font-size: 12px; }

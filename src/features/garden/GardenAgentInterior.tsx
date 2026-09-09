@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { AgentConfig, QueueItem } from "../../types";
 import { useQueueStore } from "../../store/useQueueStore";
 import { normalizeAgentConfig } from "../agents/configUtils";
@@ -10,7 +10,7 @@ import { normalizeEntityPath } from "./entityRef";
 import { agentMonogram } from "./agentMonogram";
 import { automationRunStatusColor } from "../automations/run/statusLabels";
 import type { SituatedAutomationInput } from "./automationProjection";
-import { useGardenAgentContents, type GardenContentState, type GardenContentsCache } from "./useGardenAgentContents";
+import { useGardenAgentContents, type GardenContentState, type GardenContentsCache, type GardenConversationEntry, type GardenMemoryRecord } from "./useGardenAgentContents";
 import "./garden-agent-interior.css";
 
 export interface GardenAgentInteriorProps {
@@ -58,6 +58,55 @@ function ContentNotice({ state, label }: { state: GardenContentState<unknown>; l
     {state.error && <p role="status">{label} unavailable: {state.error}</p>}
     {state.stale && <p className="garden-agent-interior-note">Showing the last loaded snapshot.</p>}
   </>;
+}
+
+/** Keep every archive entry discoverable; mount prose only for expanded objects. */
+function ConversationObject({ conversation }: { conversation: GardenConversationEntry }) {
+  const [open, setOpen] = useState(false);
+  const label = conversation.status === "open" ? "Current session" : "Recent session";
+  const excerpt = conversation.last_record_excerpt || conversation.first_prompt_excerpt || "No recorded excerpt.";
+  return <details className="garden-agent-interior-conversation garden-conversation-object" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary className="garden-conversation-summary" aria-label={`${label}, ${excerpt}, ${conversation.started_at}, ${conversation.conversation_id}`}>
+      <i className="garden-conversation-mark" aria-hidden="true" />
+      <strong>{label}</strong>
+      <time className="garden-conversation-date" dateTime={conversation.started_at} title={conversation.started_at}>{conversation.started_at.slice(0, 10)}</time>
+      <span className="garden-conversation-caption" title={excerpt}>{concise(excerpt, 38)}</span>
+      <small className="garden-conversation-meta" title={`Status: ${conversation.status}`}>{conversation.turn_count} turns · {conversation.artifact_count} artifacts</small>
+    </summary>
+    {open && <div className="garden-conversation-detail"><p>{excerpt}</p><small>{conversation.started_at} · {conversation.status}</small></div>}
+  </details>;
+}
+
+/** Find within the retained grid so searching never removes or repositions canonical anchors. */
+function MemorySearch({ memories }: { memories: GardenMemoryRecord[] }) {
+  const root = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+  const [lastFound, setLastFound] = useState<string | null>(null);
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = needle ? memories.filter((memory) => memory.text.toLocaleLowerCase().includes(needle)) : [];
+  const index = matches.findIndex((memory) => memory.memory_id === lastFound);
+  const findNext = () => {
+    const match = matches[(index + 1) % matches.length];
+    if (!match) return;
+    const scroll = root.current?.closest(".garden-agent-interior-scroll");
+    const button = Array.from(scroll?.querySelectorAll<HTMLButtonElement>("[data-garden-ref]") ?? [])
+      .find((element) => element.dataset.gardenRef === `memory:${match.memory_id}`);
+    if (!button) return;
+    button.scrollIntoView({ block: "nearest", inline: "nearest" });
+    button.focus({ preventScroll: true });
+    setLastFound(match.memory_id);
+  };
+  return <div ref={root} className="garden-memory-search" onKeyDown={(event) => event.stopPropagation()}>
+    <label className="garden-memory-search-label">Find memory
+      <input type="search" className="garden-memory-search-input" value={query} placeholder="Search loaded memories"
+        onChange={(event) => { setQuery(event.target.value); setLastFound(null); }}
+        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); findNext(); } }} />
+    </label>
+    {needle && <>
+      <span className="garden-memory-search-status" role="status">{index >= 0 ? `Match ${index + 1} of ${matches.length}` : `${matches.length} matching ${matches.length === 1 ? "memory" : "memories"}`}</span>
+      <button type="button" className="garden-agent-interior-action garden-memory-search-next" disabled={!matches.length} onClick={findNext}>Find next memory</button>
+    </>}
+  </div>;
 }
 
 /** Preview the recorded execution order; neutral nodes have no run evidence yet. */
@@ -193,6 +242,8 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
     </Region>
     <Region name="Memory" count={contents.memories.data?.length}>
       <ContentNotice state={contents.memories} label="Memory" />
+      {contents.memories.data && <p className="garden-collection-count garden-memory-count">{contents.memories.data.length} loaded {contents.memories.data.length === 1 ? "memory" : "memories"}</p>}
+      {contents.memories.data && contents.memories.data.length > 48 && <MemorySearch key={JSON.stringify([agent.session_id, workspaceId])} memories={contents.memories.data} />}
       {!contents.memories.data && !reading && <div className="garden-memory-dormant" aria-hidden="true"><i /><i /><i /></div>}
       {(["stable", "current"] as const).map((kind) => <div key={kind} className="garden-agent-interior-memory-kind">
         <h4>{kind === "stable" ? "Stable" : "Current"}</h4>
@@ -200,6 +251,7 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
           const records = contents.memories.data?.filter((memory) => memory.kind === kind && (memory.workspace !== null) === workspaceBound) ?? [];
           return records.length > 0 && <div key={String(workspaceBound)} className="garden-agent-interior-scope">
             <h5>{workspaceBound ? "Workspace-bound" : "Agent-wide"}</h5>
+            <span className="garden-collection-count garden-memory-scope-count">{records.length} {records.length === 1 ? "memory" : "memories"}</span>
             <div className="garden-object-grid garden-memory-objects">{records.map((memory) =>
               record({ kind: "memory", id: memory.memory_id }, memory.text, `Revision ${memory.revision}`)
             )}</div>
@@ -213,12 +265,11 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
       <ContentNotice state={contents.conversations} label="Conversations" />
       {routines.map((routine) => record({ kind: "automation", id: routine.id }, routine.label,
         `${routine.runStatus === "none" ? "Assigned routine" : routine.runStatus} · ${routine.nodeCount} stages`, undefined, <RoutineMark routine={routine} />))}
+      {contents.conversations.data && <p className="garden-collection-count garden-conversation-count">{contents.conversations.data.length} loaded {contents.conversations.data.length === 1 ? "conversation" : "conversations"}</p>}
       <details className="garden-agent-interior-disclosure garden-work-evidence"><summary>Sessions & Inbox</summary>
-      {contents.conversations.data?.slice(0, 3).map((conversation) => <div className="garden-agent-interior-conversation" key={conversation.conversation_id}>
-        <strong>{conversation.status === "open" ? "Current session" : "Recent session"}</strong>
-        <Excerpt text={conversation.last_record_excerpt || conversation.first_prompt_excerpt || "No recorded excerpt."} />
-        <small title={`Status: ${conversation.status}`}>{conversation.turn_count} turns · {conversation.artifact_count} artifacts</small>
-      </div>)}
+      <div className="garden-conversation-objects">{contents.conversations.data?.map((conversation) =>
+        <ConversationObject key={`${agent.session_id}:${conversation.conversation_id}`} conversation={conversation} />
+      )}</div>
       {contents.conversations.data?.length === 0 && <p>No recorded conversations available.</p>}
       {reading && <AgentQueue agentId={agent.session_id} />}
       </details>
