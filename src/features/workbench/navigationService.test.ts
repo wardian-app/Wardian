@@ -64,6 +64,36 @@ function deterministicIds(values: string[]) {
   };
 }
 
+describe("Garden canonical return", () => {
+  it("returns to the originating Garden after closing an active session, preserving its lens", async () => {
+    const garden = makeSurface("garden-1", { surface_type: "garden", state: { label: "Memory record", trail: ["agent:a"] } });
+    const overview = makeSurface("overview", { surface_type: "agents-overview" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([overview, garden]) });
+    const registry = createSurfaceRegistry();
+    registry.register(definition("garden"));
+    registry.register(definition("agents-overview"));
+    registry.register(definition("agent-session", { open_policy: "focus_resource" }));
+    const navigation = createWorkbenchNavigationService({ registry, store, create_id: deterministicIds(["session"]) });
+    const session = await navigation.open_contextually("garden-1", { surface_type: "agent-session", resource_key: "a" });
+    expect(await navigation.close(session)).toBe("allow");
+    expect(store.getState().document.groups["group-1"].active_surface_id).toBe("garden-1");
+    expect(store.getState().document.surfaces["garden-1"].state).toEqual(garden.state);
+  });
+
+  it("does not steal focus when a canonical destination is closed in the background", async () => {
+    const garden = makeSurface("garden", { surface_type: "garden" });
+    const other = makeSurface("other", { surface_type: "other" });
+    const store = createWorkbenchStore({ initial_document: makeSingleGroupDocument([other, garden]) });
+    const registry = createSurfaceRegistry();
+    for (const type of ["garden", "other", "files"]) registry.register(definition(type));
+    const navigation = createWorkbenchNavigationService({ registry, store, create_id: deterministicIds(["file"]) });
+    const file = navigation.open({ surface_type: "files" });
+    navigation.focus("other");
+    expect(await navigation.close(file)).toBe("allow");
+    expect(store.getState().document.groups["group-1"].active_surface_id).toBe("other");
+  });
+});
+
 function makeSideBySideDocument(
   source: WorkbenchSurfaceV1,
   adjacent: WorkbenchSurfaceV1,

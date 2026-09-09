@@ -44,6 +44,8 @@ export interface TerrainPaint {
   churn: number;
   /** 0..1, decayed by how many turns ago the newest change landed. */
   recency: number;
+  /** False when any represented write lacks usable turn evidence. */
+  recencyKnown?: boolean;
   /** `attributed` when any changed path beneath the cell maps to an agent. */
   evidence: ChangeReviewEvidence;
   /** True only when every changed path beneath the cell has been reviewed. */
@@ -91,6 +93,7 @@ interface Accumulator {
   allReviewed: boolean;
   agentIds: Set<string>;
   count: number;
+  unknownRecency: boolean;
 }
 
 /**
@@ -128,6 +131,7 @@ export function buildTerrainPaint(
 
       for (const path of ancestorChain(absolute, root)) {
         const accumulator = accumulators.get(path) ?? emptyAccumulator();
+        if (distance === null) accumulator.unknownRecency = true;
         accumulator.kinds.add(entry.change_kind);
         accumulator.churn += churn;
         if (distance !== null) {
@@ -164,6 +168,7 @@ export function buildTerrainPaint(
         accumulator.newestTurn !== null
           ? 2 ** (-accumulator.newestTurn / RECENCY_HALF_LIFE_TURNS)
           : UNKNOWN_RECENCY,
+      recencyKnown: !accumulator.unknownRecency && accumulator.newestTurn !== null,
       evidence: accumulator.attributed ? "attributed" : "inferred",
       reviewed: accumulator.allReviewed,
       agentIds: [...accumulator.agentIds].sort(),
@@ -181,10 +186,10 @@ export function buildTerrainPaint(
  * full-strength wash also destroys the churn comparison it exists to make:
  * everything above the knee reads the same.
  */
-export const MAX_CHANGE_ALPHA = 0.55;
+export const MAX_CHANGE_ALPHA = 0.18;
 
 /** Floor, so a one-line change is visible rather than technically painted. */
-export const MIN_CHANGE_ALPHA = 0.12;
+export const MIN_CHANGE_ALPHA = 0.04;
 
 /** How much of the tint recency controls, the rest coming from churn. */
 export const RECENCY_SHARE = 0.4;
@@ -224,6 +229,7 @@ function emptyAccumulator(): Accumulator {
     allReviewed: true,
     agentIds: new Set(),
     count: 0,
+    unknownRecency: false,
   };
 }
 

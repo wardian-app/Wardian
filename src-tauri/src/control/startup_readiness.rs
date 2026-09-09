@@ -162,19 +162,172 @@ pub(crate) fn provider_output_requires_startup_action(provider: &str, output: &s
     let cleaned = strip_ansi_controls(output).to_ascii_lowercase();
     match provider {
         "claude" => cleaned.contains("allow external claude.md file imports?"),
-        "codex" => {
-            cleaned.contains("try new model")
-                && cleaned.contains("use existing model")
-                && cleaned.contains("press enter to confirm")
-        }
+        "codex" => crate::delivery::codex_menu::current_screen_requires_choice(
+            &strip_ansi_controls(output),
+        ),
         "antigravity" => cleaned.contains("do you trust the contents of this project?"),
         _ => false,
+    }
+}
+
+/// Read the current runtime's canonical screen before trusting a cached Ready
+/// observation. Missing or replacement-runtime evidence cannot authorize input.
+pub(crate) async fn codex_current_screen_requires_choice(
+    state: &AppState,
+    session_id: &str,
+) -> Result<bool, String> {
+    let generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation)
+        .ok_or_else(|| "Codex runtime identity unavailable before input".to_string())?;
+    let snapshot = state
+        .terminal_sessions
+        .snapshot(session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current_generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation);
+    if snapshot.runtime_generation != generation || current_generation != Some(generation) {
+        return Err("Codex terminal runtime changed before input".to_string());
+    }
+    Ok(crate::delivery::codex_menu::current_screen_requires_choice(
+        &snapshot.visible_grid,
+    ))
+}
+
+/// A delayed completion/log event cannot dismiss a still-visible model menu.
+/// The caller holds the lifecycle lock and rechecks status-Arc identity before
+/// publishing. No provider selection is made and no historical output is read.
+pub(crate) async fn constrain_codex_status_observation(
+    state: &AppState,
+    session_id: &str,
+    status: &str,
+) -> Option<&'static str> {
+    if !matches!(
+        wardian_core::identity::normalize_status(status).as_str(),
+        "idle" | "processing"
+    ) {
+        return None;
+    }
+    let codex = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .is_some_and(|agent| {
+            agent
+                .config
+                .lock()
+                .is_ok_and(|config| config.provider == "codex")
+        });
+    if codex
+        && codex_current_screen_requires_choice(state, session_id)
+            .await
+            // A failed or stale snapshot cannot prove that a choice was dismissed.
+            .unwrap_or(true)
+    {
+        Some("Action Needed")
+    } else {
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn current_rate_limit_screen_blocks_payload_and_late_idle_until_repaint() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::delivery::{submit_live_surface_prompt, LiveSurfacePromptRequest};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        insert_test_agent(&state, "menu-agent", "Menu", "Coder").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "menu-agent",
+                TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 190,
+                    rows: 51,
+                },
+            )
+            .await
+            .unwrap();
+        {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut("menu-agent").unwrap();
+            agent.runtime_generation = Some(generation);
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        let retained = include_str!("../delivery/fixtures/codex-rate-limit-menu.txt");
+        let terminal = state.terminal_sessions.clone();
+        let bytes = format!("\x1b[2J\x1b[H{}", retained.replace('\n', "\r\n")).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking("menu-agent", generation, bytes)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        record_provider_ready_evidence(
+            &state,
+            "menu-agent",
+            0,
+            ProviderReadyEvidence::ProviderEvent,
+        )
+        .await;
+        let result = submit_live_surface_prompt(
+            None,
+            &state,
+            LiveSurfacePromptRequest::message("menu-agent", "must not enter model menu"),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("explicit Codex model choice"));
+        assert!(
+            rx.try_recv().is_err(),
+            "No payload, Return, or model-choice keys may be written"
+        );
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Idle").await,
+            Some("Action Needed")
+        );
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Processing...").await,
+            Some("Action Needed")
+        );
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                "menu-agent",
+                generation,
+                b"\x1b[2J\x1b[H\xe2\x80\xba Ask Codex to do anything".to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!codex_current_screen_requires_choice(&state, "menu-agent")
+            .await
+            .unwrap());
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Idle").await,
+            None
+        );
+    }
 
     #[tokio::test]
     async fn stale_startup_generation_cannot_ready_replacement() {

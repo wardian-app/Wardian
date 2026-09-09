@@ -1,4 +1,6 @@
 pub mod codex_composer;
+pub(crate) mod codex_menu;
+pub mod codex_shared;
 pub mod headless_process;
 pub mod live_surface;
 pub mod native_broker;

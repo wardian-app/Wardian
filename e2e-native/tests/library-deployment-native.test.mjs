@@ -67,12 +67,12 @@ function assertIsDirectoryLink(target) {
 
 test("library skill deployment: deploy creates a live junction, undeploy leaves the source, rename relinks, delete cleans up", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

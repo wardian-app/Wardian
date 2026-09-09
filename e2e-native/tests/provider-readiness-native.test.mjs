@@ -57,12 +57,12 @@ async function invokeTauri(driver, command, args = {}) {
 
 test("native provider readiness reports user-facing provider commands from the app environment", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

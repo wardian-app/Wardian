@@ -1,6 +1,8 @@
 pub(crate) mod classes;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod codex_shared;
+pub(crate) mod codex_stop;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod session_identity;
@@ -305,6 +307,16 @@ fn schedule_agent_status_observation(
         // looking up the input generation so an old status Arc cannot publish
         // Ready into a replacement between identity validation and the write.
         let _lifecycle = state.lock_agent_lifecycle(&status_session_id).await;
+        let Some(status) = crate::control::codex_menu_status::constrain_publication(
+            state.inner(),
+            &status_session_id,
+            &current_status,
+            &status,
+        )
+        .await
+        else {
+            return;
+        };
         // Keep the map lock through the synchronous durable write. A runtime
         // replacement must wait until this observation is either rejected or
         // committed, which prevents an old Arc from winning the database race
