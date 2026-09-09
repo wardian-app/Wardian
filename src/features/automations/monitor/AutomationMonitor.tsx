@@ -3,7 +3,7 @@ import type { RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useSchedulesStore } from '../../../store/useSchedulesStore';
 import type { AgentConfig } from '../../../types';
-import type { AutomationSchedule } from '../../../types/automation';
+import type { AutomationSchedule, ListenerView } from '../../../types/automation';
 import { useRunStore } from '../run/useRunStore';
 import type { RunSummary } from '../run/runTypes';
 import { buildAgentLabelMap } from './assignmentPresentation';
@@ -16,8 +16,17 @@ import {
   sectionsForFilter,
 } from './monitorModel';
 import type { ActivityFilter, ActivitySection, AutomationActivity } from './monitorModel';
+import {
+  automationBlueprintIdsForAgents,
+  automationRecordMatchesAgentScope,
+  automationRunMatchesAgentScope,
+} from '../agentScope';
+
+const EMPTY_AGENT_SCOPE = new Set<string>();
 
 interface AutomationMonitorProps {
+  selectedAgentIds?: ReadonlySet<string>;
+  listeners?: readonly ListenerView[];
   onOpenRun: (blueprintId: string, runId: string) => void;
   onEditSchedule: (schedule: AutomationSchedule) => void;
 }
@@ -46,7 +55,12 @@ const HISTORY_OVERSCAN_CARDS = 4;
 const HISTORY_MAX_RENDERED_ROWS = 32;
 const HISTORY_DEFAULT_VIEWPORT_HEIGHT_PX = 720;
 
-export function AutomationMonitor({ onOpenRun, onEditSchedule }: AutomationMonitorProps) {
+export function AutomationMonitor({
+  selectedAgentIds = EMPTY_AGENT_SCOPE,
+  listeners = [],
+  onOpenRun,
+  onEditSchedule,
+}: AutomationMonitorProps) {
   const schedules = useSchedulesStore((state) => state.schedules);
   const error = useSchedulesStore((state) => state.error);
   const load = useSchedulesStore((state) => state.load);
@@ -87,8 +101,29 @@ export function AutomationMonitor({ onOpenRun, onEditSchedule }: AutomationMonit
     };
   }, []);
 
-  const monitorModel = useMemo(() => buildMonitorModel(runs, schedules), [runs, schedules]);
-  const schedulesById = useMemo(() => scheduleLookupById(schedules), [schedules]);
+  const allSchedulesById = useMemo(() => scheduleLookupById(schedules), [schedules]);
+  const scopedBlueprintIds = useMemo(
+    () => automationBlueprintIdsForAgents([...schedules, ...listeners], selectedAgentIds),
+    [listeners, schedules, selectedAgentIds],
+  );
+  const scopedSchedules = useMemo(
+    () => schedules.filter((schedule) => automationRecordMatchesAgentScope(schedule, selectedAgentIds)),
+    [schedules, selectedAgentIds],
+  );
+  const scopedRuns = useMemo(
+    () => runs.filter((run) => automationRunMatchesAgentScope(
+      run,
+      allSchedulesById,
+      scopedBlueprintIds,
+      selectedAgentIds,
+    )),
+    [allSchedulesById, runs, scopedBlueprintIds, selectedAgentIds],
+  );
+  const monitorModel = useMemo(
+    () => buildMonitorModel(scopedRuns, scopedSchedules),
+    [scopedRuns, scopedSchedules],
+  );
+  const schedulesById = useMemo(() => scheduleLookupById(scopedSchedules), [scopedSchedules]);
   const upcomingSchedules = monitorModel.upcomingSchedules;
   const activities = monitorModel.activities;
   const groupedActivities = useMemo(() => groupActivities(activities, filter), [activities, filter]);
@@ -128,7 +163,10 @@ export function AutomationMonitor({ onOpenRun, onEditSchedule }: AutomationMonit
         <div className="automation-monitor__toolbar flex shrink-0 items-center justify-between gap-3 border-b border-wardian-border bg-[var(--color-wardian-card)] px-3 py-2">
           <div className="min-w-0">
             <h3 className="text-xs font-bold text-[var(--color-wardian-text)]">Activity</h3>
-            <div className="mt-0.5 truncate text-[10px] text-muted">{activities.length} automations tracked</div>
+            <div className="mt-0.5 truncate text-[10px] text-muted">
+              {activities.length} {activities.length === 1 ? 'automation' : 'automations'} tracked
+              {selectedAgentIds.size > 0 ? ' for selected agents' : ''}
+            </div>
           </div>
           <div className="automation-monitor__filters flex shrink-0 items-center gap-1">
             {FILTERS.map((item) => (
