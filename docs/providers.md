@@ -81,6 +81,20 @@ Claude runs directly in the real target workspace.
 
 Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and maintains `.claude/skills` links where needed so Claude can see Wardian-managed common, class, and agent skills without those files living in the repository root.
 
+Keep shared, class, and agent instructions in their canonical `AGENTS.md` files.
+On ordinary Claude bootstrap, Wardian refreshes its existing managed `CLAUDE.md`
+bridges as sibling copies and generates the habitat copy after its memory brief
+is appended. These are snapshots: start a fresh session after editing canonical
+instructions to load the updated text. No separate preparation command is needed.
+
+Generated copies carry an ownership marker and body hash. Wardian preserves
+customized or linked `CLAUDE.md` files; editing a generated copy makes it a custom
+override. To restore automatic refresh for an existing managed bridge, replace
+that override deliberately with the bare `@AGENTS.md` stub. Workspace files and
+user-selected include directories are not rewritten. Nested imports in canonical
+text retain Claude's normal external-import consent; Wardian does not grant
+project-wide approval or change global trust settings.
+
 Wardian also launches Claude-managed terminal surfaces with Claude Code's alternate-screen opt-out enabled. This preserves native terminal scrollback for desktop terminals and mobile PWA drag scrolling while keeping Claude's existing `CLAUDE.md` discovery behavior.
 
 ### Session and Status Handling

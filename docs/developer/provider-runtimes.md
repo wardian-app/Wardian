@@ -91,6 +91,13 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude reads `CLAUDE.md`.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
+- Ordinary habitat preparation materializes existing owned common/class/agent
+  `CLAUDE.md` bridges from sibling canonical `AGENTS.md`; habitat generation and
+  the subsequent memory append also refresh the habitat bridge. These are
+  bootstrap snapshots, with no live refresh guarantee. Exact legacy stubs and
+  unchanged versioned/hash-marked projections are eligible; customized files and
+  links are preserved. Nested imports are copied verbatim and retain provider
+  consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
