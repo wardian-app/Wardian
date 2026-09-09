@@ -1,4 +1,5 @@
 use crate::paths::state_db_path;
+pub mod agent_messaging;
 use once_cell::sync::Lazy;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::{Arc, Mutex};
@@ -303,6 +304,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     crate::telemetry::run_telemetry_migrations(conn)?;
+    agent_messaging::migrate(conn)?;
     Ok(())
 }
 
@@ -590,6 +592,7 @@ fn delete_agent_with_conn(conn: &mut Connection, session_id: &str) -> rusqlite::
         "DELETE FROM native_session_bindings WHERE target_agent_id = ?1",
         params![session_id],
     )?;
+    agent_messaging::delete_references(&transaction, session_id, &interaction_ids)?;
     for interaction_id in interaction_ids {
         transaction.execute(
             "DELETE FROM mailbox_messages WHERE interaction_id = ?1",

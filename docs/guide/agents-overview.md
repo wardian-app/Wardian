@@ -25,6 +25,12 @@ agent's instructions, skills, permissions, or provider session, and saving one
 does not restart the agent. New agents start without a description, so the spawn
 automation has no additional required step.
 
+After restarting Wardian, agents can appear in the roster while their sessions
+are still restoring. Configuration saves and lifecycle actions for such an
+agent wait for its restoration to finish. Once a save succeeds, later resume
+actions use the saved settings, including the choice to start a fresh provider
+conversation. This also applies to paused agents.
+
 ### Open an Agent from Another View
 
 When **Graph**, **Garden**, or **Inbox** uses **Open Agent**, Wardian first

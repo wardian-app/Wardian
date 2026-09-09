@@ -45,6 +45,26 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
 5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
 6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Inbox completions come only from live explicit provider turn-completed events with a canonical final assistant response; CLI `watch --until status:*` evidence comes from live transitions after hydration.
 
+## Startup restoration and configuration ownership
+
+Startup restoration uses the same per-agent lifecycle gate as configuration
+updates, pause, and resume. It claims the gate before selecting a saved config
+for an unregistered agent or publishing its `Restoring` placeholder, and keeps
+the claim through the final runtime or error publication. A current registered
+agent takes precedence over an older startup snapshot.
+
+An update submitted during restoration waits for that agent's publication, then
+validates and persists its changes against the final agent. Success therefore
+means the configuration remains current in memory and in
+`<wardian-home>/settings/state.json`; a subsequent resume reads those settings.
+Paused agents use the same boundary even though their restoration opens no PTY.
+Provider startup never holds the global agents, order, or durable roster locks.
+
+The deterministic regression in `src-tauri/src/startup_restore/tests.rs` holds
+startup completion at a barrier while polling the real configuration command.
+It covers paused and live publications without a provider process or timing
+delay. Real provider acceptance remains a separate native check.
+
 ## Workbench State
 
 The frontend Zustand workbench store is the single in-process writer for the

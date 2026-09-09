@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { X } from 'lucide-react';
+import { X, Plus } from 'lucide-react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import {
     AgentConfig,
@@ -416,9 +416,9 @@ export const DeployTargetsControl: React.FC<DeployTargetsControlProps> = ({ entr
                 data-testid="deploy-targets-add-button"
                 onClick={() => (pickerOpen ? setPickerOpen(false) : openPicker())}
                 aria-expanded={pickerOpen}
-                className="self-start rounded border border-wardian-border px-3 py-1 text-xs text-primary transition-colors hover:bg-wardian-card-bg-muted"
+                className="wardian-button wardian-button--secondary self-start gap-1.5"
             >
-                + Add target…
+                <Plus size={14} aria-hidden="true" /> Add target…
             </button>
             {pickerOpen &&
                 createPortal(
