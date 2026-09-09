@@ -311,6 +311,22 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.
 
+### Headless prompt input
+
+Wardian sends the complete headless OpenCode prompt as UTF-8 on stdin, then
+closes the pipe to signal EOF. It supplies no positional message: OpenCode's
+`run` parser reconstructs positional messages with literal quotes. Whitespace,
+line endings, quotes, backslashes, and Unicode therefore remain part of the
+original prompt. Model, agent, session, output-format, and directory flags still
+use the ordinary argument path.
+
+The execution deadline and conversation-lease heartbeat also cover blocked
+stdin writes. Failed or cancelled delivery terminates the owned process tree;
+a failed write can represent partial delivery and is never automatically retried
+by this transport. OpenCode failure errors retain the exit code but omit raw
+provider stderr, which can echo private input. Input fidelity does not guarantee
+that the provider's answer satisfies the requested task.
+
 ### Practical implications
 
 - OpenCode is closer to Gemini than Codex on workspace handling: Wardian launches from the habitat command root while passing the real repo as the project directory.

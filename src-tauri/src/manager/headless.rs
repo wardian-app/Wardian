@@ -19,6 +19,8 @@ use super::{
 };
 use crate::utils::logging::log_debug;
 
+mod opencode_stdin;
+
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
 pub(crate) fn headless_provider_launch(
@@ -317,8 +319,7 @@ pub(crate) fn headless_provider_args(
             provider_args.push("json".to_string());
             provider_args.push("--dir".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
-            provider_args
-                .push(crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt));
+            // `run` re-quotes positional messages; send exact prompt bytes on stdin.
         }
         "antigravity" => {
             if let Some(config) = config_override {
@@ -552,7 +553,7 @@ pub async fn run_headless_with_options(
         )? {
             cmd.env(key, value);
         }
-        cmd.stdin(std::process::Stdio::null());
+        opencode_stdin::configure(&mut cmd);
     } else if matches!(provider_name, "antigravity" | "pi") {
         cmd.stdin(std::process::Stdio::null());
     } else if provider_name == "mock" {
@@ -670,13 +671,24 @@ pub async fn run_headless_with_options(
         })
     };
 
-    let status = wait_for_headless_child(
-        &mut child,
-        provider_name,
-        options.timeout,
-        options.lease_owner.as_ref(),
-    )
-    .await;
+    let status = if provider_name == "opencode" {
+        opencode_stdin::wait(
+            &mut child,
+            prompt,
+            options.timeout,
+            options.lease_owner.as_ref(),
+            &mut process_tree_guard,
+        )
+        .await
+    } else {
+        wait_for_headless_child(
+            &mut child,
+            provider_name,
+            options.timeout,
+            options.lease_owner.as_ref(),
+        )
+        .await
+    };
     if status.is_ok() {
         process_tree_guard.disarm();
     }
