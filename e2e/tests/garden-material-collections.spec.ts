@@ -41,4 +41,8 @@ test("large collections remain findable without moving the agent geography", asy
   await expect(work.locator(".garden-conversation-detail")).toContainText("Conversation 59:");
   await expect(work.locator(".garden-conversation-object")).toHaveCount(60);
   await expect(cell).toHaveAttribute("data-garden-world", world!);
+  // Persistent camera controls stay above enlarged cells after a viewport resize.
+  await page.setViewportSize({ width: 640, height: 700 });
+  await page.getByTestId("garden-fit-view").click();
+  await expect(page.getByTestId("garden-fit-view")).toBeVisible();
 });

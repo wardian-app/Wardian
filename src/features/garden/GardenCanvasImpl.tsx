@@ -676,7 +676,7 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
         hidden={compositionActive}
         style={compositionActive ? { display: "none" } : undefined}
         data-testid="garden-viewport-controls"
-        className="absolute bottom-3 right-3 z-10 flex items-center gap-1 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)]/90 px-1 py-1 text-[11px] shadow-sm backdrop-blur"
+        className="absolute bottom-3 right-3 z-40 flex items-center gap-1 rounded-md border border-wardian-border bg-[var(--color-wardian-bg)]/90 px-1 py-1 text-[11px] shadow-sm backdrop-blur"
       >
         <button
           type="button"
