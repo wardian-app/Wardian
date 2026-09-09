@@ -966,11 +966,20 @@ fn normalize_claude_headless_output(
 ) -> Result<serde_json::Value, String> {
     let parsed = serde_json::from_str::<serde_json::Value>(output.trim())
         .map_err(|error| format!("Failed to parse Claude JSON output: {error}. Raw: {output}"))?;
-    let response = claude_headless_response(&parsed).unwrap_or_else(|| output.to_string());
+    let result = claude_headless_result(&parsed)?;
+    let response = if result["type"] == "result" {
+        result["result"]
+            .as_str()
+            .expect("validated Claude terminal result")
+            .trim()
+            .to_owned()
+    } else {
+        claude_headless_response(result).unwrap_or_else(|| output.to_string())
+    };
 
     if output_format == "json" {
         Ok(serde_json::json!({
-            "session_id": parsed.get("session_id").and_then(|value| value.as_str()),
+            "session_id": result.get("session_id").and_then(|value| value.as_str()),
             "response": response,
             "raw": output,
         }))
@@ -978,6 +987,47 @@ fn normalize_claude_headless_output(
         Ok(serde_json::json!({ "text": response }))
     }
 }
+
+/// Verbose Claude JSON contains conversation events followed by one terminal
+/// result. Earlier assistant/tool text is not the completed task's answer.
+fn claude_headless_result(value: &serde_json::Value) -> Result<&serde_json::Value, String> {
+    let result = if let Some(events) = value.as_array() {
+        let result = events
+            .last()
+            .filter(|event| event["type"] == "result")
+            .ok_or("Claude headless event array has no terminal result")?;
+        if events
+            .iter()
+            .filter(|event| event["type"] == "result")
+            .count()
+            != 1
+        {
+            return Err("Claude headless event array has ambiguous results".into());
+        }
+        result
+    } else {
+        value
+    };
+    if result["type"] == "result" {
+        if !result["result"].is_string() {
+            return Err("Claude headless terminal result has no answer text".into());
+        }
+        if result
+            .get("is_error")
+            .is_some_and(|flag| flag.as_bool() != Some(false))
+            || result
+                .get("subtype")
+                .is_some_and(|kind| kind.as_str() != Some("success"))
+        {
+            return Err("Claude headless terminal result did not succeed".into());
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+#[path = "headless/claude_output_tests.rs"]
+mod claude_output_tests;
 
 fn claude_headless_response(value: &serde_json::Value) -> Option<String> {
     for key in ["result", "response", "text"] {

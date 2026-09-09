@@ -115,6 +115,15 @@ powershell -NoProfile -Command "wardian --version"
 bash -lc "wardian --version"
 ```
 
+### Headless result output
+
+Claude's verbose JSON output can contain an event array ending in a result.
+Wardian extracts that terminal answer and its provider session ID before
+passing the answer to automation. Intermediate messages remain diagnostic
+data. Existing single-object responses are also supported. Missing, ambiguous
+or unsuccessful terminal results fail the task instead of exposing event data
+as a successful answer.
+
 ## Codex
 
 ### Chat history
