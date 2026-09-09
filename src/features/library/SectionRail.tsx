@@ -1,4 +1,5 @@
 import React from 'react';
+import { Puzzle, MessageSquare, Layers, Workflow, Plug } from 'lucide-react';
 import { LibraryIndex, LibraryIndexFolder, LibrarySectionId, isLibraryEntry } from '../../types';
 
 /**
@@ -38,13 +39,15 @@ interface SectionRailProps {
  * scoped to the library view — it does not touch the global left sidebar.
  */
 export const SectionRail: React.FC<SectionRailProps> = ({ activeSection, sections, onSelect }) => {
+    const icons = { skills: Puzzle, prompts: MessageSquare, classes: Layers, automations: Workflow, mcps: Plug };
     return (
         <div
             data-testid="library-section-rail"
-            className="w-20 flex-shrink-0 border-r border-wardian-border bg-wardian-sidebar-primary flex flex-col items-stretch overflow-y-auto"
+            className="w-24 flex-shrink-0 border-r border-wardian-border bg-wardian-sidebar-primary flex flex-col items-stretch overflow-y-auto py-2"
         >
             {LIBRARY_SECTIONS.map((section) => {
                 const count = sections ? countEntries(sections[section.id].tree) : 0;
+                const Icon = icons[section.id];
                 return (
                     <button
                         key={section.id}
@@ -54,11 +57,12 @@ export const SectionRail: React.FC<SectionRailProps> = ({ activeSection, section
                         aria-current={activeSection === section.id ? 'true' : undefined}
                         className={`flex flex-col items-center gap-1 py-3 w-full border-l-2 transition-colors ${
                             activeSection === section.id
-                                ? 'border-[var(--color-wardian-accent)] text-primary bg-wardian-sidebar-primary'
+                                ? 'border-[var(--color-wardian-accent)] text-[var(--color-wardian-accent)] bg-wardian-card-bg-muted'
                                 : 'border-transparent text-muted hover:text-primary'
                         }`}
                     >
-                        <span className="label-small !tracking-normal text-center">{section.label}</span>
+                        <Icon size={18} strokeWidth={1.7} aria-hidden="true" />
+                        <span className="text-[11px] font-medium text-center">{section.label}</span>
                         {count > 0 && <span className="text-[10px] text-muted-neutral">{count}</span>}
                     </button>
                 );

@@ -109,7 +109,9 @@ async function installGardenTestIpcMock(page: Page) {
         if (command === "dismiss_onboarding_hint") {
           return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
         }
-        if (command === "list_automations") return [];
+        if (command === "list_automations" || command === "schedule_list") return [];
+        if (command === "automation_list_blueprints") return { blueprints: [], truncated: false, next_offset: null };
+        if (command === "automation_list_runs") return { runs: [], truncated: false, next_offset: null };
         if (command === "list_scheduled_runs") return [];
         if (command === "load_automation_library")
           return { folders: [], rootAutomationIds: [] };
@@ -154,7 +156,7 @@ test.describe("Garden View", () => {
       garden.getByRole("region", { name: "Garden status legend" }),
     ).toContainText("Action Required");
     await expect(garden.getByTestId("garden-selection-summary")).toContainText(
-      "Select a unit to view its status.",
+      "Select to inspect",
     );
 
     if (process.env.WARDIAN_GARDEN_SCREENSHOT) {
@@ -167,6 +169,8 @@ test.describe("Garden View", () => {
 
   test("dragging a unit persists its position to localStorage", async () => {
     await openSurface(page, "garden");
+    // Authored placement is a Workstream action under semantic composition.
+    await surfacePanel(page, "garden").locator('[data-garden-object="district:workspace:c:/projects/garden-test"]').press("Enter");
 
     // Wait for the canvas to be visible
     const canvas = surfacePanel(page, "garden").locator(
@@ -174,17 +178,8 @@ test.describe("Garden View", () => {
     );
     await expect(canvas).toBeVisible({ timeout: 10_000 });
 
-    // Canvas units have no DOM handle, so the drag has to land on top of one.
-    // This fixture seeds exactly one agent and no automations, so the map holds a
-    // single unit — and the canvas fits its content into view, which puts that
-    // unit in the middle of the viewport whatever its world coordinates are.
-    // Aiming at the centre is therefore both simpler and sturdier than
-    // projecting a stored position: stored positions are district-relative, so
-    // projecting them as world coordinates aimed at empty canvas.
-    //
-    // The fit is still waited on, because the container is measured by a
-    // ResizeObserver and re-fits as it settles; dragging mid-fit would chase a
-    // moving unit.
+    // Wait for the district camera to settle, then use the accessible object's
+    // screen location to target the underlying canvas inhabitant.
     const container = surfacePanel(page, "garden").locator(".garden-canvas");
     let transform: string | null = null;
     await expect
@@ -202,10 +197,12 @@ test.describe("Garden View", () => {
     const box = await canvas.boundingBox();
     if (!box) throw new Error("no canvas bounding box");
 
-    const startX = box.x + box.width / 2;
-    const startY = box.y + box.height / 2;
-    const endX = startX + 160;
-    const endY = startY + 120;
+    const hit = await surfacePanel(page, "garden").locator('[data-garden-object="agent:garden-test-agent-01"]').boundingBox();
+    if (!hit) throw new Error("no agent hit target");
+    const startX = hit.x + hit.width / 2;
+    const startY = hit.y + hit.height / 2;
+    const endX = startX + 40;
+    const endY = startY + 30;
 
     // Released explicitly: a drag is committed on `dragend` now, not on every
     // intermediate move. Committing per move re-pinned the unit and re-ran the

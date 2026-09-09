@@ -15,7 +15,7 @@ import { makeWorkbenchDocument } from "../fixtures/workbenchIpcMock";
  * reason to seat it inward.
  */
 
-const SCREENSHOT_DIR = "e2e/screenshots/garden-district-centrality";
+const SCREENSHOT_DIR = "e2e/screenshots/garden";
 
 function screenshotTimestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -257,7 +257,11 @@ async function installMock(page: Page) {
             return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
           if (command === "dismiss_onboarding_hint")
             return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
-          if (command === "list_automations") return [];
+          if (command === "list_automations" || command === "schedule_list") return [];
+          if (command === "memory_list") return [];
+          if (command === "list_conversations") return { schema: 1, conversations: [] };
+          if (command === "automation_list_blueprints") return { blueprints: [], truncated: false, next_offset: null };
+          if (command === "automation_list_runs") return { runs: [], truncated: false, next_offset: null };
           if (command === "list_scheduled_runs") return [];
           if (command === "load_automation_library")
             return { folders: [], rootAutomationIds: [] };
@@ -304,12 +308,11 @@ test("captures district ground, change paint, and the centrality legend", async 
 
   await capture("garden-districts-ground-and-centrality.png");
 
-  // Zoomed, because a treemap subdivision is the point and it is not legible at
-  // the zoom that fits three districts on screen.
-  const zoomIn = garden.getByRole("button", { name: "Zoom in" });
-  for (let step = 0; step < 5; step += 1) {
-    await zoomIn.click();
-    await page.waitForTimeout(120);
-  }
-  await capture("garden-terrain-cells-with-change-paint.png");
+  // Workspace composition reveals activity ancestry rather than recursively
+  // drawing unchanged filesystem contents as the camera magnifies.
+  await garden.locator('[data-garden-object="agent:writer"]').press("Enter");
+  await garden.getByRole("region", { name: "Workspace, Teams, Agents" }).getByRole("button", { name: /work\/papers/ }).press("Enter");
+  await expect(garden.getByRole("region", { name: "Workspace activity" })).toBeVisible();
+  await expect(garden.getByRole("checkbox", { name: "Show full tree" })).not.toBeChecked();
+  await capture("garden-workspace-activity.png");
 });

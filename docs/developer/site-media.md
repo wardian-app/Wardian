@@ -90,6 +90,11 @@ Required clips fail the run when they cannot be produced. Stretch clips are
 reported and skipped, because an empty or broken clip is worse than an absent
 section.
 
+The distinction tracks the site, not the difficulty of the capture: a clip is
+stretch only while no section on wardian.org uses it. Once a section does, a
+skipped capture would publish that section with no media, so the clip moves to
+`REQUIRED_CLIPS`. There are no stretch clips at present.
+
 ## Shared fixtures
 
 Both captures drive the same seeded app through

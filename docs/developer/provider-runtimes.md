@@ -53,6 +53,14 @@ the prompt. An unknown Codex resume identity remains a bootstrap error.
 
 ## Antigravity
 
+### Model discovery
+
+Wardian reads `agy models` from the installed CLI. Current releases return
+tab-separated model IDs and display names; both are preserved in the model
+picker. Progress messages are excluded. The selected ID is passed unchanged
+through `--model` for launches, including low-effort Flash variants. OpenCode's
+one-model-ID-per-line catalog remains supported by the shared parser.
+
 ### Working-root model
 
 Antigravity runs directly in the real target workspace. Wardian does not use a projected workspace for Antigravity.
@@ -103,6 +111,13 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude reads `CLAUDE.md`.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
+- Ordinary habitat preparation materializes existing owned common/class/agent
+  `CLAUDE.md` bridges from sibling canonical `AGENTS.md`; habitat generation and
+  the subsequent memory append also refresh the habitat bridge. These are
+  bootstrap snapshots, with no live refresh guarantee. Exact legacy stubs and
+  unchanged versioned/hash-marked projections are eligible; customized files and
+  links are preserved. Nested imports are copied verbatim and retain provider
+  consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
@@ -126,6 +141,15 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 powershell -NoProfile -Command "wardian --version"
 bash -lc "wardian --version"
 ```
+
+### Headless result output
+
+Claude's verbose JSON output can contain an event array ending in a result.
+Wardian extracts that terminal answer and its provider session ID before
+passing the answer to automation. Intermediate messages remain diagnostic
+data. Existing single-object responses are also supported. Missing, ambiguous
+or unsuccessful terminal results fail the task instead of exposing event data
+as a successful answer.
 
 ## Codex
 
@@ -228,7 +252,10 @@ Current sequence:
 1. Create or update the agent's projected `CODEX_HOME` under `.wardian/agents/<wardian-agent-id>/habitat/.codex`.
 2. Generate a distinct provider UUID and write a minimal `session_meta` rollout at `sessions/<year>/<month>/<day>/rollout-<timestamp>-<provider-id>.jsonl`.
 3. Validate that Codex resolves the rollout from that same projected home.
-4. Launch interactive Codex with the real workspace as `--cd` and resume the exact provider UUID.
+4. Start the Wardian-owned local daemon without loading a thread. The ordinary
+   TUI resumes the selected provider UUID under the same home and real workspace.
+   Wardian requires that exact thread to appear in the owned daemon before
+   subscribing and enabling peer delivery. No model bootstrap turn is required.
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
@@ -273,6 +300,23 @@ Wardian treats these as the important lifecycle markers:
 
 Codex commentary events like `agent_message` should not be used as hard status transitions.
 
+The shared app-server event reader observes turns started through either the
+TUI or Wardian. A named Wardian inbox output without an originating model
+call is non-waking context; it must not mark an idle agent as processing.
+V2 peer information, follow-up work, and interruption use native WebSocket
+operations through a private local socket and the configured Codex executable's
+`app-server proxy` tunnel. MCP exposes the model-facing
+tools and explicit receiver. See [agent messaging tools](./agent-messaging-tools.md).
+
+For long canonical homes, owner startup recovers pending launch settings and
+then prepares a private compact physical home before config/MCP projection.
+The logical habitat path remains an owned directory link. Matching agent and
+slot records authorize that link; arbitrary links remain invalid. A separate
+preparation lock fences migration against ordinary refresh and index writes.
+Refresh resolves completed mappings without moving homes or recovering a live
+startup overlay. The provider executable, normal TUI invocation and shell `HOME`
+are unchanged. See [the removal criteria](https://github.com/wardian-app/Wardian/issues/1235).
+
 ### Known operational edge cases
 
 - Codex skill discovery can be correct while shell execution is still blocked by the CLI sandbox. In that case, the agent sees the skill but fails when the skill tries to invoke shell tools.
@@ -302,6 +346,22 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - OpenCode session IDs are discovered from JSON output during `opencode run --format json`, or captured from `opencode session list` while the interactive TUI runs.
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.
+
+### Headless prompt input
+
+Wardian sends the complete headless OpenCode prompt as UTF-8 on stdin, then
+closes the pipe to signal EOF. It supplies no positional message: OpenCode's
+`run` parser reconstructs positional messages with literal quotes. Whitespace,
+line endings, quotes, backslashes, and Unicode therefore remain part of the
+original prompt. Model, agent, session, output-format, and directory flags still
+use the ordinary argument path.
+
+The execution deadline and conversation-lease heartbeat also cover blocked
+stdin writes. Failed or cancelled delivery terminates the owned process tree;
+a failed write can represent partial delivery and is never automatically retried
+by this transport. OpenCode failure errors retain the exit code but omit raw
+provider stderr, which can echo private input. Input fidelity does not guarantee
+that the provider's answer satisfies the requested task.
 
 ### Practical implications
 

@@ -53,7 +53,7 @@ describe('useLibraryStore', () => {
     useLibraryStore.getState().setLibraryDetailWidth(900);
     expect(useLibraryStore.getState().libraryDetailWidth).toBe(700);
     useLibraryStore.getState().resetLibraryDetailWidth();
-    expect(useLibraryStore.getState().libraryDetailWidth).toBe(480);
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(640);
   });
 
   it('fetchIndex loads the unified index', async () => {

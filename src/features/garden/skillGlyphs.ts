@@ -79,6 +79,83 @@ export function gardenDetailForScale(scale: number): GardenDetail {
 /** Smallest arc radius, clear of the agent's 18px status halo. */
 const CROWN_RADIUS = 27;
 export const GLYPH_RADIUS = 6.5;
+
+/**
+ * Move the existing crown glyph into its Capabilities row in cell world space.
+ * The caller supplies eased progress; interpolation here stays linear so it
+ * matches the DOM handoff. Scale the whole mark, including text and rings.
+ */
+export function crownConvergence(position: { x: number; y: number }, index: number, convergence = 0) {
+  const progress = Number.isFinite(convergence) ? Math.max(0, Math.min(1, convergence)) : 0;
+  return {
+    x: position.x * (1 - progress) + (-9.5 + (index % 3) * 2.4) * progress,
+    y: position.y * (1 - progress) + (-7.4 + Math.floor(index / 3) * 3.25) * progress,
+    glyphScale: 1 * (1 - progress) + 0.085 * progress,
+    labelOpacity: 1 - progress,
+  };
+}
+
+/** Cubic easing with zero slope at both ends, including when zoom reverses. */
+function smoothReveal(value: number, start: number, end: number): number {
+  const t = Math.max(0, Math.min(1, (value - start) / (end - start)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Continuous disclosure for a stable near-crown slot (overflow uses slot 12).
+ * The first skills arrive around workstream scale; later ones follow in order.
+ * Text fades only after its effective screen size is readable.
+ */
+export function crownReveal(scale: number, index: number) {
+  const zoom = Number.isFinite(scale) ? Math.max(0, scale) : 0;
+  const start = 0.55 + Math.max(0, index) * 0.07;
+  const opacity = smoothReveal(zoom, start, start + 0.4);
+  const glyphScale = 0.65 + 0.35 * opacity;
+  return {
+    opacity,
+    glyphScale,
+    monogramOpacity: smoothReveal(8 * zoom * glyphScale, 10, 12),
+    labelOpacity: smoothReveal(zoom, 2, 2.6),
+  };
+}
+
+/**
+ * Outward radial label lane, fixed to its glyph's angle. Ten screen-pixel text
+ * in a bounded single line fits between neighboring rays at label zoom (>=2).
+ * Left-side labels are flipped upright. Width stays bounded in screen pixels.
+ * A single-skill crown instead centers a horizontal label above its glyph.
+ * Pass total crown size, never the changing number of revealed glyphs.
+ */
+export function crownLabelLayout(position: { x: number; y: number }, scale: number, crownLength = 0) {
+  const zoom = Number.isFinite(scale) ? Math.max(0.01, scale) : 0.01;
+  if (crownLength === 1) {
+    return {
+      x: 0,
+      y: -GLYPH_RADIUS - 16 / zoom,
+      rotation: 0,
+      width: 72 / zoom,
+      height: 12 / zoom,
+      offsetX: 36 / zoom,
+      offsetY: 0,
+      fontSize: 10 / zoom,
+      align: "center" as const,
+    };
+  }
+  const angle = Math.atan2(position.y, position.x);
+  const left = position.x < -0.000001;
+  const distance = GLYPH_RADIUS + 4 / zoom;
+  return {
+    x: Math.cos(angle) * distance,
+    y: Math.sin(angle) * distance,
+    rotation: angle * 180 / Math.PI + (left ? 180 : 0),
+    width: 72 / zoom,
+    height: 12 / zoom,
+    offsetX: left ? 72 / zoom : 0,
+    offsetY: 6 / zoom,
+    fontSize: 10 / zoom,
+    align: left ? "right" as const : "left" as const,
+  };
+}
 /**
  * Centre-to-centre spacing along the arc. Slightly more than a glyph diameter,
  * so neighbours read as separate marks rather than a smear.
