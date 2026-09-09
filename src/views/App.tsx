@@ -1330,14 +1330,14 @@ function AppBody() {
     return true;
   }, [agents, offAgentIds, scheduleAgentOverviewScroll, setSelectedAgentIds, workbenchNavigation, workbenchPersistence.store]);
 
-  const openAgentFromSurface = useCallback((sourceSurfaceId: string, sessionId: string) => {
+  const openAgentFromSurface = useCallback((sourceSurfaceId: string, sessionId: string, sessionOnly = false) => {
     const state = workbenchPersistence.store.getState();
     const overviewSurfaceId = findExistingSurface(
       state.document,
       state.surface_mru,
       "agents-overview",
     );
-    if (overviewSurfaceId && focusAgentInOverviewSurface(overviewSurfaceId, sessionId)) {
+    if (!sessionOnly && overviewSurfaceId && focusAgentInOverviewSurface(overviewSurfaceId, sessionId)) {
       return;
     }
 
@@ -1794,7 +1794,7 @@ function AppBody() {
           selectedAgentIds={selectedAgentIds}
           offAgentIds={offAgentIds}
           onSelectionChange={setSelectedAgentIds}
-          onOpenAgent={(sessionId) => openAgentFromSurface(surface.surface_id, sessionId)}
+          onOpenAgent={(sessionId) => openAgentFromSurface(surface.surface_id, sessionId, true)}
           on_state_change={(state) => {
             workbenchPersistence.store.getState().apply_commands([{
               type: "update_surface_state",

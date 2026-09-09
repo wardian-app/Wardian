@@ -69,6 +69,8 @@ export function quantizeScale(scale: number): number {
 
 export interface GardenTerrainOptions {
   enabled: boolean;
+  /** The habitat needs stable beds and immediate activity groups, not a recursive crawl. */
+  rootOnly?: boolean;
   /** districtId -> roots and extent, from `computeGardenLayout`. */
   districts: ReadonlyMap<string, TerrainDistrict>;
   /** Null until the canvas has measured itself and applied a transform. */
@@ -108,7 +110,7 @@ export interface GardenTerrainResult {
  * timer per root.
  */
 export function useGardenTerrain(options: GardenTerrainOptions): GardenTerrainResult {
-  const { enabled, districts, viewport } = options;
+  const { enabled, districts, viewport, rootOnly = false } = options;
   const [listings, setListings] = useState<ReadonlyMap<string, TerrainListing>>(
     () => new Map<string, TerrainListing>(),
   );
@@ -362,11 +364,11 @@ export function useGardenTerrain(options: GardenTerrainOptions): GardenTerrainRe
       const requests = frontierRequests(cells, viewport, listings, {
         inFlight: inFlight.current.size,
       });
-      const fresh = requests.filter((path) => !failed.current.has(path));
+      const fresh = requests.filter((path) => !failed.current.has(path) && (!rootOnly || rootsRef.current.includes(path)));
       if (fresh.length > 0) void requestListings(fresh);
     }, EXPANSION_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [enabled, viewport, cells, listings, requestListings]);
+  }, [enabled, viewport, cells, listings, requestListings, rootOnly]);
 
   const visibleRoots = useMemo(() => {
     if (!viewport) return [];
