@@ -1,7 +1,6 @@
 # Provider log forward acquisition
 
-Status: implemented locally; authoritative backend and docs verification passed;
-review pending.
+Status: implemented.
 Issue: #1251. Stacked on archive provenance repair #1189.
 
 ## Problem and ownership
