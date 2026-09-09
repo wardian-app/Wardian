@@ -33,7 +33,7 @@ conversation. This also applies to paused agents.
 
 ### Open an Agent from Another View
 
-When **Graph**, **Garden**, or **Inbox** uses **Open Agent**, Wardian first
+When **Graph** or **Inbox** uses **Open Agent**, Wardian first
 targets an existing Agents view anywhere in the Workbench. It can activate an
 inactive Agents tab in the same pane or another pane, select the requested
 card, and scroll it into view. If the target is hidden by a zoomed pane,
@@ -42,6 +42,11 @@ Wardian restores the split layout before moving focus there.
 If the view's local agent search or status filter would hide the requested
 card, Wardian clears only that blocking filter before revealing it. Filters
 that already include the requested agent stay in place.
+
+In **Garden**, double-click or Enter opens the agent's composition. Its explicit
+**Open agent session** action opens or focuses the canonical Agent Session
+terminal through contextual Workbench navigation, preserving Garden's
+breadcrumb and camera; it does not reuse the Agents view.
 
 The roster's explicit **Open** and **Open to Side** controls remain terminal
 actions: they open or focus Agent Session tabs instead of changing the

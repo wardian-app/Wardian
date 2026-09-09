@@ -103,6 +103,14 @@ export function createWorkbenchNavigationService(
 ): WorkbenchNavigationService {
   const { registry, store } = options;
   const createId = options.create_id ?? defaultCreateId;
+  // Garden's canonical actions leave its spatial lens intact. Closing the active
+  // destination returns to that source, even when another tab sits beside it.
+  const gardenReturns = new Map<string, string>();
+  const rememberGardenReturn = (sourceId: string | null | undefined, targetId: string) => {
+    if (sourceId !== targetId && sourceId && store.getState().document.surfaces[sourceId]?.surface_type === "garden") gardenReturns.set(targetId, sourceId);
+    else gardenReturns.delete(targetId);
+    return targetId;
+  };
 
   const provenanceDetachCommands = (
     document: ReturnType<WorkbenchStore["getState"]>["document"],
@@ -277,6 +285,7 @@ export function createWorkbenchNavigationService(
   const openWithCurrentPolicy = (request: OpenSurfaceRequest): string => {
     const definition = registry.require(request.surface_type);
     const state = store.getState();
+    const sourceId = state.document.groups[state.document.active_group_id]?.active_surface_id;
     const candidates = orderedSurfaces(state);
     const existingId = registry.resolve_existing(
       definition.open_policy === "singleton"
@@ -286,7 +295,7 @@ export function createWorkbenchNavigationService(
     );
     if (existingId) {
       apply([{ type: "focus_surface", surface_id: existingId }]);
-      return existingId;
+      return rememberGardenReturn(sourceId, existingId);
     }
 
     const surfaceId = createId("surface");
@@ -296,7 +305,7 @@ export function createWorkbenchNavigationService(
       surface,
       ...(request.group_id === undefined ? {} : { group_id: request.group_id }),
     }]);
-    return surfaceId;
+    return rememberGardenReturn(sourceId, surfaceId);
   };
 
   const rebindResource = async (
@@ -349,12 +358,13 @@ export function createWorkbenchNavigationService(
       if (!targetSurface) return openWithCurrentPolicy(request);
       if (targetSurface.resource_key === requestedResourceKey) {
         apply([{ type: "focus_surface", surface_id: targetSurfaceId }]);
-        return targetSurfaceId;
+        return rememberGardenReturn(sourceSurfaceId, targetSurfaceId);
       }
 
       const decision = await rebindResource(targetSurfaceId, request);
       if (decision === "allow" && store.getState().document.surfaces[targetSurfaceId]) {
         apply([{ type: "focus_surface", surface_id: targetSurfaceId }]);
+        rememberGardenReturn(sourceSurfaceId, targetSurfaceId);
       }
       return targetSurfaceId;
     },
@@ -746,19 +756,25 @@ export function createWorkbenchNavigationService(
           }]
         : [];
       commands.push({ type: "close_surface", surface_id: surfaceId });
+      const returnId = gardenReturns.get(surfaceId);
+      if (returnId && snapshot.surfaces[returnId] && snapshot.groups[snapshot.active_group_id]?.active_surface_id === surfaceId) {
+        commands.push({ type: "focus_surface", surface_id: returnId });
+      }
       commands.push(...provenanceDetachCommands(
         snapshot,
         new Set([surfaceId]),
         new Set([surfaceId]),
       ));
-      return (await coordinateClose(
+      const result = await coordinateClose(
         snapshotState,
         [surfaceId],
         () => store.getState().compare_and_apply_commands(
           snapshotState.transaction_version,
           commands,
         ).accepted,
-      )).decision;
+      );
+      if (!store.getState().document.surfaces[surfaceId]) gardenReturns.delete(surfaceId);
+      return result.decision;
     },
 
     close_group: async (groupId) => {
