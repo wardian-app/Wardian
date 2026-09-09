@@ -141,6 +141,7 @@ as a successful answer.
 
 ### Chat history
 
+- Startup host-context records do not start work or increment the query count. The status parser and Chat share the native content-kind classifier; explicit user content, legacy string prompts, and canonical user events retain their normal activity behavior. See [#1249](https://github.com/wardian-app/Wardian/issues/1249).
 - Codex emits a lightweight `agent_message` and a completed `response_item` for the same visible assistant response. The completed record can append an internal `<oai-mem-citation>` block. Wardian removes that block before storing or rendering the message, and applies the same normalization while replaying older archived rows, so one user-visible answer appears once.
 - Wardian memory rows are filtered to the active conversation boundary before they are merged into Chat, then receive the same chronological sequence assignment as provider and watch events. Agent-wide memory history must not be replayed into a later conversation.
 
