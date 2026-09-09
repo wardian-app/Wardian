@@ -58,4 +58,3 @@ are outside this probe's scope. The separate 43-second production walkthrough
 shows the complete hierarchy and canonical record return.
 
 The complete supported DEV browser suite passed on an isolated `00d5177c` checkout: 194 passed, 19 existing skips, zero failures or retries (5.3 minutes). The Garden journeys also passed against the frozen production build. Development-only dynamic store imports and the Workbench proof hook require the DEV harness; they are not production application entry points.
-
