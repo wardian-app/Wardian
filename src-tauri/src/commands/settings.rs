@@ -729,38 +729,80 @@ pub(crate) async fn save_shell_settings_for_state(
     let previous_logging = crate::utils::load_shell_settings_document()
         .map(|document| document.settings.conversation_logging)
         .unwrap_or_else(|_| ShellSettings::default().conversation_logging);
+    let requested_logging = settings.settings.conversation_logging;
+    if previous_logging == requested_logging {
+        return crate::utils::save_shell_settings_document(&settings);
+    }
+
+    // Snapshot the global roster before the policy gate. From here onward the
+    // lock order is policy gate, then each archive's per-agent gate.
+    let snapshots = conversation_logging_transition_snapshots(state).await;
+    let _policy_guard = state.conversation_capture_policy_lock.lock().await;
+
+    // A disable boundary is observed before the setting changes. Bytes that
+    // arrive in the tiny interval are conservatively excluded, never leaked.
+    if requested_logging == ConversationLoggingSetting::Disabled {
+        record_provider_log_policy_for_snapshots(state, &snapshots, false)?;
+    }
+
     let saved = crate::utils::save_shell_settings_document(&settings)?;
+
+    // Re-enable is persisted first, then the closing boundary is observed.
+    // Bytes in between remain conservatively part of the disabled span.
+    if saved.settings.conversation_logging == ConversationLoggingSetting::Enabled {
+        record_provider_log_policy_for_snapshots(state, &snapshots, true)?;
+    }
 
     if previous_logging != ConversationLoggingSetting::Disabled
         && saved.settings.conversation_logging == ConversationLoggingSetting::Disabled
     {
-        mark_global_conversation_logging_disabled(state).await;
+        mark_global_conversation_logging_disabled(state, &snapshots);
     }
 
     Ok(saved)
 }
 
-async fn mark_global_conversation_logging_disabled(state: &crate::state::AppState) {
+async fn conversation_logging_transition_snapshots(
+    state: &crate::state::AppState,
+) -> Vec<crate::commands::chat::AgentArchiveCaptureSnapshot> {
     let session_ids = {
         let agents = state.agents.lock().await;
         agents.keys().cloned().collect::<Vec<_>>()
     };
-
+    let mut snapshots = Vec::new();
     for session_id in session_ids {
-        let snapshot = match crate::commands::chat::agent_archive_capture_snapshot(
-            state,
-            &session_id,
-        )
-        .await
-        {
-            Ok(snapshot) => snapshot,
+        match crate::commands::chat::agent_archive_capture_snapshot(state, &session_id).await {
+            Ok(snapshot) => snapshots.push(snapshot),
             Err(error) => {
                 crate::manager::log_debug(&format!(
-                    "[WARDIAN] conversation archive disabled cutoff snapshot failed for {session_id}: {error}"
+                    "[WARDIAN] conversation archive policy snapshot failed for {session_id}: {error}"
                 ));
-                continue;
             }
-        };
+        }
+    }
+    snapshots
+}
+
+fn record_provider_log_policy_for_snapshots(
+    state: &crate::state::AppState,
+    snapshots: &[crate::commands::chat::AgentArchiveCaptureSnapshot],
+    logging_enabled: bool,
+) -> Result<(), String> {
+    for snapshot in snapshots {
+        crate::commands::chat::record_provider_log_policy_for_snapshot(
+            state,
+            snapshot,
+            logging_enabled,
+        )?;
+    }
+    Ok(())
+}
+
+fn mark_global_conversation_logging_disabled(
+    state: &crate::state::AppState,
+    snapshots: &[crate::commands::chat::AgentArchiveCaptureSnapshot],
+) {
+    for snapshot in snapshots {
         if crate::state::conversation_archive::effective_conversation_logging(
             ConversationLoggingSetting::Disabled,
             snapshot.agent_conversation_logging,
@@ -768,13 +810,14 @@ async fn mark_global_conversation_logging_disabled(state: &crate::state::AppStat
         {
             continue;
         }
-        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
         if let Err(error) = state
             .conversation_archive
             .discard_agent_with_context(context, &[])
         {
             crate::manager::log_debug(&format!(
-                "[WARDIAN] conversation archive disabled cutoff failed for {session_id}: {error}"
+                "[WARDIAN] conversation archive disabled cutoff failed for {}: {error}",
+                snapshot.session_id
             ));
         }
     }
@@ -963,6 +1006,105 @@ mod settings_path_tests {
 
             assert_eq!(appended, 0);
         });
+    }
+
+    #[tokio::test]
+    async fn global_logging_transition_excludes_provider_bytes_written_while_disabled() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp_dir.path());
+        crate::utils::save_shell_settings(&ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save initial enabled setting");
+        let log_path = temp_dir.path().join("provider.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Before disable\"}}\n",
+        )
+        .expect("write initial provider event");
+        let state = AppState::new();
+        let agent = test_agent("agent-1", AgentConversationLoggingSetting::Default, None);
+        {
+            let mut config = agent.config.lock().expect("agent config");
+            config.fresh_provider_session_id = Some("provider-session-1".to_string());
+        }
+        *agent.log_path.lock().expect("agent log path") = Some(log_path.clone());
+        state
+            .agents
+            .lock()
+            .await
+            .insert("agent-1".to_string(), agent);
+        crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("capture enabled prefix");
+
+        save_shell_settings_for_state(
+            &state,
+            ShellSettingsDocument {
+                schema_version: 2,
+                settings: ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Disabled,
+                    ..Default::default()
+                },
+                overrides: ShellSettingsOverrides {
+                    conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable logging");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"SECRET_DISABLED\"}}}}")
+            })
+            .expect("append disabled provider event");
+        save_shell_settings_for_state(
+            &state,
+            ShellSettingsDocument {
+                schema_version: 2,
+                settings: ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Enabled,
+                    ..Default::default()
+                },
+                overrides: ShellSettingsOverrides::default(),
+            },
+        )
+        .await
+        .expect("re-enable logging");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"After re-enable\"}}}}")
+            })
+            .expect("append enabled provider event");
+        crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("capture after re-enable");
+
+        let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let archived = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive");
+        let text = archived
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>();
+        assert!(text.contains(&"Before disable"));
+        assert!(text.contains(&"After re-enable"));
+        assert!(!text.contains(&"SECRET_DISABLED"));
+        std::env::remove_var("WARDIAN_HOME");
     }
 
     fn test_agent(
