@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::process::Child;
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tokio::time::{sleep, Instant};
+use tokio::time::{sleep, timeout, Instant};
 use uuid::Uuid;
 use wardian_core::browser::{
     BrowserCookie, CookieAction, DownloadRecord, NetworkEntry, NetworkFilter, NetworkRequestDetail,
@@ -54,6 +54,8 @@ const SCREENCAST_JPEG_QUALITY: u32 = 85;
 /// Windows. Keep retries bounded and limited to this session's directory.
 const PROFILE_CLEANUP_ATTEMPTS: usize = 20;
 const PROFILE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// Do not let a failed browser termination hold up profile cleanup forever.
+const BROWSER_PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What a session tells the rest of the app about itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1611,14 +1613,8 @@ impl BrowserSession {
         }
         let mut cleanup_errors = Vec::new();
         if let Some(mut child) = self.child.lock().await.take() {
-            // `kill` also reaps. The profile stays locked on Windows until the
-            // process is fully gone, so this must complete before removal.
-            if let Err(error) = child.kill().await {
-                if let Err(wait_error) = child.wait().await {
-                    cleanup_errors.push(format!(
-                        "failed to terminate browser process: {error}; failed to reap it: {wait_error}"
-                    ));
-                }
+            if let Err(error) = terminate_browser_child(&mut child).await {
+                cleanup_errors.push(error.to_string());
             }
         }
         if let Err(error) = remove_profile_dir(&self.profile_dir).await {
@@ -1638,8 +1634,64 @@ impl BrowserSession {
     }
 }
 
-/// Removes a browser profile, tolerating only the short lock-release window
-/// observed after a Chromium shutdown. An exhausted retry is returned to the
+/// Terminates a browser child without allowing a failed kill/reap to block
+/// profile cleanup forever. A successful bounded wait is enough to prove the
+/// process is gone even when the initial kill reported an already-exited child.
+async fn terminate_browser_child(child: &mut Child) -> Result<(), BrowserError> {
+    match timeout(BROWSER_PROCESS_CLEANUP_TIMEOUT, child.kill()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let kill_error = format!("failed to terminate browser process: {error}");
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] browser child kill reported an error; using bounded reap: {kill_error}"
+            ));
+            reap_browser_child(child, &kill_error, BROWSER_PROCESS_CLEANUP_TIMEOUT).await
+        }
+        Err(_) => {
+            let kill_error = format!(
+                "timed out after {}ms terminating browser process",
+                BROWSER_PROCESS_CLEANUP_TIMEOUT.as_millis()
+            );
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] browser child kill timed out; using bounded reap: {kill_error}"
+            ));
+            reap_browser_child(child, &kill_error, BROWSER_PROCESS_CLEANUP_TIMEOUT).await
+        }
+    }
+}
+
+/// Waits for a browser child for a bounded interval after termination failed.
+async fn reap_browser_child(
+    child: &mut Child,
+    termination_error: &str,
+    timeout_duration: Duration,
+) -> Result<(), BrowserError> {
+    match timeout(timeout_duration, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(BrowserError::Io {
+            detail: format!("{termination_error}; failed to reap browser process: {error}"),
+        }),
+        Err(_) => Err(BrowserError::Io {
+            detail: format!(
+                "{termination_error}; timed out after {}ms waiting for browser process to exit",
+                timeout_duration.as_millis()
+            ),
+        }),
+    }
+}
+
+fn attach_cleanup_diagnostic(
+    attach_error: &BrowserError,
+    cleanup_error: &BrowserError,
+    cleanup_stage: &str,
+) -> String {
+    format!(
+        "browser attach failed ({attach_error}); {cleanup_stage} cleanup failed: {cleanup_error}"
+    )
+}
+
+/// Removes a browser profile, tolerating only a bounded transient lock-release
+/// window after a Chromium shutdown. An exhausted retry is returned to the
 /// explicit close caller instead of being silently discarded.
 async fn remove_profile_dir(profile_dir: &Path) -> Result<(), BrowserError> {
     let profile_dir = profile_dir.to_path_buf();
@@ -1952,10 +2004,16 @@ impl BrowserSessionBroker {
         let (connection, page, known_targets) = match attached {
             Ok(attached) => attached,
             Err(error) => {
-                let _ = launched.child.kill().await;
+                if let Err(cleanup_error) = terminate_browser_child(&mut launched.child).await {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] {}",
+                        attach_cleanup_diagnostic(&error, &cleanup_error, "process")
+                    ));
+                }
                 if let Err(cleanup_error) = remove_profile_dir(&profile_dir).await {
                     crate::utils::logging::log_debug(&format!(
-                        "[Wardian] browser profile cleanup failed after attach error: {cleanup_error}"
+                        "[Wardian] {}",
+                        attach_cleanup_diagnostic(&error, &cleanup_error, "profile")
                     ));
                 }
                 return Err(error);
@@ -2944,6 +3002,51 @@ pub(crate) fn normalize_console_level(level: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browser_reap_timeout_is_reported_without_waiting_indefinitely() {
+        let mut command =
+            tokio::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/d", "/c", "ping 127.0.0.1 -n 30 > nul"]);
+        } else {
+            command.args(["-c", "sleep 30"]);
+        }
+        let mut child = command.spawn().expect("spawn long-running test child");
+
+        let started = std::time::Instant::now();
+        let result = reap_browser_child(
+            &mut child,
+            "synthetic browser kill failure",
+            Duration::from_millis(20),
+        )
+        .await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+
+        let error = result.expect_err("a live child must hit the bounded reap timeout");
+        assert!(error.to_string().contains("timed out after 20ms"));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "bounded reap took too long: {:?}",
+            started.elapsed()
+        );
+
+    }
+
+    #[test]
+    fn attach_cleanup_diagnostic_retains_original_and_cleanup_errors() {
+        let attach_error = BrowserError::Invalid {
+            detail: "attach failed".to_string(),
+        };
+        let cleanup_error = BrowserError::Io {
+            detail: "kill failed".to_string(),
+        };
+        let diagnostic = attach_cleanup_diagnostic(&attach_error, &cleanup_error, "process");
+
+        assert!(diagnostic.contains("attach failed"));
+        assert!(diagnostic.contains("kill failed"));
+    }
 
     #[tokio::test]
     async fn profile_cleanup_reports_an_unremovable_path() {
