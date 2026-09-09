@@ -2103,6 +2103,61 @@ Do you want to proceed?
     }
 
     #[test]
+    fn codex_user_response_item_survives_merge_as_a_request_turn() {
+        let provider_events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request","role":"user","content":[{"type":"input_text","text":"Run the archive check."}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-turn","content_item_kinds":["user.text"]}}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Run the archive check."}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-answer","role":"assistant","content":[{"type":"output_text","text":"Archive checked."}]}}"#,
+            ],
+        );
+        let chat_events = merge_chat_events(Vec::new(), provider_events);
+        let request = chat_events
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Run the archive check."))
+            .expect("merged request");
+
+        assert_eq!(chat_events.len(), 2);
+        assert_eq!(request.source.as_deref(), Some("response_item"));
+        assert_eq!(request.role, Some(AgentChatRole::User));
+        assert_eq!(request.turn_id.as_deref(), Some("native-request"));
+        assert_eq!(request.metadata["input_origin"], "human_input");
+        assert_eq!(request.metadata["input_purpose"], "request");
+        assert_eq!(request.metadata["provider_turn_id"], "native-turn");
+        assert_eq!(request.metadata["request_root_id"], "native-request");
+
+        let records = chat_events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                crate::state::conversation_archive::narrative_from_chat_event(
+                    event,
+                    index as u64 + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let turns = crate::state::conversation_archive::derive_turn_records(
+            "conversation-1",
+            &records,
+            &chat_events,
+            &[],
+            false,
+        );
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].request.kind, "user_request",
+            "an explicit user response_item must remain a request after mirror merging"
+        );
+        assert_eq!(
+            turns[0].status,
+            wardian_core::conversations::ConversationTurnStatus::Responded
+        );
+    }
+
+    #[test]
     fn merge_deduplicates_same_message_text_across_distinct_turn_ids() {
         let first = AgentChatEvent {
             id: "agent-1:provider:1".to_string(),
