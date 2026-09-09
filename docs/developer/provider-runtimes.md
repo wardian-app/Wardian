@@ -68,6 +68,12 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - The Chat view also replays Wardian's durable conversation archive before the bounded live provider data, so already captured rows remain visible when a provider artifact is temporarily unavailable.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
+### Prompt delivery
+
+- Antigravity's editor honors bracketed paste. Wardian wraps multiline prompts, and single-line prompts of 2048 bytes or more, in `ESC[200~` … `ESC[201~`, then sends one carriage return as a separate write. Short single-line prompts keep the simple literal path.
+- This supersedes an earlier assumption that Antigravity did not support bracketed paste. That assumption made Wardian send long multiline prompts literally, so the editor treated the embedded newlines as submits and could retain the prompt unsent with no turn produced. A native protocol experiment against Antigravity 1.1.27 sent raw `ESC[200~ payload ESC[201~` for a 6886-byte, 285-line prompt; the editor collapsed it into a single paste entry, and one carriage return produced a provider-native answer containing all three independent random labels placed at the payload's beginning, middle, and end.
+- The 500 ms submit settle delay is unchanged. The experiment's 267 ms editor-application time is one machine's measurement, not a guarantee, so delivery still depends on the existing bounded turn receipt and still fails closed with no automatic retry when that receipt does not arrive.
+
 ### Practical implications
 
 - Do not use Gemini's `--include-directories`, `--session-id`, or stream output assumptions for Antigravity.
@@ -135,6 +141,7 @@ as a successful answer.
 
 ### Chat history
 
+- Startup host-context records do not start work or increment the query count. The status parser and Chat share the native content-kind classifier; explicit user content, legacy string prompts, and canonical user events retain their normal activity behavior. See [#1249](https://github.com/wardian-app/Wardian/issues/1249).
 - Codex emits a lightweight `agent_message` and a completed `response_item` for the same visible assistant response. The completed record can append an internal `<oai-mem-citation>` block. Wardian removes that block before storing or rendering the message, and applies the same normalization while replaying older archived rows, so one user-visible answer appears once.
 - Wardian memory rows are filtered to the active conversation boundary before they are merged into Chat, then receive the same chronological sequence assignment as provider and watch events. Agent-wide memory history must not be replayed into a later conversation.
 
