@@ -50,6 +50,10 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// so the idle cost of a higher setting is nothing and the cost while
 /// scrolling buys back legibility that no amount of scaling can recover.
 const SCREENCAST_JPEG_QUALITY: u32 = 85;
+/// Profile locks can outlive the browser process by a short interval on
+/// Windows. Keep retries bounded and limited to this session's directory.
+const PROFILE_CLEANUP_ATTEMPTS: usize = 20;
+const PROFILE_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// What a session tells the rest of the app about itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,7 +124,7 @@ pub enum BrowserError {
     WaitTimeout { condition: String, timeout_ms: u64 },
     /// The caller supplied something this operation cannot accept.
     Invalid { detail: String },
-    /// A filesystem operation around a screenshot failed.
+    /// A browser-session filesystem or process cleanup operation failed.
     Io { detail: String },
     /// A mirrored presentation tried to drive the page.
     ReadOnlyPresentation,
@@ -1596,7 +1600,7 @@ impl BrowserSession {
         }
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self) -> Result<(), BrowserError> {
         // Skipped once the socket is gone: the page died with the browser, and
         // the call would only wait out its timeout.
         if !self.connection.is_closed() {
@@ -1605,14 +1609,66 @@ impl BrowserSession {
                 .call_session(&self.cdp_session().await, "Page.close", json!({}))
                 .await;
         }
+        let mut cleanup_errors = Vec::new();
         if let Some(mut child) = self.child.lock().await.take() {
             // `kill` also reaps. The profile stays locked on Windows until the
-            // process is fully gone, so this must complete before the removal.
-            let _ = child.kill().await;
+            // process is fully gone, so this must complete before removal.
+            if let Err(error) = child.kill().await {
+                if let Err(wait_error) = child.wait().await {
+                    cleanup_errors.push(format!(
+                        "failed to terminate browser process: {error}; failed to reap it: {wait_error}"
+                    ));
+                }
+            }
         }
-        // Best effort: a profile left behind is noise, not a failure.
-        let _ = std::fs::remove_dir_all(&self.profile_dir);
+        if let Err(error) = remove_profile_dir(&self.profile_dir).await {
+            cleanup_errors.push(error.to_string());
+        }
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(BrowserError::Io {
+                detail: format!(
+                    "browser session {} cleanup failed: {}",
+                    self.browser_id,
+                    cleanup_errors.join("; ")
+                ),
+            })
+        }
     }
+}
+
+/// Removes a browser profile, tolerating only the short lock-release window
+/// observed after a Chromium shutdown. An exhausted retry is returned to the
+/// explicit close caller instead of being silently discarded.
+async fn remove_profile_dir(profile_dir: &Path) -> Result<(), BrowserError> {
+    let profile_dir = profile_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut last_error = None;
+        for attempt in 0..PROFILE_CLEANUP_ATTEMPTS {
+            match std::fs::remove_dir_all(&profile_dir) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < PROFILE_CLEANUP_ATTEMPTS {
+                        std::thread::sleep(PROFILE_CLEANUP_RETRY_DELAY);
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "failed to remove browser profile {} after {} attempts: {}",
+            profile_dir.display(),
+            PROFILE_CLEANUP_ATTEMPTS,
+            last_error.expect("cleanup attempts always record an error")
+        ))
+    })
+    .await
+    .map_err(|error| BrowserError::Io {
+        detail: format!("browser profile cleanup task failed: {error}"),
+    })?
+    .map_err(|detail| BrowserError::Io { detail })
 }
 
 /// Normalizes a user-supplied address into a URL the browser will accept.
@@ -1868,15 +1924,25 @@ impl BrowserSessionBroker {
         let profile_dir = self.profile_root.join(&browser_id);
         let download_dir = self.download_root.join(&browser_id);
 
-        let mut launched =
-            match launch_engine(&binary, &profile_dir, viewport.width, viewport.height).await {
-                Ok(launched) => launched,
-                Err(error) => {
-                    // Nothing started, but the profile directory was created.
-                    let _ = std::fs::remove_dir_all(&profile_dir);
-                    return Err(BrowserError::Engine(error));
+        let mut launched = match launch_engine(
+            &binary,
+            &profile_dir,
+            viewport.width,
+            viewport.height,
+        )
+        .await
+        {
+            Ok(launched) => launched,
+            Err(error) => {
+                // Nothing started, but the profile directory was created.
+                if let Err(cleanup_error) = remove_profile_dir(&profile_dir).await {
+                    crate::utils::logging::log_debug(&format!(
+                            "[Wardian] browser profile cleanup failed after launch error: {cleanup_error}"
+                        ));
                 }
-            };
+                return Err(BrowserError::Engine(error));
+            }
+        };
 
         // The browser is running from here on. `kill_on_drop` would terminate
         // it but never reap it, and on Windows a dying Chromium still holds
@@ -1887,7 +1953,11 @@ impl BrowserSessionBroker {
             Ok(attached) => attached,
             Err(error) => {
                 let _ = launched.child.kill().await;
-                let _ = std::fs::remove_dir_all(&profile_dir);
+                if let Err(cleanup_error) = remove_profile_dir(&profile_dir).await {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] browser profile cleanup failed after attach error: {cleanup_error}"
+                    ));
+                }
                 return Err(error);
             }
         };
@@ -1916,7 +1986,11 @@ impl BrowserSessionBroker {
         // The session owns the child now, so its own teardown does the
         // killing, reaping, and profile removal.
         if let Err(error) = session.set_viewport(Some(viewport)).await {
-            session.shutdown().await;
+            if let Err(cleanup_error) = session.shutdown().await {
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] browser session startup cleanup failed: {cleanup_error}"
+                ));
+            }
             return Err(error);
         }
         // Best effort, and deliberately not fatal: a browser that cannot be
@@ -2190,11 +2264,12 @@ impl BrowserSessionBroker {
         // actually took it out of the map announces and tears down, so a
         // listener never sees two contradictory closures for one session.
         if take_session(&self.sessions, &browser_id).await.is_some() {
-            session.shutdown().await;
+            let cleanup_result = session.shutdown().await;
             let _ = self.events.send(BrowserSessionEvent::Closed {
                 browser_id: browser_id.clone(),
                 reason: "closed".to_string(),
             });
+            cleanup_result?;
         }
         Ok(browser_id)
     }
@@ -2215,7 +2290,11 @@ impl BrowserSessionBroker {
             if take_session(&self.sessions, &browser_id).await.is_none() {
                 continue;
             }
-            session.shutdown().await;
+            if let Err(error) = session.shutdown().await {
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] browser session {browser_id} cleanup failed while its agent stopped: {error}"
+                ));
+            }
             let _ = self.events.send(BrowserSessionEvent::Closed {
                 browser_id: browser_id.clone(),
                 reason: "the owning agent stopped".to_string(),
@@ -2235,7 +2314,12 @@ impl BrowserSessionBroker {
             .map(|(_, s)| s)
             .collect();
         for session in sessions {
-            session.shutdown().await;
+            if let Err(error) = session.shutdown().await {
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] browser session {} cleanup failed during app shutdown: {error}",
+                    session.browser_id
+                ));
+            }
         }
     }
 }
@@ -2272,7 +2356,11 @@ async fn reap_dead_session(
         browser_id,
         reason: "the browser process exited".to_string(),
     });
-    session.shutdown().await;
+    if let Err(error) = session.shutdown().await {
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] browser session cleanup failed after process exit: {error}"
+        ));
+    }
 }
 
 /// What a freshly attached page target needs before it can be presented.
@@ -2856,6 +2944,28 @@ pub(crate) fn normalize_console_level(level: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn profile_cleanup_reports_an_unremovable_path() {
+        let root = std::env::temp_dir().join(format!("wardian-profile-cleanup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create test root");
+        let profile = root.join("profile");
+        std::fs::write(&profile, b"not a directory").expect("create blocking file");
+
+        let error = remove_profile_dir(&profile)
+            .await
+            .expect_err("a file cannot be removed as a profile directory");
+        assert_eq!(error.code(), "browser_io_error");
+        assert!(error
+            .to_string()
+            .contains("failed to remove browser profile"));
+        assert!(
+            profile.is_file(),
+            "the test fixture must remain for cleanup"
+        );
+
+        std::fs::remove_dir_all(&root).expect("remove test root");
+    }
 
     #[test]
     fn accepts_http_and_https_unchanged() {
