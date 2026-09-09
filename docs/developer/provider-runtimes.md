@@ -281,6 +281,12 @@ Refresh resolves completed mappings without moving homes or recovering a live
 startup overlay. The provider executable, normal TUI invocation and shell `HOME`
 are unchanged. See [the removal criteria](https://github.com/wardian-app/Wardian/issues/1235).
 
+On Windows, managed Codex MCP publication uses the existing parent's canonical
+verbatim path for both the temporary file and destination, including before
+compact-home mapping. It resolves only the parent. Configuration is written
+before ownership; interrupted publication leaves an unowned entry that retries
+preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
+
 ### Known operational edge cases
 
 - Codex skill discovery can be correct while shell execution is still blocked by the CLI sandbox. In that case, the agent sees the skill but fails when the skill tries to invoke shell tools.
