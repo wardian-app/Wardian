@@ -5,6 +5,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+mod checkpoint;
+
 const EVENTS: &str = "events.jsonl";
 const CHECKPOINT: &str = "state.json";
 const BLUEPRINT: &str = "blueprint.json";
@@ -37,10 +39,11 @@ pub fn read_events(root: &Path) -> crate::engine::Result<Vec<Event>> {
     Ok(out)
 }
 
-/// Write the checkpoint snapshot to `<root>/state.json`.
+/// Write the checkpoint snapshot to `<root>/state.json`. Readers that share
+/// deletion may retain their previous snapshot while the next one replaces it.
 pub fn write_checkpoint(root: &Path, state: &RunState) -> crate::engine::Result<()> {
     std::fs::create_dir_all(root)?;
-    crate::atomic_file::write_json_atomic(&root.join(CHECKPOINT), state)?;
+    checkpoint::write(&root.join(CHECKPOINT), state)?;
     Ok(())
 }
 
@@ -125,6 +128,60 @@ mod tests {
         write_checkpoint(dir.path(), &s).unwrap();
         let back = read_checkpoint(dir.path()).unwrap().unwrap();
         assert_eq!(back.next_seq, 9);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checkpoint_replacement_preserves_open_reader() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut root = dir.path().to_path_buf();
+        while root.as_os_str().len() < 270 {
+            root.push("long-workflow-checkpoint-path");
+        }
+        let mut state = RunState::new("run", "workflow");
+        state.next_seq = 2;
+        write_checkpoint(&root, &state).unwrap();
+        // Rust's normal file reader shares deletion. Keep it open across the
+        // same replacement that polling clients can overlap with the driver.
+        let mut reader = File::open(root.join(CHECKPOINT)).unwrap();
+        state.next_seq = 3;
+        write_checkpoint(&root, &state).expect("checkpoint replacement while read handle is open");
+        assert_eq!(read_checkpoint(&root).unwrap().unwrap().next_seq, 3);
+        state.next_seq = 4;
+        write_checkpoint(&root, &state).expect("another checkpoint with the old reader still open");
+        assert_eq!(read_checkpoint(&root).unwrap().unwrap().next_seq, 4);
+        let mut previous = String::new();
+        reader.read_to_string(&mut previous).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RunState>(&previous)
+                .unwrap()
+                .next_seq,
+            2
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checkpoint_replacement_does_not_bypass_exclusive_reader() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = RunState::new("run", "workflow");
+        state.next_seq = 2;
+        write_checkpoint(dir.path(), &state).unwrap();
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE, without delete.
+            .open(dir.path().join(CHECKPOINT))
+            .unwrap();
+        state.next_seq = 3;
+        assert!(write_checkpoint(dir.path(), &state).is_err());
+        assert_eq!(read_checkpoint(dir.path()).unwrap().unwrap().next_seq, 2);
+        drop(reader);
+        write_checkpoint(dir.path(), &state).unwrap();
+        assert_eq!(read_checkpoint(dir.path()).unwrap().unwrap().next_seq, 3);
     }
 
     #[test]

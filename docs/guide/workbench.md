@@ -183,13 +183,19 @@ Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly
 
 ### Contextual agent opens
 
-When Graph, Garden, or Inbox opens an agent, Wardian first reuses the existing
+When Graph or Inbox opens an agent, Wardian first reuses the existing
 **Agents** view wherever it is in the Workbench. It activates that tab when
 needed, focuses the pane, selects the agent, and brings its card into view
 instead of adding a tab. This works when Agents is another tab in the same
 pane or an inactive tab in another pane. If no Agents view exists, Wardian
 next retargets an adjoining Agent Session. If neither target is available,
 Wardian uses the usual focus-or-open behavior.
+
+Garden's **Open agent session** action instead targets the canonical Agent
+Session terminal through contextual navigation, preserving the Garden surface.
+Double-click or Enter on a Garden agent first enters its composition.
+Workbench Back or closing the destination returns to Garden with its saved
+breadcrumb, selection, camera, and activity lens.
 
 When you zoom one pane, Wardian can still use an Agents tab in that pane but
 will not switch to a hidden pane. The roster remains explicit: its **Open**

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { SectionRail } from '../features/library/SectionRail';
 import { LibraryList } from '../features/library/LibraryList';
@@ -36,6 +36,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     const fetchIndex = useLibraryStore((s) => s.fetchIndex);
     const libraryDetailWidth = useLibraryStore((s) => s.libraryDetailWidth);
     const setLibraryDetailWidth = useLibraryStore((s) => s.setLibraryDetailWidth);
+    const resetLibraryDetailWidth = useLibraryStore((s) => s.resetLibraryDetailWidth);
+    const detailRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => subscribeToLibraryChanges(), []);
 
@@ -131,6 +133,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                 </div>
                 <div
                     data-testid="library-detail"
+                    ref={detailRef}
                     className="library-view__detail relative flex-shrink-0 border-l border-wardian-border overflow-y-auto"
                     style={{ width: `${libraryDetailWidth}px` }}
                 >
@@ -143,9 +146,10 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                     </button>
                     <SidebarResizeHandle
                         baseWidth={libraryDetailWidth}
+                        getBaseWidth={() => detailRef.current?.getBoundingClientRect().width || libraryDetailWidth}
                         edge="left"
                         onResize={setLibraryDetailWidth}
-                        onReset={() => setLibraryDetailWidth(480)}
+                        onReset={resetLibraryDetailWidth}
                     />
                     <DetailPane
                         surfaceId={surfaceId}

@@ -11,6 +11,10 @@ const FNV_PRIME: u64 = 0x100000001b3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
+    AgentMessaging {
+        request: crate::agent_messaging::AgentMessagingRequest,
+        origin: MessageOrigin,
+    },
     AgentList,
     AgentDelete {
         target: String,

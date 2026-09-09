@@ -21,7 +21,7 @@ automation, and extension. Take only the next step that helps the work at hand.
 - [Dashboard](./dashboard.md): watch the whole fleet over a trailing window and spot an agent behaving oddly.
 - [Analytics](./analytics.md): look up how much agents, models, or providers did over a chosen period.
 - [Graph](./graph.md): inspect team, workspace, and worktree relationships between agents.
-- [Garden](./garden.md): see agents, automations, and skills laid out so that distance reflects what they share.
+- [Garden](./garden.md): explore workstreams, cell-like agents, workspace activity, and situated routines down to their records and evidence.
 - [Watchlists](./watchlists.md): group, select, sort, and monitor agents in the right roster.
 - [Inbox](./inbox.md): triage completed work, important updates, and decisions.
 - [Class Management](./class-management.md): understand reusable agent setups; edit them from the Library's Classes section.

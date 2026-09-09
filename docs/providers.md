@@ -81,6 +81,20 @@ Claude runs directly in the real target workspace.
 
 Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and maintains `.claude/skills` links where needed so Claude can see Wardian-managed common, class, and agent skills without those files living in the repository root.
 
+Keep shared, class, and agent instructions in their canonical `AGENTS.md` files.
+On ordinary Claude bootstrap, Wardian refreshes its existing managed `CLAUDE.md`
+bridges as sibling copies and generates the habitat copy after its memory brief
+is appended. These are snapshots: start a fresh session after editing canonical
+instructions to load the updated text. No separate preparation command is needed.
+
+Generated copies carry an ownership marker and body hash. Wardian preserves
+customized or linked `CLAUDE.md` files; editing a generated copy makes it a custom
+override. To restore automatic refresh for an existing managed bridge, replace
+that override deliberately with the bare `@AGENTS.md` stub. Workspace files and
+user-selected include directories are not rewritten. Nested imports in canonical
+text retain Claude's normal external-import consent; Wardian does not grant
+project-wide approval or change global trust settings.
+
 Wardian also launches Claude-managed terminal surfaces with Claude Code's alternate-screen opt-out enabled. This preserves native terminal scrollback for desktop terminals and mobile PWA drag scrolling while keeping Claude's existing `CLAUDE.md` discovery behavior.
 
 ### Session and Status Handling
@@ -101,9 +115,11 @@ Codex executes against the real target workspace while Wardian keeps mutable pro
 
 Codex reads `AGENTS.md`. Wardian passes the real project root with `--cd <absolute-workspace-path>` and projects assigned skills into the agent-specific `CODEX_HOME/skills` tree. This keeps skill scope per agent while preserving Codex trust and command execution against the actual repository path.
 
-For interactive, inherited headless, and native launches, Wardian also supplies its
-managed common, class, and agent instructions through Codex's developer
-instructions setting, in that order. These are the same managed sources used
+For shared interactive/background owners and inherited headless launches,
+Wardian supplies its managed common, class, and agent instructions through
+Codex's developer instructions setting, in that order. The shared owner places
+the same instructions in its temporary startup configuration for the ordinary
+TUI; no TUI command-line config override is needed. These are the same managed sources used
 to generate habitat `AGENTS.md`; workspace instructions retain Codex's normal
 discovery and priority. Inherited workers use the configured agent's instruction
 identity. This bridge works when Wardian memory is disabled. When enabled, the
@@ -148,9 +164,49 @@ paths, while agent-only MCP entries remain available.
 
 ### Session and Status Handling
 
-Wardian starts a fresh Codex session by writing a minimal rollout into the agent's projected `CODEX_HOME`, then resumes that exact provider UUID interactively. This avoids a bootstrap model turn while preserving per-agent session isolation. Status tracking uses Codex thread and turn events, approval requests, command events, and completion markers.
+Wardian materializes fresh Codex history without a bootstrap model turn and
+retains the exact provider UUID in the agent's private `CODEX_HOME`. A
+Wardian-owned app-server manages the session, and the original Codex terminal
+attaches to it. Status tracking observes native turn events, including work
+started from that terminal.
+
+The [agent messaging tools](./developer/agent-messaging-tools.md) separate
+information, follow-up tasks, and interruption. Delivery uses the shared
+local app-server connection. The local-daemon integration targets stable CLI
+`0.154.0` or later, with a tested `0.154.0-alpha.6` exception and actual runtime
+capability checks. Information does not start a turn, and a task receipt
+does not imply a reply. Existing embedded terminal sessions adopt this runtime
+on an explicit restart; uncertain messages are not automatically replayed.
+
+Resuming a Codex agent applies its selected model and reasoning effort. If only
+the effort is selected, Wardian keeps the conversation's recorded model when
+available, then falls back to the effective provider configuration and catalogue.
+This launch-time selection does not replace an unspecified model in agent settings.
+
+Codex currently limits the length of its local control-socket path. When a
+managed home is too deep, Wardian uses a private compact location and keeps
+`habitat/.codex` linked to it. The provider executable and the user's shell
+environment remain unchanged. An ownership record in the agent directory
+identifies the physical home; include that target when backing up provider
+state. Startup reports an error if no secure location fits. This temporary
+workaround is tracked for removal in
+[#1235](https://github.com/wardian-app/Wardian/issues/1235).
 
 ### Debug First
+
+If startup reports `list_turns is not supported yet`, the installed Codex
+runtime cannot resume that conversation's paginated history. Closing other
+apps does not fix this compatibility error. Keep the original history and use
+a compatible runtime or a separately backed-up recovery; do not delete the
+conversation to clear its red status. Intentional Wardian shutdown does not
+mark healthy shared Codex connections as provider errors.
+
+If a resumed conversation reports `already has an active writer`, another
+Codex process still owns that conversation. Release it in the other Codex app
+or terminal, then restart the Wardian agent. If the other app retains ownership,
+quit it after saving other work. Do not delete the rollout or writer-lock file;
+the owning process must release the lock. Restore failures are also recorded in
+`<wardian-home>/wardian_debug.log`.
 
 If Codex behaves unexpectedly, run `wardian agent doctor <agent-name-or-uuid>`
 first. It reports the agent's effective `CODEX_HOME`, installed/enabled plugins

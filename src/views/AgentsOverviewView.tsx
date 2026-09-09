@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentConfig, AgentTelemetry, AgentsOverviewMode, CloneMode } from "../types";
 import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
@@ -17,6 +17,7 @@ import {
   agentsOverviewGridRowOrigin,
 } from "../features/grid/agentsOverviewLayout";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
+import { normalizeAgentStatus } from "../utils/statusUtils";
 
 type GridCardMode = "terminal" | "chat";
 
@@ -214,15 +215,23 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     setContextMenu({ visible: true, x: e.clientX, y: e.clientY, agentId });
   };
 
+  // Resume publishes Processing before committing is_off=false. Expose the
+  // terminal for human onboarding while the native attachment gate is pending.
+  const startingAgentIds = useMemo(() => new Set(filteredAgents
+    .filter((agent) => offAgentIds.has(agent.session_id)
+      && normalizeAgentStatus(telemetry[agent.session_id]?.current_status) === "Processing...")
+    .map((agent) => agent.session_id)), [filteredAgents, offAgentIds, telemetry]);
   const renderableAgents = filteredAgents.filter((agent: AgentConfig) => {
     const agentId = agent.session_id.toString();
-    return !offAgentIds.has(agentId) || telemetry[agentId]?.current_status === "Headless";
+    return !offAgentIds.has(agentId) || startingAgentIds.has(agentId)
+      || telemetry[agentId]?.current_status === "Headless";
   });
-  const cardModeForAgent = (agentId: string): GridCardMode => cardModeOverrides[agentId] ?? gridCardDisplayMode;
+  const cardModeForAgent = useCallback((agentId: string): GridCardMode => startingAgentIds.has(agentId)
+    ? "terminal" : cardModeOverrides[agentId] ?? gridCardDisplayMode, [startingAgentIds, cardModeOverrides, gridCardDisplayMode]);
   const layoutAgents = useMemo(() => renderableAgents.map((agent) => ({
     id: agent.session_id.toString(),
     cardMode: cardModeForAgent(agent.session_id.toString()),
-  })), [cardModeOverrides, gridCardDisplayMode, renderableAgents]);
+  })), [cardModeForAgent, renderableAgents]);
   const {
     containerRef,
     containerSize: overviewContainerSize,
@@ -430,7 +439,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
         const isAgentRendererResident = residentAgentIds.has(agentId);
         const isAgentPresentationVisible = isAgentVisible && isAgentRendererResident;
         const isAgentMaximized = isMaximized && overviewLayout.focusedAgentId === agentId;
-        const isOff = offAgentIds.has(agentId);
+        const isOff = offAgentIds.has(agentId) && !startingAgentIds.has(agentId);
         const isSelected = selectedAgentIds.has(agentId);
         
         const metrics = telemetry[agentId];

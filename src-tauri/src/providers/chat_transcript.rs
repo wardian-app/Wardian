@@ -771,7 +771,12 @@ fn normalize_claude(
                     session_id,
                     provider,
                     sequence,
-                    AgentChatRole::User,
+                    // Claude labels native context as a `user` message in
+                    // stream-json, but it is provider-supplied context, not
+                    // an operator prompt. Keep the provenance in metadata
+                    // and use the system role so consumers do not split the
+                    // transcript into a false turn.
+                    AgentChatRole::System,
                     text_from_value(message)?,
                     "stream_json".to_string(),
                     turn_id_from(message).or_else(|| turn_id_from(parsed)),
@@ -793,7 +798,10 @@ fn normalize_claude(
                     session_id,
                     provider,
                     sequence,
-                    AgentChatRole::User,
+                    // Interruption markers and other provider-internal
+                    // messages must not participate in user-prompt matching
+                    // or turn-boundary detection.
+                    AgentChatRole::System,
                     text_from_value(message)?,
                     "stream_json".to_string(),
                     turn_id_from(message).or_else(|| turn_id_from(parsed)),
@@ -2689,7 +2697,7 @@ mod tests {
             .step_by(2)
             .zip(["context-1", "context-2"])
         {
-            assert_eq!(event.role, Some(AgentChatRole::User));
+            assert_eq!(event.role, Some(AgentChatRole::System));
             assert_eq!(event.metadata["input_origin"], "context_injection");
             assert_eq!(event.metadata["input_purpose"], "skill");
             assert_eq!(event.metadata["request_root_id"], "request-1");
@@ -2735,7 +2743,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| {
             event.kind == AgentChatEventKind::Message
-                && event.role == Some(AgentChatRole::User)
+                && event.role == Some(AgentChatRole::System)
                 && event.metadata["input_origin"] == "provider_internal"
                 && event.metadata["input_purpose"] == "internal"
                 && event.metadata["causal_ref"] == "provider:uuid:assistant-1"
@@ -2748,6 +2756,38 @@ mod tests {
             events[1].text.as_deref(),
             Some("[Request interrupted by user for tool use]")
         );
+    }
+
+    #[test]
+    fn claude_real_stream_provenance_does_not_promote_context_or_tool_results_to_prompts() {
+        // The tool-result line is captured from Claude Code 2.1.263 with the
+        // haiku model. Claude emits it as a native `user` record even though
+        // its content is the result of the preceding Read tool call.
+        let lines = [
+            r#"{"type":"user","uuid":"request-1","message":{"role":"user","content":"Inspect the evidence file."}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01evidence","name":"Read","input":{"file_path":"provider-evidence.txt"}}]}}"#,
+            r#"{"type":"user","isMeta":true,"parent_tool_use_id":"toolu_01evidence","uuid":"context-1","message":{"role":"user","content":[{"type":"text","text":"Native provider context."}]}}"#,
+            r#"{"type":"user","uuid":"tool-result-1","parent_tool_use_id":null,"message":{"role":"user","content":[{"tool_use_id":"toolu_01evidence","type":"tool_result","content":"1\tWARDIAN_CLAUDE_REAL_EVIDENCE\n2\t"}]}}"#,
+            r#"{"type":"user","parentUuid":"request-1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+        ];
+
+        let events = normalize_chat_lines("agent-1", "claude", lines);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == AgentChatEventKind::Message
+                    && event.role == Some(AgentChatRole::User))
+                .count(),
+            1
+        );
+        assert_eq!(events[2].role, Some(AgentChatRole::System));
+        assert_eq!(events[2].metadata["input_origin"], "context_injection");
+        assert_eq!(events[3].kind, AgentChatEventKind::ToolResult);
+        assert_eq!(events[3].role, Some(AgentChatRole::Tool));
+        assert_eq!(events[3].metadata["raw_type"], "tool_result");
+        assert_eq!(events[4].role, Some(AgentChatRole::System));
+        assert_eq!(events[4].metadata["input_origin"], "provider_internal");
     }
 
     #[test]

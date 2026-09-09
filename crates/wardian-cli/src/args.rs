@@ -10,6 +10,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Serve the explicit local agent messaging tool over MCP.
+    Mcp {
+        #[command(subcommand)]
+        command: crate::mcp::McpCommand,
+    },
     /// Discover command arguments as compact JSON; optionally name a command path.
     Schema {
         /// Command path, e.g. agent spawn or browser <target> snapshot.

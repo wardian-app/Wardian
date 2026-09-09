@@ -611,7 +611,23 @@ fn claude_legacy_provider_log_event_id(
     raw_line: &str,
 ) -> String {
     let mut legacy_event = event.clone();
-    if event.role.as_ref() == Some(&AgentChatRole::User) {
+    // Before provenance normalization, Claude context and provider-internal
+    // messages were persisted with the native `user` role. Recreate that role
+    // for the field-derived ID so pre-fix archive refs remain aliases of the
+    // raw-line ID emitted now.
+    if event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::System)
+        && matches!(
+            event
+                .metadata
+                .get("input_origin")
+                .and_then(serde_json::Value::as_str),
+            Some("context_injection" | "provider_internal")
+        )
+    {
+        legacy_event.role = Some(AgentChatRole::User);
+    }
+    if legacy_event.role.as_ref() == Some(&AgentChatRole::User) {
         if let (Some(current_text), Ok(parsed)) = (
             event.text.as_deref(),
             serde_json::from_str::<serde_json::Value>(raw_line),
@@ -1185,8 +1201,9 @@ fn event_identity_ids(event: &AgentChatEvent) -> Vec<&str> {
 
 /// Normalizes archived records written before provider adapters learned to
 /// remove their internal wrappers. This keeps archive replay on the same
-/// visible-text contract as newly parsed provider events.
+/// visible-text and provenance contract as newly parsed provider events.
 fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
+    normalize_chat_event_provenance(event);
     if event.kind != AgentChatEventKind::Message {
         return;
     }
@@ -1194,6 +1211,30 @@ fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
         return;
     };
     event.text = visible_chat_text_for_provider(&event.provider, role, text);
+}
+
+/// Older archives persisted Claude's native `user` role for provider context,
+/// interruption markers, and tool-result records. Their explicit provenance
+/// metadata is authoritative, so replay can migrate the presentation role
+/// without rewriting the durable archive or treating the row as a new prompt.
+fn normalize_chat_event_provenance(event: &mut AgentChatEvent) {
+    let input_origin = event
+        .metadata
+        .get("input_origin")
+        .and_then(serde_json::Value::as_str);
+    if event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::User)
+        && matches!(
+            input_origin,
+            Some("context_injection" | "provider_internal")
+        )
+    {
+        event.role = Some(AgentChatRole::System);
+    } else if event.kind == AgentChatEventKind::ToolResult
+        && event.role == Some(AgentChatRole::User)
+    {
+        event.role = Some(AgentChatRole::Tool);
+    }
 }
 
 fn should_collapse_provider_message_duplicate(
@@ -1901,6 +1942,42 @@ Do you want to proceed?
     }
 
     #[test]
+    fn claude_provider_log_ids_alias_pre_migration_provenance_roles() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("claude.jsonl");
+        let lines = [
+            r#"{"type":"user","isMeta":true,"uuid":"context-1","message":{"role":"user","content":"Native provider context."}}"#,
+            r#"{"type":"user","parentUuid":"assistant-1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+        ];
+        std::fs::write(&log_path, format!("{}\n", lines.join("\n"))).expect("write log");
+
+        let events = load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[]);
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_eq!(event.role, Some(AgentChatRole::System));
+            assert!(matches!(
+                event.metadata["input_origin"].as_str(),
+                Some("context_injection" | "provider_internal")
+            ));
+            let legacy_id = event
+                .metadata
+                .get("legacy_event_ids")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|ids| ids.first())
+                .and_then(serde_json::Value::as_str)
+                .expect("pre-migration role alias");
+            let mut pre_migration_event = event.clone();
+            pre_migration_event.role = Some(AgentChatRole::User);
+            assert_eq!(
+                legacy_id,
+                stable_provider_log_event_id(&pre_migration_event, &log_path)
+            );
+            assert_ne!(legacy_id, event.id);
+        }
+    }
+
+    #[test]
     fn provider_log_transcript_suppresses_watch_terminal_fallback() {
         let provider_events = vec![AgentChatEvent {
             id: "agent-1:provider:1".to_string(),
@@ -2328,6 +2405,79 @@ Do you want to proceed?
         assert!(chat_events
             .iter()
             .any(|event| event.kind == AgentChatEventKind::Status));
+    }
+
+    #[test]
+    fn merge_replays_legacy_claude_provenance_roles_without_false_prompts() {
+        let archived_context = AgentChatEvent {
+            id: "agent-1:legacy:context".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("Native provider context.".to_string()),
+            title: None,
+            status: None,
+            turn_id: Some("context-1".to_string()),
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({
+                "conversation_archive_id": "conversation-one",
+                "input_origin": "context_injection",
+                "input_purpose": "context"
+            }),
+        };
+        let mut archived_internal = archived_context.clone();
+        archived_internal.id = "agent-1:legacy:internal".to_string();
+        archived_internal.text = Some("[Request interrupted by user]".to_string());
+        archived_internal.turn_id = None;
+        archived_internal.sequence = Some(2);
+        archived_internal.metadata["input_origin"] = serde_json::json!("provider_internal");
+        archived_internal.metadata["input_purpose"] = serde_json::json!("internal");
+        let mut archived_result = archived_context.clone();
+        archived_result.id = "agent-1:legacy:result".to_string();
+        archived_result.kind = AgentChatEventKind::ToolResult;
+        archived_result.role = Some(AgentChatRole::User);
+        archived_result.text = Some("1\tWARDIAN_CLAUDE_REAL_EVIDENCE".to_string());
+        archived_result.turn_id = Some("toolu_01evidence".to_string());
+        archived_result.sequence = Some(3);
+        archived_result.metadata = serde_json::json!({
+            "conversation_archive_id": "conversation-one",
+            "raw_type": "tool_result"
+        });
+
+        let mut live_context = archived_context.clone();
+        live_context.id = "agent-1:raw:context".to_string();
+        live_context.role = Some(AgentChatRole::System);
+        live_context.metadata = serde_json::json!({
+            "input_origin": "context_injection",
+            "legacy_event_ids": ["agent-1:legacy:context"]
+        });
+        let mut live_internal = archived_internal.clone();
+        live_internal.id = "agent-1:raw:internal".to_string();
+        live_internal.role = Some(AgentChatRole::System);
+        live_internal.metadata = serde_json::json!({
+            "input_origin": "provider_internal",
+            "legacy_event_ids": ["agent-1:legacy:internal"]
+        });
+
+        let replayed = merge_chat_events(
+            vec![archived_context, archived_internal, archived_result],
+            vec![live_context, live_internal],
+        );
+
+        assert_eq!(replayed.len(), 3);
+        assert_eq!(replayed[0].role, Some(AgentChatRole::System));
+        assert_eq!(replayed[0].metadata["input_origin"], "context_injection");
+        assert_eq!(replayed[1].role, Some(AgentChatRole::System));
+        assert_eq!(replayed[1].metadata["input_origin"], "provider_internal");
+        assert_eq!(replayed[2].kind, AgentChatEventKind::ToolResult);
+        assert_eq!(replayed[2].role, Some(AgentChatRole::Tool));
     }
 
     #[test]

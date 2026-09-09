@@ -19,6 +19,8 @@ use super::{
 };
 use crate::utils::logging::log_debug;
 
+mod opencode_stdin;
+
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
 pub(crate) fn headless_provider_launch(
@@ -317,8 +319,7 @@ pub(crate) fn headless_provider_args(
             provider_args.push("json".to_string());
             provider_args.push("--dir".to_string());
             provider_args.push(provider_cwd.to_string_lossy().to_string());
-            provider_args
-                .push(crate::utils::terminal_input::normalize_prompt_for_terminal_submit(prompt));
+            // `run` re-quotes positional messages; send exact prompt bytes on stdin.
         }
         "antigravity" => {
             if let Some(config) = config_override {
@@ -558,7 +559,7 @@ pub async fn run_headless_with_options(
         )? {
             cmd.env(key, value);
         }
-        cmd.stdin(std::process::Stdio::null());
+        opencode_stdin::configure(&mut cmd);
     } else if matches!(provider_name, "antigravity" | "pi") {
         cmd.stdin(std::process::Stdio::null());
     } else if provider_name == "mock" {
@@ -676,13 +677,24 @@ pub async fn run_headless_with_options(
         })
     };
 
-    let status = wait_for_headless_child(
-        &mut child,
-        provider_name,
-        options.timeout,
-        options.lease_owner.as_ref(),
-    )
-    .await;
+    let status = if provider_name == "opencode" {
+        opencode_stdin::wait(
+            &mut child,
+            prompt,
+            options.timeout,
+            options.lease_owner.as_ref(),
+            &mut process_tree_guard,
+        )
+        .await
+    } else {
+        wait_for_headless_child(
+            &mut child,
+            provider_name,
+            options.timeout,
+            options.lease_owner.as_ref(),
+        )
+        .await
+    };
     if status.is_ok() {
         process_tree_guard.disarm();
     }
@@ -972,11 +984,20 @@ fn normalize_claude_headless_output(
 ) -> Result<serde_json::Value, String> {
     let parsed = serde_json::from_str::<serde_json::Value>(output.trim())
         .map_err(|error| format!("Failed to parse Claude JSON output: {error}. Raw: {output}"))?;
-    let response = claude_headless_response(&parsed).unwrap_or_else(|| output.to_string());
+    let result = claude_headless_result(&parsed)?;
+    let response = if result["type"] == "result" {
+        result["result"]
+            .as_str()
+            .expect("validated Claude terminal result")
+            .trim()
+            .to_owned()
+    } else {
+        claude_headless_response(result).unwrap_or_else(|| output.to_string())
+    };
 
     if output_format == "json" {
         Ok(serde_json::json!({
-            "session_id": parsed.get("session_id").and_then(|value| value.as_str()),
+            "session_id": result.get("session_id").and_then(|value| value.as_str()),
             "response": response,
             "raw": output,
         }))
@@ -984,6 +1005,47 @@ fn normalize_claude_headless_output(
         Ok(serde_json::json!({ "text": response }))
     }
 }
+
+/// Verbose Claude JSON contains conversation events followed by one terminal
+/// result. Earlier assistant/tool text is not the completed task's answer.
+fn claude_headless_result(value: &serde_json::Value) -> Result<&serde_json::Value, String> {
+    let result = if let Some(events) = value.as_array() {
+        let result = events
+            .last()
+            .filter(|event| event["type"] == "result")
+            .ok_or("Claude headless event array has no terminal result")?;
+        if events
+            .iter()
+            .filter(|event| event["type"] == "result")
+            .count()
+            != 1
+        {
+            return Err("Claude headless event array has ambiguous results".into());
+        }
+        result
+    } else {
+        value
+    };
+    if result["type"] == "result" {
+        if !result["result"].is_string() {
+            return Err("Claude headless terminal result has no answer text".into());
+        }
+        if result
+            .get("is_error")
+            .is_some_and(|flag| flag.as_bool() != Some(false))
+            || result
+                .get("subtype")
+                .is_some_and(|kind| kind.as_str() != Some("success"))
+        {
+            return Err("Claude headless terminal result did not succeed".into());
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+#[path = "headless/claude_output_tests.rs"]
+mod claude_output_tests;
 
 fn claude_headless_response(value: &serde_json::Value) -> Option<String> {
     for key in ["result", "response", "text"] {
@@ -1102,19 +1164,14 @@ pub async fn obtain_session_id(
         None
     };
 
-    if provider_name == "codex" {
-        if let Some(agent_habitat_root) = habitat_root.as_ref() {
-            let agent_codex_home = habitat_codex_home(agent_habitat_root);
-            let real_codex_home = dirs::home_dir()
-                .ok_or("Could not find user home directory")?
-                .join(".codex");
-            sync_codex_agent_home(
-                &real_codex_home,
-                &agent_codex_home,
-                std::path::Path::new(""),
-            )?;
+    if provider_name == "codex" && habitat_root.is_some() {
+        let agent_id = bootstrap_session_id.ok_or("Codex habitat identity is missing")?;
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        let _preparation = crate::utils::codex_home::acquire_preparation(&wardian_home, agent_id)?;
+        let agent_codex_home =
+            crate::utils::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
 
-            match materialize_codex_session_rollout(&agent_codex_home, cwd) {
+        match materialize_codex_session_rollout(&agent_codex_home, cwd) {
                 Ok(session_id) => {
                     let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
                         provider: provider_name.to_string(),
@@ -1128,7 +1185,6 @@ pub async fn obtain_session_id(
                     "[WARDIAN-DEBUG] Codex session rollout materialization unavailable; using legacy bootstrap: {error}"
                 )),
             }
-        }
     }
     let provider_cwd = interactive_provider_cwd(
         provider_name,
@@ -2422,6 +2478,7 @@ mod tests {
             provider_config: wardian_core::models::ProviderConfig::Codex(
                 wardian_core::models::CodexProviderConfig {
                     reasoning_effort: Some("low".into()),
+                    approval_policy: Some("on-request".into()),
                     ..Default::default()
                 },
             ),
@@ -2452,12 +2509,7 @@ mod tests {
                             None,
                             Some(&config),
                         ),
-                        "app-server" => {
-                            let mut args = Vec::new();
-                            provider.append_common_args(&mut args, &config, false);
-                            args.push("app-server".into());
-                            args
-                        }
+                        "app-server" => provider.shared_server_args(&config).unwrap(),
                         _ => provider.get_spawn_args(&config, false),
                     };
                     let original = args.clone();
@@ -2487,8 +2539,11 @@ mod tests {
                         text.matches("MEMORY_SENTINEL").count(),
                         usize::from(memory_context.is_some())
                     );
-                    if mode != "interactive" {
+                    if mode == "exec" {
                         assert!(index < args.iter().position(|arg| arg == mode).unwrap());
+                    } else if mode == "app-server" {
+                        assert_eq!(args.first().map(String::as_str), Some("app-server"));
+                        assert!(index > 1);
                     }
                     args.drain(index - 1..=index);
                     // Every original argument survives, including cwd, model, effort and task.
