@@ -64,7 +64,7 @@ export const PromptDetail: React.FC<PromptDetailProps> = ({
                     onClick={() => void handleRun()}
                     disabled={!hasAgents || running}
                     title={hasAgents ? undefined : 'Select at least one agent to run this prompt'}
-                    className="rounded bg-[var(--color-wardian-accent)] px-3 py-1.5 text-xs font-bold text-[var(--color-wardian-bg)] transition-all hover:brightness-110 disabled:opacity-50 disabled:hover:brightness-100"
+                    className="wardian-button wardian-button--primary"
                 >
                     {running ? 'Running…' : 'Run'}
                 </button>

@@ -880,7 +880,7 @@ SET dp0=%~dp0
     fn spawn_args_include_context_dirs_sandbox_permissions_and_resume() {
         let provider = make_provider();
         let config = AgentConfig {
-            model: Some("pro".into()),
+            model: Some("gemini-3.8-flash-low".into()),
             system_include_directories: Some(vec!["common".into(), "class".into()]),
             include_directories: Some(vec!["class".into(), "user".into()]),
             resume_session: Some("conversation-123".into()),
@@ -912,7 +912,7 @@ SET dp0=%~dp0
                 "--agent",
                 "reviewer",
                 "--model",
-                "pro",
+                "gemini-3.8-flash-low",
                 "--effort",
                 "high",
                 "--conversation",

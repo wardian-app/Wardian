@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+mod agent_messaging;
 
 use tokio::sync::Mutex;
 use wardian_core::control::{
@@ -20,6 +21,8 @@ pub struct InteractionState {
     provider_generations: Mutex<HashMap<String, u64>>,
     provider_status_observations: Mutex<HashMap<String, u64>>,
     provider_inputs: Mutex<HashMap<String, ProviderInputState>>,
+    // Ephemeral long-poll wake revisions; canonical delivery remains in the DB.
+    agent_message_provider_revisions: Mutex<HashMap<String, u64>>,
 }
 
 impl InteractionState {
@@ -924,6 +927,10 @@ impl InteractionState {
                 && reply.source_session_id.as_deref() != Some(session_id)
         });
         self.provider_status_observations
+            .lock()
+            .await
+            .remove(session_id);
+        self.agent_message_provider_revisions
             .lock()
             .await
             .remove(session_id);
