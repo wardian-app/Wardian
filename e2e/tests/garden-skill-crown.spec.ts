@@ -229,7 +229,7 @@ test.describe("Garden skill crown", () => {
     );
     await expect(garden.locator('[data-garden-object^="automation:"]')).toHaveCount(0);
     await garden.locator('[data-garden-object="agent:hw-01"]').press("Enter");
-    const capabilities = garden.getByRole("region", { name: "Capabilities", exact: true });
+    const capabilities = garden.getByRole("region", { name: "Skills", exact: true });
     await expect(capabilities).toContainText("KiCad Review");
     await expect(capabilities).toContainText("Class-inherited");
     await page.close();

@@ -4,7 +4,7 @@ The Garden is a hierarchical habitat for exploring Wardian's work. Districts
 contain cell-like agents and workspace ground; entering an agent, workspace,
 or situated automation reveals its composition, then readable records.
 Position reflects shared teams, workspaces, worktrees, and concrete assignments.
-Skills appear on their carriers and inside Capabilities, not as independent
+Skills appear on their carriers and inside Skills, not as independent
 map units. Unassigned Library blueprints do not populate the map.
 
 Use the Garden when you want to see the shape of your setup: which agents
@@ -60,7 +60,7 @@ labels keep their centre and width while their outlines grow smoothly in
 height into reading planes. Zooming out reverses the change, keeping the
 surrounding geography connected.
 
-![Agent cell with Identity, Capabilities, Memory, Active work, and Ports anchored inside its membrane](../assets/screenshots/garden/agent-cutaway.png)
+![Agent cell with Identity, Skills, Memory, Automations, Conversations, Inbox, Workspace, Teams, and Agents anchored inside its membrane](../assets/screenshots/garden/agent-cutaway.png)
 
 *Zoom into an agent cell to reveal contained objects, then approach a record to read it.*
 
@@ -76,7 +76,7 @@ seeds keep Stable/Current and scope grouping; enter one for its full text and
 evidence. Collections show loaded counts. With more than 48 loaded memories,
 **Find memory** searches their text; Enter or **Find next memory** focuses the
 next match without rearranging the collection. Enter that object to read its
-evidence. **Sessions & Inbox** exposes every loaded conversation summary, with
+evidence. **Conversations** exposes every loaded conversation summary, with
 dates and expandable excerpts, alongside notification details.
 Skill provenance remains in its accessible label and hover description, with
 canonical details available through the skill record.
@@ -90,13 +90,13 @@ plane and geography.
 | Region | Contents |
 | --- | --- |
 | Identity | Purpose, class, provider, model, saved permission settings, and **Open agent session** |
-| Capabilities | Deployed skills with direct, class-inherited, or global provenance; linked or copied state; configured tools |
+| Skills and Tools | Deployed skills with direct, class-inherited, or global provenance; linked or copied state; configured tools |
 | Memory | Stable and Current records, grouped by agent-wide or workspace-bound scope |
-| Active work | Current/recent conversation excerpts, assigned routines, and loaded Inbox items attributed by agent session ID |
-| Ports | Workspace, team membership, and peers sharing a team or workspace |
+| Automations, Conversations, and Inbox | Current/recent conversation excerpts, assigned routines, and loaded Inbox items attributed by agent session ID |
+| Workspace, Teams, and Agents | Workspace, team membership, and peers sharing a team or workspace |
 
 Saved permission and tool settings describe configuration; runtime application
-may require a restart. A port is a relationship, not exclusive ownership.
+may require a restart. Related agents share a workspace or team; these links do not imply exclusive ownership.
 Following a peer or workspace keeps a breadcrumb back to the originating agent.
 Peer links travel to that peer's cell in its own place in the world.
 
@@ -125,22 +125,22 @@ participating agents. Selection reveals attribution threads without drawing
 every relationship at once. Attributed and inferred evidence remain distinct;
 an inferred write does not establish an agent owner.
 
-The activity lens controls file recency:
+Inside a workspace, **File activity → Turn range** controls file recency. The overview always includes all compared changes.
 
-| Lens | Included activity |
+| Turn range | Included activity |
 | --- | --- |
-| **Now** | Newest two turns of known activity |
-| **Recent** (default) | Newest sixteen turns of known activity |
-| **Branch** | All changes in the current workspace comparison, without a recency cutoff |
+| **Latest 2 turns** | Newest two turns of known activity |
+| **Latest 16 turns** (default) | Newest sixteen turns of known activity |
+| **All compared changes** | All changes in the current workspace comparison, without a recency cutoff |
 
 Unknown or inferred recency is retained, not treated as proof of inactivity.
 Turn windows are relative to the change summary's newest turn, not elapsed
-minutes. **Branch** does not change the comparison baseline: Garden uses the
+minutes. **All compared changes** does not change the comparison baseline: Garden uses the
 workspace-wide HEAD or branch-point preference, falling back to branch point
 when the preference requires a single agent. Inspect the file record's baseline
 when comparing it with an agent-scoped Changes pane.
 
-Enable **Show full tree** inside a workspace to browse unchanged contents.
+Enable **Show full tree** inside a workspace to browse unchanged contents. This disables the turn-range control while all folder contents are shown.
 Directory listings are paged; use **Next folder page** there or **Load next
 page** on the map when offered.
 
@@ -160,7 +160,7 @@ requirement alone does not locate a blueprint.
 
 Running and awaiting-approval runs remain eligible regardless of age. Other
 runs remain recent for **24 hours**, using their update time, then completion
-or start time when absent. This window is separate from the file time lens.
+or start time when absent. This window is separate from the file-activity range.
 An open routine or stage keeps its evidence while its automation remains in the
 Garden breadcrumb, even after the run leaves the map's activity window. This
 does not put old runs back on the map. Historical evidence also remains
@@ -262,7 +262,7 @@ schedule records. Change any of those and the map follows.
 Garden's scene store retains manual district-relative placements, district
 cells, visits, and settled geometry in browser storage. Each Workbench Garden
 surface persists its selection, breadcrumb trail (including return cameras),
-current camera, and time lens in Workbench state. These are view preferences,
+current camera, and file-activity range in Workbench state. These are view preferences,
 not copies of agent configuration, memory, file contents, or automation truth.
 Camera saves settle after a zoom or pan gesture; leaving the surface flushes
 the latest position.

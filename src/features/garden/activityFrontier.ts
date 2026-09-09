@@ -6,7 +6,7 @@ import type { GardenTimeLens } from "./gardenNavigation";
 /** Unknown recency is retained: absence of attribution is not evidence of inactivity. */
 export function activityInLens(paint: TerrainPaint | undefined, lens: GardenTimeLens): boolean {
   if (!paint || lens === "branch" || paint.evidence === "inferred" || paint.recencyKnown === false) return true;
-  return paint.recency >= 2 ** (-(lens === "now" ? 2 : 16) / 8);
+  return paint.recency > 2 ** (-(lens === "now" ? 2 : 16) / 8);
 }
 
 export interface GardenActivityGroup {

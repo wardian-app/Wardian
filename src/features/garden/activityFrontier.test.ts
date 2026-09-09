@@ -6,6 +6,13 @@ import type { ChangeReviewFileEntry } from "../../types";
 
 const entry = (path: string, turn: number, evidence: "attributed" | "inferred" = "attributed"): ChangeReviewFileEntry => ({ path, change_kind: "deleted", old_path: null, insertions: 0, deletions: 4, evidence, agent_ids: evidence === "attributed" ? ["a"] : [], turn_indices: evidence === "attributed" ? [turn] : [], binary: false, truncated: false, reviewed: false });
 describe("activity frontier", () => {
+  it.each([["now", 2], ["recent", 16]] as const)("includes exactly the latest %s window", (lens, count) => {
+    const files = Array.from({ length: count + 1 }, (_, age) => entry(`age-${age}.ts`, 20 - age));
+    const paint = buildTerrainPaint([{ root: "/work", entries: files, toTurnIndex: 20 }]);
+    for (let age = 0; age <= count; age++) {
+      expect(activityInLens(paint.get(`/work/age-${age}.ts`), lens)).toBe(age < count);
+    }
+  });
   it("retains uncertain writes and applies turn-based windows without hiding branch evidence", () => {
     const files = [entry("new.ts", 20), entry("old.ts", 1), entry("shell.ts", 0, "inferred"), { ...entry("unknown.ts", 0), turn_indices: [] }];
     const paint = buildTerrainPaint([{ root: "/work", entries: files, toTurnIndex: 20 }]);

@@ -13,7 +13,7 @@ const memory: GardenMemoryRecord = {
   memory_id: GARDEN_MEMORY, revision_id: "revision-2", revision: 2,
   agent_id: GARDEN_AGENT, workspace: GARDEN_ROOT, kind: "stable",
   text: "Keep the five agent regions in a stable layout.",
-  evidence_excerpt: "Review confirmed that Memory stays beside Capabilities across agents.",
+  evidence_excerpt: "Review confirmed that Memory stays beside Skills across agents.",
   evidence_hash: "synthetic-evidence-hash", status: "active",
   supersedes_revision_id: "revision-1", replaced_by_revision_id: null,
   created_at: timestamp, updated_at: timestamp, last_verified_at: timestamp,

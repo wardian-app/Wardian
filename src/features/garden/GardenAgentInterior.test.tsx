@@ -48,11 +48,19 @@ describe("GardenAgentInterior", () => {
       expect(button.querySelector("strong")?.textContent).not.toContain("executions");
     }
   });
-  it("keeps all five named regions and truthful provenance visible", async () => {
+  it("uses Wardian feature labels while retaining the five geographic trays", async () => {
     render(<GardenAgentInterior {...props()} />);
-    for (const name of ["Identity", "Capabilities", "Memory", "Active work", "Ports"]) {
+    for (const name of ["Identity", "Skills", "Memory"]) {
       expect(within(screen.getByRole("region", { name })).getByRole("heading", { level: 3 })).toHaveAccessibleName(name);
     }
+    expect(screen.getAllByRole("region")).toHaveLength(5);
+    expect(screen.getByRole("region", { name: "Skills" })).toHaveClass("garden-agent-interior-capabilities");
+    expect(screen.getByRole("region", { name: "Automations, Conversations, Inbox" })).toHaveClass("garden-agent-interior-active-work");
+    expect(screen.getByRole("region", { name: "Workspace, Teams, Agents" })).toHaveClass("garden-agent-interior-ports");
+    for (const name of ["Automations", "Workspace", "Teams", "Agents"]) expect(screen.getByRole("group", { name })).toBeInTheDocument();
+    for (const name of ["Conversations", "Inbox"]) expect(screen.getByLabelText(name)).toBeInTheDocument();
+    expect(screen.getByText("Tools", { selector: "summary" })).toBeInTheDocument();
+    for (const name of ["Capabilities", "Active work", "Ports"]) expect(screen.queryByText(name)).not.toBeInTheDocument();
     expect(screen.getByText("Class-inherited · Copied; does not sync")).toBeInTheDocument();
     expect(screen.getByText("Agent-wide")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("No attributable items in the loaded Inbox.")).toBeInTheDocument());
@@ -73,7 +81,7 @@ describe("GardenAgentInterior", () => {
     expect(callbacks.onEnter).toHaveBeenCalledTimes(1);
   });
 
-  it("routes identity, skills, workspace and peer ports with canonical refs", () => {
+  it("routes identity, skills, workspace and related agents with canonical refs", () => {
     const callbacks = props();
     render(<GardenAgentInterior {...callbacks} />);
     for (const [name, ref] of [
@@ -136,11 +144,11 @@ describe("GardenAgentInterior", () => {
       type: "claude", permission_mode: "plan", tools: ["Read", "Edit"], allowed_tools: ["Read"], disallowed_tools: ["Bash"], strict_mcp_config: false,
     } }} />);
     const identity = within(screen.getByRole("region", { name: "Identity" }));
-    const capabilities = within(screen.getByRole("region", { name: "Capabilities" }));
+    const skills = within(screen.getByRole("region", { name: "Skills" }));
     expect(identity.getByText("plan")).toBeInTheDocument();
     expect(identity.getByText("No")).toBeInTheDocument();
-    expect(capabilities.getByText("Read, Edit")).toBeInTheDocument();
-    expect(capabilities.getByText("Bash")).toBeInTheDocument();
+    expect(skills.getByText("Read, Edit")).toBeInTheDocument();
+    expect(skills.getByText("Bash")).toBeInTheDocument();
     expect(screen.queryByText("Legacy")).not.toBeInTheDocument();
     expect(screen.queryByText("bypassPermissions")).not.toBeInTheDocument();
   });
@@ -149,6 +157,6 @@ describe("GardenAgentInterior", () => {
     render(<GardenAgentInterior {...props()} agent={{ ...agent, codex_sandbox_mode: "read-only", codex_approval_policy: "never", codex_search: false }} />);
     expect(screen.getByText("read-only")).toBeInTheDocument();
     expect(screen.getByText("never")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Capabilities" })).getByText("No")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Skills" })).getByText("No")).toBeInTheDocument();
   });
 });

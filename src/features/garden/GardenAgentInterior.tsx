@@ -29,10 +29,11 @@ export interface GardenAgentInteriorProps {
   contentsCache?: GardenContentsCache;
 }
 
-function Region({ name, children, action, count }: { name: string; children: ReactNode; action?: ReactNode; count?: number }) {
+/** Layout keys remain stable when feature labels change. Grouped trays label their own contents. */
+function Region({ name, regionKey = name.toLowerCase().replace(/ /g, "-"), heading = true, children, action, count }: { name: string; regionKey?: string; heading?: boolean; children: ReactNode; action?: ReactNode; count?: number }) {
   const id = useId();
-  return <section className={`garden-agent-interior-region garden-agent-interior-${name.toLowerCase().replace(/ /g, "-")}`} aria-labelledby={id}>
-    <h3 id={id}>{name}{count !== undefined && <span className="garden-region-count" aria-hidden="true">{count}</span>}</h3>
+  return <section className={`garden-agent-interior-region garden-agent-interior-${regionKey}`} aria-labelledby={heading ? id : undefined} aria-label={heading ? undefined : name}>
+    {heading && <h3 id={id}>{name}{count !== undefined && <span className="garden-region-count" aria-hidden="true">{count}</span>}</h3>}
     <div className="garden-agent-interior-scroll" tabIndex={0} aria-label={`${name} contents`}>{children}</div>
     {action && <div className="garden-agent-interior-primary-action">{action}</div>}
   </section>;
@@ -151,7 +152,6 @@ function AgentQueue({ agentId }: { agentId: string }) {
   const attributed = items.filter((item) => item.agent_session_id === agentId && !item.dismissed)
     .sort((left, right) => right.timestamp - left.timestamp);
   return <div className="garden-agent-interior-queue">
-    <h4>Inbox</h4>
     {loading && <p role="status">Loading Inbox…</p>}
     {attributed.map((item) => <article key={item.id} className="garden-agent-interior-conversation">
       <strong>{item.notification_title || queueItemStatus(item)}</strong>
@@ -214,7 +214,9 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
         if (event.key === " ") event.stopPropagation();
       }}>
       {glyph && <i className="garden-agent-interior-glyph" aria-hidden="true" style={{ "--garden-skill-hue": glyph.hue } as CSSProperties}><b>{glyph.monogram}</b></i>}
-      {!glyph && ref.kind !== "identity" && <i className={`garden-object-mark garden-object-mark-${ref.kind}`} aria-hidden="true">{mark ?? (ref.kind === "agent" ? agentMonogram(title) : ref.kind === "workspace" ? "⌁" : "")}</i>}
+      {!glyph && ref.kind !== "identity" && <i className={`garden-object-mark garden-object-mark-${ref.kind}`} aria-hidden="true">{mark ?? (ref.kind === "memory"
+        ? <svg viewBox="0 0 34 26" focusable="false"><path d="M3 19C3 8 14 3 30 3C30 16 21 23 8 23C5 23 3 22 3 19Z" /><path className="garden-memory-vein" d="M8 19L25 8" /></svg>
+        : ref.kind === "agent" ? agentMonogram(title) : ref.kind === "workspace" ? "⌁" : "")}</i>}
       <strong>{ref.kind === "memory" ? concise(title, 38) : title}</strong>{detail && <> <span>{detail}</span></>}
     </button>
   </div>;
@@ -231,8 +233,8 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
       <p className="garden-agent-interior-note">Saved configuration; runtime application may require a restart.</p>
       </details>
     </Region>
-    <Region name="Capabilities" count={crown.length} action={<details className="garden-agent-interior-disclosure">
-      <summary>Configured tools</summary>
+    <Region name="Skills" regionKey="capabilities" count={crown.length} action={<details className="garden-agent-interior-disclosure">
+      <summary>Tools</summary>
       <ConfigurationFields config={providerConfig} fields={TOOL_FIELDS} />
       {typeof providerConfig.mcp_config === "string" && providerConfig.mcp_config && <p>MCP configuration supplied.</p>}
     </details>}>
@@ -261,25 +263,42 @@ export function GardenAgentInterior({ agent, status, crown, agents, teams, autom
       {contents.memories.data?.length === 0 && <p>No active memories in this scope.</p>}
       <button type="button" className="garden-agent-interior-action" onClick={contents.refresh}>Refresh contents</button>
     </Region>
-    <Region name="Active work">
-      <ContentNotice state={contents.conversations} label="Conversations" />
+    <Region name="Automations, Conversations, Inbox" regionKey="active-work" heading={false}>
+      <div className="garden-agent-feature-group" role="group" aria-label="Automations">
+      <h4>Automations</h4>
       {routines.map((routine) => record({ kind: "automation", id: routine.id }, routine.label,
         `${routine.runStatus === "none" ? "Assigned routine" : routine.runStatus} · ${routine.nodeCount} stages`, undefined, <RoutineMark routine={routine} />))}
+      {!routines.length && <p>No assigned automations.</p>}
+      </div>
+      <details className="garden-agent-interior-disclosure garden-work-evidence" aria-label="Conversations"><summary>Conversations</summary>
+      <ContentNotice state={contents.conversations} label="Conversations" />
       {contents.conversations.data && <p className="garden-collection-count garden-conversation-count">{contents.conversations.data.length} loaded {contents.conversations.data.length === 1 ? "conversation" : "conversations"}</p>}
-      <details className="garden-agent-interior-disclosure garden-work-evidence"><summary>Sessions & Inbox</summary>
       <div className="garden-conversation-objects">{contents.conversations.data?.map((conversation) =>
         <ConversationObject key={`${agent.session_id}:${conversation.conversation_id}`} conversation={conversation} />
       )}</div>
       {contents.conversations.data?.length === 0 && <p>No recorded conversations available.</p>}
+      </details>
+      <details className="garden-agent-interior-disclosure garden-work-evidence" aria-label="Inbox"><summary>Inbox</summary>
       {reading && <AgentQueue agentId={agent.session_id} />}
       </details>
     </Region>
-    <Region name="Ports">
+    <Region name="Workspace, Teams, Agents" regionKey="ports" heading={false}>
+      <div className="garden-agent-feature-group" role="group" aria-label="Workspace">
+      <h4>Workspace</h4>
       {workspaceId && record({ kind: "workspace", id: workspaceId }, workspace, "Workspace")}
+      {!workspaceId && <p>No workspace configured.</p>}
+      </div>
+      <div className="garden-agent-feature-group" role="group" aria-label="Teams">
+      <h4>Teams</h4>
       {memberships.map((team) => <p key={team.id}>Team · {team.name}</p>)}
+      {!memberships.length && <p>No team memberships.</p>}
+      </div>
+      <div className="garden-agent-feature-group" role="group" aria-label="Agents">
+      <h4>Agents</h4>
       {peers.map((peer) => record({ kind: "agent", id: peer.session_id }, peer.session_name,
         memberships.some((team) => team.agentIds.includes(peer.session_id)) ? "Shared team" : "Shared workspace"))}
-      {!workspaceId && !memberships.length && !peers.length && <p>No workspace or team relationships available.</p>}
+      {!peers.length && <p>No related agents.</p>}
+      </div>
     </Region>
   </div>;
 }

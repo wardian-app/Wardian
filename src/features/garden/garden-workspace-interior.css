@@ -29,3 +29,8 @@
 .garden-workspace-interior .garden-workspace-evidence { grid-column: 1 / -1; padding-top: 7px; border-top: 1px solid var(--workspace-edge); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .garden-workspace-interior .garden-workspace-evidence[data-evidence="inferred"] { border-top-style: dashed; }
 .garden-workspace-interior > button { margin-top: 12px; border-radius: 4px; font-size: 12px; }
+.garden-file-activity { margin: 0 0 18px; padding: 12px; border: 1px solid var(--color-wardian-border); border-radius: 6px; font-size: 12px; }
+.garden-file-activity legend { padding-inline: 4px; font-weight: 600; }
+.garden-file-activity label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.garden-file-activity select { min-height: 32px; max-width: 100%; padding: 4px 8px; border: 1px solid var(--color-wardian-border); border-radius: 4px; color: var(--color-wardian-text); background: var(--color-wardian-input-bg); }
+.garden-file-activity p { margin: 8px 0 0; }

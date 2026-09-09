@@ -18,16 +18,14 @@
 }
 .garden-view .garden-enter-control { display: none; }
 .garden-navigation { position: absolute; inset: 12px 12px auto; z-index: 25; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; pointer-events: none; }
-.garden-navigation nav, .garden-time-lens { pointer-events: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 5px 8px; border: 1px solid var(--color-wardian-border); border-radius: 18px; background: var(--color-wardian-bg); color: var(--color-wardian-text); }
-.garden-navigation button, .garden-time-lens button { font-size: 12px; padding: 5px 8px; border-radius: 12px; }
-.garden-time-lens { margin-left: auto; }
+.garden-navigation nav { pointer-events: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 5px 8px; border: 1px solid var(--color-wardian-border); border-radius: 18px; background: var(--color-wardian-bg); color: var(--color-wardian-text); }
+.garden-navigation button { font-size: 12px; padding: 5px 8px; border-radius: 12px; }
 .garden-coverage { position: absolute; top: calc(100% + 8px); right: 0; max-width: min(320px, 100%); pointer-events: auto; color: var(--color-wardian-text); font-size: 12px; }
 .garden-coverage > summary { width: fit-content; margin-left: auto; padding: 6px 12px; border: 1px solid var(--color-wardian-border); border-radius: 16px; background: var(--color-wardian-bg); cursor: pointer; }
 .garden-coverage > div { margin-top: 6px; padding: 14px; border: 1px solid var(--color-wardian-border); border-radius: 16px; background: var(--color-wardian-bg); max-height: 50vh; overflow: auto; }
 .garden-coverage p { margin: 0 0 10px; line-height: 1.5; color: var(--color-wardian-text-muted); }
 .garden-coverage button { padding: 6px 10px; border: 1px solid var(--color-wardian-border); border-radius: 10px; }
 .garden-coverage button:disabled { opacity: .5; cursor: wait; }
-.garden-time-lens [aria-pressed=true] { background: var(--color-wardian-card); box-shadow: inset 0 0 0 1px var(--color-wardian-accent); }
 .garden-composition { position: absolute; inset: 64px clamp(12px, 4cqw, 64px) 86px; z-index: 20; padding: clamp(18px, 3cqw, 40px); overflow: auto; overscroll-behavior: contain; border: 2px solid var(--garden-status, var(--color-wardian-border)); border-radius: 9% 12% 8% 11% / 13% 10% 14% 9%; background: var(--color-wardian-bg); box-shadow: 0 0 0 8px color-mix(in srgb, var(--garden-status, var(--color-wardian-border)) 12%, transparent); animation: garden-enter 180ms ease-out; }
 .garden-composition:focus { outline: none; }
 .garden-composition h2 { font-size: clamp(18px, 2cqw, 26px); font-weight: 600; color: var(--color-wardian-text); margin: 0 0 8px; }
@@ -55,7 +53,7 @@
 .garden-selection button { border: 1px solid var(--color-wardian-border); border-radius: 12px; padding: 5px 10px; }
 @keyframes garden-enter { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .garden-composition { animation: none; } }
-@container (max-width: 600px) { .garden-composition { inset: 100px 10px 120px; border-radius: 28px; padding: 18px; } .garden-selection { max-width: calc(100% - 24px); bottom: 46px; } .garden-navigation { gap: 6px; } .garden-time-lens { margin-left: 0; } .garden-record-facts { grid-template-columns: 85px 1fr; } }
+@container (max-width: 600px) { .garden-composition { inset: 100px 10px 120px; border-radius: 28px; padding: 18px; } .garden-selection { max-width: calc(100% - 24px); bottom: 46px; } .garden-navigation { gap: 6px; } .garden-record-facts { grid-template-columns: 85px 1fr; } }
 
 /* Scene geometry is camera-owned. These objects never become viewport panels. */
 .garden-spatial-world { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -77,8 +75,6 @@
 .garden-spatial-cell:not(.garden-spatial-agent) > .garden-spatial-contents { opacity: var(--garden-detail); }
 .garden-spatial-caption { position: absolute; top: 10%; left: 15%; right: 15%; text-align: center; color: var(--color-wardian-text-muted); font-size: 32px; line-height: 1.3; pointer-events: none; }
 .garden-spatial-nucleus-preview { position: absolute; left: 50%; transform: translate(-50%, -50%); color: var(--color-wardian-text); pointer-events: none; z-index: 1; line-height: 1; }
-.garden-spatial-cell .garden-record { font-size: 18px; }
-.garden-spatial-cell .garden-record h2 { font-size: 26px; }
 .garden-spatial-world ~ * { pointer-events: auto; }
 .garden-recovery-notice { position: absolute; top: 62px; left: 16px; z-index: 30; max-width: calc(100% - 32px); padding: 8px 12px; border-radius: 12px; background: var(--color-wardian-bg); color: var(--color-wardian-text-muted); font-size: 12px; }
 .garden-spatial-contents:focus-visible { outline: 2px solid var(--color-wardian-accent); outline-offset: -2px; }

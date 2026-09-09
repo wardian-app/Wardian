@@ -20,7 +20,6 @@ import { GardenSpatialCell } from "../features/garden/GardenSpatialCell";
 import { agentCellBounds, cameraForBounds, projectBounds, recordPlaneBounds, type GardenWorldBounds } from "../features/garden/gardenSpatialZoom";
 import { useGardenCameraMotion } from "../features/garden/useGardenCameraMotion";
 import { wheelZoomFactor } from "../utils/wheelZoom";
-import { activityInLens } from "../features/garden/activityFrontier";
 import { zoomAt } from "../features/garden/gardenViewport";
 import { normalizeEntityPath } from "../features/garden/entityRef";
 import { gardenAgentStatusColor } from "../features/garden/gardenStatus";
@@ -350,7 +349,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
   // answers for all of them.
   const changeRoots = useMemo(() => [...new Set([...terrain.visibleRoots, ...[...layout.districts.values()].flatMap((district) => district.roots)])], [terrain.visibleRoots, layout.districts]);
   const changes = useTerrainChanges({ enabled: terrainEnabled, roots: changeRoots });
-  const activityCells = useMemo(() => terrain.cells.filter((cell) => cell.depth === 0 || (changes.paint.has(cell.path) && activityInLens(changes.paint.get(cell.path), timeLens))), [terrain.cells, changes.paint, timeLens]);
+  const activityCells = useMemo(() => terrain.cells.filter((cell) => cell.depth === 0 || changes.paint.has(cell.path)), [terrain.cells, changes.paint]);
 
   // Both reverse indexes, in one place. A skill and a piece of ground answer
   // "who?" the same way — with a set of agents — because neither is a thing you
@@ -566,7 +565,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
   const renderContents = (frame: GardenNavigationFrame) => {
     const ref = frame.ref;
     if (ref.kind === "workspace") return <GardenWorkspaceInterior path={normalizeEntityPath(ref.id) ?? ref.id}
-      entries={changes.entries} paint={changes.paint} lens={timeLens} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject} />;
+      entries={changes.entries} paint={changes.paint} lens={timeLens} baseline={changes.baseline} onLensChange={setTimeLens} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject} />;
     if (ref.kind === "automation" || ref.kind === "stage") return <GardenAutomationInterior
       automation={compositionAutomations.find((item) => item.id === (ref.kind === "automation" ? ref.id : [...trail].reverse().find((parent) => parent.ref.kind === "automation")?.ref.id))}
       agents={filteredAgents} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject}
@@ -614,7 +613,6 @@ export const GardenView: React.FC<GardenViewProps> = ({
       }}>
       <div className="garden-navigation">
         <nav aria-label="Garden breadcrumb"><button onClick={() => returnTo(0)}>Habitat</button>{trail.map((frame, index) => <React.Fragment key={`${index}:${unitKey(frame.ref)}`}><span aria-hidden="true">›</span><button aria-current={index === trail.length - 1 ? "location" : undefined} onClick={() => returnTo(index + 1)}>{frame.label}</button></React.Fragment>)}</nav>
-        <div className="garden-time-lens" aria-label="Activity time lens">{(["now", "recent", "branch"] as const).map((lens) => <button key={lens} aria-pressed={timeLens === lens} title={lens === "now" ? "Newest two turns; uncertain recency retained" : lens === "recent" ? "Newest sixteen turns; uncertain recency retained" : "All changes in the workspace comparison"} onClick={() => setTimeLens(lens)}>{lens[0].toUpperCase() + lens.slice(1)}</button>)}</div>
         {(automationsTruncated || terrain.truncatedRoots.size > 0) && <details className="garden-coverage">
           <summary>Map coverage</summary>
           <div>

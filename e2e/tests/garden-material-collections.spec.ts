@@ -22,7 +22,13 @@ test("large collections remain findable without moving the agent geography", asy
   expect((await cell.boundingBox())?.width).toBeCloseTo(before!.width, 0);
   await last.press("Enter");
   await expect(page.getByRole("article", { name: "memory record" })).toBeVisible();
+  const record = page.locator('[data-garden-cell="memory:dense-memory-299"]');
+  await expect(record).toHaveCSS("transform", "none");
+  await expect(cell.locator(":scope > .garden-spatial-contents")).toHaveCSS("visibility", "hidden");
+  await expect(page.getByRole("heading", { name: "Memory", exact: true })).toBeVisible();
+  await expect(page.getByText("Canonical record", { exact: false })).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(cell.locator(":scope > .garden-spatial-contents")).toHaveCSS("visibility", "visible");
   // A later-to-earlier search must clear the sticky search surface as well.
   const search = memory.getByRole("searchbox", { name: "Find memory" });
   await search.fill("Keep the five agent regions");
@@ -32,8 +38,8 @@ test("large collections remain findable without moving the agent geography", asy
   const firstBox = await first.boundingBox();
   const searchBox = await memory.locator(".garden-memory-search").boundingBox();
   expect(firstBox!.y).toBeGreaterThanOrEqual(searchBox!.y + searchBox!.height);
-  const work = cell.getByRole("region", { name: "Active work", exact: true });
-  await work.getByText("Sessions & Inbox", { exact: true }).click();
+  const work = cell.getByRole("region", { name: "Automations, Conversations, Inbox", exact: true });
+  await work.getByText("Conversations", { exact: true }).click();
   const conversation = work.locator(".garden-conversation-summary").last();
   await conversation.scrollIntoViewIfNeeded();
   await conversation.press("Enter");

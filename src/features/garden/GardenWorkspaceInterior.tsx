@@ -14,13 +14,15 @@ interface Props {
   entries: ReadonlyMap<string, TerrainChangeEntry>;
   paint: ReadonlyMap<string, TerrainPaint>;
   lens: GardenTimeLens;
+  baseline?: string;
+  onLensChange?: (lens: GardenTimeLens) => void;
   selectedKey: string | null;
   onSelect: (ref: GardenEntityRef) => void;
   onEnter: (ref: GardenEntityRef) => void;
 }
 
 /** Activity ancestry is the default; full-tree browsing is explicit and paged. */
-export function GardenWorkspaceInterior({ path, entries, paint, lens, selectedKey, onSelect, onEnter }: Props) {
+export function GardenWorkspaceInterior({ path, entries, paint, lens, baseline = "branch_point", onLensChange, selectedKey, onSelect, onEnter }: Props) {
   const [fullTree, setFullTree] = useState(false);
   const [listing, setListing] = useState<DirectoryTreeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,9 +43,19 @@ export function GardenWorkspaceInterior({ path, entries, paint, lens, selectedKe
     <div className="garden-interior-heading"><div><h2>Workspace</h2><p className="garden-path" title={path}>{path}</p></div>
       <label><input type="checkbox" checked={fullTree} onChange={(event) => { setFullTree(event.target.checked); setPage(0); }} /> Show full tree</label>
     </div>
+    <fieldset className="garden-file-activity">
+      <legend>File activity</legend>
+      <label>Turn range <select value={lens} disabled={fullTree} onChange={(event) => onLensChange?.(event.target.value as GardenTimeLens)}>
+        <option value="now">Latest 2 turns</option>
+        <option value="recent">Latest 16 turns</option>
+        <option value="branch">All compared changes</option>
+      </select></label>
+      <p>Compared with {baseline === "head" ? "HEAD (uncommitted changes)" : "the branch point"}. Changes with uncertain recency are included.</p>
+      {fullTree && <p>Showing all folder contents; the turn range applies when full-tree browsing is off.</p>}
+    </fieldset>
     {error && <p role="alert">Directory unavailable: {error}</p>}
     {fullTree && !listing && !error && <p role="status">Loading folder…</p>}
-    {children.length === 0 && <p>No file activity in this lens. Show the full tree to browse workspace contents.</p>}
+    {children.length === 0 && <p>No file activity in this turn range. Show the full tree to browse workspace contents.</p>}
     <div className="garden-activity-groups">{children.map((group) => {
       const ref: GardenEntityRef = { kind: group.isDirectory ? "workspace" : "path", id: group.path };
       const evidence = paint.get(group.path);

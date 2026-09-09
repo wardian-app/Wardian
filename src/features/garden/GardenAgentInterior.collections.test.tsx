@@ -47,7 +47,7 @@ describe("Garden collections", () => {
     const conversations = Array.from({ length: 60 }, (_, index) => conversation(index + 1));
     const { container } = setup([], conversations);
     expect(screen.getByText("60 loaded conversations")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Sessions & Inbox"));
+    fireEvent.click(screen.getByText("Conversations", { selector: "summary" }));
     expect(container.querySelectorAll(".garden-conversation-object")).toHaveLength(60);
     expect(container.querySelectorAll(".garden-conversation-detail")).toHaveLength(0);
     for (const index of [3, 59]) {
@@ -98,8 +98,16 @@ describe("Garden collections", () => {
     memories[299].text = "Shared needle last match";
     const { container, onSelect, onEnter } = setup(memories, []);
     const input = screen.getByRole("searchbox", { name: "Find memory" });
-    const first = screen.getByRole("button", { name: "Shared NEEDLE first match Revision 1" });
-    const last = screen.getByRole("button", { name: "Shared needle last match Revision 1" });
+    // Global role queries recompute accessible names/styles for all 300 memory
+    // buttons. Scope controls to the search region and verify canonical result
+    // buttons directly, retaining accessible-name and anchor assertions.
+    const search = within(input.closest<HTMLElement>(".garden-memory-search")!);
+    const first = container.querySelector<HTMLButtonElement>('[data-garden-ref="memory:m299"]')!;
+    const last = container.querySelector<HTMLButtonElement>('[data-garden-ref="memory:m300"]')!;
+    expect(first.tagName).toBe("BUTTON");
+    expect(last.tagName).toBe("BUTTON");
+    expect(first).toHaveAccessibleName("Shared NEEDLE first match Revision 1");
+    expect(last).toHaveAccessibleName("Shared needle last match Revision 1");
     first.scrollIntoView = vi.fn();
     last.scrollIntoView = vi.fn();
     fireEvent.change(input, { target: { value: "  needle  " } });
@@ -111,20 +119,20 @@ describe("Garden collections", () => {
     expect(first).toHaveAttribute("data-garden-ref", "memory:m299");
     expect(first.scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
     expect(screen.getByText("Match 1 of 2")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Find next memory" }));
+    fireEvent.click(search.getByRole("button", { name: "Find next memory" }));
     expect(last).toHaveFocus();
     expect(screen.getByText("Match 2 of 2")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Find next memory" }));
+    fireEvent.click(search.getByRole("button", { name: "Find next memory" }));
     expect(first).toHaveFocus();
     expect(onSelect).not.toHaveBeenCalled();
     expect(onEnter).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "missing text" } });
     expect(screen.getByText("0 matching memories")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Find next memory" })).toBeDisabled();
+    expect(search.getByRole("button", { name: "Find next memory" })).toBeDisabled();
     fireEvent.change(input, { target: { value: "last match" } });
     expect(screen.getByText("1 matching memory")).toBeInTheDocument();
     fireEvent.change(input, { target: { value: "" } });
-    expect(screen.queryByRole("button", { name: "Find next memory" })).not.toBeInTheDocument();
+    expect(search.queryByRole("button", { name: "Find next memory" })).not.toBeInTheDocument();
     expect(screen.getByText("300 loaded memories")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("Loading Inbox…")).not.toBeInTheDocument());
   });

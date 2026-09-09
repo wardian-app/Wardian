@@ -36,16 +36,18 @@ test.describe("Garden semantic composition", () => {
     await expect(surfaceTab(page, "agent-session")).toHaveCount(0);
     await capture(page, "01-selected-habitat");
     await agent.press("Enter");
-    for (const name of ["Identity", "Capabilities", "Memory", "Active work", "Ports"]) {
+    for (const name of ["Identity", "Skills", "Memory", "Automations, Conversations, Inbox", "Workspace, Teams, Agents"]) {
       await expect(garden(page).getByRole("region", { name, exact: true })).toBeVisible();
+    }
+    for (const name of ["Identity", "Skills", "Memory", "Automations", "Workspace"]) {
       await expect(garden(page).getByRole("heading", { name, exact: true })).toBeInViewport();
     }
     // Transformed edges can produce 0.9999993 from IntersectionObserver even
     // when fully inside; allow subpixel rounding, not a clipped port.
-    await expect(garden(page).getByRole("region", { name: "Ports", exact: true }).getByRole("button", { name: /synthetic\/garden/ })).toBeInViewport({ ratio: .9999 });
+    await expect(garden(page).getByRole("region", { name: "Workspace, Teams, Agents", exact: true }).getByRole("button", { name: /synthetic\/garden/ })).toBeInViewport({ ratio: .9999 });
     await expect(garden(page).getByTestId("garden-selection-summary").getByRole("button", { name: "Enter", exact: true })).toHaveCount(0);
-    await expect(garden(page).getByRole("region", { name: "Active work", exact: true })).toContainText("Draft ready for evidence review.");
-    await expect(garden(page).getByRole("region", { name: "Capabilities" })).toContainText("Interface Review");
+    await expect(garden(page).getByRole("region", { name: "Automations, Conversations, Inbox", exact: true })).toContainText("Draft ready for evidence review.");
+    await expect(garden(page).getByRole("region", { name: "Skills" })).toContainText("Interface Review");
     const memory = garden(page).getByRole("button", { name: /Keep the five agent regions/ });
     await expect(memory).toBeVisible();
     await capture(page, "02-agent-cutaway");
@@ -71,7 +73,7 @@ test.describe("Garden semantic composition", () => {
     await memory.press("Enter");
     const record = garden(page).getByRole("article", { name: "memory record" });
     await expect(garden(page).getByTestId("garden-selection-summary").getByRole("button", { name: "Open record", exact: true })).toHaveCount(0);
-    await expect(record).toContainText("Review confirmed that Memory stays beside Capabilities");
+    await expect(record).toContainText("Review confirmed that Memory stays beside Skills");
     await expect(record).toContainText(GARDEN_ROOT);
     await expect(record).toContainText("conversation-design:turn:4");
     await record.getByText("Revision history (2)").click();
@@ -89,7 +91,7 @@ test.describe("Garden semantic composition", () => {
     await enterAgent(page);
     const moss = garden(page).locator(`[data-garden-cell="agent:${GARDEN_AGENT}"]`);
     const mossWorld = await moss.getAttribute("data-garden-world");
-    const ports = moss.getByRole("region", { name: "Ports", exact: true });
+    const ports = moss.getByRole("region", { name: "Workspace, Teams, Agents", exact: true });
     const peer = ports.getByRole("button", { name: /Fern Reviewer/ });
     await peer.click();
     await expect(peer).toHaveAttribute("aria-pressed", "true");
@@ -139,6 +141,11 @@ test.describe("Garden semantic composition", () => {
     // Expand the existing revision evidence so this fixture exercises real overflow.
     await reading.getByText("Revision history (2)", { exact: true }).press("Enter");
     await expect(reading).toContainText("Keep agent regions stable.");
+    // Evidence and source now have their own keyboard-accessible disclosures.
+    for (const name of ["Sources (1)", "Evidence", "Full source"]) {
+      await page.keyboard.press("Shift+Tab");
+      await expect(reading.getByText(name, { exact: true })).toBeFocused();
+    }
     await page.keyboard.press("Shift+Tab");
     await expect(reading).toBeFocused();
     await page.keyboard.press("Home");
@@ -160,7 +167,7 @@ test.describe("Garden semantic composition", () => {
 
   test("workspace activity excludes unchanged siblings until full tree; file record carries evidence", async ({ page }) => {
     await enterAgent(page);
-    await garden(page).getByRole("region", { name: "Ports" }).getByRole("button", { name: /synthetic\/garden/ }).press("Enter");
+    await garden(page).getByRole("region", { name: "Workspace, Teams, Agents" }).getByRole("button", { name: /synthetic\/garden/ }).press("Enter");
     const workspace = garden(page).getByRole("region", { name: "Workspace activity" });
     await expect(workspace.getByRole("button", { name: /src/ })).toBeVisible();
     await expect(workspace.getByRole("button", { name: /README/ })).toHaveCount(0);
@@ -181,7 +188,7 @@ test.describe("Garden semantic composition", () => {
 
   test("multi-agent schedule opens ordered run stages and immutable output evidence", async ({ page }) => {
     await enterAgent(page);
-    await garden(page).getByRole("region", { name: "Active work", exact: true }).getByRole("button", { name: /Daily design review/ }).press("Enter");
+    await garden(page).getByRole("region", { name: "Automations, Conversations, Inbox", exact: true }).getByRole("button", { name: /Daily design review/ }).press("Enter");
     const flow = garden(page).getByRole("region", { name: "Automation composition" });
     await expect(flow).toContainText("2 assigned agents");
     const lane = flow.getByRole("region", { name: `Run ${GARDEN_RUN}`, exact: true });
@@ -251,14 +258,14 @@ test.describe("Garden semantic composition", () => {
     await expect.poll(async () => (await cell.boundingBox())!.width).toBeCloseTo(beforeZoom.width, 1);
     await expect.poll(async () => (await cell.boundingBox())!.height).toBeCloseTo(beforeZoom.height, 1);
     const identity = garden(page).getByRole("region", { name: "Identity", exact: true });
-    const ports = garden(page).getByRole("region", { name: "Ports", exact: true });
+    const ports = garden(page).getByRole("region", { name: "Workspace, Teams, Agents", exact: true });
     await expect(identity).toBeVisible();
     await expect(ports).toBeVisible();
     await expect(cell).toHaveAttribute("data-garden-world", world!);
     const identityBounds = await identity.boundingBox();
     const portsBounds = await ports.boundingBox();
     expect(portsBounds!.y).toBeGreaterThan(identityBounds!.y);
-    const capabilitiesBounds = await garden(page).getByRole("region", { name: "Capabilities", exact: true }).boundingBox();
+    const capabilitiesBounds = await garden(page).getByRole("region", { name: "Skills", exact: true }).boundingBox();
     const memoryBounds = await garden(page).getByRole("region", { name: "Memory", exact: true }).boundingBox();
     expect(capabilitiesBounds!.x).toBeLessThan(identityBounds!.x);
     expect(memoryBounds!.x).toBeGreaterThan(identityBounds!.x);
@@ -324,7 +331,7 @@ test.describe("Garden semantic composition", () => {
 
   test("canonical run evidence opens Observe and schedule management opens Monitor with Garden return", async ({ page }) => {
     await enterAgent(page);
-    await garden(page).getByRole("region", { name: "Active work", exact: true }).getByRole("button", { name: /Daily design review/ }).press("Enter");
+    await garden(page).getByRole("region", { name: "Automations, Conversations, Inbox", exact: true }).getByRole("button", { name: /Daily design review/ }).press("Enter");
     await garden(page).getByRole("region", { name: `Run ${GARDEN_RUN}`, exact: true }).getByRole("button", { name: /Draft interface/ }).press("Enter");
     await garden(page).getByRole("article").getByRole("button", { name: "Inspect run evidence", exact: true }).click();
     const automations = surfacePanel(page, "automations");
