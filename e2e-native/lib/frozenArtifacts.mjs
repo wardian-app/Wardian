@@ -40,13 +40,17 @@ function runtimePayloadsFor(sourcePath) {
 }
 
 function copyMissingTree(sourcePath, destPath) {
-  if (!fs.existsSync(destPath)) {
-    fs.cpSync(sourcePath, destPath, { recursive: true });
+  if (!fs.statSync(sourcePath).isDirectory()) {
+    if (!fs.existsSync(destPath)) {
+      fs.copyFileSync(sourcePath, destPath);
+    }
     return;
   }
-  if (!fs.statSync(sourcePath).isDirectory() || !fs.statSync(destPath).isDirectory()) {
+  if (fs.existsSync(destPath) && !fs.statSync(destPath).isDirectory()) {
     return;
   }
+  // Node's Windows cpSync can misencode Unicode destination paths.
+  fs.mkdirSync(destPath, { recursive: true });
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
     copyMissingTree(path.join(sourcePath, entry.name), path.join(destPath, entry.name));
   }

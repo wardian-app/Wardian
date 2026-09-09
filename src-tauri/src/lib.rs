@@ -571,6 +571,10 @@ pub fn run() {
                                                 "Failed to restore agent {}: {}",
                                                 config.session_id, error
                                             );
+                                            utils::logging::log_debug(&format!(
+                                                "[Wardian] Failed to restore agent {}: {}",
+                                                config.session_id, error
+                                            ));
                                             let _ = wardian_core::db::update_agent_status(
                                                 &config.session_id,
                                                 "Error",
@@ -956,6 +960,11 @@ pub fn run() {
                 // Headless browsers are child processes; leaving them running
                 // after the app quits would strand them with no owner.
                 state.browser_sessions.shutdown_all().await;
+                if let Err(error) = state.native_delivery.shutdown_all().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Native owner exit cleanup: {error}"
+                    ));
+                }
             });
         }
     });

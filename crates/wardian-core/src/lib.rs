@@ -1,3 +1,4 @@
+pub mod agent_messaging;
 pub mod agent_replacement;
 pub mod artifacts;
 mod atomic_file;

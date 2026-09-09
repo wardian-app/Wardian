@@ -18,12 +18,19 @@ use wardian_core::models::{
     DeployedSkillRef, ProviderConfig,
 };
 
+#[path = "agent_lifecycle.rs"]
+mod agent_lifecycle;
 #[path = "agent_naming.rs"]
 mod agent_naming;
+mod removal;
+use agent_lifecycle::{
+    acquire_agent_lifecycle_guard, lock_agent_lifecycle, stop_native_owner, PendingRuntime,
+};
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
     validate_agent_name,
 };
+use removal::{cleanup_removed_agent_directory, join_agent_processes_for_removal};
 
 /// Outcome of applying a persisted agent model selection to its live provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -214,24 +221,6 @@ impl DeletedAgentReferenceCleanup {
             watchlists_changed,
             topology_changed,
         })
-    }
-}
-
-async fn lock_agent_lifecycle(
-    state: &AppState,
-    session_id: &str,
-) -> tokio::sync::OwnedMutexGuard<()> {
-    state.lock_agent_lifecycle(session_id).await
-}
-
-async fn acquire_agent_lifecycle_guard(
-    state: &AppState,
-    session_id: &str,
-    existing: Option<tokio::sync::OwnedMutexGuard<()>>,
-) -> tokio::sync::OwnedMutexGuard<()> {
-    match existing {
-        Some(guard) => guard,
-        None => lock_agent_lifecycle(state, session_id).await,
     }
 }
 
@@ -800,7 +789,9 @@ fn clone_path_is_generated_or_runtime(rel_path: &str) -> bool {
             | "logs"
             | "telemetry"
             | "provider-bootstrap"
-    ) || normalized == ".agents/skills"
+    ) || normalized == ".wardian-codex-home.json"
+        || normalized == ".wardian-codex-home-cleanup.json"
+        || normalized == ".agents/skills"
         || normalized.starts_with(".agents/skills/")
         || lower.ends_with(".jsonl")
         || lower.ends_with(".log")
@@ -1069,7 +1060,7 @@ fn clone_copy_profile_plan(
 
 fn clone_cleanup_created_profile_dirs(created_profile_dirs: &[std::path::PathBuf]) {
     for profile_dir in created_profile_dirs.iter().rev() {
-        clone_remove_existing_path(profile_dir);
+        removal::cleanup_failed_clone_profile_dir(profile_dir);
     }
 }
 
@@ -2385,7 +2376,9 @@ async fn register_new_agent(
         &config.agent_class,
         &session_id,
     ));
-    let mut active_agent = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
+    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
+    let active_agent =
+        pending.attach(manager::spawn_agent(app.clone(), config.clone(), false, None).await?);
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
     let persisted_resume = persisted_resume_session_for_provider(actual_resume);
     config.resume_session = persisted_resume.clone();
@@ -2409,11 +2402,11 @@ async fn register_new_agent(
     let mut agents = state.agents.lock().await;
     let mut order = state.agent_order.lock().await;
     if agents.contains_key(&session_id) {
-        manager::terminate_active_agent_process(&mut active_agent);
-        return Err(format!(
-            "An agent with session ID '{}' already exists.",
-            session_id
-        ));
+        let stopped = active_agent.begin_stop();
+        drop(order);
+        drop(agents);
+        let error = format!("An agent with session ID '{session_id}' already exists.");
+        return Err(stopped.failure(error).await);
     }
     let existing_names = agents
         .values()
@@ -2426,8 +2419,10 @@ async fn register_new_agent(
     ) {
         Ok(session_name) => config.session_name = session_name,
         Err(error) => {
-            manager::terminate_active_agent_process(&mut active_agent);
-            return Err(error);
+            let stopped = active_agent.begin_stop();
+            drop(order);
+            drop(agents);
+            return Err(stopped.failure(error).await);
         }
     }
     if let Some(reserved_session_name) = options.reserved_session_name {
@@ -2438,7 +2433,7 @@ async fn register_new_agent(
         let mut cfg = active_agent.config.lock().unwrap();
         cfg.session_name = config.session_name.clone();
     }
-    agents.insert(session_id.clone(), active_agent);
+    agents.insert(session_id.clone(), active_agent.installed());
     insert_new_agent_order(&mut order, &session_id, options.placement);
     manager::save_state(app, &agents, &order);
     drop(order);
@@ -2872,6 +2867,7 @@ async fn remove_agent<R: tauri::Runtime>(
             .ok_or_else(|| format!("Agent with session ID {} not found", session_id))?;
         validate_agent_removal(agent, expected_name, require_stopped)?;
     }
+    stop_native_owner(&state, &session_id, true).await?;
     let (previous_state_snapshot, deletion_state_snapshot) = {
         let agents = state.agents.lock().await;
         let order = state.agent_order.lock().await;
@@ -2927,24 +2923,24 @@ async fn remove_agent<R: tauri::Runtime>(
 
     #[allow(unused_mut)]
     if let Some(mut agent) = agent {
-        if let Some(runtime_generation) = agent.runtime_generation {
-            if let Err(error) = state
+        let terminal_cleanup = if let Some(runtime_generation) = agent.runtime_generation {
+            state
                 .terminal_sessions
                 .terminate_and_remove_runtime(&session_id, runtime_generation)
                 .await
-            {
-                manager::log_debug(&format!(
-                    "[WARDIAN] terminal broker cleanup failed while killing {session_id}: {error}"
-                ));
-            }
-        }
+                .map_err(|error| format!("Terminal broker cleanup failed: {error}"))
+        } else {
+            Ok(())
+        };
         let agent_workspace = agent
             .config
             .lock()
             .ok()
             .map(|config| config.folder.clone())
             .filter(|folder| !folder.trim().is_empty());
-        manager::terminate_active_agent_process(&mut agent);
+        // Broker shutdown alone is not proof of TUI exit (it can time out).
+        let process_join = join_agent_processes_for_removal(&mut agent).await;
+        let process_join = terminal_cleanup.and(process_join);
 
         // Durable state was deleted before detaching the live agent. Post-commit
         // cleanup is best-effort so a lease heartbeat cannot leave the roster
@@ -2994,19 +2990,10 @@ async fn remove_agent<R: tauri::Runtime>(
                 }
             }
 
-            let agent_dir = home.join("agents").join(&session_id);
-            if agent_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] Failed to remove agent directory {:?}: {}",
-                        agent_dir, e
-                    ));
-                } else {
-                    manager::log_debug(&format!(
-                        "[WARDIAN] Successfully removed agent directory {:?}",
-                        agent_dir
-                    ));
-                }
+            if let Err(error) = cleanup_removed_agent_directory(&home, &session_id, process_join) {
+                manager::log_debug(&format!(
+                    "[WARDIAN] Retaining agent directory and compact ownership records for {session_id}: {error}"
+                ));
             }
         }
 
@@ -3066,6 +3053,7 @@ pub async fn pause_agent(
     let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(_lifecycle_lease.owner().clone());
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     lifecycle_heartbeat.ensure_active("pause")?;
+    stop_native_owner(&state, &session_id, false).await?;
     let (mut termination, state_snapshot, status_arc) = {
         let mut agents = state.agents.lock().await;
         let order = state.agent_order.lock().await;
@@ -3129,7 +3117,7 @@ pub async fn resume_agent(
         acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
     let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(_lifecycle_lease.owner().clone());
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    state.native_delivery.dispose_agent(&session_id).await;
+    stop_native_owner(&state, &session_id, false).await?;
     let snapshot = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -3226,6 +3214,7 @@ pub async fn resume_agent(
         .await;
         return Err(error);
     }
+    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
     let mut new_active = match manager::spawn_agent(
         app.clone(),
         config.clone(),
@@ -3236,7 +3225,7 @@ pub async fn resume_agent(
     )
     .await
     {
-        Ok(active) => active,
+        Ok(active) => pending.attach(active),
         Err(error) => {
             restore_agent_status_after_failed_runtime_start(
                 &state,
@@ -3249,7 +3238,7 @@ pub async fn resume_agent(
         }
     };
     if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
-        manager::terminate_active_agent_process(&mut new_active);
+        let error = new_active.stop_after_failure(error).await;
         restore_agent_status_after_failed_runtime_start(
             &state,
             &app,
@@ -3264,11 +3253,9 @@ pub async fn resume_agent(
     let new_config = new_active.config.lock().unwrap().clone();
     let new_created_at = new_active.init_timestamp.lock().unwrap().clone();
     let new_status_arc = new_active.current_status.clone();
-    let mut pending_new_active = Some(new_active);
+    let mut pending_new_active = new_active;
     if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
-        if let Some(mut active) = pending_new_active.take() {
-            manager::terminate_active_agent_process(&mut active);
-        }
+        let error = pending_new_active.stop_after_failure(error).await;
         restore_agent_status_after_failed_runtime_start(
             &state,
             &app,
@@ -3287,7 +3274,7 @@ pub async fn resume_agent(
                 &mut agents,
                 &order,
                 &session_id,
-                &mut pending_new_active,
+                pending_new_active.slot(),
                 &snapshot.config,
                 snapshot.init_timestamp.as_deref(),
                 &new_config,
@@ -3300,9 +3287,7 @@ pub async fn resume_agent(
     let (mut old_agent, session_close_context, replacement_journal) = match commit_result {
         Ok(result) => result,
         Err(error) => {
-            if let Some(mut active) = pending_new_active.take() {
-                manager::terminate_active_agent_process(&mut active);
-            }
+            let error = pending_new_active.stop_after_failure(error).await;
             restore_agent_status_after_failed_runtime_start(
                 &state,
                 &app,
@@ -3995,7 +3980,7 @@ async fn clear_agent_session_inner(
         .unwrap_or_else(|| LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone()));
     let _lifecycle_guard =
         acquire_agent_lifecycle_guard(&state, &session_id, lifecycle.guard).await;
-    state.native_delivery.dispose_agent(&session_id).await;
+    stop_native_owner(&state, &session_id, false).await?;
     let original_config = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -4019,8 +4004,8 @@ async fn clear_agent_session_inner(
     stage_conversation_boundary(&state, &pending_archive)
         .map_err(|error| format!("Failed to stage the closing conversation: {error}"))?;
 
-    // Establish the fresh provider identity before touching the current runtime.
-    // If exact bootstrap evidence is unavailable, clear fails with the live agent intact.
+    // Establish fresh identity before the remaining runtime transition. Codex
+    // writers were joined above; a later failure retains config/status, not a live TUI.
     let previous_codex_provider_sessions = if original_config.provider == "codex" {
         let mut sessions = codex_cleared_provider_sessions(&original_config);
         if let Some(provider_session_id) = original_config
@@ -4133,11 +4118,12 @@ async fn clear_agent_session_inner(
 
     // 5. Spawn a FRESH process (is_restored = false) outside the global agent lock.
     // This ensures Claude uses --session-id and others start clean.
-    let mut new_active =
+    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
+    let new_active =
         match manager::spawn_agent(app.clone(), config, false, prepared.init_timestamp.clone())
             .await
         {
-            Ok(active) => active,
+            Ok(active) => pending.attach(active),
             Err(error) => {
                 restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
                     .await;
@@ -4145,7 +4131,7 @@ async fn clear_agent_session_inner(
             }
         };
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
-        manager::terminate_active_agent_process(&mut new_active);
+        let error = new_active.stop_after_failure(error).await;
         restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
         return Err(error);
     }
@@ -4162,11 +4148,9 @@ async fn clear_agent_session_inner(
     let new_config = new_active.config.lock().unwrap().clone();
     let new_created_at = new_active.init_timestamp.lock().unwrap().clone();
     let new_status_arc = new_active.current_status.clone();
-    let mut pending_new_active = Some(new_active);
+    let mut pending_new_active = new_active;
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
-        if let Some(mut active) = pending_new_active.take() {
-            manager::terminate_active_agent_process(&mut active);
-        }
+        let error = pending_new_active.stop_after_failure(error).await;
         return Err(error);
     }
     let commit_result = {
@@ -4178,7 +4162,7 @@ async fn clear_agent_session_inner(
                 &mut agents,
                 &order,
                 &session_id,
-                &mut pending_new_active,
+                pending_new_active.slot(),
                 &original_config,
                 prepared.init_timestamp.as_deref(),
                 &new_config,
@@ -4191,9 +4175,7 @@ async fn clear_agent_session_inner(
     let (mut displaced_agent, session_close_context, replacement_journal) = match commit_result {
         Ok(result) => result,
         Err(error) => {
-            if let Some(mut active) = pending_new_active.take() {
-                manager::terminate_active_agent_process(&mut active);
-            }
+            let error = pending_new_active.stop_after_failure(error).await;
             restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
                 .await;
             return Err(error);
@@ -5244,7 +5226,7 @@ mod tests {
         GeminiProviderConfig, OpenCodeProviderConfig, PiProviderConfig, ProviderConfig,
     };
 
-    struct WardianHomeGuard;
+    pub(super) struct WardianHomeGuard;
 
     impl Drop for WardianHomeGuard {
         fn drop(&mut self) {
@@ -5252,7 +5234,7 @@ mod tests {
         }
     }
 
-    fn make_test_agent() -> ActiveAgent {
+    pub(super) fn make_test_agent() -> ActiveAgent {
         ActiveAgent {
             config: Arc::new(Mutex::new(AgentConfig::default())),
             child_process: None,
@@ -6160,6 +6142,11 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         .expect("permission log");
         std::fs::write(source_root.join("logs").join("agent.log"), "log").expect("log");
         std::fs::write(source_root.join("transcript.jsonl"), "{}").expect("transcript");
+        std::fs::write(source_root.join(".wardian-codex-home.json"), "{}")
+            .expect("compact ownership mapping");
+        std::fs::write(source_root.join("preferences.json"), "{}").expect("user profile JSON");
+        std::fs::write(source_root.join(".wardian-codex-home-cleanup.json"), "{}")
+            .expect("compact cleanup receipt");
 
         let files = clone_collect_eligible_file_tree(home, "source-agent").expect("files");
         let paths = flatten_clone_file_paths(&files);
@@ -6173,6 +6160,9 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(!paths.iter().any(|path| path.starts_with("logs/")));
         assert!(!paths.iter().any(|path| path.ends_with(".jsonl")));
         assert!(!paths.iter().any(|path| path.ends_with(".log")));
+        assert!(!paths.contains(&".wardian-codex-home.json".to_string()));
+        assert!(!paths.contains(&".wardian-codex-home-cleanup.json".to_string()));
+        assert!(paths.contains(&"preferences.json".to_string()));
     }
 
     #[test]
@@ -6192,6 +6182,14 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             home,
             "source-agent",
             &["claude/permission-requests.jsonl".to_string()]
+        )
+        .is_err());
+        std::fs::write(source.join(".wardian-codex-home.json"), "{}")
+            .expect("compact ownership mapping");
+        assert!(clone_validate_selected_profile_files(
+            home,
+            "source-agent",
+            &[".wardian-codex-home.json".to_string()]
         )
         .is_err());
     }
