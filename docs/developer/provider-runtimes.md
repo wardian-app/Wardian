@@ -301,6 +301,13 @@ checks that the entry is a Unix socket, and verifies its filesystem identity
 before removal. Live listeners, busy startup locks, and ambiguous connection
 results remain untouched and produce a startup error.
 
+Owner attachment requests thread metadata and live input capability without
+hydrating archived turns, so large conversations do not exceed the control
+transport's frame limit. The ordinary TUI still owns history display. Its launch
+explicitly selects the configured workspace with `--cd`, avoiding Codex's resume
+directory picker when a saved conversation records another working directory.
+Attachment failures retain the transport reason and a bounded terminal tail.
+
 For long canonical homes, owner startup recovers pending launch settings and
 then prepares a private compact physical home before config/MCP projection.
 The logical habitat path remains an owned directory link. Matching agent and
