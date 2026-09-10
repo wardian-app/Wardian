@@ -17,8 +17,8 @@ This document captures the practical runtime differences between Wardian's suppo
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
 - On Windows, provider adapters should prefer direct native executables or a
-  direct `node <script.js>` launch resolved from an npm `.cmd` shim. Shell-wrap
-  only when shell dispatch is required, such as extensionless OpenCode shims.
+  direct `node <script.js>` launch resolved from an npm shim. Shell-wrap only
+  when shell dispatch is required and no verified native launcher is available.
 
 ## Quick Comparison
 
@@ -370,10 +370,12 @@ that the provider's answer satisfies the requested task.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `<habitat>/.opencode/opencode.json` (`OPENCODE_CONFIG`) first, then verify the junctioned `skills/` entries resolve.
 - Interactive status comes from TUI window-title scraping ("OpenCode" idle, "OC | …" processing), while token/cost telemetry comes from OpenCode's shared SQLite store via wardian-core; both channels are expected to exist side by side.
 - TUI "Permission required" prompts never appear in the window title. Wardian detects them from the provider log (`message=asking id=per_…`) and raises Action Needed; the ask is attributed to a session only while its prompt loop is the sole open loop in the log, and clears once loop activity resumes after the prompt is answered.
-- On Windows, Wardian should launch the `opencode` command resolved from PATH,
-  matching how a user terminal starts OpenCode. Interactive and headless launch
-  wrap that command through the configured shell because npm and PowerShell
-  shims need shell dispatch semantics.
+- On Windows, Wardian resolves the `opencode` command from PATH. When an
+  npm-generated `.cmd` or `.ps1` shim points at the package's top-level native
+  launcher, Wardian launches that executable directly so the provider does not
+  acquire an avoidable configured-shell wrapper. Unrecognized or incomplete
+  shims still run through the configured shell, preserving compatibility with
+  the PATH command behavior described in [#568](https://github.com/wardian-app/Wardian/issues/568).
 
 ## Pi
 
