@@ -295,6 +295,12 @@ operations through a private local socket and the configured Codex executable's
 `app-server proxy` tunnel. MCP exposes the model-facing
 tools and explicit receiver. See [agent messaging tools](./agent-messaging-tools.md).
 
+After an unclean exit, startup recovers an abandoned default socket only when
+a nonblocking connection is refused. It holds Codex's native startup lock,
+checks that the entry is a Unix socket, and verifies its filesystem identity
+before removal. Live listeners, busy startup locks, and ambiguous connection
+results remain untouched and produce a startup error.
+
 For long canonical homes, owner startup recovers pending launch settings and
 then prepares a private compact physical home before config/MCP projection.
 The logical habitat path remains an owned directory link. Matching agent and

@@ -111,12 +111,7 @@ impl CodexSharedOwner {
             &spec.target_agent_id,
         )?;
         let socket = attachment::default_socket(&codex_home)?;
-        // Never attach to an existing listener, nor remove another owner's socket.
-        if std::fs::symlink_metadata(&socket).is_ok() {
-            return Err(CodexSharedError::unsupported(
-                "default Codex socket already exists; previous generation must exit first",
-            ));
-        }
+        attachment::recover_stale_socket(&socket)?;
         let provider = ProviderFactory::resolve("codex").map_err(CodexSharedError::unsupported)?;
         let (program, prefix_args) = provider.get_executable();
         let mut args = crate::providers::CodexProvider::new()
