@@ -7,7 +7,7 @@ import type { BlueprintListResult } from "../automations/automationTypes";
 import type { AutomationSchedule } from "../../types/automation";
 import { GardenAutomationCache } from "./gardenAutomationCache";
 import {
-  projectSituatedAutomations, isVisibleGardenRun, GARDEN_AUTOMATION_RECENT_MS,
+  projectSituatedAutomations, isGardenPopulationRun, GARDEN_AUTOMATION_RECENT_MS,
   type GardenBlueprintEvidence, type GardenRunEvidence, type GardenRunInvocation, type SituatedAutomationInput,
 } from "./automationProjection";
 
@@ -135,7 +135,7 @@ export async function loadGardenAutomationInputs(
   const blueprints: GardenBlueprintEvidence[] = [];
   const paths = new Set(blueprintPages.refs.map((ref) => ref.path));
   const retained = [...new Map(retainedSummaries.map((run) => [run.run_id, run])).values()].filter((run) =>
-    isVisibleGardenRun(run, options.now ?? Date.now(), options.recentMs ?? GARDEN_AUTOMATION_RECENT_MS)
+    isGardenPopulationRun(run, options.now ?? Date.now(), options.recentMs ?? GARDEN_AUTOMATION_RECENT_MS)
     || retainedIds.has(`run:${run.run_id}`) || retainedIds.has(`schedule:${run.schedule_id}`));
   for (const run of retained) if (run.blueprint_path) paths.add(run.blueprint_path);
   await Promise.all([...paths].map(async (path) => {
@@ -250,7 +250,7 @@ export function useGardenAutomations(enabled = true, options: { retainedProjecti
             const old = previous.get(id);
             if (!old || (retainedOnly && !retainedProjectionIds.includes(id))) continue;
             // Expiry continues to apply to stale map trails, even while their record is selected.
-            if (!retainedOnly && old.projectionKind === "run" && !old.runs.some((run) => isVisibleGardenRun(run, Date.now(), GARDEN_AUTOMATION_RECENT_MS))) continue;
+            if (!retainedOnly && old.projectionKind === "run" && !old.runs.some((run) => isGardenPopulationRun(run, Date.now(), GARDEN_AUTOMATION_RECENT_MS))) continue;
             merged.set(id, { ...old, stale: true, evidenceErrors });
           }
           return [...merged.values()];

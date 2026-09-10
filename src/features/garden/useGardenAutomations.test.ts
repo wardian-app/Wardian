@@ -45,6 +45,22 @@ describe("bounded refresh caching", () => {
     await loadGardenAutomationInputs(invoker, 0, { cache, now: now + 15_000 });
     expect(invoker.mock.calls.map(([command]) => command).sort()).toEqual(["automation_list_blueprints", "automation_list_runs", "schedule_list"]);
   });
+  it("does not hydrate terminal one-off history for the Garden population", async () => {
+    const invoker = vi.fn(async (command: string) => {
+      if (command === "automation_list_runs") return {
+        runs: Array.from({ length: 80 }, (_, i) => ({
+          ...ended, schedule_id: null, status: i % 2 ? "failed" : "completed", run_id: `review-${i}`, path: `/review-${i}`,
+        })),
+        truncated: false, next_offset: null,
+      };
+      if (command === "schedule_list") return [];
+      return responder(command);
+    });
+    const result = await loadGardenAutomationInputs(invoker, 0, { now });
+    expect(result.automations).toEqual([]);
+    expect(invoker.mock.calls.some(([command]) => command === "automation_read_run")).toBe(false);
+    expect(invoker.mock.calls.some(([command]) => command === "read_file_preview")).toBe(false);
+  });
   it("expires same-path definitions and terminal evidence without extending TTL on hits", async () => {
     const cache = new GardenAutomationCache();
     const invoker = vi.fn(completedResponder);
@@ -354,13 +370,13 @@ describe("focused historical evidence", () => {
     expect(invoker.mock.calls.filter(([command]) => command === "automation_list_runs")).toHaveLength(1);
     expect(invoker.mock.calls.some(([command]) => command === "automation_read_run")).toBe(false);
   });
-  it("keeps focused evidence across the expiry boundary while removing the canvas trail", async () => {
+  it("keeps focused evidence across the recency boundary without creating a canvas trail", async () => {
     const invoker = async (command: string) => command === "automation_list_runs"
       ? { runs: [old], truncated: false, next_offset: null } : responder(command);
     const endedAt = Date.parse(old.updated_at);
     const before = await loadGardenAutomationInputs(invoker, 0, { now: endedAt + 999, recentMs: 1000, retainedProjectionIds: ["run:old"] });
     const after = await loadGardenAutomationInputs(invoker, 0, { now: endedAt + 1001, recentMs: 1000, retainedProjectionIds: ["run:old"] });
-    expect(before.automationProjections.some((item) => item.id === "run:old")).toBe(true);
+    expect(before.automationProjections.some((item) => item.id === "run:old")).toBe(false);
     expect(after.automationProjections.some((item) => item.id === "run:old")).toBe(false);
     expect(after.retainedAutomations[0].runEvidence).toEqual(before.retainedAutomations[0].runEvidence);
   });
