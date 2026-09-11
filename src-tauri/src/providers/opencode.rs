@@ -21,6 +21,34 @@ impl OpenCodeProvider {
         OpenCodeProvider
     }
 
+    /// Resolve the native launcher referenced by an npm-generated Windows
+    /// shim. This is deliberately limited to the top-level package launcher;
+    /// the nested `opencode-windows-*` binaries have crashed on some Windows
+    /// installations and must remain a fallback-free path.
+    #[cfg(target_os = "windows")]
+    fn native_windows_binary_from_shim(shim: &std::path::Path) -> Option<String> {
+        let extension = shim.extension()?.to_str()?.to_ascii_lowercase();
+        if !matches!(extension.as_str(), "cmd" | "ps1") {
+            return None;
+        }
+
+        let content = std::fs::read_to_string(shim).ok()?;
+        let normalized = content.replace('\\', "/").to_ascii_lowercase();
+        if !normalized.contains("node_modules/opencode-ai/bin/opencode.exe") {
+            return None;
+        }
+
+        let candidate = shim
+            .parent()?
+            .join("node_modules")
+            .join("opencode-ai")
+            .join("bin")
+            .join("opencode.exe");
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().to_string())
+    }
+
     #[cfg(target_os = "windows")]
     fn find_windows_opencode_in_paths<I>(paths: I, path_exts: &[String]) -> Option<String>
     where
@@ -37,6 +65,9 @@ impl OpenCodeProvider {
             for ext in path_exts {
                 let candidate = path.join(format!("opencode{ext}"));
                 if candidate.exists() {
+                    if let Some(native) = Self::native_windows_binary_from_shim(&candidate) {
+                        return Some(native);
+                    }
                     return Some(candidate.to_string_lossy().to_string());
                 }
             }
@@ -45,6 +76,9 @@ impl OpenCodeProvider {
                 return Some(bare.to_string_lossy().to_string());
             }
             if powershell.exists() {
+                if let Some(native) = Self::native_windows_binary_from_shim(&powershell) {
+                    return Some(native);
+                }
                 return Some(powershell.to_string_lossy().to_string());
             }
         }
@@ -401,6 +435,37 @@ mod tests {
                     .to_string_lossy()
                     .to_string()
             )
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_lookup_uses_native_launcher_from_npm_shim() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cmd = temp.path().join("opencode.cmd");
+        let exe = temp
+            .path()
+            .join("node_modules")
+            .join("opencode-ai")
+            .join("bin")
+            .join("opencode.exe");
+        std::fs::create_dir_all(exe.parent().expect("parent")).expect("create dirs");
+        std::fs::write(
+            &cmd,
+            "@echo off\r\n\"%~dp0\\node_modules\\opencode-ai\\bin\\opencode.exe\" %*\r\n",
+        )
+        .expect("cmd shim");
+        std::fs::write(&exe, "native launcher").expect("native launcher");
+
+        let resolved = OpenCodeProvider::find_windows_opencode_in_paths(
+            vec![temp.path().to_path_buf()],
+            &[".exe".into(), ".cmd".into(), ".bat".into()],
+        );
+
+        assert_eq!(
+            resolved,
+            Some(exe.to_string_lossy().to_string()),
+            "a verified npm shim should not add a PowerShell/cmd wrapper around the native launcher"
         );
     }
 
