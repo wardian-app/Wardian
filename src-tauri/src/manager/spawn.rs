@@ -770,6 +770,7 @@ pub async fn spawn_agent(
     is_restored: bool,
     initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
+    let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
         &config.session_id,
         config.resume_session.as_deref(),
@@ -919,6 +920,7 @@ pub async fn spawn_agent(
         format!("fresh:{}:{born_to_save}", config.session_id)
     };
     let memory_enabled = crate::utils::memory_feature_enabled();
+    let memory_brief_at = std::time::Instant::now();
     let memory_setup = if memory_enabled {
         match wardian_core::memory::MemoryStore::from_default_home() {
             Ok(store) => match store.compile_brief(
@@ -950,8 +952,10 @@ pub async fn spawn_agent(
     } else {
         None
     };
+    let memory_brief_ms = memory_brief_at.elapsed().as_millis();
     // Codex config projection belongs to the exclusive owner, after recovery.
     // The manager only needs neutral habitat/instructions before owner creation.
+    let habitat_at = std::time::Instant::now();
     let habitat_root = if config.provider == "codex" {
         Some(crate::utils::fs::prepare_habitat_workspace(
             &cwd,
@@ -966,14 +970,18 @@ pub async fn spawn_agent(
             Some(&config.session_id),
         )?
     };
+    let habitat_ms = habitat_at.elapsed().as_millis();
+    let mut memory_append_ms = 0;
     if let Some(root) = habitat_root.as_ref() {
         if memory_enabled {
+            let append_at = std::time::Instant::now();
             crate::utils::fs::append_habitat_memory_instructions(
                 root,
                 memory_setup.as_ref().and_then(|(_, brief)| {
                     (!brief.is_empty).then_some(brief.context_text.as_str())
                 }),
             )?;
+            memory_append_ms = append_at.elapsed().as_millis();
         }
         if !crate::utils::fs::provider_uses_projected_workspace(&config.provider) {
             let include = root.to_string_lossy().to_string();
@@ -1052,6 +1060,7 @@ pub async fn spawn_agent(
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
     let mut codex_attach_guard = None;
+    let attachment_at = std::time::Instant::now();
     let codex_attachment = if config.provider == "codex" {
         let attachment = app_state
             .native_delivery
@@ -1088,6 +1097,7 @@ pub async fn spawn_agent(
     } else {
         None
     };
+    let attachment_ms = attachment_at.elapsed().as_millis();
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -1095,6 +1105,18 @@ pub async fn spawn_agent(
         launch_spec.executable,
         launch_spec.args.len(),
         provider_cwd.display()
+    ));
+    // Everything above happens before the provider process exists, so it is the
+    // part of perceived spawn latency Wardian itself owns.
+    log_debug(&format!(
+        "[Wardian] Spawn prelaunch timing provider={} session={} memory_brief_ms={} habitat_ms={} memory_append_ms={} attachment_ms={} prelaunch_total_ms={}",
+        config.provider,
+        config.session_id,
+        memory_brief_ms,
+        habitat_ms,
+        memory_append_ms,
+        attachment_ms,
+        spawn_started_at.elapsed().as_millis(),
     ));
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
     for arg in &launch_spec.args {

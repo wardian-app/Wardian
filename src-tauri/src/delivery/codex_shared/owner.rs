@@ -11,17 +11,78 @@ mod attachment;
 #[path = "owner_preparation_tests.rs"]
 mod preparation_tests;
 
+/// Phase durations for one owner startup.
+///
+/// Startup crosses several process launches and an RPC handshake, so a single
+/// total cannot say which one was slow. Each field is the wall time of exactly
+/// one phase; `total` is the whole of `start`, which is larger than their sum
+/// by the cheap bookkeeping between them.
+#[derive(Default)]
+pub(super) struct OwnerStartTimings {
+    quiescent: std::time::Duration,
+    habitat_workspace: std::time::Duration,
+    codex_home: std::time::Duration,
+    compact_home: std::time::Duration,
+    codex_projection: std::time::Duration,
+    managed_messaging: std::time::Duration,
+    socket_recovery: std::time::Duration,
+    launch_config: std::time::Duration,
+    child_spawn: std::time::Duration,
+    socket_wait: std::time::Duration,
+    proxy_connect: std::time::Duration,
+    initialize: std::time::Duration,
+    launch_model: std::time::Duration,
+    total: std::time::Duration,
+}
+
+/// Time one fallible phase into `slot` without disturbing its result.
+fn phase<T>(slot: &mut std::time::Duration, work: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let outcome = work();
+    *slot = started.elapsed();
+    outcome
+}
+
+impl OwnerStartTimings {
+    fn log(&self, agent_id: &str) {
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] Codex owner start agent={agent_id} total_ms={} quiescent_ms={} \
+habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
+socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} socket_wait_ms={} \
+proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
+            self.total.as_millis(),
+            self.quiescent.as_millis(),
+            self.habitat_workspace.as_millis(),
+            self.codex_home.as_millis(),
+            self.compact_home.as_millis(),
+            self.codex_projection.as_millis(),
+            self.managed_messaging.as_millis(),
+            self.socket_recovery.as_millis(),
+            self.launch_config.as_millis(),
+            self.child_spawn.as_millis(),
+            self.socket_wait.as_millis(),
+            self.proxy_connect.as_millis(),
+            self.initialize.as_millis(),
+            self.launch_model.as_millis(),
+        ));
+    }
+}
+
 /// Called only by a new owner under the broker's exclusive owner gate, after
 /// all previous readers have joined. Generic habitat refresh never calls this.
 fn prepare_owner_habitat(
     workspace: &std::path::Path,
     class_name: &str,
     agent_id: &str,
+    timings: &mut OwnerStartTimings,
 ) -> Result<(PathBuf, PathBuf), CodexSharedError> {
-    let habitat = crate::utils::fs::prepare_habitat_workspace(workspace, class_name, agent_id)
-        .map_err(CodexSharedError::unsupported)?;
+    let habitat = phase(&mut timings.habitat_workspace, || {
+        crate::utils::fs::prepare_habitat_workspace(workspace, class_name, agent_id)
+    })
+    .map_err(CodexSharedError::unsupported)?;
     let wardian_home = crate::utils::get_wardian_home()
         .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
+    let started = std::time::Instant::now();
     let _preparation = crate::utils::codex_home::acquire_preparation(&wardian_home, agent_id)
         .map_err(CodexSharedError::unsupported)?;
     let home = crate::utils::codex_home::owner_preparation_home(&wardian_home, agent_id)
@@ -29,14 +90,21 @@ fn prepare_owner_habitat(
     // Recover against the authoritative physical path before relocating it or
     // projecting config. Generic refresh cannot enter this migration boundary.
     super::launch_config::recover_launch_config(&home)?;
-    let compact_home = crate::utils::codex_home::prepare_compact_home(&wardian_home, agent_id)
-        .map_err(CodexSharedError::unsupported)?;
+    timings.codex_home = started.elapsed();
+    let compact_home = phase(&mut timings.compact_home, || {
+        crate::utils::codex_home::prepare_compact_home(&wardian_home, agent_id)
+    })
+    .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
-    crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
-        .map_err(CodexSharedError::unsupported)?;
+    phase(&mut timings.codex_projection, || {
+        crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
+    })
+    .map_err(CodexSharedError::unsupported)?;
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
-        crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, agent_id)
-            .map_err(CodexSharedError::unsupported)?
+        phase(&mut timings.managed_messaging, || {
+            crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, agent_id)
+        })
+        .map_err(CodexSharedError::unsupported)?
     {
         return Err(CodexSharedError::unsupported(format!(
             "managed messaging unavailable: {reason}"
@@ -97,7 +165,12 @@ impl CodexSharedOwner {
         .map_err(CodexSharedError::unsupported)?;
         let wardian_home = crate::utils::get_wardian_home()
             .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
+        // Phase timing is emitted on every outcome, including failures, because
+        // a startup that gives up late is exactly the one worth measuring.
+        let mut timings = OwnerStartTimings::default();
+        let started_at = std::time::Instant::now();
         tokio::pin!(cancelled);
+        let quiescent_at = std::time::Instant::now();
         tokio::select! {
             biased;
             _ = &mut cancelled => return Err(CodexSharedError::unsupported("Codex owner startup cancelled before home preparation")),
@@ -105,13 +178,17 @@ impl CodexSharedOwner {
                 result.map_err(CodexSharedError::unsupported)?;
             }
         }
+        timings.quiescent = quiescent_at.elapsed();
         let (habitat, codex_home) = prepare_owner_habitat(
             &spec.workspace,
             &spec.config.agent_class,
             &spec.target_agent_id,
+            &mut timings,
         )?;
         let socket = attachment::default_socket(&codex_home)?;
-        attachment::recover_stale_socket(&socket)?;
+        phase(&mut timings.socket_recovery, || {
+            attachment::recover_stale_socket(&socket)
+        })?;
         let provider = ProviderFactory::resolve("codex").map_err(CodexSharedError::unsupported)?;
         let (program, prefix_args) = provider.get_executable();
         let mut args = crate::providers::CodexProvider::new()
@@ -161,11 +238,11 @@ impl CodexSharedOwner {
         let mut launch_config = if spec.config.is_off {
             None
         } else {
-            Some(super::launch_config::prepare_launch_config(
-                &codex_home,
-                &generated_args,
-            )?)
+            Some(phase(&mut timings.launch_config, || {
+                super::launch_config::prepare_launch_config(&codex_home, &generated_args)
+            })?)
         };
+        let child_spawn_at = std::time::Instant::now();
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -193,11 +270,14 @@ impl CodexSharedOwner {
             restore_launch_overlay(&mut launch_config)?;
             return Err(CodexSharedError::unsupported(error));
         }
+        timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
+        let timings = &mut timings;
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
+            let socket_wait_at = std::time::Instant::now();
             let wait_socket = wait_for_socket(
                 &socket,
                 tokio::time::Instant::now() + STARTUP_TIMEOUT,
@@ -208,6 +288,7 @@ impl CodexSharedOwner {
                 _ = &mut cancelled => return Err(CodexSharedError::unsupported("Codex owner startup cancelled")),
                 result = wait_socket => result?,
             }
+            timings.socket_wait = socket_wait_at.elapsed();
             let mut proxy_command = Command::new(&program);
             proxy_command.args(&prefix_args).current_dir(&spec.workspace).env("CODEX_HOME", &codex_home);
             // Reuse the owner's complete prepared environment, including the
@@ -219,25 +300,31 @@ impl CodexSharedOwner {
                     proxy_command.env_remove(key);
                 }
             }
+            let proxy_connect_at = std::time::Instant::now();
             let client = CodexSharedClient::connect_proxy(
                 spec.target_agent_id.clone(), spec.generation, proxy_command, &socket, &mut cancelled,
             ).await?;
+            timings.proxy_connect = proxy_connect_at.elapsed();
             connected = Some(client.clone());
             let initialize = async {
+                let initialize_at = std::time::Instant::now();
                 let observed_version = if spec.config.is_off {
                     client.initialize_queued(&codex_home).await?
                 } else {
                     client.initialize(&codex_home).await?
                 };
+                timings.initialize = initialize_at.elapsed();
                 attachment::require_local_version(&observed_version)?;
                 attachment::child_alive(&mut child)?;
                 owned_socket = Some(attachment::OwnedSocket::capture(&socket)?);
                 // Fresh private owner: the interactive TUI alone may load a thread.
                 attachment::require_empty(&client).await?;
+                let launch_model_at = std::time::Instant::now();
                 model_override = super::launch_model::resolve_launch_model(
                     &client, spec.config.model.as_deref(), configured_effort.as_deref(),
                     spec.config.resume_session.as_deref(), &spec.workspace,
                 ).await?;
+                timings.launch_model = launch_model_at.elapsed();
                 policy.expect_launch_model(model_override.as_deref())?;
                 // Read-only preference lookup must not take the first-loader role.
                 attachment::require_empty(&client).await?;
@@ -265,6 +352,8 @@ impl CodexSharedOwner {
                 result = initialize => result,
             }
         }.await;
+        timings.total = started_at.elapsed();
+        timings.log(&spec.target_agent_id);
         match start {
             Ok((client, observed_version)) => Ok(Arc::new(Self {
                 client,
