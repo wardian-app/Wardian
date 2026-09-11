@@ -609,6 +609,20 @@ pub(crate) fn ensure_codex_home_projection(
     let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
     let wardian_skills = habitat_root.join(".agents").join("skills");
     sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
+    // A home with no thread index rebuilds it from the whole projected session
+    // tree before the provider opens its socket. Seeding is optional: without a
+    // cached snapshot this agent simply pays for the rebuild, as before.
+    match super::codex_thread_state::seed(&wardian_home, &projected_home) {
+        Ok(true) => log_debug(&format!(
+            "[Wardian] Seeded Codex thread index for {}",
+            projected_home.display()
+        )),
+        Ok(false) => {}
+        Err(error) => log_debug(&format!(
+            "[Wardian] Codex thread index seed unavailable for {}: {error}",
+            projected_home.display()
+        )),
+    }
 
     if crate::utils::load_codex_runtime_policy()
         .map(|policy| policy.trust_workspaces)

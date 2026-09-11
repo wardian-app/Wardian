@@ -354,6 +354,24 @@ impl CodexSharedOwner {
         }.await;
         timings.total = started_at.elapsed();
         timings.log(&spec.target_agent_id);
+        if start.is_ok() {
+            // The socket is open, so this home's thread index is current for the
+            // projected session tree. Publishing it lets the next agent skip the
+            // rebuild. Detached and best effort: it must never delay or fail a
+            // launch that has already succeeded.
+            let home = codex_home.clone();
+            tokio::task::spawn_blocking(move || {
+                let Some(wardian_home) = crate::utils::get_wardian_home() else {
+                    return;
+                };
+                if let Err(error) = crate::utils::codex_thread_state::refresh(&wardian_home, &home)
+                {
+                    crate::utils::logging::log_debug(&format!(
+                        "[Wardian] Codex thread index publication skipped: {error}"
+                    ));
+                }
+            });
+        }
         match start {
             Ok((client, observed_version)) => Ok(Arc::new(Self {
                 client,
