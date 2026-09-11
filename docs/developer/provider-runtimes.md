@@ -105,6 +105,10 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
   links are preserved. Nested imports are copied verbatim and retain provider
   consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
+- On Windows, publishing generated `CLAUDE.md` siblings supports long ASCII and
+  Unicode habitat and managed-root paths. The writer uses the existing parent's
+  canonical path for both temporary creation and the destination join, after
+  checking ownership and links; it does not resolve the destination leaf.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
 ### Approval handling
