@@ -8,6 +8,7 @@ use wardian_core::topology::{
     apply_topology_operation, authorize_topology_mutation_v1, load_reconciled_topology,
     load_team_memberships, load_topology, pair_activity_from_records, resolve_neighbors,
     save_topology, PairActivity, Topology, TopologyAuthDenied, TopologyOperation,
+    PAIR_ACTIVITY_WINDOW_MS,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,12 +136,17 @@ pub struct PairActivityResult {
 #[tauri::command]
 pub async fn get_pair_activity(offset: Option<usize>) -> Result<PairActivityResult, String> {
     let offset = offset.unwrap_or(0);
-    let mut records =
-        wardian_core::db::list_recent_interaction_records_page(MAX_ACTIVITY_RECORDS + 1, offset)
-            .map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now();
+    let since = (now - chrono::Duration::milliseconds(PAIR_ACTIVITY_WINDOW_MS)).to_rfc3339();
+    let mut records = wardian_core::db::list_recent_interaction_records_since_page(
+        MAX_ACTIVITY_RECORDS + 1,
+        offset,
+        &since,
+    )
+    .map_err(|e| e.to_string())?;
     let mut truncated = records.len() > MAX_ACTIVITY_RECORDS;
     records.truncate(MAX_ACTIVITY_RECORDS);
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = now.timestamp_millis();
     let mut pairs = pair_activity_from_records(&records, now_ms);
     pairs.sort_by(|left, right| right.last_message_at.cmp(&left.last_message_at));
     if pairs.len() > MAX_ACTIVITY_PAIRS {

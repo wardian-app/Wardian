@@ -34,6 +34,33 @@ impl RestorePublication {
             "restoration claim belongs to another agent"
         );
         let status = agent.current_status.clone();
+        if agent.runtime_generation.is_none()
+            && agent.process_id.is_none()
+            && *status.lock().unwrap() == "Error"
+        {
+            let output = agent
+                .watch_state
+                .lock()
+                .unwrap()
+                .raw_snapshot_since(None, Some(262_144))
+                .map(|snapshot| snapshot.text)
+                .unwrap_or_default();
+            let output = if output.is_empty() {
+                "Wardian could not restore this agent. No provider error details were recorded.\r\n"
+                    .to_owned()
+            } else {
+                output
+            };
+            if let Err(error) = state
+                .terminal_sessions
+                .start_failure_terminal(&session_id, output.as_bytes())
+                .await
+            {
+                crate::manager::log_debug(&format!(
+                    "[Wardian] Failed to publish restoration error terminal for {session_id}: {error}"
+                ));
+            }
+        }
         let mut agents = state.agents.lock().await;
         let mut order = state.agent_order.lock().await;
         if !order.contains(&session_id) {

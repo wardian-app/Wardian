@@ -1,6 +1,7 @@
 import { test, expect, type Page, type Locator } from "@playwright/test";
 import { installGardenCompositionMock, GARDEN_AGENT } from "../fixtures/gardenComposition";
 import { surfacePanel } from "../fixtures/workbench";
+import { WHEEL_ZOOM_STEP } from "../../src/utils/wheelZoom";
 
 const garden = (page: Page) => surfacePanel(page, "garden");
 const agentCell = (page: Page) => garden(page).locator(`[data-garden-cell="agent:${GARDEN_AGENT}"]`);
@@ -53,9 +54,9 @@ test.describe("Garden continuous world zoom", () => {
       const { before, after, x, y } = await wheel(page, cell, -120);
       await expect(cell).toHaveAttribute("data-garden-world", world!);
       // A notch is a small magnification about the pointer, including the entry boundary.
-      expect(after.width / before.width).toBeCloseTo(1.05, 2);
-      expect(after.x).toBeCloseTo(x + (before.x - x) * 1.05, 0);
-      expect(after.y).toBeCloseTo(y + (before.y - y) * 1.05, 0);
+      expect(after.width / before.width).toBeCloseTo(WHEEL_ZOOM_STEP, 2);
+      expect(after.x).toBeCloseTo(x + (before.x - x) * WHEEL_ZOOM_STEP, 0);
+      expect(after.y).toBeCloseTo(y + (before.y - y) * WHEEL_ZOOM_STEP, 0);
       samples.push({ width: after.width, detail: Number(await cell.getAttribute("data-garden-detail")) });
       steps++;
     }
@@ -65,7 +66,7 @@ test.describe("Garden continuous world zoom", () => {
     await expect(garden(page).getByTestId("garden-zoom-level")).not.toHaveText(initialZoom!);
     for (let index = 0; index < steps; index++) {
       const { before, after } = await wheel(page, cell, 120);
-      expect(after.width / before.width).toBeCloseTo(1 / 1.05, 2);
+      expect(after.width / before.width).toBeCloseTo(1 / WHEEL_ZOOM_STEP, 2);
       await expect(cell).toHaveAttribute("data-garden-world", world!);
     }
     expect((await box(cell)).width).toBeCloseTo(start.width, 0);
@@ -92,10 +93,10 @@ test.describe("Garden continuous world zoom", () => {
     let steps = 0;
     while ((await box(cell)).width < 750 && steps < 100) {
       const { before, after, x, y } = await wheel(page, cell, -120);
-      expect(after.width / before.width).toBeCloseTo(1.05, 2);
-      expect(after.x).toBeCloseTo(x + (before.x - x) * 1.05, 0);
+      expect(after.width / before.width).toBeCloseTo(WHEEL_ZOOM_STEP, 2);
+      expect(after.x).toBeCloseTo(x + (before.x - x) * WHEEL_ZOOM_STEP, 0);
       // The reading plane expands vertically about the source anchor, not its top edge.
-      expect(after.y + after.height / 2).toBeCloseTo(y + (before.y + before.height / 2 - y) * 1.05, 0);
+      expect(after.y + after.height / 2).toBeCloseTo(y + (before.y + before.height / 2 - y) * WHEEL_ZOOM_STEP, 0);
       expect(after.height).toBeGreaterThan(before.height);
       expect(after.height - before.height).toBeLessThan(after.width * .12);
       if (after.width >= 420) await expect(cell.locator(":scope > .garden-spatial-caption")).toHaveCSS("opacity", "0");

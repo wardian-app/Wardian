@@ -2106,12 +2106,14 @@ fn codex_provider_turn_id(payload: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codex_response_item_user_context(payload: &Value, source: &str, role: &AgentChatRole) -> bool {
-    // Codex emits provider-supplied host context as a response_item message
-    // with batched content. Preserve the conservative default for records
-    // without trustworthy content-kind metadata, but accept an explicitly
-    // user-authored response_item so it is not discarded in favor of its
-    // lower-ranked event_msg mirror.
+/// Classifies batched Codex host context using native content-kind metadata.
+/// Records without trustworthy metadata retain the conservative context default;
+/// explicit user content and legacy string content remain eligible user input.
+pub(crate) fn codex_response_item_user_context(
+    payload: &Value,
+    source: &str,
+    role: &AgentChatRole,
+) -> bool {
     source == "response_item"
         && matches!(role, AgentChatRole::User)
         && matches!(payload.get("content"), Some(Value::Array(_)))
