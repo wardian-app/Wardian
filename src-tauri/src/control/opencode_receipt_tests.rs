@@ -2,37 +2,8 @@
 #[tokio::test]
 async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
     let _home = TestWardianHome::new_async().await;
-    let xdg_data_home = _home.path().join("xdg-data");
-    let opencode_dir = xdg_data_home.join("opencode");
-    std::fs::create_dir_all(&opencode_dir).expect("create OpenCode fixture directory");
-    let opencode_db = opencode_dir.join("opencode.db");
-    {
-        let connection =
-            rusqlite::Connection::open(&opencode_db).expect("create OpenCode fixture database");
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE message (
-                    id text PRIMARY KEY,
-                    session_id text NOT NULL,
-                    time_created integer,
-                    time_updated integer,
-                    data text NOT NULL
-                );
-                CREATE TABLE part (
-                    id text PRIMARY KEY,
-                    message_id text NOT NULL,
-                    session_id text NOT NULL,
-                    time_created integer,
-                    time_updated integer,
-                    data text NOT NULL
-                );
-                "#,
-            )
-            .expect("create OpenCode fixture schema");
-    }
-    let _xdg_data_home =
-        ScopedEnvVar::set("XDG_DATA_HOME", xdg_data_home.to_string_lossy().as_ref());
+    let receipt_fixture = super::test_support::opencode_receipt_fixture(_home.path(), "ses_test");
+    let opencode_db = receipt_fixture.db_path.clone();
     let state = AppState::new();
     insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
     {
@@ -45,6 +16,7 @@ async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     install_test_terminal_runtime(&state, "agent-1", tx).await;
+    set_test_opencode_screen(&state, "OpenCode", OPENCODE_READY_SCREEN).await;
 
     let receipt_db = opencode_db.clone();
     let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
@@ -55,25 +27,13 @@ async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
         submitted_tx.send(()).expect("signal submitted payload");
         release_rx.await.expect("release receipt insert");
         tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(receipt_db)
-                .expect("open OpenCode receipt database");
-            connection
-                .execute(
-                    "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, 1, 1, ?3)",
-                    rusqlite::params!["message-1", "ses_test", r#"{"role":"user"}"#],
-                )
-                .expect("insert OpenCode user message");
-            connection
-                .execute(
-                    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, 2, 2, ?4)",
-                    rusqlite::params![
-                        "part-1",
-                        "message-1",
-                        "ses_test",
-                        r#"{"type":"text","text":"hello"}"#,
-                    ],
-                )
-                .expect("insert OpenCode user part");
+            super::test_support::insert_opencode_user_receipt(
+                &receipt_db,
+                "ses_test",
+                "message-1",
+                "part-1",
+                "hello",
+            );
         })
         .await
         .expect("insert OpenCode receipt");
