@@ -629,6 +629,15 @@ impl AgentProvider for CodexProvider {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                         match role {
                             "assistant" => Some(AgentEvent::Unknown),
+                            "user"
+                                if super::chat_transcript::codex_response_item_user_context(
+                                    payload,
+                                    "response_item",
+                                    &wardian_core::models::chat::AgentChatRole::User,
+                                ) =>
+                            {
+                                Some(AgentEvent::Unknown)
+                            }
                             "user" => Some(AgentEvent::UserQuery),
                             _ => Some(AgentEvent::Unknown),
                         }
@@ -679,47 +688,10 @@ mod tests {
     use super::*;
     use wardian_core::models::ProviderConfig;
 
+    mod status;
+
     fn make_provider() -> CodexProvider {
         CodexProvider::new()
-    }
-
-    #[test]
-    fn retained_inbox_output_is_status_neutral_only_with_exact_host_structure() {
-        let p = make_provider();
-        let retained: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/codex-0.153.4-inbox-output.json")).unwrap();
-        assert!(matches!(
-            p.parse_output(&retained.to_string()),
-            Some(AgentEvent::Unknown)
-        ));
-        let mut with_null = retained.clone();
-        with_null["payload"]["call_id"] = serde_json::Value::Null;
-        assert!(matches!(
-            p.parse_output(&with_null.to_string()),
-            Some(AgentEvent::Unknown)
-        ));
-        for (key, value) in [
-            ("call_id", "actual-model-call"),
-            ("namespace", "foreign"),
-            ("name", "wardian_task_delivery"),
-        ] {
-            let mut candidate = retained.clone();
-            candidate["payload"][key] = serde_json::json!(value);
-            assert!(
-                matches!(
-                    p.parse_output(&candidate.to_string()),
-                    Some(AgentEvent::Generating)
-                ),
-                "{key}"
-            );
-        }
-        let quoted = serde_json::json!({"type":"response_item","payload":{
-            "type":"function_call_output","call_id":"call","output":retained.to_string()
-        }});
-        assert!(matches!(
-            p.parse_output(&quoted.to_string()),
-            Some(AgentEvent::Generating)
-        ));
     }
 
     #[test]
@@ -1221,120 +1193,5 @@ SET dp0=%~dp0
 
         assert_eq!(executable, "node");
         assert_eq!(args, vec![codex_js.to_string_lossy().to_string()]);
-    }
-
-    #[test]
-    fn parse_output_thread_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"thread.started","thread_id":"abc-123"}"#;
-        let event = p.parse_output(line).unwrap();
-        assert_eq!(
-            event,
-            AgentEvent::Init {
-                session_id: "abc-123".into(),
-                timestamp: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_output_turn_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.started"}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::UserQuery);
-    }
-
-    #[test]
-    fn parse_output_turn_completed_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
-    }
-
-    #[test]
-    fn parse_output_agent_message_event() {
-        let p = make_provider();
-        let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
-    }
-
-    #[test]
-    fn parse_output_task_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_task_complete_event() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
-    }
-
-    #[test]
-    fn parse_output_interrupted_turn_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.aborted"}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnInterrupted);
-    }
-
-    #[test]
-    fn parse_output_agent_message_does_not_change_status() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Waiting for approval"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
-    }
-
-    #[test]
-    fn parse_output_exec_command_begin_sets_generating() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"exec_command_begin","command":"git status"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_function_call_output_resumes_processing() {
-        let p = make_provider();
-        let line =
-            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_live_activity_response_items_set_generating() {
-        let p = make_provider();
-        for payload_type in [
-            "reasoning",
-            "function_call",
-            "custom_tool_call",
-            "custom_tool_call_output",
-        ] {
-            let line = format!(
-                r#"{{"type":"response_item","payload":{{"type":"{}","call_id":"abc"}}}}"#,
-                payload_type
-            );
-
-            assert_eq!(p.parse_output(&line).unwrap(), AgentEvent::Generating);
-        }
-    }
-
-    #[test]
-    fn parse_output_response_item_function_call_requires_approval() {
-        let p = make_provider();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Allow reading foo?\"}"}}"#;
-        assert_eq!(
-            p.parse_output(line).unwrap(),
-            AgentEvent::ActionRequired {
-                message: "Allow reading foo?".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_output_response_item_function_call_without_approval_sets_generating() {
-        let p = make_provider();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\"}"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
     }
 }

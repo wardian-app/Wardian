@@ -2923,15 +2923,11 @@ async fn remove_agent<R: tauri::Runtime>(
 
     #[allow(unused_mut)]
     if let Some(mut agent) = agent {
-        let terminal_cleanup = if let Some(runtime_generation) = agent.runtime_generation {
-            state
-                .terminal_sessions
-                .terminate_and_remove_runtime(&session_id, runtime_generation)
-                .await
-                .map_err(|error| format!("Terminal broker cleanup failed: {error}"))
-        } else {
-            Ok(())
-        };
+        let terminal_cleanup = state
+            .terminal_sessions
+            .remove_agent_session(&session_id, agent.runtime_generation)
+            .await
+            .map_err(|error| format!("Terminal broker cleanup failed: {error}"));
         let agent_workspace = agent
             .config
             .lock()

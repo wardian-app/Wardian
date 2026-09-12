@@ -335,10 +335,11 @@ pub struct AgentRef {
 pub const REASON_MANUAL: &str = "manual";
 pub const RULE_WORKSPACE_FALLBACK: &str = "workspace-fallback";
 
-/// Stale asks older than this window no longer count as active. An AwaitingReply task
-/// created more than 1 hour ago is considered resolved/abandoned and won't trigger
-/// edge animation in the UI.
-pub const ACTIVE_ASK_WINDOW_MS: i64 = 60 * 60 * 1000;
+/// Communication activity older than this window is dormant in the graph.
+pub const PAIR_ACTIVITY_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// Stale asks older than the pair activity window no longer count as active.
+pub const ACTIVE_ASK_WINDOW_MS: i64 = PAIR_ACTIVITY_WINDOW_MS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Neighbor {

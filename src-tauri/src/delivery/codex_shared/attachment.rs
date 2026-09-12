@@ -2,6 +2,64 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "socket_recovery_tests.rs"]
+mod socket_recovery_tests;
+
+/// Recover only a refused, unchanged socket while holding the same startup
+/// lock as stock Codex. Live listeners, competing startups, non-socket entries,
+/// and ambiguous inspection/connect errors remain untouched.
+pub(super) fn recover_stale_socket(path: &Path) -> Result<(), CodexSharedError> {
+    if OwnedSocket::existing(path)?.is_none() {
+        return Ok(());
+    }
+    let lock_path = path
+        .parent()
+        .ok_or_else(|| CodexSharedError::unsupported("Codex socket has no parent directory"))?
+        .join("app-server-startup.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| {
+            CodexSharedError::unsupported(format!("cannot open Codex startup lock: {error}"))
+        })?;
+    lock.try_lock().map_err(|error| {
+        CodexSharedError::unsupported(format!(
+            "Codex startup is already in progress or its lock is unavailable: {error}"
+        ))
+    })?;
+    let Some(previous) = OwnedSocket::existing(path)? else {
+        return Ok(());
+    };
+    // A full live accept queue must never block restoration or cancellation.
+    // Pending connections are ambiguous and therefore preserve the endpoint.
+    let probe = || -> std::io::Result<()> {
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
+        socket.connect(&socket2::SockAddr::unix(path)?)
+    };
+    match probe() {
+        Ok(_) => {
+            return Err(CodexSharedError::unsupported(
+                "default Codex socket has a live listener; previous generation must exit first",
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(CodexSharedError::unsupported(format!(
+                "cannot establish whether the existing Codex socket is stale: {error}"
+            )))
+        }
+    }
+    // remove_after_exit rechecks the exact filesystem identity. The refused
+    // connection establishes no listener and the native lock excludes rebinds.
+    previous.remove_after_exit()
+}
+
 /// Resolve the owned home once, then use Codex's ordinary Windows spelling for
 /// CODEX_HOME, default-socket byte validation and the proxy's socket argument.
 pub(super) fn canonical_home(home: &Path) -> Result<PathBuf, CodexSharedError> {
@@ -35,6 +93,21 @@ pub(super) struct OwnedSocket {
 }
 
 impl OwnedSocket {
+    /// Observe a pre-existing endpoint without claiming it or removing it.
+    /// A caller must separately prove quiescence before removing this entry.
+    pub(super) fn existing(path: &Path) -> Result<Option<Self>, CodexSharedError> {
+        match socket_identity(path) {
+            Ok(identity) => Ok(Some(Self {
+                path: path.to_owned(),
+                identity,
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(CodexSharedError::unsupported(format!(
+                "cannot inspect existing Codex socket: {error}"
+            ))),
+        }
+    }
+
     pub(super) fn capture(path: &Path) -> Result<Self, CodexSharedError> {
         Ok(Self {
             path: path.to_owned(),
@@ -73,13 +146,35 @@ fn socket_identity(path: &Path) -> std::io::Result<(u64, u64)> {
 #[cfg(windows)]
 fn socket_identity(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use winapi::um::fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    use winapi::um::fileapi::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO,
+    };
+    use winapi::um::minwinbase::FileAttributeTagInfo;
+    use winapi::um::winbase::GetFileInformationByHandleEx;
     // Windows AF_UNIX endpoints are reparse points. Inspect the entry itself
     // with zero data access; never follow it or open it as a stream transport.
     let file = std::fs::OpenOptions::new()
         .access_mode(0)
         .custom_flags(0x0020_0000 | 0x0200_0000)
         .open(path)?;
+    let mut tag = std::mem::MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::uninit();
+    // SAFETY: owned handle, correctly sized FILE_ATTRIBUTE_TAG_INFO buffer.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle().cast(),
+            FileAttributeTagInfo,
+            tag.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // IO_REPARSE_TAG_AF_UNIX. Ordinary files and other reparse points must
+    // never qualify for socket cleanup, even when connect reports refusal.
+    if unsafe { tag.assume_init() }.ReparseTag != 0x8000_0023 {
+        return Err(std::io::Error::other("default socket is not a Unix socket"));
+    }
     let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: owned file handle and the Win32 BY_HANDLE_FILE_INFORMATION ABI.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr()) }

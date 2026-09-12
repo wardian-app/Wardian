@@ -703,7 +703,9 @@ fn normalize_codex_payload(
                     metadata,
                 );
             }
-            message_event(
+            let preserve_provider_turn_id =
+                source == "response_item" && matches!(role, AgentChatRole::User);
+            let mut event = message_event(
                 session_id,
                 provider,
                 sequence,
@@ -712,7 +714,13 @@ fn normalize_codex_payload(
                 source,
                 turn_id,
                 payload_type,
-            )
+            )?;
+            if preserve_provider_turn_id {
+                if let Some(provider_turn_id) = codex_provider_turn_id(payload) {
+                    set_metadata_string(&mut event.metadata, "provider_turn_id", &provider_turn_id);
+                }
+            }
+            Some(event)
         }
         "task_started" | "exec_command_begin" | "exec_command_start" => Some(tool_call_event(
             session_id,
@@ -2192,14 +2200,36 @@ fn codex_provider_turn_id(payload: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codex_response_item_user_context(payload: &Value, source: &str, role: &AgentChatRole) -> bool {
-    // Codex emits provider-supplied host context as a response_item message
-    // with batched content. The canonical human prompt is the separate
-    // event_msg/user_message record, so this boundary is structural rather
-    // than based on the injected text.
+/// Classifies batched Codex host context using native content-kind metadata.
+/// Records without trustworthy metadata retain the conservative context default;
+/// explicit user content and legacy string content remain eligible user input.
+pub(crate) fn codex_response_item_user_context(
+    payload: &Value,
+    source: &str,
+    role: &AgentChatRole,
+) -> bool {
     source == "response_item"
         && matches!(role, AgentChatRole::User)
         && matches!(payload.get("content"), Some(Value::Array(_)))
+        && !codex_response_item_has_explicit_user_content(payload)
+}
+
+fn codex_response_item_has_explicit_user_content(payload: &Value) -> bool {
+    let Some(content_item_kinds) = payload
+        .get("internal_chat_message_metadata_passthrough")
+        .and_then(|metadata| metadata.get("content_item_kinds"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+
+    !content_item_kinds.is_empty()
+        && content_item_kinds.iter().all(|kind| {
+            matches!(
+                kind.as_str().map(str::trim),
+                Some("user.text" | "user.image")
+            )
+        })
 }
 
 fn codex_tool_call_raw_input_text(payload: &Value) -> Option<String> {
@@ -2342,6 +2372,56 @@ mod tests {
         assert_eq!(events[2].metadata["context_observation"], "provider_native");
         assert_eq!(events[2].metadata["request_root_id"], "agent-1:3");
         assert_eq!(events[3].metadata["request_root_id"], "agent-1:3");
+    }
+
+    #[test]
+    fn codex_explicit_user_content_is_not_treated_as_context() {
+        let message = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","id":"native-request","role":"user","content":[{"type":"input_text","text":"Run the archive check."}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-turn","content_item_kinds":["user.text"]}}}"#,
+        );
+
+        assert_eq!(message.role, Some(AgentChatRole::User));
+        assert_eq!(message.turn_id.as_deref(), Some("native-request"));
+        assert_eq!(message.metadata["input_origin"], "human_input");
+        assert_eq!(message.metadata["input_purpose"], "request");
+        assert_eq!(message.metadata["provider_turn_id"], "native-turn");
+    }
+
+    #[test]
+    fn codex_explicit_context_content_kinds_remain_context() {
+        let message = one(
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","id":"native-context","role":"user","content":[{"type":"input_text","text":"Workspace instructions."}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-turn","content_item_kinds":["agents_md.instructions","environments.environment_context"]}}}"#,
+        );
+
+        assert_eq!(message.role, Some(AgentChatRole::User));
+        assert_eq!(message.metadata["input_origin"], "context_injection");
+        assert_eq!(message.metadata["input_purpose"], "context");
+        assert_eq!(message.metadata["provider_turn_id"], "native-turn");
+    }
+
+    #[test]
+    fn codex_unknown_or_mixed_content_kinds_remain_context() {
+        for content_item_kinds in [
+            vec!["user.future"],
+            vec!["user.text", "agents_md.instructions"],
+        ] {
+            let payload = json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Unclassified content."}],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": content_item_kinds,
+                },
+            });
+
+            assert!(codex_response_item_user_context(
+                &payload,
+                "response_item",
+                &AgentChatRole::User,
+            ));
+        }
     }
 
     #[test]
