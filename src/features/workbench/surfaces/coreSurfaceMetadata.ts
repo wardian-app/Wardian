@@ -6,6 +6,7 @@ import type {
   WorkbenchSurfaceV1,
 } from "../../../types";
 import { useQueueStore } from "../../../store/useQueueStore";
+import type { GardenCamera, GardenNavigationFrame, GardenTimeLens } from "../../garden/gardenNavigation";
 import type { GraphRelationshipReason } from "../../graph/graphProjection";
 import {
   DEFAULT_DASHBOARD_PREFS,
@@ -54,7 +55,12 @@ export type GraphSurfaceState = Readonly<{
   picker_search: string;
   show_all_labels: boolean;
 }>;
-export type GardenSurfaceState = Readonly<{ selected_unit_key: string | null }>;
+export type GardenSurfaceState = Readonly<{
+  selected_unit_key: string | null;
+  trail?: GardenNavigationFrame[];
+  camera?: GardenCamera;
+  time_lens?: GardenTimeLens;
+}>;
 /**
  * What the Analytics grid is currently asking.
  *
@@ -163,7 +169,27 @@ function restoreGardenState(value: unknown, version: number): SurfaceRestoreResu
     !isRecord(value)
     || (value.selected_unit_key !== null && typeof value.selected_unit_key !== "string")
   ) return { ok: false, error: "garden state is malformed" };
-  return { ok: true, state: { selected_unit_key: value.selected_unit_key as string | null } };
+  const cameraValid = (camera: unknown): camera is GardenCamera => {
+    if (!isRecord(camera) || typeof camera.scale !== "number" || !Number.isFinite(camera.scale) || camera.scale <= 0 || !isRecord(camera.position)) return false;
+    return typeof camera.position.x === "number" && Number.isFinite(camera.position.x)
+      && typeof camera.position.y === "number" && Number.isFinite(camera.position.y);
+  };
+  const kinds = new Set(["district", "workspace", "agent", "automation", "identity", "skill", "memory", "path", "stage"]);
+  const boundsValid = (bounds: unknown) => isRecord(bounds)
+    && [bounds.x, bounds.y, bounds.width, bounds.height].every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))
+    && Number(bounds.width) > 0 && Number(bounds.height) > 0;
+  const trail = Array.isArray(value.trail) ? value.trail.filter((frame): frame is GardenNavigationFrame =>
+    isRecord(frame) && isRecord(frame.ref) && kinds.has(String(frame.ref.kind))
+    && typeof frame.ref.id === "string" && typeof frame.label === "string"
+    && (frame.camera === undefined || cameraValid(frame.camera))
+    && (frame.bounds === undefined || boundsValid(frame.bounds)),
+  ) : undefined;
+  return { ok: true, state: {
+    selected_unit_key: value.selected_unit_key as string | null,
+    ...(trail ? { trail } : {}),
+    ...(cameraValid(value.camera) ? { camera: value.camera } : {}),
+    ...(["now", "recent", "branch"].includes(String(value.time_lens)) ? { time_lens: value.time_lens as GardenTimeLens } : {}),
+  } };
 }
 
 function openCommand(surfaceType: CoreViewSurfaceType, title: string): SurfaceCommandDefinition {

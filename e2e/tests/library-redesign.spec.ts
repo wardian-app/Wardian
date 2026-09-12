@@ -93,7 +93,7 @@ test.describe("Library Redesign", () => {
     await row.click();
     await expect(page.locator('[data-testid="skill-detail"]')).toBeVisible();
     await expect(page.locator('[data-testid="detail-header"]')).toContainText("planner");
-    await expect(page.locator('[data-testid="markdown-editor-textarea"]')).toHaveValue(/Planner/);
+    await expect(page.getByRole('heading', { name: 'Planner', exact: true })).toBeVisible();
   });
 
   test("search flattens results and shows a path subtitle", async () => {
@@ -124,6 +124,7 @@ test.describe("Library Redesign", () => {
     await expect(editor).toBeVisible();
     await expect(editor).toContainText("Saved");
 
+    await page.getByTestId('markdown-editor-edit').click();
     const textarea = page.locator('[data-testid="markdown-editor-textarea"]');
     await textarea.click();
     await textarea.type("\nExtra line.");
@@ -140,7 +141,7 @@ test.describe("Library Redesign", () => {
     await page.locator('[data-testid="library-row-classes/Architect"]').click();
 
     await expect(page.locator('[data-testid="class-detail"]')).toBeVisible();
-    await expect(page.locator('[data-testid="markdown-editor-textarea"]')).toHaveValue(/Role: Architect/);
+    await expect(page.getByRole('heading', { name: 'Role: Architect', exact: true })).toBeVisible();
   });
 
   test("shows the MCP stub copy", async () => {

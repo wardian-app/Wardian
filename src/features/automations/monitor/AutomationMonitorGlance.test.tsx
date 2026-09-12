@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { AutomationMonitorGlance } from './AutomationMonitorGlance';
 import type { AgentConfig } from '../../../types';
-import type { AutomationSchedule } from '../../../types/automation';
+import type { AutomationSchedule, ListenerView } from '../../../types/automation';
 import type { RunSummary } from '../run/runTypes';
 
 const heartbeatSchedule: AutomationSchedule = {
@@ -63,6 +63,42 @@ const run: RunSummary = {
   status: 'running',
   node_count: 1,
   path: '/r',
+};
+
+const assignedRun: RunSummary = {
+  ...run,
+  run_id: 'run-editorial',
+  blueprint_id: 'editorial-review',
+  schedule_id: 'schedule-editorial',
+};
+
+const selectedListener: ListenerView = {
+  id: 'selected-listener',
+  blueprint_id: 'listener-only',
+  name: 'Selected listener',
+  enabled: true,
+  trigger: {
+    type: 'file_watch',
+    path: '/workspace',
+    recursive: true,
+    patterns: [],
+    ignore: [],
+    events: ['created'],
+    debounce_ms: 250,
+  },
+  input: {},
+  bindings: {},
+  assignments: {
+    worker: { target_type: 'agent', agent_id: 'agent-librarian', conversation: 'current' },
+  },
+  runtime: { armed: true, fire_count: 0, recent_fire_epoch_ms: [], consecutive_failures: 0 },
+  has_secret: false,
+};
+
+const listenerRun: RunSummary = {
+  ...run,
+  run_id: 'run-listener',
+  blueprint_id: 'listener-only',
 };
 
 const approvalRun: RunSummary = {
@@ -167,6 +203,29 @@ describe('AutomationMonitorGlance', () => {
     expect(screen.getByText('heartbeat')).toBeInTheDocument();
     expect(screen.queryByText('Broken Audit')).toBeNull();
     expect(screen.queryByText('approval-gate')).toBeNull();
+  });
+
+  it('scopes schedules and runs to any selected agent', () => {
+    render(
+      <AutomationMonitorGlance
+        agents={agents}
+        selectedAgentIds={new Set(['agent-librarian', 'agent-missing'])}
+        listeners={[selectedListener]}
+        schedules={[heartbeatSchedule, assignedSchedule]}
+        activeRuns={[run, assignedRun, listenerRun]}
+        onOpenRun={() => {}}
+        onOpenMonitor={() => {}}
+        onPauseSchedule={() => {}}
+        onResumeSchedule={() => {}}
+        onRunScheduleNow={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId('automation-sidebar-agent-scope')).toHaveTextContent('2 selected agents');
+    expect(screen.getAllByText('Editorial Review').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Passive Heartbeat')).toBeNull();
+    expect(screen.getByText(/2 running/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 next/i)).toBeInTheDocument();
   });
 
   it('shows two resolved role assignments and an accessible overflow control', () => {

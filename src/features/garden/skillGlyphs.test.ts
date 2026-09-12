@@ -7,6 +7,9 @@ import {
   buildSkillCrowns,
   crownExtent,
   crownPositions,
+  crownReveal,
+  crownLabelLayout,
+  crownConvergence,
   gardenDetailForScale,
   skillHue,
   type CrownAgent,
@@ -266,5 +269,122 @@ describe("gardenDetailForScale", () => {
     expect(gardenDetailForScale(2)).toBe("near");
     expect(CROWN_CAP.far).toBe(0);
     expect(CROWN_CAP.mid).toBeLessThan(CROWN_CAP.near);
+  });
+});
+
+describe("continuous crown disclosure", () => {
+  it("interpolates each stable slot continuously into its Capabilities grid", () => {
+    crownPositions(13).forEach((position, index) => {
+      const start = crownConvergence(position, index);
+      expect(start).toEqual({ ...position, glyphScale: 1, labelOpacity: 1 });
+      const end = crownConvergence(position, index, 1);
+      expect(end).toEqual({ x: -9.5 + (index % 3) * 2.4, y: -7.4 + Math.floor(index / 3) * 3.25, glyphScale: 0.085, labelOpacity: 0 });
+      expect(GLYPH_RADIUS * end.glyphScale).toBeCloseTo(0.5525);
+      const middle = crownConvergence(position, index, 0.5);
+      for (const key of ["x", "y", "glyphScale", "labelOpacity"] as const) {
+        expect(middle[key]).toBeCloseTo((start[key] + end[key]) / 2);
+        for (const boundary of [0, 1]) {
+          const before = crownConvergence(position, index, boundary - 0.000001);
+          const after = crownConvergence(position, index, boundary + 0.000001);
+          expect(Math.abs(after[key] - before[key])).toBeLessThan(0.0001);
+        }
+      }
+      expect(crownConvergence(position, index, -1)).toEqual(start);
+      expect(crownConvergence(position, index, 2)).toEqual(end);
+      expect(crownConvergence(position, index, NaN)).toEqual(start);
+    });
+  });
+
+  it("reveals earlier slots first, monotonically, with a bounded glyph size", () => {
+    for (let index = 0; index <= CROWN_CAP.near; index += 1) {
+      let previous = 0;
+      for (let scale = 0; scale <= 3; scale += 0.01) {
+        const reveal = crownReveal(scale, index);
+        expect(reveal.opacity).toBeGreaterThanOrEqual(previous);
+        expect(reveal.opacity).toBeLessThanOrEqual(crownReveal(scale, 0).opacity);
+        expect(reveal.glyphScale).toBeGreaterThanOrEqual(0.65);
+        expect(reveal.glyphScale).toBeLessThanOrEqual(1);
+        if (reveal.monogramOpacity > 0) expect(8 * scale * reveal.glyphScale).toBeGreaterThan(10);
+        previous = reveal.opacity;
+      }
+      expect(crownReveal(3, index).opacity).toBe(1);
+    }
+  });
+
+  it("has no jumps or slope discontinuities at reveal endpoints or old detail thresholds", () => {
+    const epsilon = 0.00001;
+    for (let index = 0; index <= CROWN_CAP.near; index += 1) {
+      const start = 0.55 + index * 0.07;
+      for (const threshold of [start, start + 0.4, 0.7, 1.3, 1.25, 1.5, 2, 2.6]) {
+        const before = crownReveal(threshold - epsilon, index);
+        const at = crownReveal(threshold, index);
+        const after = crownReveal(threshold + epsilon, index);
+        for (const key of ["opacity", "glyphScale", "monogramOpacity", "labelOpacity"] as const) {
+          expect(Math.abs(after[key] - before[key])).toBeLessThan(0.001);
+          const incoming = (at[key] - before[key]) / epsilon;
+          const outgoing = (after[key] - at[key]) / epsilon;
+          expect(Math.abs(incoming - outgoing)).toBeLessThan(0.01);
+        }
+      }
+    }
+  });
+
+  it("keeps invalid camera values finite and hidden", () => {
+    for (const scale of [NaN, Infinity, -Infinity, -1, 0]) {
+      expect(crownReveal(scale, 0).opacity).toBe(0);
+      expect(crownReveal(scale, 0).labelOpacity).toBe(0);
+    }
+  });
+
+  it("centers a horizontal 72px single-skill label with a 4px gap above the glyph", () => {
+    for (const scale of [2.01, 2.6, 4, 8, 10]) {
+      const label = crownLabelLayout(crownPositions(1)[0], scale, 1);
+      expect(label.rotation).toBe(0);
+      expect(label.align).toBe("center");
+      expect(label.width * scale).toBeCloseTo(72);
+      expect(label.height * scale).toBeCloseTo(12);
+      expect(label.fontSize * scale).toBeCloseTo(10);
+      expect(label.x - label.offsetX + label.width / 2).toBeCloseTo(0);
+      expect((-GLYPH_RADIUS - (label.y - label.offsetY + label.height)) * scale).toBeCloseTo(4);
+    }
+  });
+
+  it("preserves the radial layout for every multi-skill crown", () => {
+    for (const count of [2, 3, 6, 12, 15]) {
+      for (const position of crownPositions(Math.min(count, 13))) {
+        expect(crownLabelLayout(position, 2.6, count)).toEqual(crownLabelLayout(position, 2.6));
+      }
+    }
+  });
+
+  it("keeps label boxes separated at every crown count and readable zoom", () => {
+    // Separating-axis test on the actual rotated Konva text boxes, including
+    // their maximum width: long labels ellipsize inside these same bounds.
+    for (let count = 1; count <= CROWN_CAP.near + 1; count += 1) {
+      for (const scale of [2, 2.01, 2.3, 2.6, 4, 8]) {
+        const boxes = crownPositions(count).map((position) => {
+          const label = crownLabelLayout(position, scale, count);
+          expect(label.fontSize * scale).toBe(10);
+          const angle = label.rotation * Math.PI / 180;
+          return [[0, 0], [label.width, 0], [label.width, label.height], [0, label.height]].map(([x, y]) => ({
+            x: position.x + label.x + (x - label.offsetX) * Math.cos(angle) - (y - label.offsetY) * Math.sin(angle),
+            y: position.y + label.y + (x - label.offsetX) * Math.sin(angle) + (y - label.offsetY) * Math.cos(angle),
+          }));
+        });
+        boxes.forEach((box, index) => {
+          for (const other of boxes.slice(index + 1)) {
+            const axes = [box, other].flatMap((corners) => [0, 1].map((edge) => ({
+              x: -(corners[edge + 1].y - corners[edge].y),
+              y: corners[edge + 1].x - corners[edge].x,
+            })));
+            expect(axes.some((axis) => {
+              const a = box.map((p) => p.x * axis.x + p.y * axis.y);
+              const b = other.map((p) => p.x * axis.x + p.y * axis.y);
+              return Math.max(...a) <= Math.min(...b) || Math.max(...b) <= Math.min(...a);
+            })).toBe(true);
+          }
+        });
+      }
+    }
   });
 });

@@ -26,7 +26,7 @@ is complete.
 | Workflow blueprint catalog | `workflow_list_blueprints` | 500 parsed blueprints | response carries `truncated`; the workflow selector identifies the partial catalog |
 | Workflow run list | `workflow_list_runs` | 200 newest runs | response carries `truncated`; Observe shows the partial-result notice |
 | Inbox notification projection | `list_inbox_notifications` | 200 newest notifications | response carries `truncated`; Inbox identifies the partial projection |
-| Topology activity | `get_pair_activity` | 5,000 recent records and 1,000 pair rows | result carries `truncated`; the graph treats the activity set as recent/partial |
+| Topology activity | `get_pair_activity` | 5,000 recent records and 1,000 pair rows | result carries `truncated`; the graph treats the activity set as a quiet recent projection |
 
 The constants live next to the owning boundary so a caller cannot request an
 unbounded page through the public command. Limits count returned domain
@@ -71,8 +71,9 @@ bounded UI response types without an explicit review.
 - A large directory, Git worktree, library section, workflow log, or
   interaction database cannot force the corresponding public command to
   return an unbounded collection.
-- Every truncated response is visible to the consuming surface or is carried
-  forward to the next API boundary; no partial result is presented as complete.
+- Every truncated response is visible to the consuming surface, carried forward
+  to the next API boundary, or explicitly defined as a bounded projection by
+  that surface; no partial result is presented as complete.
 - Existing small-result behavior and ordering remain unchanged.
 - Unit tests exercise the limit and the `truncated` transition for every
   changed response, plus a UI test for each user-visible overflow notice.
@@ -90,10 +91,12 @@ operator has already loaded. The UI may append pages for inspection, but no
 single response or expansion action may return the full collection.
 
 The contract applies to indirect consumers too: Garden folder/workflow views,
-the Graph activity view, and other projections preserve continuation metadata
-instead of replacing it with a generic omission notice. When a collection is
-refreshed, a fresh initial request resets the continuation sequence so pages
-cannot silently splice together different snapshots.
+the Graph activity view, and other projections preserve the bounded-result
+semantics. The Graph deliberately consumes only its initial recent projection;
+it does not surface an overflow notice or continuation control. The backend
+command retains its offset contract for callers that need historical expansion.
+When a collection is refreshed, a fresh initial request resets the continuation
+sequence so pages cannot silently splice together different snapshots.
 
 ## Review checklist
 
@@ -106,6 +109,13 @@ cannot silently splice together different snapshots.
 - [x] Existing bounded transcript, terminal, monitor, and queue surfaces
 - [x] Native/real-provider acceptance is not required; these are local storage,
   command, and rendering limits.
+
+## Graph activity presentation
+
+The Graph is a visual topology surface, not a communication-history browser.
+It renders the initial bounded recent activity projection without showing a
+truncation banner or a page-expansion control. This keeps routine long-lived
+workspaces free of a persistent warning while the backend cap remains in place.
 
 ## Verification
 

@@ -14,6 +14,8 @@ const openRunMock = vi.hoisted(() => vi.fn());
 const observeRunMock = vi.hoisted(() => vi.fn());
 const setModeMock = vi.hoisted(() => vi.fn());
 const automationMonitorGlanceMock = vi.hoisted(() => vi.fn());
+const loadListenersMock = vi.hoisted(() => vi.fn());
+const subscribeListenersMock = vi.hoisted(() => vi.fn().mockResolvedValue(() => undefined));
 
 vi.mock("../features/agents/ConfigureAgentPanel", () => ({
   ConfigureAgentPanel: () => <div data-testid="configure-agent-panel-mock" />,
@@ -35,6 +37,7 @@ vi.mock("../features/automations/monitor/AutomationMonitorGlance", () => ({
     onPauseSchedule,
     onResumeSchedule,
     onRunScheduleNow,
+    selectedAgentIds,
   }: {
     onOpenRun: (blueprintId: string, runId: string) => void;
     agents: AgentConfig[];
@@ -42,8 +45,9 @@ vi.mock("../features/automations/monitor/AutomationMonitorGlance", () => ({
     onPauseSchedule: (id: string) => void;
     onResumeSchedule: (id: string) => void;
     onRunScheduleNow: (id: string) => void;
+    selectedAgentIds: ReadonlySet<string>;
   }) => {
-    automationMonitorGlanceMock({ agents });
+    automationMonitorGlanceMock({ agents, selectedAgentIds });
     return <div>
       <button type="button" onClick={() => onOpenRun("automation-1", "run-1")}>
         Open Run
@@ -67,6 +71,12 @@ vi.mock("../features/automations/monitor/AutomationMonitorGlance", () => ({
 vi.mock("../store/useSchedulesStore", () => ({
   useSchedulesStore: <T,>(selector: (state: { schedules: unknown[]; load: () => void; pause: (id: string) => void; resume: (id: string) => void; runNow: (id: string) => void }) => T) => (
     selector({ schedules: [], load: loadSchedulesMock, pause: pauseScheduleMock, resume: resumeScheduleMock, runNow: runScheduleNowMock })
+  ),
+}));
+
+vi.mock("../store/useListenersStore", () => ({
+  useListenersStore: <T,>(selector: (state: { listeners: unknown[]; load: () => void; subscribe: () => Promise<() => void> }) => T) => (
+    selector({ listeners: [], load: loadListenersMock, subscribe: subscribeListenersMock })
   ),
 }));
 
@@ -246,11 +256,13 @@ describe("SidebarContentPane", () => {
   });
 
   it("loads automation state and wires schedule controls into the glance pane", () => {
-    renderPane({ activeTab: "automations" });
+    const selectedAgentIds = new Set(["agent-1"]);
+    renderPane({ activeTab: "automations", selectedAgentIds });
 
     expect(loadSchedulesMock).toHaveBeenCalled();
     expect(loadRunsMock).toHaveBeenCalled();
-    expect(automationMonitorGlanceMock).toHaveBeenCalledWith({ agents });
+    expect(loadListenersMock).toHaveBeenCalled();
+    expect(automationMonitorGlanceMock).toHaveBeenCalledWith({ agents, selectedAgentIds });
 
     fireEvent.click(screen.getByRole("button", { name: /pause schedule/i }));
     fireEvent.click(screen.getByRole("button", { name: /resume schedule/i }));

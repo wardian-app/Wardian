@@ -86,12 +86,12 @@ async function waitForCompletedRun(home, blueprintId, timeoutMs = 30000) {
 
 test("the automation scheduler tick loop fires a scheduled run", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

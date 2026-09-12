@@ -4,7 +4,7 @@ import { AutomationMonitor } from './AutomationMonitor';
 import { buildActivities, buildMonitorModel } from './monitorModel';
 import { formatAutomationTime } from './automationTime';
 import type { RunSummary } from '../run/runTypes';
-import type { AutomationSchedule } from '../../../types/automation';
+import type { AutomationSchedule, ListenerView } from '../../../types/automation';
 
 const invokeMock = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invokeMock(...args) }));
@@ -23,6 +23,58 @@ const runState = vi.hoisted(() => ({
   runs: [] as RunSummary[],
   loadRuns: vi.fn(),
 }));
+
+const automationSchedule = (
+  id: string,
+  blueprintId: string,
+  name: string,
+  agentId: string,
+): AutomationSchedule => ({
+  id,
+  blueprint_id: blueprintId,
+  name,
+  input: {},
+  bindings: {},
+  assignments: {
+    worker: { target_type: 'agent', agent_id: agentId, conversation: 'current' },
+  },
+  schedule: { schedule_type: 'daily', time_of_day: '09:00', active: true },
+  is_paused: false,
+  next_run_epoch_ms: Date.UTC(2026, 5, 1, 16, 0, 0),
+});
+
+const automationRun = (runId: string, blueprintId: string, scheduleId?: string): RunSummary => ({
+  run_id: runId,
+  blueprint_id: blueprintId,
+  schedule_id: scheduleId,
+  status: 'completed',
+  node_count: 2,
+  path: `/runs/${runId}`,
+  updated_at: '2026-06-01T18:00:00Z',
+});
+
+const selectedListener: ListenerView = {
+  id: 'selected-listener',
+  blueprint_id: 'listener-only',
+  name: 'Selected listener',
+  enabled: true,
+  trigger: {
+    type: 'file_watch',
+    path: '/workspace',
+    recursive: true,
+    patterns: [],
+    ignore: [],
+    events: ['created'],
+    debounce_ms: 250,
+  },
+  input: {},
+  bindings: {},
+  assignments: {
+    worker: { target_type: 'agent', agent_id: 'agent-1', conversation: 'current' },
+  },
+  runtime: { armed: true, fire_count: 0, recent_fire_epoch_ms: [], consecutive_failures: 0 },
+  has_secret: false,
+};
 
 vi.mock('../../../store/useSchedulesStore', () => ({
   useSchedulesStore: <T,>(selector: (state: typeof scheduleState) => T) => selector(scheduleState),
@@ -69,6 +121,35 @@ describe('AutomationMonitor', () => {
     expect(historyCard).toHaveTextContent('Ran');
     expect(historyCard).toHaveTextContent('Outcome');
     expect(historyCard).not.toHaveTextContent('Next run');
+  });
+
+  it('scopes monitor activity and exact scheduled runs to any selected agent', () => {
+    scheduleState.schedules = [
+      automationSchedule('selected', 'shared', 'Selected workflow', 'agent-1'),
+      automationSchedule('other', 'shared', 'Other workflow', 'agent-2'),
+    ];
+    runState.runs = [
+      automationRun('run-selected', 'shared', 'selected'),
+      automationRun('run-other', 'shared', 'other'),
+      automationRun('run-listener', 'listener-only'),
+    ];
+
+    render(
+      <AutomationMonitor
+        selectedAgentIds={new Set(['agent-1'])}
+        listeners={[selectedListener]}
+        onOpenRun={vi.fn()}
+        onEditSchedule={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Selected workflow')).toBeInTheDocument();
+    expect(screen.queryByText('Other workflow')).toBeNull();
+    expect(screen.getByText('2 automations tracked for selected agents')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+    expect(screen.queryByTestId('automation-history-run-run-other')).toBeNull();
+    expect(screen.getByTestId('automation-history-run-run-listener')).toBeInTheDocument();
   });
 
   it('sorts history by latest run timestamp and shows the timestamp', () => {

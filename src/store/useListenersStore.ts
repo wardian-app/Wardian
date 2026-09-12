@@ -3,6 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import { create } from 'zustand';
 import type { AutomationListener, ListenerGatewayConfig, ListenerView } from '../types/automation';
 
+let listenerLoadGeneration = 0;
+
 interface ListenersState {
   listeners: ListenerView[];
   gateway: ListenerGatewayConfig | null;
@@ -27,9 +29,11 @@ export const useListenersStore = create<ListenersState>((set, get) => ({
   error: null,
 
   async load() {
+    const generation = ++listenerLoadGeneration;
     set({ loading: true, error: null });
     try {
       const listeners = await invoke<ListenerView[]>('listener_list');
+      if (generation !== listenerLoadGeneration) return;
       const next = Array.isArray(listeners) ? listeners : [];
       // Listeners write runtime state on every fire, so an unchanged payload
       // is common; bailing out keeps a busy watcher from re-rendering the view.
@@ -39,6 +43,7 @@ export const useListenersStore = create<ListenersState>((set, get) => ({
       }
       set({ listeners: next, loading: false });
     } catch (error) {
+      if (generation !== listenerLoadGeneration) return;
       set({ error: String(error), loading: false });
     }
   },

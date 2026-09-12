@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -60,10 +61,6 @@ const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === 
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
-
 function buildCli(harness) {
   const result = spawnSync(
     "cargo",
@@ -80,7 +77,7 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  return path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {

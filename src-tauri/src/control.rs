@@ -5,12 +5,21 @@ pub(crate) use startup_readiness::{
 };
 
 use crate::manager;
+mod agent_messaging;
+mod codex_background;
+mod headless_delivery;
+use crate::providers::claude::claude_output_has_bypass_permissions_consent_prompt;
 use crate::remote::operations::inbox_list_control as list_inbox_control;
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
 };
 use crate::state::{AppState, MailboxMessageDraft, MailboxMessageRecord};
 use crate::utils::strip_ansi_controls;
+use agent_messaging::{
+    bounded_headless_delivery_timeout, message_with_structured_reply_instruction,
+    HeadlessMessageDeliveryRequest,
+};
+use headless_delivery::deliver_headless_message;
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -222,6 +231,9 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
         .map_err(|e| ControlError::bad_request(format!("malformed control request JSON: {e}")))?;
 
     match req {
+        ControlRequest::AgentMessaging { request, origin } => {
+            agent_messaging::handle(app, request, origin).await
+        }
         ControlRequest::AgentList => {
             let response = AgentListResponse::new(live_agent_snapshots(app).await);
             ok_json(&response)
@@ -2093,6 +2105,7 @@ async fn deliver_message_to_target_with_delivery_options(
             }
             DeliveryRoute::Headless => {
                 if input_mode == MessageInputMode::Message
+                    && info.provider != "codex"
                     && crate::delivery::native_session::NativeProviderProtocol::for_provider(
                         &info.provider,
                     )
@@ -2157,6 +2170,8 @@ async fn deliver_message_to_target_with_delivery_options(
                         origin,
                         timeout: headless_timeout,
                         lifecycle_guard: Some(target_lifecycle_guard),
+                        orchestration,
+                        parent_interaction_id,
                     },
                 )
                 .await
@@ -2317,6 +2332,9 @@ async fn deliver_native_message(
             record,
         )
         .await?;
+    let accepted_only = info.provider == "codex"
+        && receipt.record.phase
+            == wardian_core::native_transport::NativeDeliveryPhase::ProviderAccepted;
     let detail = DeliveryDetail {
         uuid: info.uuid.clone(),
         name: info.name.clone(),
@@ -2326,10 +2344,24 @@ async fn deliver_native_message(
         input_mode,
         queue_policy,
         message_id: Some(receipt.record.envelope.interaction_id.clone()),
-        delivery_phase: Some("turn_started".to_string()),
-        observed_state: Some("turn_started".to_string()),
+        delivery_phase: Some(
+            if accepted_only {
+                "provider_accepted"
+            } else {
+                "turn_started"
+            }
+            .to_string(),
+        ),
+        observed_state: Some(
+            if accepted_only {
+                "protocol_acknowledged"
+            } else {
+                "turn_started"
+            }
+            .to_string(),
+        ),
         reason: Some(format!(
-            "positive provider turn-start evidence via {}",
+            "provider delivery evidence via {}",
             receipt.capabilities.transport
         )),
         profile: Some(receipt.capabilities.provider.clone()),
@@ -2514,14 +2546,6 @@ fn status_uses_headless_delivery(status: &str) -> bool {
     matches!(status, "off" | "error" | "headless")
 }
 
-fn bounded_headless_delivery_timeout(timeout_ms: Option<u64>) -> Duration {
-    timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT)
-        .max(Duration::from_secs(1))
-        .min(MAX_HEADLESS_DELIVERY_TIMEOUT)
-}
-
 fn approval_action_bytes(provider: &str, action: &ApprovalAction) -> Vec<u8> {
     match action {
         ApprovalAction::Accept => {
@@ -2635,239 +2659,10 @@ enum HeadlessMessageDelivery {
     Busy(Box<DeliveryTargetInfo>),
 }
 
-struct HeadlessMessageDeliveryRequest<'a> {
-    app: Option<&'a AppHandle>,
-    info: &'a DeliveryTargetInfo,
-    interaction_id: &'a str,
-    prompt: &'a str,
-    input_mode: MessageInputMode,
-    queue_policy: QueuePolicy,
-    origin: Option<&'a MessageOrigin>,
-    timeout: Duration,
-    lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-}
-
 #[derive(Debug)]
 enum HeadlessMessageLeaseError {
     Busy,
     Failed(String),
-}
-
-async fn deliver_headless_message(
-    state: &AppState,
-    request: HeadlessMessageDeliveryRequest<'_>,
-) -> HeadlessMessageDelivery {
-    let HeadlessMessageDeliveryRequest {
-        app,
-        info,
-        interaction_id,
-        prompt,
-        input_mode,
-        queue_policy,
-        origin,
-        timeout,
-        lifecycle_guard,
-    } = request;
-    // Direct offline delivery runs a provider against the target agent's
-    // workspace. Hold the same home-wide shared guard as automation drives
-    // before taking a conversation lease, so a managed-worktree deletion
-    // cannot remove that workspace before or during provider execution.
-    let _headless_execution =
-        match wardian_core::automation_execution_lock::acquire_headless_execution_guard() {
-            Ok(guard) => guard,
-            Err(error) => {
-                let detail = headless_message_failure_detail(
-                    info,
-                    interaction_id,
-                    input_mode,
-                    queue_policy,
-                    "headless_execution_blocked",
-                    error,
-                );
-                persist_interaction_delivery_attempt(
-                    state,
-                    interaction_id,
-                    &info.uuid,
-                    DeliveryTransportKind::HeadlessProcess,
-                    &detail,
-                )
-                .await;
-                record_delivery_attempt(state, &detail).await;
-                return HeadlessMessageDelivery::Completed(Box::new(detail));
-            }
-        };
-    // Every headless path claims the persisted lease before the in-process
-    // lifecycle gate. Automations and lifecycle mutations use the same order, so
-    // a local waiter never holds the gate while another Wardian process holds
-    // the lease it needs to finish.
-    let lease = match acquire_headless_message_lease(info, interaction_id) {
-        Ok(lease) => lease,
-        Err(HeadlessMessageLeaseError::Busy) => {
-            return HeadlessMessageDelivery::Busy(Box::new(
-                delivery_target_info(state, &info.uuid)
-                    .await
-                    .unwrap_or_else(|_| info.clone()),
-            ))
-        }
-        Err(HeadlessMessageLeaseError::Failed(error)) => {
-            let detail = headless_message_failure_detail(
-                info,
-                interaction_id,
-                input_mode,
-                queue_policy,
-                "lease_unavailable",
-                error,
-            );
-            persist_interaction_delivery_attempt(
-                state,
-                interaction_id,
-                &info.uuid,
-                DeliveryTransportKind::HeadlessProcess,
-                &detail,
-            )
-            .await;
-            record_delivery_attempt(state, &detail).await;
-            return HeadlessMessageDelivery::Completed(Box::new(detail));
-        }
-    };
-    let mut lease_guard =
-        wardian_core::conversation_lease::PersistedConversationLeaseGuard::new(&lease);
-    let lifecycle_guard = match lifecycle_guard {
-        Some(guard) => guard,
-        None => match state.try_lock_agent_lifecycle(&info.uuid).await {
-            Some(guard) => guard,
-            None => {
-                return HeadlessMessageDelivery::Busy(Box::new(
-                    delivery_target_info(state, &info.uuid)
-                        .await
-                        .unwrap_or_else(|_| info.clone()),
-                ));
-            }
-        },
-    };
-    let current_info = match delivery_target_info(state, &info.uuid).await {
-        Ok(current_info) => current_info,
-        Err(error) => {
-            let detail = headless_message_failure_detail(
-                info,
-                interaction_id,
-                input_mode,
-                queue_policy,
-                "target_replaced",
-                error.message,
-            );
-            persist_interaction_delivery_attempt(
-                state,
-                interaction_id,
-                &info.uuid,
-                DeliveryTransportKind::HeadlessProcess,
-                &detail,
-            )
-            .await;
-            record_delivery_attempt(state, &detail).await;
-            return HeadlessMessageDelivery::Completed(Box::new(detail));
-        }
-    };
-    if !same_delivery_target_incarnation(info, &current_info)
-        || !status_uses_headless_delivery(&current_info.status)
-    {
-        return HeadlessMessageDelivery::Busy(Box::new(current_info));
-    }
-    record_headless_status_observation(app, state, &current_info).await;
-    drop(lifecycle_guard);
-
-    let result = crate::delivery::run_headless_process_prompt(
-        state,
-        crate::delivery::HeadlessProcessPromptRequest {
-            node: "message_delivery".to_string(),
-            provider: current_info.provider.clone(),
-            cwd: current_info.cwd.clone(),
-            prompt: prompt.to_string(),
-            session_id: current_info.uuid.clone(),
-            memory_agent_id: Some(current_info.uuid.clone()),
-            resume_session: current_info.resume_session.clone(),
-            config_override: Some(current_info.config.clone()),
-            interaction_id: Some(interaction_id.to_string()),
-            timeout,
-            lease_owner: Some(lease_guard.owner().clone()),
-        },
-    )
-    .await;
-
-    match result {
-        Ok(result) => {
-            record_headless_message_response(
-                state,
-                &current_info,
-                interaction_id,
-                &result.response,
-            )
-            .await;
-            record_headless_message_exchange(
-                state,
-                &current_info,
-                interaction_id,
-                prompt,
-                &result.response,
-                origin,
-            )
-            .await;
-            let mut detail = DeliveryDetail {
-                uuid: current_info.uuid.clone(),
-                name: current_info.name.clone(),
-                provider: current_info.provider.clone(),
-                runtime_state: "headless_process".to_string(),
-                delivery_state: "provider_applied".to_string(),
-                input_mode,
-                queue_policy,
-                message_id: Some(interaction_id.to_string()),
-                delivery_phase: Some("process_completed".to_string()),
-                observed_state: Some("stdout_parsed".to_string()),
-                reason: Some("target was not live; ran provider headlessly".to_string()),
-                profile: Some(
-                    crate::utils::delivery_profile::delivery_profile(&current_info.provider)
-                        .provider,
-                ),
-                error: None,
-            };
-            record_delivery_attempt(state, &detail).await;
-            let release_error = lease_guard.release().err();
-            if let Some(error) = release_error {
-                detail.reason = Some(format!(
-                    "target was not live; ran provider headlessly (lease cleanup is pending until it can be released or expires: {error})"
-                ));
-            } else {
-                record_headless_status_observation(app, state, &current_info).await;
-            }
-            HeadlessMessageDelivery::Completed(Box::new(detail))
-        }
-        Err(error) => {
-            let diagnostic =
-                crate::delivery::headless_process::sanitize_headless_error(&error, prompt);
-            let mut detail = headless_message_failure_detail(
-                &current_info,
-                interaction_id,
-                input_mode,
-                queue_policy,
-                "headless_process_failed",
-                diagnostic,
-            );
-            // The process runner already persisted this attempt. This watch
-            // record is intentionally not another durable delivery attempt.
-            record_delivery_attempt(state, &detail).await;
-            let release_error = lease_guard.release().err();
-            if let Some(release_error) = release_error {
-                if let Some(error) = detail.error.as_mut() {
-                    error.message.push_str(&format!(
-                        "; additionally failed to release the conversation lease: {release_error}"
-                    ));
-                }
-            } else {
-                record_headless_status_observation(app, state, &current_info).await;
-            }
-            HeadlessMessageDelivery::Completed(Box::new(detail))
-        }
-    }
 }
 
 fn acquire_headless_message_lease(
@@ -4123,12 +3918,6 @@ async fn ask_fallback_agent_snapshot(
         })
 }
 
-fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
-    format!(
-        "{message}\n\nWardian request id: {request_id}\nWhen finished, execute this command from your shell/tool with the reply body on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
-    )
-}
-
 #[derive(Debug)]
 struct StructuredAskDeliveryMessage {
     prompt: String,
@@ -4268,6 +4057,14 @@ async fn submit_structured_reply(
     origin: Option<&MessageOrigin>,
     app: Option<&AppHandle>,
 ) -> Result<StructuredReply, ControlError> {
+    if let Some(reply) =
+        agent_messaging::legacy_reply(state, request_id, status.clone(), body, origin, app).await?
+    {
+        if let Some(app) = app {
+            let _ = app.emit("pair-activity-changed", ());
+        }
+        return Ok(reply);
+    }
     let source_session_id =
         origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
 
@@ -4963,7 +4760,14 @@ async fn delivery_target_info(
         cwd: PathBuf::from(&config.folder),
         config: config.clone(),
         config_identity: agent.config.clone(),
-        status: normalize_status(&status),
+        // Provider log activity can outlive a leased background owner. Off is
+        // authoritative for routing even when the observed status says Idle;
+        // callers still enforce lease ownership before starting background work.
+        status: if config.is_off {
+            "off".to_string()
+        } else {
+            normalize_status(&status)
+        },
     })
 }
 
@@ -5225,6 +5029,9 @@ pub(crate) fn spawn_mailbox_drain_if_idle(
     session_id: &str,
     observed_status: &str,
 ) {
+    if matches!(normalize_status(observed_status).as_str(), "idle" | "off") {
+        agent_messaging::spawn_pending_tasks(app, session_id);
+    }
     if normalize_status(observed_status) != "idle" {
         return;
     }
@@ -5240,6 +5047,7 @@ pub(crate) fn spawn_mailbox_drain_if_idle(
 /// drain. Later provider idle observations remain the normal delivery trigger;
 /// this does not poll or retry terminal input.
 pub(crate) fn spawn_mailbox_drain_after_restore(app: &AppHandle, session_id: &str) {
+    agent_messaging::spawn_pending_tasks(app, session_id);
     let app = app.clone();
     let session_id = session_id.to_string();
     tauri::async_runtime::spawn(async move {
@@ -6131,7 +5939,11 @@ mod tests {
         assert!(authenticate_automation_memory_principal(Some("agent-a"), None).is_err());
     }
 
-    fn test_agent(session_id: &str, session_name: &str, agent_class: &str) -> ActiveAgent {
+    pub(super) fn test_agent(
+        session_id: &str,
+        session_name: &str,
+        agent_class: &str,
+    ) -> ActiveAgent {
         ActiveAgent {
             config: Arc::new(Mutex::new(AgentConfig {
                 session_id: session_id.to_string(),
@@ -7230,6 +7042,97 @@ mod tests {
             records[1].text.as_deref(),
             Some("Mock headless execution completed successfully.")
         );
+    }
+
+    #[tokio::test]
+    async fn configured_off_routing_ignores_status_drift_without_changing_input_policy() {
+        let state = AppState::new();
+        let agent = test_agent("off-routing", "Routing", "Test");
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.provider = "codex".into();
+            config.is_off = true;
+        }
+        let config = agent.config.clone();
+        let observed_status = agent.current_status.clone();
+        state
+            .agents
+            .lock()
+            .await
+            .insert("off-routing".into(), agent);
+        let approval = ApprovalAction::Accept;
+        for drift in ["Processing...", "Idle", "Action Needed"] {
+            *observed_status.lock().unwrap() = drift.into();
+            let info = delivery_target_info(&state, "off-routing").await.unwrap();
+            assert_eq!(info.status, "off", "observed status: {drift}");
+            assert!(status_uses_headless_delivery(&info.status));
+            for (mode, policy, action, expected) in [
+                (
+                    MessageInputMode::Message,
+                    QueuePolicy::QueueIfBusy,
+                    None,
+                    DeliveryRoute::Headless,
+                ),
+                (
+                    MessageInputMode::Message,
+                    QueuePolicy::LiveOnly,
+                    None,
+                    DeliveryRoute::Reject {
+                        failure: "target_not_live",
+                    },
+                ),
+                (
+                    MessageInputMode::Message,
+                    QueuePolicy::MailboxOnly,
+                    None,
+                    DeliveryRoute::Mailbox {
+                        runtime_state: "mailbox_only",
+                    },
+                ),
+                (
+                    MessageInputMode::Command,
+                    QueuePolicy::QueueIfBusy,
+                    None,
+                    DeliveryRoute::Mailbox {
+                        runtime_state: "queued_not_live",
+                    },
+                ),
+                (
+                    MessageInputMode::ApprovalAction,
+                    QueuePolicy::QueueIfBusy,
+                    Some(&approval),
+                    DeliveryRoute::Reject {
+                        failure: "not_input_ready",
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    decide_delivery_route(&info.status, mode, policy, action),
+                    expected,
+                    "observed status: {drift}, input: {mode:?}, policy: {policy:?}",
+                );
+            }
+            // Routing does not rewrite telemetry or the configured lifecycle.
+            assert_eq!(*observed_status.lock().unwrap(), drift);
+            assert!(config.lock().unwrap().is_off);
+        }
+        config.lock().unwrap().is_off = false;
+        for (observed, mode, action) in [
+            ("Idle", MessageInputMode::Message, None),
+            (
+                "Action Needed",
+                MessageInputMode::ApprovalAction,
+                Some(&approval),
+            ),
+        ] {
+            *observed_status.lock().unwrap() = observed.into();
+            let info = delivery_target_info(&state, "off-routing").await.unwrap();
+            assert!(!status_uses_headless_delivery(&info.status));
+            assert_eq!(
+                decide_delivery_route(&info.status, mode, QueuePolicy::LiveOnly, action),
+                DeliveryRoute::Live,
+            );
+        }
     }
 
     #[test]
