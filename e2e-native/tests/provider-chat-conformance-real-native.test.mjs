@@ -21,7 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { acquireHomeLock, nativeRunId, releaseHomeLock } from "../lib/sessionHome.mjs";
-import { cleanupConformanceSession, closeConformanceSession } from "../lib/conformance-cleanup.mjs";
+import { cleanupConformanceSession, closeConformanceSession, pauseConformanceWork } from "../lib/conformance-cleanup.mjs";
 
 const HARNESS_SHA256 = createHash("sha256").update(await fs.readFile(import.meta.filename)).digest("hex");
 
@@ -200,6 +200,43 @@ async function visibleAnswers(driver, sessionId) {
   }, sessionId);
 }
 
+async function spawnAfterCatalog(checkCatalog, spawn, catalogOnly = false) {
+  if (await checkCatalog() !== true || catalogOnly) return undefined;
+  return spawn();
+}
+
+function selectedCatalogModel(catalog, provider, model) {
+  assert.equal(catalog.provider, provider);
+  assert.equal(catalog.refresh_error, null, "Provider catalog refresh failed");
+  const selected = catalog.models.find(entry => entry.id === model);
+  assert.ok(selected, "Refreshed Wardian catalog does not expose the explicitly selected model");
+  return selected;
+}
+
+test("chat conformance deterministic: failed catalog prevents spawn and submission", async () => {
+  for (const catalog of [
+    { provider: "codex", refresh_error: "refresh failed", models: [{ id: "selected" }] },
+    { provider: "codex", refresh_error: null, models: [{ id: "different" }] },
+  ]) {
+    const calls = [];
+    const agent = await spawnAfterCatalog(async () => {
+      calls.push("catalog");
+      try { selectedCatalogModel(catalog, "codex", "selected"); return true; }
+      catch (error) {
+        assert.match(error.message, /refresh failed|selected model/);
+        calls.push("failed");
+        return false; // Match the subtest recorder after persisting failure.
+      }
+    }, async () => { calls.push("spawn"); return { session_id: "fixture" }; });
+    if (agent) calls.push("submit");
+    assert.deepEqual(calls, ["catalog", "failed"]);
+  }
+  let spawns = 0;
+  assert.equal(await spawnAfterCatalog(async () => true, async () => ++spawns, true), undefined);
+  assert.equal(spawns, 0);
+  assert.equal(await spawnAfterCatalog(async () => true, async () => ++spawns), 1);
+});
+
 // These tests exercise only the assertion predicates/configuration, never a provider.
 test("chat conformance deterministic: explicit models and provider selection fail closed", () => {
   const env = { WARDIAN_E2E_CHAT_PROVIDERS: "claude", WARDIAN_NATIVE_APP: path.resolve("artifact") };
@@ -330,6 +367,7 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
       harness.watchMode = false;
       let session;
       let agent;
+      let spawnAttempted = false;
       let startupAttempted = false;
       let saveCleanup = async () => {};
       // Register before prepare so fixture/report failures cannot strand an owned claim.
@@ -337,9 +375,9 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
         try {
           await cleanupConformanceSession({
             harness, session, startupAttempted,
-            pause: async () => {
-              if (agent) await invokeTauri(session.driver, "pause_agent", { sessionId: agent.session_id });
-            },
+            pause: () => pauseConformanceWork(
+              (command, args) => invokeTauri(session.driver, command, args),
+              { spawnAttempted, sessionId: agent?.session_id }),
             save: (cleanup) => saveCleanup(cleanup),
           });
         } catch (error) {
@@ -541,29 +579,28 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
         session = await startNativeSession(harness);
         await session.driver.manage().setTimeouts({ script: 180_000 });
         await waitForAppShell(session.driver, 30_000);
-        await check("model-catalog", async () => {
+        agent = await spawnAfterCatalog(() => check("model-catalog", async () => {
           const catalog = await ipc("list_provider_model_catalog", { provider, forceRefresh: true });
-          assert.equal(catalog.provider, provider);
-          assert.equal(catalog.refresh_error, null, "Provider catalog refresh failed");
-          assert.ok(catalog.models.some((entry) => entry.id === config.models[provider]),
-            "Refreshed Wardian catalog does not expose the explicitly selected model");
+          const selected = selectedCatalogModel(catalog, provider, config.models[provider]);
           report.provider_version = catalog.version;
           if (provider === "codex") {
-            const supported = catalog.models.find((entry) => entry.id === config.models[provider]).effort_options || [];
+            const supported = selected.effort_options || [];
             selectedEffort = ["none", "minimal", "low", "medium", "high", "xhigh"].find((effort) => supported.includes(effort));
             report.requested_effort = selectedEffort || null;
           }
           return { selected_model_present: true, model_count: catalog.models.length, source: catalog.source };
-        });
-        if (process.env.WARDIAN_E2E_CHAT_CATALOG_ONLY === "1") return;
+        }), async () => {
         report.phase = "spawning-provider";
         await save();
-        agent = await ipc("spawn_agent", { req: {
+        spawnAttempted = true;
+        return ipc("spawn_agent", { req: {
           sessionName: `Chat-Conformance-${provider}`, agentClass: "TestClass", folder: workspace,
           isOff: false, resumeSession: null,
           configOverride: { provider, model: config.models[provider], session_persistence: "resume", conversation_logging: "enabled",
             ...(selectedEffort ? { provider_config: { type: provider, reasoning_effort: selectedEffort } } : {}) },
         } });
+        }, process.env.WARDIAN_E2E_CHAT_CATALOG_ONLY === "1");
+        if (!agent) return;
         assert.equal(agent.provider, provider);
         assert.equal((await agentConfig()).model, config.models[provider]);
         report.configured_model = (await agentConfig()).model;

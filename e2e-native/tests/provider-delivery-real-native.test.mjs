@@ -475,6 +475,22 @@ async function assertRealChatConformance(driver, sessionId, provider, marker) {
   return { events, assistantEvents };
 }
 
+function assertNoStaleTranscript(events, staleMarker) {
+  assert.equal(events.some((event) => (event?.text ?? "").includes(staleMarker)), false,
+    "Fresh resume replayed the previous provider transcript, including archive/fallback rows");
+}
+
+test("delivery deterministic: fresh readiness cannot filter away separate stale answers", () => {
+  const fresh = { provider: "codex", kind: "message", role: "assistant", text: "NEW",
+    source: "response_item", metadata: { provider_log: true } };
+  for (const source of ["response_item", "conversation_archive", "terminal_fallback"]) {
+    const events = [{ ...fresh, source, text: "OLD" }, fresh];
+    assert.equal(events.filter((event) => isProviderAuthoredAssistantEvent(event, "codex", "NEW")).length, 1);
+    assert.throws(() => assertNoStaleTranscript(events, "OLD"), /previous provider transcript/);
+  }
+  assertNoStaleTranscript([fresh], "OLD");
+});
+
 async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
   return await driver.wait(async () => {
     const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
@@ -525,17 +541,7 @@ async function resumeFreshAndAssertTranscript({
     provider,
     freshDelivery.expected,
   );
-  assert.equal(
-    transcript.assistantEvents.some((event) => (event.text ?? "").includes(staleMarker)),
-    false,
-    `${provider} fresh resume replayed the previous provider transcript: ${JSON.stringify(
-      transcript.assistantEvents.filter((event) => (event?.text ?? "").includes(staleMarker)).map((event) => ({
-        text: event?.text,
-        source: event?.source,
-        metadata: event?.metadata,
-      })),
-    )}`,
-  );
+  assertNoStaleTranscript(transcript.events, staleMarker);
   assert.ok(
     transcript.assistantEvents.some((event) => (event.text ?? "").includes(freshDelivery.expected)),
     `${provider} fresh resume did not reload the new provider transcript: ${transcript.text}`,

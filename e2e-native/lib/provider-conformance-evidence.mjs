@@ -17,6 +17,23 @@ const positive = value => Number.isSafeInteger(value) && value > 0;
 const portable = value => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9 ._+():/-]{0,159}$/.test(value)
   && !/(?:[A-Za-z]:|\/Users\/|\/home\/|\.\.)/.test(value);
 
+/** Mark the case before its stimulus; callers persist this before execution. */
+export function beginConformanceCase(report, name) {
+  need(Object.hasOwn(report.cases, name), "unknown_case");
+  report.active_case = name;
+  report.cases[name] = { status: "running", attempted: true };
+}
+
+/** Finalize only the active unfinished case, preserving completed and unattempted cases.
+ * The caller supplies blocked=true only for a demonstrated prerequisite failure.
+ */
+export function failActiveConformanceCase(report, error, blocked = false) {
+  const name = report.active_case;
+  if (report.cases[name]?.status !== "running") return;
+  report.cases[name] = { ...report.cases[name], status: blocked ? "blocked" : "fail",
+    failure_type: error.name || "Error" };
+}
+
 /** SHA256 of JSON.stringify(sorted [relative path, SHA256] pairs), UTF-8. */
 export function conformanceSourceSha256(source) {
   need(object(source) && Object.keys(source).length > 0, "source_map");

@@ -12,6 +12,26 @@ export async function closeConformanceSession(session) {
   }
 }
 
+/** Pause the isolated roster, retaining uncertainty for an unreturned spawn or
+ * an automation without observed terminal completion. A roster alone cannot
+ * establish that an in-flight spawn has finished registering its owner.
+ */
+export async function pauseConformanceWork(invoke, { spawnAttempted, sessionId, automationUnsettled = false }) {
+  let ownSeen = false;
+  await pauseConformanceAgents(async (command, args) => {
+    const value = await invoke(command, args);
+    if (command === "list_agents") ownSeen = Array.isArray(value)
+      && value.some((agent) => agent.session_id === sessionId);
+    return value;
+  });
+  if (spawnAttempted && !(typeof sessionId === "string" && sessionId && ownSeen)) {
+    throw new Error("Spawn completion/owned roster is uncertain; retain the home lock for supervised cleanup");
+  }
+  if (automationUnsettled) {
+    throw new Error("Automation completion is unconfirmed; retain the home lock for supervised cleanup");
+  }
+}
+
 /**
  * Final cleanup for isolated provider conformance suites. Run real suites through the native runner:
  * its process-tree supervisor remains the boundary for failed/uncertain startup.

@@ -3,7 +3,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { CONFORMANCE_SUITES, conformanceSourceSha256, providerConformanceObservations } from "../lib/provider-conformance-evidence.mjs";
+import { CONFORMANCE_SUITES, conformanceSourceSha256, providerConformanceObservations,
+  beginConformanceCase, failActiveConformanceCase } from "../lib/provider-conformance-evidence.mjs";
 import { selectMatrixCellEvidence } from "../../outputs/provider-conformance-20260907/matrix-evidence.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 const digest = character => character.repeat(64);
@@ -62,6 +63,26 @@ function inputs(f) {
   return { reportBytes, manifestBytes, expected: { ...f.expected, reportSha256: sha(reportBytes), manifestSha256: sha(manifestBytes) } };
 }
 const adapt = f => providerConformanceObservations(inputs(f));
+
+test("attempted context assertion failure survives persistence and import", () => {
+  for (const blocked of [false, true]) {
+    const f = fixture("context");
+    f.report.cases = { managed_instructions: "not_run", skills_discovery: "not_run", approval_state: "not_run" };
+    beginConformanceCase(f.report, "managed_instructions");
+    assert.equal(JSON.parse(JSON.stringify(f.report)).cases.managed_instructions.status, "running");
+    try { assert.equal("forbidden tool observed", "read only"); }
+    catch (error) { failActiveConformanceCase(f.report, error, blocked); }
+    f.report = JSON.parse(JSON.stringify(f.report));
+    const rows = adapt(f);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].function, "instructions");
+    assert.equal(rows[0].status, blocked ? "blocked" : "fail");
+    assert.equal(f.report.cases.skills_discovery, "not_run");
+    assert.equal(f.report.cases.approval_state, "not_run");
+    const old = { ...rows[0], status: "pass", date: "2026-09-08T12:00:00.000Z" };
+    assert.equal(selectMatrixCellEvidence([old, ...rows], "codex", "instructions").status, rows[0].status);
+  }
+});
 
 test("chat retains exact historical mappings, dates and explicit composite groups", () => {
   const rows = adapt(fixture());

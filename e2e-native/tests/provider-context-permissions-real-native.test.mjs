@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomBytes, createHash } from "node:crypto";
-import { cleanupConformanceSession } from "../lib/conformance-cleanup.mjs";
+import { cleanupConformanceSession, pauseConformanceWork } from "../lib/conformance-cleanup.mjs";
+import { beginConformanceCase, failActiveConformanceCase } from "../lib/provider-conformance-evidence.mjs";
 
 import {
   createNativeHarness,
@@ -239,6 +240,22 @@ function assertReadOnlyToolUse(events) {
   assert.deepEqual(forbidden, [], "context probe mutated files or explicitly read the startup instruction file");
 }
 
+test("context follow-up deterministic: forbidden observed tools finalize the active case", () => {
+  for (const name of ["managed_instructions", "skills_discovery"]) {
+    const report = { cases: { managed_instructions: "not_run", skills_discovery: "not_run", approval_state: "not_run" } };
+    beginConformanceCase(report, name);
+    try {
+      assertReadOnlyToolUse([{ kind: "tool_call", metadata: { tool_name: "write", tool_input: { path: "fixture.txt" } } }]);
+      assert.fail("Forbidden tool must fail");
+    } catch (error) {
+      assert.match(error.message, /context probe mutated files/);
+      failActiveConformanceCase(report, error);
+    }
+    assert.equal(report.cases[name].status, "fail");
+    assert.equal(report.cases.approval_state, "not_run");
+  }
+});
+
 function assertTranscriptAuthorship(events, provider, marker) {
   const answers = providerAuthoredAssistant(events, provider, marker);
   assert.equal(answers.length, 1, "transcript authorship requires one provider-log assistant event");
@@ -309,13 +326,15 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
   harness.isolatedHome = await fs.mkdtemp(path.join(homesRoot, `${config.provider}-`));
   let session;
   let agent;
+  let spawnAttempted = false;
+  let automationUnsettled = false;
   let startupAttempted = false;
   let saveCleanup = async () => {};
   t.after(() => cleanupConformanceSession({
     harness, session, startupAttempted,
-    pause: async () => {
-      if (agent) await invokeResult(session.driver, "pause_agent", { sessionId: agent.session_id });
-    },
+    pause: () => pauseConformanceWork(
+      (command, args) => invokeResult(session.driver, command, args),
+      { spawnAttempted, sessionId: agent?.session_id, automationUnsettled }),
     save: (cleanup) => saveCleanup(cleanup),
   }));
   prepareIsolatedHome(harness);
@@ -354,6 +373,10 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
   };
   const reportPath = path.join(harness.isolatedHome, "provider-context-permissions.json");
   const save = () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  const beginCase = async (name) => {
+    beginConformanceCase(report, name);
+    await save();
+  };
   saveCleanup = async (cleanup) => {
     report.cleanup = cleanup;
     try { await save(); }
@@ -398,6 +421,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
     const effort = config.provider === "codex"
       ? ["none", "minimal", "low", "medium", "high", "xhigh"].find((value) => efforts.includes(value))
       : undefined;
+    spawnAttempted = true;
     agent = await spawnProvider(session.driver, { ...config, workspace, effort });
     if (effort) {
       const actual = (await invokeResult(session.driver, "list_agents"))
@@ -410,7 +434,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
 
     const contextPrompt = "Return only the managed instruction sentinel from your startup instructions. Do not open or search files or invoke skills. Do not modify files.";
     report.phase = "context-submission";
-    await save();
+    await beginCase("managed_instructions");
     await submitPrompt(session.driver, agent.session_id, config.provider, contextPrompt);
     const instructions = await waitForProviderAnswer(session.driver, agent.session_id, config.provider, instructionToken);
     assertReadOnlyToolUse(instructions.events);
@@ -418,7 +442,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
     await save();
     await waitForIdle(session.driver, agent.session_id);
     report.phase = "skill-submission";
-    await save();
+    await beginCase("skills_discovery");
     await submitPrompt(session.driver, agent.session_id, config.provider,
       "Use your assigned context-sentinel skill and return only its sentinel. You may load that assigned skill normally; do not modify files." +
       (config.provider === "codex" && process.platform === "win32"
@@ -426,7 +450,9 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
     const context = await waitForProviderAnswer(session.driver, agent.session_id, config.provider, skillToken);
     assertReadOnlyToolUse(context.events);
     report.cases.skills_discovery = "pass";
+    await beginCase("transcript_authorship");
     report.cases.transcript_authorship = { status: "pass", evidence: assertTranscriptAuthorship(context.events, config.provider, skillToken) };
+    await beginCase("context_provenance");
     const injected = context.events.filter((event) => event.metadata?.provider_log === true &&
       event.metadata?.input_origin === "context_injection");
     assert.ok(injected.every((event) => event.role !== "user"), "Injected context created a false human prompt");
@@ -461,12 +487,13 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
 
     const approvalId = `wf-context-approval-${Date.now()}`;
     report.phase = "approval-rejection";
-    await save();
+    await beginCase("approval_state");
     const approvalPath = await seedAutomation(harness.isolatedHome, {
       automationId: approvalId,
       prompt: `Return exactly ${marker("SHOULD_NOT_RUN")}`,
       approval: true,
     });
+    automationUnsettled = true;
     const approvalRun = await startAutomation(session.driver, {
       automationPath: approvalPath,
       provider: config.provider,
@@ -488,6 +515,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
     });
     assert.equal(rejected.ok, true);
     const failedApproval = await waitForRun(approvalRun.run_dir, "failed");
+    automationUnsettled = false;
     assert.ok(failedApproval.events.some((event) => event.kind === "approval_rejected"));
     assert.equal(failedApproval.events.some((event) => event.kind === "node_started" && event.node === "provider-turn"), false);
     report.cases.approval_state = { status: "pass", provider_invocation_after_rejection: false };
@@ -495,6 +523,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
     // This row proves interactive activity only. Keep the registered agent live:
     // Agy archive settlement120s + next live ingest60s + scheduling margin30s.
     report.phase = "interactive-telemetry";
+    await beginCase("telemetry");
     const telemetryBudget = config.provider === "antigravity" ? 210_000 : 90_000;
     report.cases.telemetry = { status: "running", scope: "interactive", budget_ms: telemetryBudget,
       settlement_ms: config.provider === "antigravity" ? 120_000 : 0, live_ingest_cadence_ms: 60_000,
@@ -552,13 +581,15 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
       if (!lastRunDir) return true;
       try {
         const state = JSON.parse(await fs.readFile(path.join(lastRunDir, "state.json"), "utf8"));
-        return ["completed", "failed"].includes(state.status);
+        const settled = ["completed", "failed"].includes(state.status);
+        if (settled) automationUnsettled = false;
+        return settled;
       } catch { return false; }
     };
     const runEvidenceCase = async (mode) => {
       const isFresh = mode === "fresh";
       report.phase = isFresh ? "headless-fresh" : "headless-resume";
-      await save();
+      await beginCase(isFresh ? "headless_fresh_boundary" : "headless_inherited_resume");
       // Snapshot and ownership/schema validation happen before this paid turn.
       const before = await nativeReader.snapshot({ agentId: agent.session_id, originalSession: original.resume_session });
       const inventory = [...before.inventory].sort();
@@ -578,6 +609,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
       const automationId = `wf-context-${isFresh ? "fresh" : "resume"}-${Date.now()}`;
       const automationPath = await seedAutomation(harness.isolatedHome, { automationId, prompt });
       launchUnconfirmed = true;
+      automationUnsettled = true;
       const run = await startAutomation(session.driver, {
         automationPath, provider: config.provider, workspace,
         assignment: { target_type: "agent", agent_id: agent.session_id,
@@ -586,6 +618,7 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
       lastRunDir = run.run_dir;
       launchUnconfirmed = false;
       const completed = await waitForRun(run.run_dir, "completed");
+      automationUnsettled = false;
       const result = await observeHeadlessEvidence(nativeReader, {
         agentId: agent.session_id, originalSession: original.resume_session, before,
         mode, prompt, secret: resumeSecret, marker: caseMarker,
@@ -609,10 +642,12 @@ test("real provider context, approval, headless boundary, and telemetry follow-u
       .filter((name) => report.cases[name]?.status !== "pass");
     assert.deepEqual(unsuccessful, [], "Headless evidence has failed or blocked assertions; inspect the per-case report");
   } catch (error) {
+    failActiveConformanceCase(report, error, error instanceof EvidenceBlocked);
     report.failure = { type: error.name || "Error",
       classification: error instanceof EvidenceBlocked ? "coverage_gap/blocked" : "real-provider-or-harness-observation",
       ...(error instanceof EvidenceBlocked ? { evidence_code: error.code } : {}),
     };
+    await save();
     throw error;
   }
 });

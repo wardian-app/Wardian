@@ -5,7 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { acquireHomeLock, readHomeLock, releaseHomeLock, HOME_LOCK_FILE } from "../lib/sessionHome.mjs";
-import { cleanupConformanceSession, closeConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
+import { cleanupConformanceSession, closeConformanceSession, pauseConformanceAgents,
+  pauseConformanceWork } from "../lib/conformance-cleanup.mjs";
 
 function fixture(t) {
   const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-conformance-cleanup-"));
@@ -172,4 +173,36 @@ test("unsettled temporary task retains lock even with no registered agents", asy
   await assert.rejects(cleanupConformanceSession(options), (error) => error.cleanupConfirmed === false);
   assert.deepEqual(calls, ["close", "save"]);
   assert.equal(readHomeLock(harness.isolatedHome).runId, harness.runId);
+});
+
+test("chat/context unreturned spawn pauses roster but retains lock after driver exit", async (t) => {
+  const { options, harness } = fixture(t);
+  for (const roster of [[], [{ session_id: "late-owner" }]]) {
+    const paused = [];
+    options.pause = () => pauseConformanceWork(async (command, args) => {
+      if (command === "list_agents") return roster;
+      paused.push(args.sessionId);
+    }, { spawnAttempted: true, sessionId: undefined });
+    await assert.rejects(cleanupConformanceSession(options), error => error.cleanupConfirmed === false);
+    assert.deepEqual(paused, roster.map(agent => agent.session_id));
+    assert.ok(readHomeLock(harness.isolatedHome));
+  }
+});
+
+test("context unsettled automation retains lock even after returned agent pauses", async (t) => {
+  const { options, harness } = fixture(t);
+  options.pause = () => pauseConformanceWork(async command =>
+    command === "list_agents" ? [{ session_id: "owned" }] : undefined,
+  { spawnAttempted: true, sessionId: "owned", automationUnsettled: true });
+  await assert.rejects(cleanupConformanceSession(options), error => error.cleanupConfirmed === false);
+  assert.ok(readHomeLock(harness.isolatedHome));
+});
+
+test("returned owner and settled automation permit proven cleanup", async (t) => {
+  const { options, harness } = fixture(t);
+  options.pause = () => pauseConformanceWork(async command =>
+    command === "list_agents" ? [{ session_id: "owned" }] : undefined,
+  { spawnAttempted: true, sessionId: "owned", automationUnsettled: false });
+  assert.equal((await cleanupConformanceSession(options)).shutdown_confirmed, true);
+  assert.equal(readHomeLock(harness.isolatedHome), null);
 });

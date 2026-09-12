@@ -184,10 +184,9 @@ test("native Codex model selection drives the interactive model and effort picke
 
   const harness = await createNativeHarness();
   await prepareChooserHome(harness);
-  let session;
+  const owned = {};
   let startupAttempted = false;
   let spawnAttempted = false;
-  let sessionId;
   const report = { schema_version: 1, scope: "pretrusted_model_chooser_only",
     status: "running", inference_prompts_submitted: 0, run_id: harness.runId,
     suite_sha256: createHash("sha256").update(await fs.readFile(new URL(import.meta.url))).digest("hex"),
@@ -205,8 +204,8 @@ test("native Codex model selection drives the interactive model and effort picke
   }, PROCESS_TIMEOUT_MS);
   t.after(async () => {
     try {
-      await cleanupConformanceSession({ harness, session, startupAttempted,
-        pause: () => pauseChooserAgents(session.driver, { spawnAttempted, sessionId }),
+      await cleanupConformanceSession({ harness, session: owned.session, startupAttempted,
+        pause: () => pauseChooserAgents(owned.session.driver, { spawnAttempted, sessionId: owned.sessionId }),
         save: async (cleanup) => {
           report.cleanup = cleanup;
           if (report.status === "assertions_passed_pending_cleanup" && cleanup.shutdown_confirmed && cleanup.home_lock_released)
@@ -229,7 +228,8 @@ test("native Codex model selection drives the interactive model and effort picke
   }
   await saveReport();
   startupAttempted = true;
-  session = await startNativeSession(harness);
+  const session = await startNativeSession(harness);
+  owned.session = session;
   report.driver = { pid: session.tauriDriver.pid, port: harness.driverPort,
     native_port: harness.nativeDriverPort, ownership: harness.driverPortOwnership,
     native_ownership: harness.nativeDriverPortOwnership };
@@ -263,7 +263,8 @@ test("native Codex model selection drives the interactive model and effort picke
     },
   });
   assert.equal(spawned.ok, true, "spawn_agent failed; retain raw native runner diagnostics");
-  sessionId = spawned.value.session_id;
+  const sessionId = spawned.value.session_id;
+  owned.sessionId = sessionId;
   report.session_id = sessionId;
 
   const before = await waitForCodexReady(
