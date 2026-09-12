@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { makeWorkbenchDocument } from './workbenchIpcMock';
 
 /**
  * Shared library IPC mock for browser E2E specs.
@@ -133,7 +134,7 @@ export async function installLibraryIpcMock(
   contentFixture: Record<string, string>,
 ) {
   await page.addInitScript(
-    ({ indexFixture, contentFixture }) => {
+    ({ indexFixture, contentFixture, workbenchDocument }) => {
       let callbackId = 1;
       const callbacks = new Map<number, unknown>();
       const tauriWindow = window as Window & {
@@ -192,6 +193,18 @@ export async function installLibraryIpcMock(
         convertFileSrc: (filePath: string) => filePath,
         invoke: async (command: string, args?: Record<string, unknown>) => {
           if (command === "list_agents") return [];
+          if (command === "get_workbench_boot_config") return { safe_mode: false };
+          if (command === "load_workbench_state") return {
+            source: "default", document: workbenchDocument, notice: null, durable_revision: 0, durable_token: "library-fixture-0",
+          };
+          if (command === "save_workbench_state") {
+            const request = args as { document: { revision: number }; request_id: string };
+            return { outcome: "saved", durable_revision: request.document.revision, durable_token: `library-fixture-${request.document.revision}`, request_id: request.request_id };
+          }
+          if (command === "list_provider_model_catalog") return {
+            provider: args?.provider ?? "claude", version: null, source: "provider_aliases", models: [], refresh_error: null,
+          };
+          if (command === "get_generated_agent_name") return "Example";
           if (command === "list_agent_classes") {
             return [{ name: "Architect", description: "Designs systems", is_default: false }];
           }
@@ -260,6 +273,6 @@ export async function installLibraryIpcMock(
         },
       };
     },
-    { indexFixture, contentFixture },
+    { indexFixture, contentFixture, workbenchDocument: makeWorkbenchDocument() },
   );
 }

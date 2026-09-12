@@ -83,10 +83,25 @@ pub fn delivery_profile(provider: &str) -> DeliveryProfile {
         "antigravity" => DeliveryProfile {
             provider: normalized,
             submit_key: SubmitKey::CarriageReturn,
+            // Unchanged. A native protocol experiment against Antigravity 1.1.27
+            // collapsed a 6886-byte, 285-line payload into its editor in 267ms,
+            // but one machine's timing is not a guarantee, so this stays a
+            // bounded settle delay backed by the existing turn receipt rather
+            // than a measured minimum. Delivery still fails closed with no
+            // automatic retry when the receipt does not arrive.
             submit_delay_ms: 500,
+            // Antigravity's editor does honor bracketed paste: the same
+            // experiment sent raw ESC[200~ payload ESC[201~ and the editor
+            // showed a single collapsed paste entry, then one Return produced a
+            // provider-native answer containing all three independent random
+            // labels from the beginning, middle and end of the payload. Sending
+            // such a payload literally instead makes the editor treat embedded
+            // newlines as submits, which is how a long multiline prompt could be
+            // retained unsent. Short single-line prompts keep the simple literal
+            // path, matching the other editor-style providers.
             bracketed_paste: BracketedPasteProfile {
-                enabled: false,
-                min_bytes: usize::MAX,
+                enabled: true,
+                min_bytes: 2048,
             },
             input_ready_markers: &[">"],
             busy_markers: &["Working"],
@@ -131,6 +146,17 @@ mod tests {
         assert_eq!(profile.submit_delay_ms, 750);
         assert!(profile.bracketed_paste.enabled);
         assert_eq!(profile.bracketed_paste.min_bytes, 1);
+    }
+
+    #[test]
+    fn antigravity_profile_pastes_multiline_and_long_prompts_without_changing_submit_timing() {
+        let profile = delivery_profile("antigravity");
+
+        assert_eq!(profile.submit_key, SubmitKey::CarriageReturn);
+        assert!(profile.bracketed_paste.enabled);
+        assert_eq!(profile.bracketed_paste.min_bytes, 2048);
+        // The settle delay is deliberately untouched by enabling paste.
+        assert_eq!(profile.submit_delay_ms, 500);
     }
 
     #[test]

@@ -1,0 +1,24 @@
+{
+  "provenance": {
+    "provider": "Claude Code 2.1.263",
+    "capture": "retained v6 narrow resize snapshot write, chunk41; mixed output diagnostic, not a provider-only raw stream",
+    "source_sha256": "564646a83998a9deabd5ce6d567d09782a282a1ed46163a44c8b97cde7ee8948",
+    "sanitization": "Two workspace labels replaced with equal-width ASCII; cursor controls and numbered rows unchanged"
+  },
+  "cols": 53,
+  "rows": 54,
+  "history": [
+    "\u001b[C\u2590\u259b\u2588\u2588\u2588\u259b\u2588\u001b[3CClaude\u001b[CCode\u001b[Cv2.1.263",
+    "\u259d\u259c\u2588\u2588\u2588\u2588\u2588\u2588\u2580\u001b[2CHaiku\u001b[C4.5\u001b[C\u00b7\u001b[CClaude\u001b[CPro",
+    "\u001b[2C\u259d\u259d\u001b[C\u259d\u259d\u001b[4Csample-workspace                          ",
+    "\u276f Print exactly 50 lines of numbers, one per line, fr",
+    "\u25cf 1",
+    "\u001b[2C2",
+    "  3",
+    "  4",
+    "  5",
+    "\u001b[2C6",
+    "\u001b[2C7"
+  ],
+  "state": "\u001b[?25h\u001b[m\u001b[H\u001b[J\u001b[2C8\u001b[2;3H9\u001b[3;3H10\u001b[4;3H11\u001b[5;3H12\u001b[6;3H13\u001b[7;3H14\u001b[8;3H15\u001b[9;3H16\u001b[10;3H17\u001b[11;3H18\u001b[12;3H19\u001b[13;3H20\u001b[14;3H21\u001b[15;3H22\u001b[16;3H23\u001b[17;3H24\u001b[18;3H25\u001b[19;3H26\u001b[20;3H27\u001b[21;3H28\u001b[22;3H29\u001b[23;3H30\u001b[24;3H31\u001b[25;3H32\u001b[26;3H33\u001b[27;3H34\u001b[28;3H35\u001b[29;3H36\u001b[30;3H37\u001b[31;3H38\u001b[32;3H39\u001b[33;3H40\u001b[34;3H41\u001b[35;3H42\u001b[36;3H43\u001b[37;3H44\u001b[38;3H45\u001b[39;3H46\u001b[40;3H47\u001b[41;3H48\u001b[42;3H49\u001b[43;3H50\u001b[45;1H\u273b\u001b[CWorked\u001b[Cfor\u001b[C2s\u001b[C\u00b7\u001b[Cdone\u001b[C1:37\u001b[CPM\u001b[47;1H\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\r\n\u276f\u00a0\r\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u001b[50;3HHaiku\u001b[C4.5\u001b[C|\u001b[Csample-workspace    \u001b[C|\u001b[Ctok:43.9k\u001b[C| ctx:\u001b[51;3H\u23f5\u23f5\u001b[Cbypass\u001b[Cpermissions\u001b[Con\u001b[C(shift+tab\u001b[Cto\u001b[Ccycle)\u001b[C\u00b7\u001b[CPR\u001b[48;3H\u001b>\u001b[?1l\u001b[?2004h"
+}

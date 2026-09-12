@@ -862,10 +862,11 @@ pub async fn spawn_agent(
         });
     }
 
-    app_state
+    let provider_generation = app_state
         .interactions
         .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
-        .await;
+        .await
+        .generation;
 
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
@@ -949,12 +950,22 @@ pub async fn spawn_agent(
     } else {
         None
     };
-    let habitat_root = prepare_provider_habitat(
-        &config.provider,
-        &cwd,
-        &config.agent_class,
-        Some(&config.session_id),
-    )?;
+    // Codex config projection belongs to the exclusive owner, after recovery.
+    // The manager only needs neutral habitat/instructions before owner creation.
+    let habitat_root = if config.provider == "codex" {
+        Some(crate::utils::fs::prepare_habitat_workspace(
+            &cwd,
+            &config.agent_class,
+            &config.session_id,
+        )?)
+    } else {
+        prepare_provider_habitat(
+            &config.provider,
+            &cwd,
+            &config.agent_class,
+            Some(&config.session_id),
+        )?
+    };
     if let Some(root) = habitat_root.as_ref() {
         if memory_enabled {
             crate::utils::fs::append_habitat_memory_instructions(
@@ -1040,6 +1051,43 @@ pub async fn spawn_agent(
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
+    let mut codex_attach_guard = None;
+    let codex_attachment = if config.provider == "codex" {
+        let attachment = app_state
+            .native_delivery
+            .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
+                target_agent_id: config.session_id.clone(),
+                provider: "codex".into(),
+                generation: provider_generation,
+                workspace: provider_cwd.clone(),
+                config: config.clone(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        codex_attach_guard = Some(super::codex_shared::CodexAttachGuard::new(
+            app_state.native_delivery.clone(),
+            config.session_id.clone(),
+            provider_generation,
+        ));
+        // Both clients read the aligned private home; ordinary local discovery
+        // requires no CLI key/value config overrides and no --remote mode.
+        provider_args = provider.get_executable().1;
+        // --model is replayable by the local daemon and makes a cold resume
+        // honor current configuration, including the aligned effort setting.
+        if let Some(model) = &attachment.model_override {
+            provider_args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(id) = &attachment.expected_resume_id {
+            provider_args.extend(["resume".into(), id.clone()]);
+        }
+        provider_args.push("--no-alt-screen".into());
+        // A saved thread can have another historical cwd. Explicitly select the
+        // configured workspace so Codex cannot block attachment on its cwd picker.
+        provider_args.extend(["--cd".into(), provider_cwd.to_string_lossy().into_owned()]);
+        Some(attachment)
+    } else {
+        None
+    };
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -1070,10 +1118,8 @@ pub async fn spawn_agent(
         cmd.env(key, value);
     }
 
-    if config.provider == "codex" {
-        if let Some(root) = habitat_root.as_ref() {
-            cmd.env("CODEX_HOME", habitat_codex_home(root));
-        }
+    if let Some(attachment) = &codex_attachment {
+        cmd.env("CODEX_HOME", &attachment.codex_home);
     } else if config.provider == "opencode" {
         for (key, value) in opencode_interactive_env(&provider_cwd, &config)? {
             cmd.env(key, value);
@@ -1145,6 +1191,20 @@ pub async fn spawn_agent(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
+    let mut child = super::codex_shared::StartingCodexTui::new(
+        child,
+        codex_attachment.as_ref().map(|attachment| {
+            (
+                app_state.native_delivery.clone(),
+                config.session_id.clone(),
+                attachment.generation,
+            )
+        }),
+    );
+    if let Some(guard) = codex_attach_guard.as_mut() {
+        // StartingCodexTui now owns joined PTY + owner cleanup on every error.
+        guard.attached();
+    }
     let process_id = child.process_id();
 
     // Phase 2: Record/Update status in SQLite with the real PID
@@ -1180,6 +1240,12 @@ pub async fn spawn_agent(
         .master
         .take_writer()
         .map_err(|e| format!("Failed to get pty writer: {}", e))?;
+    // Tracks only cleanup ownership; human terminal input remains available
+    // during trust/login/onboarding while native peer delivery stays unbound.
+    let codex_attachment_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let codex_reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_alive = codex_reader_alive.clone();
+    let reader_attachment_ready = codex_attachment_ready.clone();
     let pty_master: crate::state::terminal_session::SharedPtyMaster =
         std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
@@ -1198,6 +1264,7 @@ pub async fn spawn_agent(
         .start_or_replace_runtime(&config.session_id, terminal_runtime, initial_geometry)
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
+    child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 
@@ -1282,6 +1349,13 @@ pub async fn spawn_agent(
     let terminal_theme_for_pty = app_state.terminal_theme();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
+    let codex_reader_owner = codex_attachment.as_ref().map(|_| {
+        (
+            app_state.native_delivery.clone(),
+            config.session_id.clone(),
+            provider_generation,
+        )
+    });
     let pty_config = config_lock.clone();
     let auto_confirm_antigravity_workspace_trust = config.provider == "antigravity"
         && config
@@ -1308,6 +1382,10 @@ pub async fn spawn_agent(
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
+        let _codex_exit_guard = codex_reader_owner.map(|(broker, agent_id, generation)| {
+            super::codex_shared::CodexAttachGuard::new(broker, agent_id, generation)
+                .for_reader(reader_alive, reader_attachment_ready)
+        });
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -1405,7 +1483,9 @@ pub async fn spawn_agent(
                     } else {
                         None
                     };
-                    let startup_ready = if provider_name_for_pty == "claude" {
+                    let startup_ready = if provider_name_for_pty == "codex" {
+                        false // Only the owner attachment gate publishes Codex readiness.
+                    } else if provider_name_for_pty == "claude" {
                         claude_startup_readiness.observe(&text)
                     } else {
                         startup_output.as_deref().is_some_and(|output| {
@@ -1751,6 +1831,88 @@ pub async fn spawn_agent(
         set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Off");
     });
 
+    if let Some(attachment) = &codex_attachment {
+        let finalized = app_state
+            .native_delivery
+            .finalize_codex_tui(
+                &config.session_id,
+                attachment.generation,
+                || {
+                    if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err(
+                            crate::delivery::codex_shared::CodexSharedError::unsupported(
+                                "captured Codex PTY reader exited during attachment",
+                            ),
+                        );
+                    }
+                    child.alive()
+                },
+                |id| {
+                    let mut captured_config = config_lock.lock().map_err(|_| {
+                        crate::delivery::codex_shared::CodexSharedError::unsupported(
+                            "agent config lock unavailable",
+                        )
+                    })?;
+                    super::apply_provider_identity("codex", &mut captured_config, id)
+                        .map(|_| ())
+                        .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
+                },
+            )
+            .await;
+        if let Err(error) = finalized {
+            child.stop().await;
+            // Failed attachment otherwise discards the only TUI evidence (for
+            // example a blocking startup picker). Preserve a bounded plain tail.
+            let output = watch_state
+                .lock()
+                .ok()
+                .and_then(|state| state.snapshot_since(None, Some(4096)).ok())
+                .map(|snapshot| snapshot.output.text)
+                .unwrap_or_default();
+            return Err(if output.trim().is_empty() {
+                error.to_string()
+            } else {
+                format!("{error}\nProvider terminal output:\n{output}")
+            });
+        }
+        if let Err(error) = child.alive() {
+            child.stop().await;
+            return Err(error.to_string());
+        }
+        config = config_lock
+            .lock()
+            .map_err(|_| "agent config lock unavailable")?
+            .clone();
+        codex_attachment_ready.store(true, std::sync::atomic::Ordering::Release);
+        if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
+            codex_attachment_ready.store(false, std::sync::atomic::Ordering::Release);
+            child.stop().await;
+            return Err("captured Codex PTY reader exited during finalization".into());
+        }
+        app_state
+            .interactions
+            .record_provider_input_state(
+                &config.session_id,
+                provider_generation,
+                ProviderInputReadiness::Ready,
+                None,
+            )
+            .await;
+        set_agent_status(&app, &config.session_id, &current_status, "Idle");
+    }
+    if codex_attachment.is_some() {
+        let observations = app_state
+            .native_delivery
+            .codex_observations(&config.session_id, provider_generation)
+            .await
+            .map_err(|error| error.to_string())?;
+        super::codex_shared::observe_turn_activity(
+            app.clone(),
+            config.session_id.clone(),
+            current_status.clone(),
+            observations,
+        );
+    }
     if config.provider == "codex" {
         let watcher_app = app.clone();
         let watcher_provider = provider.clone();
@@ -2603,9 +2765,12 @@ pub async fn spawn_agent(
         cfg.folder = expected_folder;
     }
 
+    if let Some(guard) = codex_attach_guard.as_mut() {
+        guard.attached();
+    }
     Ok(ActiveAgent {
         config: config_lock,
-        child_process: Some(child),
+        child_process: Some(child.attached()),
         background_processes,
         memory_capability,
         runtime_generation: Some(runtime_generation),

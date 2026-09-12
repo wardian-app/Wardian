@@ -332,6 +332,53 @@ describe("useAgentResourceController", () => {
     expect(result.current.off_agent_ids.has("agent-2")).toBe(true);
   });
 
+  it.each(["status_event", "metrics"] as const)("projects backend startup through %s while the roster stays Off", async (source) => {
+    const { result } = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(result.current.agents).toHaveLength(2));
+    act(() => {
+      if (source === "status_event") {
+        emit("agent-status-updated", { session_id: "agent-2", current_status: "Processing..." });
+      } else {
+        emit("agent-metrics", [metric("agent-2", "Processing...")]);
+      }
+    });
+    await act(async () => { await result.current.refresh_agents(); });
+    expect(result.current.off_agent_ids.has("agent-2")).toBe(true);
+    expect(result.current.agents.find((agent) => agent.session_id === "agent-2")?.is_off).toBe(true);
+    expect(projections().telemetry["agent-2"].current_status).toBe("Processing...");
+    expect(mockInvoke.mock.calls.some(([command]) => command === "resume_agent")).toBe(false);
+
+    act(() => emit("agent-status-updated", { session_id: "agent-2", current_status: "Off" }));
+    expect(projections().telemetry["agent-2"].current_status).toBe("Off");
+    expect(result.current.off_agent_ids.has("agent-2")).toBe(true);
+  });
+
+  it("projects pending UI resume and rollback before the invoke settles", async () => {
+    const { result } = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(result.current.agents).toHaveLength(2));
+    let rejectResume!: (error: Error) => void;
+    const pending = new Promise<never>((_resolve, reject) => { rejectResume = reject; });
+    mockInvoke.mockReturnValueOnce(pending);
+    let settled = false;
+    const resume = result.current.resume_agent("agent-2").catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+    act(() => emit("agent-status-updated", { session_id: "agent-2", current_status: "Processing..." }));
+    expect(projections().telemetry["agent-2"].current_status).toBe("Processing...");
+    expect(result.current.off_agent_ids.has("agent-2")).toBe(true);
+    expect(settled).toBe(false);
+
+    const failure = new Error("attachment failed");
+    await act(async () => {
+      emit("agent-status-updated", { session_id: "agent-2", current_status: "Off" });
+      rejectResume(failure);
+      expect(await resume).toBe(failure);
+    });
+    expect(projections().telemetry["agent-2"].current_status).toBe("Off");
+    expect(result.current.off_agent_ids.has("agent-2")).toBe(true);
+  });
+
   it("reports explicit provider turn completions separately from status changes", async () => {
     const on_agent_turn_completed = vi.fn();
     const { result } = renderHook(() => useAgentResourceController({ on_agent_turn_completed }));

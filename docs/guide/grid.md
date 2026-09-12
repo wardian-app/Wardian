@@ -43,6 +43,11 @@ Chat text and attachments remain editable while an agent is processing. With con
 
 Wardian preserves terminal state across tab changes, pane moves, Agents layout changes, and remote handoff. Reclaimed renderers restore and fit automatically when their presentation becomes visible.
 
+Restoring a live terminal keeps the broker's retained scrollback above the current
+screen, including short histories that fit within one viewport. This history is
+bounded runtime state; restarting the provider does not restore a terminated
+terminal's screen.
+
 ## Related Links
 
 - [Agents](./agents-overview.md)

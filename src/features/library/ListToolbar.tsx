@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FolderOpen } from 'lucide-react';
+import { FolderOpen, Star, Plus, ChevronDown, Search } from 'lucide-react';
 
 interface ListToolbarProps {
     /** Singular label of the active section's entry kind, e.g. "skill". */
@@ -65,9 +65,11 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
     return (
         <div
             data-testid="library-toolbar"
-            className="flex flex-col gap-2 px-3 py-2 border-b border-wardian-border bg-wardian-sidebar-primary"
+            className="flex flex-col gap-3 p-3 border-b border-wardian-border bg-wardian-sidebar-primary"
         >
             <div className="flex items-center gap-2">
+                <label className="relative flex flex-1 min-w-0 items-center">
+                <Search size={14} className="absolute left-2.5 text-muted-neutral" aria-hidden="true" />
                 <input
                     type="text"
                     data-testid="library-search"
@@ -75,21 +77,23 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                     onChange={(e) => onSearchChange(e.target.value)}
                     placeholder={`Search ${kindLabelPlural}...`}
                     aria-label={`Search ${kindLabelPlural}`}
-                    className="flex-1 min-w-0 bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1 text-xs text-primary placeholder:text-muted-neutral focus:outline-none focus:border-[var(--color-wardian-accent)]"
+                    className="w-full min-w-0 h-8 bg-[var(--color-wardian-input-bg)] border border-wardian-border rounded-md pl-8 pr-2 text-xs text-primary placeholder:text-muted-neutral focus:outline-none focus:border-[var(--color-wardian-accent)]"
                 />
+                </label>
                 <button
                     type="button"
                     data-testid="library-star-filter"
                     onClick={onToggleStarredOnly}
                     aria-pressed={showStarredOnly}
                     title={showStarredOnly ? 'Show all items' : 'Show starred only'}
-                    className={`px-2 py-1 rounded border text-xs transition-colors ${
+                    aria-label="Show starred only"
+                    className={`wardian-icon-button shrink-0 ${
                         showStarredOnly
                             ? 'border-[var(--color-wardian-accent)] text-[var(--color-wardian-accent)] bg-wardian-card-bg-muted'
                             : 'border-wardian-border text-muted-neutral hover:text-primary'
                     }`}
                 >
-                    ★
+                    <Star size={15} fill={showStarredOnly ? 'currentColor' : 'none'} aria-hidden="true" />
                 </button>
                 <div className="relative">
                     <button
@@ -98,9 +102,9 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                         onClick={() => setMenuOpen((open) => !open)}
                         aria-expanded={menuOpen}
                         aria-haspopup="menu"
-                        className="px-2 py-1 rounded border border-wardian-border text-xs text-muted transition-colors hover:text-primary hover:bg-wardian-card-bg-muted"
+                        className="wardian-button wardian-button--primary gap-1"
                     >
-                        New ▾
+                        <Plus size={14} aria-hidden="true" /> New <ChevronDown size={12} aria-hidden="true" />
                     </button>
                     {menuOpen && (
                         <div
@@ -136,7 +140,7 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                     onClick={onReveal}
                     title="Open in local file system"
                     aria-label="Open in local file system"
-                    className="shrink-0 rounded-md border border-wardian-border p-1 text-muted-neutral transition-colors hover:text-primary hover:bg-wardian-card-bg-muted"
+                    className="wardian-icon-button wardian-icon-button--secondary shrink-0"
                 >
                     <FolderOpen aria-hidden="true" size={14} strokeWidth={2} />
                 </button>
@@ -158,7 +162,7 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                         type="button"
                         data-testid="library-new-confirm"
                         onClick={submitNewName}
-                        className="px-2 py-1 rounded border border-wardian-border text-xs text-muted transition-colors hover:text-primary hover:bg-wardian-card-bg-muted"
+                        className="wardian-button wardian-button--primary"
                     >
                         Create
                     </button>
@@ -166,7 +170,7 @@ export const ListToolbar: React.FC<ListToolbarProps> = ({
                         type="button"
                         data-testid="library-new-cancel"
                         onClick={() => setCreating(null)}
-                        className="px-2 py-1 rounded border border-wardian-border text-xs text-muted-neutral transition-colors hover:text-primary"
+                        className="wardian-button wardian-button--secondary"
                     >
                         Cancel
                     </button>
