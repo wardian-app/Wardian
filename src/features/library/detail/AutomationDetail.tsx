@@ -104,7 +104,7 @@ export const AutomationDetail: React.FC<AutomationDetailProps> = ({
                         data-testid="automation-launch-run"
                         onClick={() => void handleOpenLaunch()}
                         disabled={resolving}
-                        className="rounded bg-[var(--color-wardian-accent)] px-3 py-1.5 text-xs font-bold text-[var(--color-wardian-bg)] transition-all hover:brightness-110 disabled:opacity-50"
+                        className="wardian-button wardian-button--primary"
                     >
                         {resolving ? 'Resolving…' : 'Launch Run'}
                     </button>
@@ -114,7 +114,7 @@ export const AutomationDetail: React.FC<AutomationDetailProps> = ({
                         onClick={() => onOpenAutomationsView?.()}
                         disabled={!onOpenAutomationsView}
                         title={onOpenAutomationsView ? undefined : 'Not available yet'}
-                        className="rounded border border-wardian-border px-3 py-1.5 text-xs text-primary transition-colors hover:bg-wardian-card-bg-muted disabled:opacity-50"
+                        className="wardian-button wardian-button--secondary"
                     >
                         Open in Automations view
                     </button>

@@ -1,9 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openAutomationEditor } from "../fixtures/workbench";
+import { openAutomationEditor, surfaceTab } from "../fixtures/workbench";
+import { makeWorkbenchDocument } from "../fixtures/workbenchIpcMock";
 import { mkdir } from "node:fs/promises";
 
 const adaptiveCardScreenshotDirectory =
   "e2e/screenshots/automation-monitor-adaptive-cards/2026-07-16T06-18-35Z";
+const agentScopeScreenshotDirectory =
+  "e2e/screenshots/automation-agent-scope/2026-09-09T05-15-00Z";
+const agentFilterToggleScreenshotDirectory =
+  "e2e/screenshots/automation-agent-filter-toggle/2026-09-10T04-00-00Z";
 const fixedBrowserTime = "2026-07-16T16:00:00.000Z";
 
 test.use({ locale: "en-US", timezoneId: "America/New_York" });
@@ -37,7 +42,8 @@ const blueprint = {
 };
 
 async function installScheduleMonitorIpcMock(page: Page) {
-  await page.addInitScript(({ blueprintFixture, agentFixtures, completedRunFixture }) => {
+  const workbenchDocument = makeWorkbenchDocument();
+  await page.addInitScript(({ blueprintFixture, agentFixtures, completedRunFixture, workbenchDocument }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
     let schedules: Array<Record<string, unknown>> = [{
@@ -107,6 +113,26 @@ async function installScheduleMonitorIpcMock(page: Page) {
         if (command === "get_library_tree") return { type: "Folder", path: "", name: "Root", children: [] };
         if (command === "list_deployed_skills") return [];
         if (command === "load_app_settings") return null;
+        if (command === "get_workbench_boot_config") return { safe_mode: false };
+        if (command === "load_workbench_state") {
+          return {
+            source: "primary",
+            document: workbenchDocument,
+            notice: null,
+            durable_revision: workbenchDocument.revision,
+            durable_token: `mock-token-${workbenchDocument.revision}`,
+          };
+        }
+        if (command === "save_workbench_state") {
+          const document = args?.document as { revision?: number } | undefined;
+          const revision = document?.revision ?? workbenchDocument.revision;
+          return {
+            outcome: "saved",
+            durable_revision: revision,
+            durable_token: `mock-token-${revision}`,
+            request_id: args?.request_id,
+          };
+        }
         if (command === "load_shell_settings") {
           return {
             shell_id: "auto",
@@ -117,12 +143,22 @@ async function installScheduleMonitorIpcMock(page: Page) {
           };
         }
         if (command === "list_available_shells") return [];
+        if (command === "list_provider_model_catalog") {
+          return { provider: args?.provider, models: [], default_model: null };
+        }
         if (command === "plugin:event|listen") return callbackId++;
         if (command === "plugin:event|unlisten") return null;
         if (command === "sync_provider_theme_settings") return null;
 
         if (command === "automation_list_blueprints") {
-          return { blueprints: [{ id: "wf", name: "Scheduled WF", path: "/x/wf.md" }], truncated: false, next_offset: null };
+          return {
+            blueprints: [
+              { id: "wf", name: "Scheduled WF", path: "/x/wf.md" },
+              { id: "script-only", name: "Script Only", path: "/x/script-only.md" },
+            ],
+            truncated: false,
+            next_offset: null,
+          };
         }
         if (command === "automation_parse") return { blueprint: blueprintFixture, diagnostics: [] };
         if (command === "automation_validate") return { ok: true, diagnostics: [] };
@@ -216,11 +252,19 @@ async function installScheduleMonitorIpcMock(page: Page) {
       updated_at: "2026-07-15T16:32:00.000Z",
       completed_at: "2026-07-15T16:32:00.000Z",
     },
+    workbenchDocument,
   });
 }
 
 test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) => {
   await mkdir(adaptiveCardScreenshotDirectory, { recursive: true });
+  await mkdir(agentScopeScreenshotDirectory, { recursive: true });
+  await mkdir(agentFilterToggleScreenshotDirectory, { recursive: true });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
   await installScheduleMonitorIpcMock(page);
   await page.setViewportSize({ width: 1700, height: 980 });
   await page.clock.setFixedTime(fixedBrowserTime);
@@ -281,6 +325,36 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(scriptOnlyCard).not.toContainText("Default assignment");
   await scriptOnlyCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/script-only-card.png` });
 
+  const analystRow = page.locator('[data-testid="agent-watchlist"] .watchlist-row[aria-label="Agent Analyst Ada"]');
+  await analystRow.click();
+  await surfaceTab(page, "automations").click();
+  await expect(page.getByTestId("automation-view-agent-scope")).toHaveText("Selected agent");
+  await expect(monitor.getByText("1 automation tracked for selected agents")).toBeVisible();
+  await expect(monitor.getByTestId("automation-activity-row-wf")).toBeVisible();
+  await expect(monitor.getByTestId("automation-activity-row-script-only")).toHaveCount(0);
+  await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Scheduled WF" })).toHaveCount(1);
+  await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Script Only" })).toHaveCount(0);
+
+  const agentScopeToggle = page.getByTestId("automation-agent-scope-toggle");
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "true");
+  await agentScopeToggle.click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "false");
+  await expect(monitor.getByTestId("automation-activity-row-script-only")).toBeVisible();
+  await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Script Only" })).toHaveCount(1);
+  await page.getByTestId("app-shell").screenshot({
+    path: `${agentFilterToggleScreenshotDirectory}/all-workflows.png`,
+    animations: "disabled",
+  });
+
+  await page.getByTestId("sidebar-tab-automations").click();
+  await expect(page.getByTestId("automation-sidebar-agent-scope")).toHaveText("Selected agent");
+  await expect(page.getByTestId("automation-glance-row-schedule-script-only")).toHaveCount(0);
+  await surfaceTab(page, "automations").click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "false");
+  await agentScopeToggle.click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "true");
+  await expect(monitor.getByTestId("automation-activity-row-script-only")).toHaveCount(0);
+
   await monitor.getByRole("button", { name: "History" }).click();
   const historyCard = monitor.getByTestId("automation-history-run-run-completed");
   await expect(historyCard).toContainText("Ran");
@@ -291,6 +365,7 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(historyCard).not.toContainText("run-completed");
 
   await page.getByTestId("sidebar-tab-automations").click();
+  await expect(page.getByTestId("automation-sidebar-agent-scope")).toHaveText("Selected agent");
   const sidebarCard = page.getByTestId("automation-glance-row-schedule-1");
   await expect(sidebarCard).toContainText("Analyst Ada");
   await expect(sidebarCard).toContainText("Reviewer Rui");
@@ -306,6 +381,11 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
   await sidebarCard.screenshot({ path: `${adaptiveCardScreenshotDirectory}/sidebar-multi-agent-card.png` });
+  await expect(page.getByTestId("automation-glance-row-schedule-script-only")).toHaveCount(0);
+  await page.getByTestId("app-shell").screenshot({
+    path: `${agentScopeScreenshotDirectory}/selected-agent-scope.png`,
+    animations: "disabled",
+  });
 
   await monitor.getByRole("button", { name: "Scheduled" }).click();
   await expect(monitor.getByRole("button", { name: "Pause E2E Nightly" }).first()).toBeVisible();
@@ -323,4 +403,5 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
     }).__scheduleMonitorInvokes?.find((call) => call.command === "schedule_create")
   ));
   expect(scheduleCall?.args).toMatchObject({ blueprintId: "wf", name: "E2E Nightly" });
+  expect(errors).toEqual([]);
 });

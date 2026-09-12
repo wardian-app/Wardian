@@ -1,3 +1,4 @@
+use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 use crate::providers::antigravity::{
     changed_workspace_conversation, AntigravityConversationMessage, AntigravityProvider,
 };
@@ -26,7 +27,7 @@ use super::claude::{
 };
 use super::codex::{codex_provider_session_is_excluded, codex_session_file_path};
 use super::opencode::{
-    opencode_interactive_env, opencode_recent_session_for_workspace, opencode_status_from_title,
+    opencode_interactive_env, opencode_status_from_title, OpenCodeSessionDiscovery,
 };
 use super::session_identity::{
     apply_provider_identity, expected_caller_owned_identity, ProviderIdentityOutcome,
@@ -544,106 +545,6 @@ impl AntigravityUserTurnReceiptTracker {
     }
 }
 
-#[derive(Default)]
-struct CodexTerminalThemeProbeResponder {
-    answered_light_dark: bool,
-    answered_foreground: bool,
-    answered_background: bool,
-    answered_palette_zero: bool,
-    tail: Vec<u8>,
-}
-
-impl CodexTerminalThemeProbeResponder {
-    fn responses_for_chunk(
-        &mut self,
-        provider_name: &str,
-        chunk: &[u8],
-        theme: &str,
-    ) -> Vec<Vec<u8>> {
-        if provider_name != "codex" || chunk.is_empty() {
-            self.remember_tail(chunk);
-            return Vec::new();
-        }
-
-        let mut data = self.tail.clone();
-        data.extend_from_slice(chunk);
-        let terminal_theme = CodexTerminalTheme::from_wardian_theme(theme);
-        let mut responses = Vec::new();
-
-        if !self.answered_light_dark && contains_bytes(&data, b"\x1b[?996n") {
-            self.answered_light_dark = true;
-            responses.push(
-                format!(
-                    "\x1b[?997;{}n",
-                    if terminal_theme.prefers_light { 2 } else { 1 }
-                )
-                .into_bytes(),
-            );
-        }
-
-        if !self.answered_foreground
-            && (contains_bytes(&data, b"\x1b]10;?\x07")
-                || contains_bytes(&data, b"\x1b]10;?\x1b\\"))
-        {
-            self.answered_foreground = true;
-            responses.push(format!("\x1b]10;rgb:{}\x1b\\", terminal_theme.foreground).into_bytes());
-        }
-
-        if !self.answered_background
-            && (contains_bytes(&data, b"\x1b]11;?\x07")
-                || contains_bytes(&data, b"\x1b]11;?\x1b\\"))
-        {
-            self.answered_background = true;
-            responses.push(format!("\x1b]11;rgb:{}\x1b\\", terminal_theme.background).into_bytes());
-        }
-
-        if !self.answered_palette_zero && contains_bytes(&data, b"\x1b]4;0;?\x07") {
-            self.answered_palette_zero = true;
-            responses.push(format!("\x1b]4;0;rgb:{}\x07", terminal_theme.background).into_bytes());
-        }
-
-        self.remember_tail(&data);
-        responses
-    }
-
-    fn remember_tail(&mut self, data: &[u8]) {
-        const MAX_TERMINAL_PROBE_TAIL: usize = 32;
-        let start = data.len().saturating_sub(MAX_TERMINAL_PROBE_TAIL);
-        self.tail.clear();
-        self.tail.extend_from_slice(&data[start..]);
-    }
-}
-
-struct CodexTerminalTheme {
-    foreground: &'static str,
-    background: &'static str,
-    prefers_light: bool,
-}
-
-impl CodexTerminalTheme {
-    fn from_wardian_theme(theme: &str) -> Self {
-        if theme.trim() == "light" {
-            Self {
-                foreground: "11/18/27",
-                background: "fc/fa/f5",
-                prefers_light: true,
-            }
-        } else {
-            Self {
-                foreground: "ee/f2/ee",
-                background: "02/04/02",
-                prefers_light: false,
-            }
-        }
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle)
-}
-
 fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
     config.codex_config().cleared_provider_sessions
 }
@@ -862,10 +763,11 @@ pub async fn spawn_agent(
         });
     }
 
-    app_state
+    let provider_generation = app_state
         .interactions
         .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
-        .await;
+        .await
+        .generation;
 
     let config_lock = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
 
@@ -949,12 +851,22 @@ pub async fn spawn_agent(
     } else {
         None
     };
-    let habitat_root = prepare_provider_habitat(
-        &config.provider,
-        &cwd,
-        &config.agent_class,
-        Some(&config.session_id),
-    )?;
+    // Codex config projection belongs to the exclusive owner, after recovery.
+    // The manager only needs neutral habitat/instructions before owner creation.
+    let habitat_root = if config.provider == "codex" {
+        Some(crate::utils::fs::prepare_habitat_workspace(
+            &cwd,
+            &config.agent_class,
+            &config.session_id,
+        )?)
+    } else {
+        prepare_provider_habitat(
+            &config.provider,
+            &cwd,
+            &config.agent_class,
+            Some(&config.session_id),
+        )?
+    };
     if let Some(root) = habitat_root.as_ref() {
         if memory_enabled {
             crate::utils::fs::append_habitat_memory_instructions(
@@ -1040,6 +952,43 @@ pub async fn spawn_agent(
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
+    let mut codex_attach_guard = None;
+    let codex_attachment = if config.provider == "codex" {
+        let attachment = app_state
+            .native_delivery
+            .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
+                target_agent_id: config.session_id.clone(),
+                provider: "codex".into(),
+                generation: provider_generation,
+                workspace: provider_cwd.clone(),
+                config: config.clone(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        codex_attach_guard = Some(super::codex_shared::CodexAttachGuard::new(
+            app_state.native_delivery.clone(),
+            config.session_id.clone(),
+            provider_generation,
+        ));
+        // Both clients read the aligned private home; ordinary local discovery
+        // requires no CLI key/value config overrides and no --remote mode.
+        provider_args = provider.get_executable().1;
+        // --model is replayable by the local daemon and makes a cold resume
+        // honor current configuration, including the aligned effort setting.
+        if let Some(model) = &attachment.model_override {
+            provider_args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(id) = &attachment.expected_resume_id {
+            provider_args.extend(["resume".into(), id.clone()]);
+        }
+        provider_args.push("--no-alt-screen".into());
+        // A saved thread can have another historical cwd. Explicitly select the
+        // configured workspace so Codex cannot block attachment on its cwd picker.
+        provider_args.extend(["--cd".into(), provider_cwd.to_string_lossy().into_owned()]);
+        Some(attachment)
+    } else {
+        None
+    };
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -1070,10 +1019,8 @@ pub async fn spawn_agent(
         cmd.env(key, value);
     }
 
-    if config.provider == "codex" {
-        if let Some(root) = habitat_root.as_ref() {
-            cmd.env("CODEX_HOME", habitat_codex_home(root));
-        }
+    if let Some(attachment) = &codex_attachment {
+        cmd.env("CODEX_HOME", &attachment.codex_home);
     } else if config.provider == "opencode" {
         for (key, value) in opencode_interactive_env(&provider_cwd, &config)? {
             cmd.env(key, value);
@@ -1145,6 +1092,20 @@ pub async fn spawn_agent(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
+    let mut child = super::codex_shared::StartingCodexTui::new(
+        child,
+        codex_attachment.as_ref().map(|attachment| {
+            (
+                app_state.native_delivery.clone(),
+                config.session_id.clone(),
+                attachment.generation,
+            )
+        }),
+    );
+    if let Some(guard) = codex_attach_guard.as_mut() {
+        // StartingCodexTui now owns joined PTY + owner cleanup on every error.
+        guard.attached();
+    }
     let process_id = child.process_id();
 
     // Phase 2: Record/Update status in SQLite with the real PID
@@ -1180,6 +1141,12 @@ pub async fn spawn_agent(
         .master
         .take_writer()
         .map_err(|e| format!("Failed to get pty writer: {}", e))?;
+    // Tracks only cleanup ownership; human terminal input remains available
+    // during trust/login/onboarding while native peer delivery stays unbound.
+    let codex_attachment_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let codex_reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_alive = codex_reader_alive.clone();
+    let reader_attachment_ready = codex_attachment_ready.clone();
     let pty_master: crate::state::terminal_session::SharedPtyMaster =
         std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
@@ -1198,6 +1165,7 @@ pub async fn spawn_agent(
         .start_or_replace_runtime(&config.session_id, terminal_runtime, initial_geometry)
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
+    child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 
@@ -1282,6 +1250,13 @@ pub async fn spawn_agent(
     let terminal_theme_for_pty = app_state.terminal_theme();
     let terminal_sessions = app_state.terminal_sessions.clone();
     let reader_runtime_generation = runtime_generation;
+    let codex_reader_owner = codex_attachment.as_ref().map(|_| {
+        (
+            app_state.native_delivery.clone(),
+            config.session_id.clone(),
+            provider_generation,
+        )
+    });
     let pty_config = config_lock.clone();
     let auto_confirm_antigravity_workspace_trust = config.provider == "antigravity"
         && config
@@ -1308,6 +1283,10 @@ pub async fn spawn_agent(
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
+        let _codex_exit_guard = codex_reader_owner.map(|(broker, agent_id, generation)| {
+            super::codex_shared::CodexAttachGuard::new(broker, agent_id, generation)
+                .for_reader(reader_alive, reader_attachment_ready)
+        });
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -1374,17 +1353,14 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
-                    for response in codex_terminal_theme_responder.responses_for_chunk(
+                    codex_terminal_theme_responder.respond_to_output(
+                        &terminal_sessions,
+                        &sid_for_pty,
+                        reader_runtime_generation,
                         &provider_name_for_pty,
                         &buf[0..n],
                         &terminal_theme_for_pty,
-                    ) {
-                        let _ = terminal_sessions.send_privileged_input_blocking(
-                            &sid_for_pty,
-                            reader_runtime_generation,
-                            response,
-                        );
-                    }
+                    );
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
                     }
@@ -1405,7 +1381,9 @@ pub async fn spawn_agent(
                     } else {
                         None
                     };
-                    let startup_ready = if provider_name_for_pty == "claude" {
+                    let startup_ready = if provider_name_for_pty == "codex" {
+                        false // Only the owner attachment gate publishes Codex readiness.
+                    } else if provider_name_for_pty == "claude" {
                         claude_startup_readiness.observe(&text)
                     } else {
                         startup_output.as_deref().is_some_and(|output| {
@@ -1563,10 +1541,6 @@ pub async fn spawn_agent(
                     }
 
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
-                        let _previous_title = terminal_title_clone
-                            .lock()
-                            .map(|value| value.clone())
-                            .unwrap_or_default();
                         if provider_name_for_pty == "opencode" {
                             log_debug(&format!(
                                 "[Wardian] OpenCode backend title for session {}: {}",
@@ -1585,12 +1559,6 @@ pub async fn spawn_agent(
                                     &sid_for_pty,
                                 )
                             {
-                                let was_idle = current_status_clone
-                                    .lock()
-                                    .map(|status| {
-                                        wardian_core::identity::normalize_status(&status) == "idle"
-                                    })
-                                    .unwrap_or(false);
                                 set_agent_status(
                                     &pty_emit_app,
                                     &sid_for_pty,
@@ -1616,14 +1584,6 @@ pub async fn spawn_agent(
                                             "Idle",
                                         );
                                     });
-                                }
-                                // OpenCode's TUI does not expose a separate
-                                // JSON acknowledgement in interactive mode;
-                                // its provider-owned title changes from
-                                // `OpenCode` to `OC | …` when it accepts a
-                                // submitted turn.
-                                if was_idle && next_status == "Processing..." {
-                                    super::emit_agent_turn_started(&pty_emit_app, &sid_for_pty);
                                 }
                             }
                         } else if provider_name_for_pty == "gemini" {
@@ -1751,6 +1711,88 @@ pub async fn spawn_agent(
         set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Off");
     });
 
+    if let Some(attachment) = &codex_attachment {
+        let finalized = app_state
+            .native_delivery
+            .finalize_codex_tui(
+                &config.session_id,
+                attachment.generation,
+                || {
+                    if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err(
+                            crate::delivery::codex_shared::CodexSharedError::unsupported(
+                                "captured Codex PTY reader exited during attachment",
+                            ),
+                        );
+                    }
+                    child.alive()
+                },
+                |id| {
+                    let mut captured_config = config_lock.lock().map_err(|_| {
+                        crate::delivery::codex_shared::CodexSharedError::unsupported(
+                            "agent config lock unavailable",
+                        )
+                    })?;
+                    super::apply_provider_identity("codex", &mut captured_config, id)
+                        .map(|_| ())
+                        .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
+                },
+            )
+            .await;
+        if let Err(error) = finalized {
+            child.stop().await;
+            // Failed attachment otherwise discards the only TUI evidence (for
+            // example a blocking startup picker). Preserve a bounded plain tail.
+            let output = watch_state
+                .lock()
+                .ok()
+                .and_then(|state| state.snapshot_since(None, Some(4096)).ok())
+                .map(|snapshot| snapshot.output.text)
+                .unwrap_or_default();
+            return Err(if output.trim().is_empty() {
+                error.to_string()
+            } else {
+                format!("{error}\nProvider terminal output:\n{output}")
+            });
+        }
+        if let Err(error) = child.alive() {
+            child.stop().await;
+            return Err(error.to_string());
+        }
+        config = config_lock
+            .lock()
+            .map_err(|_| "agent config lock unavailable")?
+            .clone();
+        codex_attachment_ready.store(true, std::sync::atomic::Ordering::Release);
+        if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
+            codex_attachment_ready.store(false, std::sync::atomic::Ordering::Release);
+            child.stop().await;
+            return Err("captured Codex PTY reader exited during finalization".into());
+        }
+        app_state
+            .interactions
+            .record_provider_input_state(
+                &config.session_id,
+                provider_generation,
+                ProviderInputReadiness::Ready,
+                None,
+            )
+            .await;
+        set_agent_status(&app, &config.session_id, &current_status, "Idle");
+    }
+    if codex_attachment.is_some() {
+        let observations = app_state
+            .native_delivery
+            .codex_observations(&config.session_id, provider_generation)
+            .await
+            .map_err(|error| error.to_string())?;
+        super::codex_shared::observe_turn_activity(
+            app.clone(),
+            config.session_id.clone(),
+            current_status.clone(),
+            observations,
+        );
+    }
     if config.provider == "codex" {
         let watcher_app = app.clone();
         let watcher_provider = provider.clone();
@@ -2569,7 +2611,9 @@ pub async fn spawn_agent(
         let watcher_config = config_lock.clone();
         let watcher_current_status = current_status.clone();
         let watcher_workspace = cwd.clone();
+        let watcher_session = config.session_id.clone();
         let started_after_ms = chrono::Utc::now().timestamp_millis();
+        let mut discovery = OpenCodeSessionDiscovery::default();
         std::thread::spawn(move || loop {
             let current = watcher_current_status
                 .lock()
@@ -2578,17 +2622,18 @@ pub async fn spawn_agent(
             if current == "Off" {
                 break;
             }
-            if wardian_core::identity::normalize_status(&current) == "processing" {
-                if let Some(provider_session_id) =
-                    opencode_recent_session_for_workspace(&watcher_workspace, started_after_ms)
-                {
-                    if let Ok(mut cfg) = watcher_config.lock() {
-                        cfg.resume_session = Some(provider_session_id);
-                        cfg.fresh_provider_session_id = None;
-                    }
-                    persist_runtime_agent_configs(&watcher_app);
-                    break;
+            if let Some(provider_session_id) = discovery.poll(
+                &current,
+                &watcher_workspace,
+                started_after_ms,
+                &watcher_session,
+            ) {
+                if let Ok(mut cfg) = watcher_config.lock() {
+                    cfg.resume_session = Some(provider_session_id);
+                    cfg.fresh_provider_session_id = None;
                 }
+                persist_runtime_agent_configs(&watcher_app);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         });
@@ -2600,9 +2645,12 @@ pub async fn spawn_agent(
         cfg.folder = expected_folder;
     }
 
+    if let Some(guard) = codex_attach_guard.as_mut() {
+        guard.attached();
+    }
     Ok(ActiveAgent {
         config: config_lock,
-        child_process: Some(child),
+        child_process: Some(child.attached()),
         background_processes,
         memory_capability,
         runtime_generation: Some(runtime_generation),
@@ -3304,53 +3352,5 @@ mod tests {
         );
         assert!(resumed.context_text.contains("Later OpenCode memory"));
         assert!(!resumed.context_text.contains("Initial OpenCode memory"));
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_answers_light_theme_queries() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk(
-            "codex",
-            b"\x1b[?996n\x1b]10;?\x1b\\\x1b]11;?\x1b\\",
-            "light",
-        );
-
-        let responses: Vec<String> = responses
-            .into_iter()
-            .map(|response| String::from_utf8(response).expect("utf8 response"))
-            .collect();
-        assert_eq!(
-            responses,
-            vec![
-                "\x1b[?997;2n".to_string(),
-                "\x1b]10;rgb:11/18/27\x1b\\".to_string(),
-                "\x1b]11;rgb:fc/fa/f5\x1b\\".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_handles_split_background_query() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11", "dark")
-            .is_empty());
-        let responses = responder.responses_for_chunk("codex", b";?\x1b\\", "dark");
-
-        assert_eq!(responses, vec![b"\x1b]11;rgb:02/04/02\x1b\\".to_vec()]);
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11;?\x1b\\", "dark")
-            .is_empty());
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_ignores_other_providers() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk("opencode", b"\x1b]11;?\x1b\\", "light");
-
-        assert!(responses.is_empty());
     }
 }

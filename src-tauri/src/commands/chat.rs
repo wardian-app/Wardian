@@ -3,7 +3,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::manager::{self, opencode::opencode_database_path};
+use crate::manager::{
+    self,
+    opencode::{opencode_database_path, opencode_log_dirs, opencode_log_path_in},
+};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
     legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
@@ -23,11 +26,17 @@ use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
 
+#[path = "chat_archive_identity.rs"]
+pub(crate) mod archive_identity;
+use archive_identity::stable_provider_log_event_id;
+
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 #[cfg(test)]
 #[path = "chat_antigravity_tests.rs"]
 mod antigravity_tests;
+#[path = "chat_opencode_tools.rs"]
+mod opencode_tools;
 
 #[derive(Clone)]
 pub(crate) struct AgentArchiveCaptureSnapshot {
@@ -71,7 +80,7 @@ pub async fn load_agent_chat_transcript_for_state(
     let result = archive_agent_chat_events_for_state(state, &session_id).await?;
     let archived_events = state
         .conversation_archive
-        .chat_events_for_active_conversation(&session_id)
+        .chat_events_for_capture(&result.context)
         .unwrap_or_else(|error| {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive chat replay failed for {session_id}: {error}"
@@ -82,7 +91,14 @@ pub async fn load_agent_chat_transcript_for_state(
     // Provider logs and the watch snapshot are live, bounded sources. Replay
     // only the active durable archive so a restart or log rotation does not
     // erase current chat rows, while a new provider session starts empty.
-    let mut events = merge_chat_events(result.events, archived_events);
+    let mut events = crate::state::conversation_archive::provenance::merge_current_capture(
+        result.events,
+        archived_events,
+    )
+    .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
+    for event in &mut events {
+        normalize_chat_event_visible_text(event);
+    }
     let conversation_started_at = active_conversation_started_at(state, &session_id);
     events.extend(memory_chat_events(
         &session_id,
@@ -302,6 +318,23 @@ pub(crate) async fn agent_archive_capture_snapshot(
             }
         }
     }
+    if provider == "opencode" && log_path.is_none() {
+        let provider_session_id = opencode_session_id(
+            &config.session_id,
+            config.resume_session.as_deref(),
+            config.fresh_provider_session_id.as_deref(),
+        );
+        if let Some(path) = provider_session_id.and_then(|provider_session_id| {
+            opencode_log_dirs()
+                .into_iter()
+                .find_map(|directory| opencode_log_path_in(&directory, &provider_session_id))
+        }) {
+            log_path = Some(path.clone());
+            if let Ok(mut agent_log_path) = agent.log_path.lock() {
+                *agent_log_path = Some(path);
+            }
+        }
+    }
 
     Ok(AgentArchiveCaptureSnapshot {
         session_id,
@@ -338,8 +371,12 @@ pub(crate) fn collect_agent_chat_events_for_archive(
     if snapshot.provider == "opencode" {
         provider_events.extend(load_opencode_db_chat_events(
             &snapshot.session_id,
-            opencode_session_id(&snapshot.session_id, snapshot.resume_session.as_deref())
-                .as_deref(),
+            opencode_session_id(
+                &snapshot.session_id,
+                snapshot.resume_session.as_deref(),
+                snapshot.fresh_provider_session_id.as_deref(),
+            )
+            .as_deref(),
         ));
     }
     let provider_has_transcript = has_transcript_events(&provider_events);
@@ -574,7 +611,7 @@ fn load_provider_log_chat_events(
     };
 
     let lines = content.lines().collect::<Vec<_>>();
-    normalize_chat_lines(session_id, provider, lines.iter())
+    let mut events = normalize_chat_lines(session_id, provider, lines.iter())
         .into_iter()
         .map(|mut event| {
             set_metadata(&mut event.metadata, "provider_log", true);
@@ -606,7 +643,14 @@ fn load_provider_log_chat_events(
             }
             event
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // The bridge is available only for a complete, session-headed snapshot.
+    // A bounded tail may use persisted aliases but cannot invent new ones.
+    let complete = std::fs::metadata(path).is_ok_and(|meta| {
+        meta.len() == content.len() as u64 && meta.len() <= PROVIDER_LOG_TAIL_BYTES
+    });
+    archive_identity::attach_native_legacy_aliases(&mut events, path, &content, complete);
+    events
 }
 
 fn claude_legacy_provider_log_event_id(
@@ -615,7 +659,23 @@ fn claude_legacy_provider_log_event_id(
     raw_line: &str,
 ) -> String {
     let mut legacy_event = event.clone();
-    if event.role.as_ref() == Some(&AgentChatRole::User) {
+    // Before provenance normalization, Claude context and provider-internal
+    // messages were persisted with the native `user` role. Recreate that role
+    // for the field-derived ID so pre-fix archive refs remain aliases of the
+    // raw-line ID emitted now.
+    if event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::System)
+        && matches!(
+            event
+                .metadata
+                .get("input_origin")
+                .and_then(serde_json::Value::as_str),
+            Some("context_injection" | "provider_internal")
+        )
+    {
+        legacy_event.role = Some(AgentChatRole::User);
+    }
+    if legacy_event.role.as_ref() == Some(&AgentChatRole::User) {
         if let (Some(current_text), Ok(parsed)) = (
             event.text.as_deref(),
             serde_json::from_str::<serde_json::Value>(raw_line),
@@ -753,39 +813,6 @@ fn load_antigravity_database_chat_events(
         event.sequence = Some(index as u64 + 1);
     }
     events
-}
-
-fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
-    let mut hash = Sha256::new();
-    hash.update(event.session_id.as_bytes());
-    hash.update(b"\0");
-    hash.update(event.provider.as_bytes());
-    hash.update(b"\0");
-    hash.update(path.to_string_lossy().as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.kind).as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.role).as_bytes());
-    hash.update(b"\0");
-    for value in [
-        event.turn_id.as_deref(),
-        event.created_at.as_deref(),
-        event.source.as_deref(),
-        event.title.as_deref(),
-        event.command.as_deref(),
-        event.text.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        hash.update(value.as_bytes());
-        hash.update(b"\0");
-    }
-    format!(
-        "{}:provider_log:{}",
-        event.session_id,
-        hex_prefix(hash.finalize().as_slice(), 16)
-    )
 }
 
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
@@ -952,18 +979,39 @@ fn load_opencode_db_chat_events_from_db(
 
     let mut events = Vec::new();
     let mut request_root_id = None;
+    let mut text_sequence = 0;
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        events.extend(opencode_tools::project(
+            wardian_session_id,
+            opencode_session_id,
+            &row,
+            request_root_id.as_deref(),
+            db_path,
+            events.len() as u64 + 1,
+        ));
         let Some(event) = opencode_db_part_to_chat_event(
             wardian_session_id,
             opencode_session_id,
-            events.len() as u64 + 1,
+            text_sequence + 1,
             row,
             request_root_id.as_deref(),
         )?
         else {
             continue;
         };
+        let mut event = event;
+        // Keep legacy text IDs stable when previously omitted tool parts appear.
+        text_sequence += 1;
+        event.sequence = Some(events.len() as u64 + 1);
+        event.created_at = event.metadata["part_time_created"]
+            .as_i64()
+            .or_else(|| event.metadata["message_time_created"].as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|time| time.to_rfc3339());
+        // `source_path` is part of the archive source-record contract and is
+        // retained when events are replayed after a restart.
+        event.metadata["source_path"] = serde_json::json!(db_path.to_string_lossy());
         if event.role == Some(AgentChatRole::User)
             && event.metadata["input_origin"] != "context_injection"
         {
@@ -1086,15 +1134,22 @@ fn opencode_db_part_to_chat_event(
     }))
 }
 
-fn opencode_session_id(wardian_session_id: &str, resume_session: Option<&str>) -> Option<String> {
+fn opencode_session_id(
+    wardian_session_id: &str,
+    resume_session: Option<&str>,
+    fresh_provider_session_id: Option<&str>,
+) -> Option<String> {
     resume_session
         .map(str::trim)
         .filter(|session| session.starts_with("ses_"))
         .or_else(|| {
-            wardian_session_id
-                .trim()
-                .starts_with("ses_")
-                .then_some(wardian_session_id)
+            fresh_provider_session_id
+                .map(str::trim)
+                .filter(|session| session.starts_with("ses_"))
+        })
+        .or_else(|| {
+            let session = wardian_session_id.trim();
+            session.starts_with("ses_").then_some(session)
         })
         .map(ToString::to_string)
 }
@@ -1229,8 +1284,9 @@ fn event_identity_ids(event: &AgentChatEvent) -> Vec<&str> {
 
 /// Normalizes archived records written before provider adapters learned to
 /// remove their internal wrappers. This keeps archive replay on the same
-/// visible-text contract as newly parsed provider events.
+/// visible-text and provenance contract as newly parsed provider events.
 fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
+    normalize_chat_event_provenance(event);
     if event.kind != AgentChatEventKind::Message {
         return;
     }
@@ -1240,10 +1296,24 @@ fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
     event.text = visible_chat_text_for_provider(&event.provider, role, text);
 }
 
+/// Older archives persisted Claude's native `user` role for provider context,
+/// interruption markers, and tool-result records. Their explicit provenance
+/// metadata is authoritative, so replay can migrate the presentation role
+/// without rewriting the durable archive or treating the row as a new prompt.
+fn normalize_chat_event_provenance(event: &mut AgentChatEvent) {
+    crate::state::conversation_archive::provenance::canonicalize_role(event);
+}
+
 fn should_collapse_provider_message_duplicate(
     existing: &AgentChatEvent,
     candidate: &AgentChatEvent,
 ) -> bool {
+    if existing.metadata["provider_log"] == true
+        && candidate.metadata["provider_log"] == true
+        && !archive_identity::is_codex_stream_completion_pair(existing, candidate)
+    {
+        return false; // Native records with distinct IDs are distinct observations.
+    }
     if existing.kind != AgentChatEventKind::Message || candidate.kind != AgentChatEventKind::Message
     {
         return false;
@@ -1289,6 +1359,12 @@ fn chat_event_dedupe_key(event: &AgentChatEvent) -> String {
         return format!("archive|{conversation_id}|{}", event.id);
     }
 
+    if event.metadata["provider_log"] == true {
+        return format!(
+            "native|{}|{}|{}",
+            event.session_id, event.provider, event.id
+        );
+    }
     if event.kind == AgentChatEventKind::Message {
         return format!(
             "{:?}|{:?}|{}|{}",
@@ -1945,6 +2021,42 @@ Do you want to proceed?
     }
 
     #[test]
+    fn claude_provider_log_ids_alias_pre_migration_provenance_roles() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("claude.jsonl");
+        let lines = [
+            r#"{"type":"user","isMeta":true,"uuid":"context-1","message":{"role":"user","content":"Native provider context."}}"#,
+            r#"{"type":"user","parentUuid":"assistant-1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+        ];
+        std::fs::write(&log_path, format!("{}\n", lines.join("\n"))).expect("write log");
+
+        let events = load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[]);
+
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_eq!(event.role, Some(AgentChatRole::System));
+            assert!(matches!(
+                event.metadata["input_origin"].as_str(),
+                Some("context_injection" | "provider_internal")
+            ));
+            let legacy_id = event
+                .metadata
+                .get("legacy_event_ids")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|ids| ids.first())
+                .and_then(serde_json::Value::as_str)
+                .expect("pre-migration role alias");
+            let mut pre_migration_event = event.clone();
+            pre_migration_event.role = Some(AgentChatRole::User);
+            assert_eq!(
+                legacy_id,
+                stable_provider_log_event_id(&pre_migration_event, &log_path)
+            );
+            assert_ne!(legacy_id, event.id);
+        }
+    }
+
+    #[test]
     fn provider_log_transcript_suppresses_watch_terminal_fallback() {
         let provider_events = vec![AgentChatEvent {
             id: "agent-1:provider:1".to_string(),
@@ -2124,6 +2236,26 @@ Do you want to proceed?
             chat_events[0].text.as_deref(),
             Some("Created #daily-task-list under General.")
         );
+        // The mirror exception must not collapse two identified observations or
+        // equal answers belonging to different native requests.
+        let mut identified = chat_events[0].clone();
+        identified.id = "other-identified-answer".into();
+        identified.turn_id = Some("other-native-message".into());
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![chat_events[0].clone(), identified]).len(),
+            2
+        );
+        let mut rooted_stream = chat_events[0].clone();
+        rooted_stream.id = "stream-another-request".into();
+        rooted_stream.turn_id = None;
+        rooted_stream.source = Some("event_msg".into());
+        rooted_stream.metadata["request_root_id"] = serde_json::json!("request-a");
+        let mut rooted_completion = chat_events[0].clone();
+        rooted_completion.metadata["request_root_id"] = serde_json::json!("request-b");
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
+            2
+        );
     }
 
     #[test]
@@ -2143,6 +2275,61 @@ Do you want to proceed?
         assert_eq!(
             chat_events[0].text.as_deref(),
             Some("This is what I see? [Image #1]")
+        );
+    }
+
+    #[test]
+    fn codex_user_response_item_survives_merge_as_a_request_turn() {
+        let provider_events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request","role":"user","content":[{"type":"input_text","text":"Run the archive check."}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-turn","content_item_kinds":["user.text"]}}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Run the archive check."}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-answer","role":"assistant","content":[{"type":"output_text","text":"Archive checked."}]}}"#,
+            ],
+        );
+        let chat_events = merge_chat_events(Vec::new(), provider_events);
+        let request = chat_events
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Run the archive check."))
+            .expect("merged request");
+
+        assert_eq!(chat_events.len(), 2);
+        assert_eq!(request.source.as_deref(), Some("response_item"));
+        assert_eq!(request.role, Some(AgentChatRole::User));
+        assert_eq!(request.turn_id.as_deref(), Some("native-request"));
+        assert_eq!(request.metadata["input_origin"], "human_input");
+        assert_eq!(request.metadata["input_purpose"], "request");
+        assert_eq!(request.metadata["provider_turn_id"], "native-turn");
+        assert_eq!(request.metadata["request_root_id"], "native-request");
+
+        let records = chat_events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                crate::state::conversation_archive::narrative_from_chat_event(
+                    event,
+                    index as u64 + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        let turns = crate::state::conversation_archive::derive_turn_records(
+            "conversation-1",
+            &records,
+            &chat_events,
+            &[],
+            false,
+        );
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].request.kind, "user_request",
+            "an explicit user response_item must remain a request after mirror merging"
+        );
+        assert_eq!(
+            turns[0].status,
+            wardian_core::conversations::ConversationTurnStatus::Responded
         );
     }
 
@@ -2375,6 +2562,79 @@ Do you want to proceed?
     }
 
     #[test]
+    fn merge_replays_legacy_claude_provenance_roles_without_false_prompts() {
+        let archived_context = AgentChatEvent {
+            id: "agent-1:legacy:context".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("Native provider context.".to_string()),
+            title: None,
+            status: None,
+            turn_id: Some("context-1".to_string()),
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({
+                "conversation_archive_id": "conversation-one",
+                "input_origin": "context_injection",
+                "input_purpose": "context"
+            }),
+        };
+        let mut archived_internal = archived_context.clone();
+        archived_internal.id = "agent-1:legacy:internal".to_string();
+        archived_internal.text = Some("[Request interrupted by user]".to_string());
+        archived_internal.turn_id = None;
+        archived_internal.sequence = Some(2);
+        archived_internal.metadata["input_origin"] = serde_json::json!("provider_internal");
+        archived_internal.metadata["input_purpose"] = serde_json::json!("internal");
+        let mut archived_result = archived_context.clone();
+        archived_result.id = "agent-1:legacy:result".to_string();
+        archived_result.kind = AgentChatEventKind::ToolResult;
+        archived_result.role = Some(AgentChatRole::User);
+        archived_result.text = Some("1\tWARDIAN_CLAUDE_REAL_EVIDENCE".to_string());
+        archived_result.turn_id = Some("toolu_01evidence".to_string());
+        archived_result.sequence = Some(3);
+        archived_result.metadata = serde_json::json!({
+            "conversation_archive_id": "conversation-one",
+            "raw_type": "tool_result"
+        });
+
+        let mut live_context = archived_context.clone();
+        live_context.id = "agent-1:raw:context".to_string();
+        live_context.role = Some(AgentChatRole::System);
+        live_context.metadata = serde_json::json!({
+            "input_origin": "context_injection",
+            "legacy_event_ids": ["agent-1:legacy:context"]
+        });
+        let mut live_internal = archived_internal.clone();
+        live_internal.id = "agent-1:raw:internal".to_string();
+        live_internal.role = Some(AgentChatRole::System);
+        live_internal.metadata = serde_json::json!({
+            "input_origin": "provider_internal",
+            "legacy_event_ids": ["agent-1:legacy:internal"]
+        });
+
+        let replayed = merge_chat_events(
+            vec![archived_context, archived_internal, archived_result],
+            vec![live_context, live_internal],
+        );
+
+        assert_eq!(replayed.len(), 3);
+        assert_eq!(replayed[0].role, Some(AgentChatRole::System));
+        assert_eq!(replayed[0].metadata["input_origin"], "context_injection");
+        assert_eq!(replayed[1].role, Some(AgentChatRole::System));
+        assert_eq!(replayed[1].metadata["input_origin"], "provider_internal");
+        assert_eq!(replayed[2].kind, AgentChatEventKind::ToolResult);
+        assert_eq!(replayed[2].role, Some(AgentChatRole::Tool));
+    }
+
+    #[test]
     fn antigravity_sqlite_conversation_renders_user_and_assistant_history() {
         let temp = tempfile::tempdir().expect("temp dir");
         let database = temp.path().join("conversation.db");
@@ -2531,21 +2791,49 @@ Do you want to proceed?
         assert_eq!(chat_events[2].metadata["opencode_session_id"], "ses_test");
         assert_eq!(chat_events[2].metadata["part_id"], "part-assistant");
         assert_eq!(chat_events[2].metadata["raw_type"], "text");
+        assert_eq!(
+            chat_events[2].metadata["source_path"],
+            db_path.to_string_lossy().as_ref()
+        );
+
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-later', 'ses_test', 7, 7, '{\"role\":\"assistant\"}')",
+            [],
+        )
+        .expect("append message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-later', 'msg-later', 'ses_test', 8, 8, '{\"type\":\"text\",\"text\":\"A later reply\"}')",
+            [],
+        )
+        .expect("append part");
+
+        let refreshed = load_opencode_db_chat_events_from_db(&db_path, "agent-1", "ses_test")
+            .expect("refresh db");
+        assert_eq!(refreshed.len(), 4);
+        assert_eq!(refreshed[3].text.as_deref(), Some("A later reply"));
     }
 
     #[test]
     fn opencode_session_id_prefers_real_resume_session() {
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("ses_real")).as_deref(),
+            opencode_session_id("wardian-uuid", Some("ses_real"), None).as_deref(),
             Some("ses_real")
         );
         assert_eq!(
-            opencode_session_id("ses_from_agent", None).as_deref(),
+            opencode_session_id("ses_from_agent", None, None).as_deref(),
             Some("ses_from_agent")
         );
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("stale-uuid")),
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("ses_fresh")),
+            Some("ses_fresh".to_string())
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("fresh-uuid")),
             None
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", None, Some("ses_fresh")).as_deref(),
+            Some("ses_fresh")
         );
     }
 

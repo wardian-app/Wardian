@@ -445,14 +445,33 @@ fn parse_line_catalog(output: &str) -> Vec<ProviderModelOption> {
         .lines()
         .map(strip_ansi)
         .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty() && !line.contains(char::is_whitespace))
-        .filter(|line| seen.insert(line.clone()))
-        .map(|id| ProviderModelOption {
-            display_name: id.clone(),
-            id,
-            effort_options: Vec::new(),
-            default_effort: None,
-            is_default: false,
+        .filter_map(|line| {
+            if line.is_empty() {
+                return None;
+            }
+
+            // Antigravity 1.1.27 emits model IDs and display names as a
+            // tab-separated catalogue. OpenCode emits one model ID per line,
+            // so retain that older shape as the fallback.
+            let (id, display_name) = line
+                .split_once('\t')
+                .map(|(id, display_name)| (id.trim(), display_name.trim()))
+                .unwrap_or((line.as_str(), line.as_str()));
+            if id.is_empty() || id.contains(char::is_whitespace) || !seen.insert(id.to_string()) {
+                return None;
+            }
+
+            Some(ProviderModelOption {
+                display_name: if display_name.is_empty() {
+                    id.to_string()
+                } else {
+                    display_name.to_string()
+                },
+                id: id.to_string(),
+                effort_options: Vec::new(),
+                default_effort: None,
+                is_default: false,
+            })
         })
         .collect()
 }
@@ -605,6 +624,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["openai/gpt-5.6", "opencode/free"],
         );
+    }
+
+    #[test]
+    fn parses_current_antigravity_tab_separated_catalogue() {
+        let models = parse_line_catalog(
+            "Fetching available models...\n\
+             gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n\
+             gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n\
+             gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n",
+        );
+
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "gemini-3.8-flash-low");
+        assert_eq!(models[0].display_name, "Gemini 3.8 Flash (Low)");
+        assert_eq!(models[1].id, "gemini-3.8-flash-medium");
+        assert_eq!(models[2].id, "gemini-3.8-flash-high");
     }
 
     #[test]

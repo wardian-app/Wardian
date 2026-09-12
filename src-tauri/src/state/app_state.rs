@@ -208,7 +208,11 @@ impl AppState {
         self.interactions
             .clear_provider_input_state_in_memory(target_session_id)
             .await;
-        self.native_delivery.dispose_agent(target_session_id).await;
+        if let Err(error) = self.native_delivery.dispose_agent(target_session_id).await {
+            crate::utils::logging::log_debug(&format!(
+                "Native owner retained during removal: {error}"
+            ));
+        }
     }
 
     /// Restores durable mailbox work after interaction state has been hydrated.

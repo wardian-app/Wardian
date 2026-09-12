@@ -17,8 +17,29 @@ This document captures the practical runtime differences between Wardian's suppo
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
 - On Windows, provider adapters should prefer direct native executables or a
-  direct `node <script.js>` launch resolved from an npm `.cmd` shim. Shell-wrap
-  only when shell dispatch is required, such as extensionless OpenCode shims.
+  direct `node <script.js>` launch resolved from an npm shim. Shell-wrap only
+  when shell dispatch is required and no verified native launcher is available.
+
+### Native transport compatibility
+
+OpenCode ACP starts with its own command arguments. Wardian applies the selected
+model through `session/set_model` and the configured agent through
+`session/set_mode` after binding either a new or resumed session; a rejected
+selection stops bootstrap before a prompt is submitted.
+Only ACP `agent_message_chunk` text contributes to the assistant answer. Thoughts,
+user echoes, and tool updates remain progress signals. Native answer chunks retain
+their whitespace, including whitespace-only chunks, so streaming preserves words
+and formatting.
+Codex app-server receives the selected model through a repeatable `-c` config
+override, alongside the reasoning-effort override. Its interactive `--model`
+flag does not establish the model used by an app-server thread.
+
+Pi RPC streams typed text deltas and publishes the complete assistant message at
+`message_end`. Wardian replaces the accumulated answer for final messages and
+older full-message updates. User echoes, thinking, and tool events cannot become
+assistant answers. Bootstrap timeout diagnostics identify
+the protocol stage, such as `initialize` or `thread/resume`, without including
+the prompt. An unknown Codex resume identity remains a bootstrap error.
 
 ## Quick Comparison
 
@@ -32,6 +53,14 @@ This document captures the practical runtime differences between Wardian's suppo
 | Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
 ## Antigravity
+
+### Model discovery
+
+Wardian reads `agy models` from the installed CLI. Current releases return
+tab-separated model IDs and display names; both are preserved in the model
+picker. Progress messages are excluded. The selected ID is passed unchanged
+through `--model` for launches, including low-effort Flash variants. OpenCode's
+one-model-ID-per-line catalog remains supported by the shared parser.
 
 ### Working-root model
 
@@ -73,6 +102,12 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
   omitted; this does not establish coverage of every Antigravity tool type.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
+### Prompt delivery
+
+- Antigravity's editor honors bracketed paste. Wardian wraps multiline prompts, and single-line prompts of 2048 bytes or more, in `ESC[200~` … `ESC[201~`, then sends one carriage return as a separate write. Short single-line prompts keep the simple literal path.
+- This supersedes an earlier assumption that Antigravity did not support bracketed paste. That assumption made Wardian send long multiline prompts literally, so the editor treated the embedded newlines as submits and could retain the prompt unsent with no turn produced. A native protocol experiment against Antigravity 1.1.27 sent raw `ESC[200~ payload ESC[201~` for a 6886-byte, 285-line prompt; the editor collapsed it into a single paste entry, and one carriage return produced a provider-native answer containing all three independent random labels placed at the payload's beginning, middle, and end.
+- The 500 ms submit settle delay is unchanged. The experiment's 267 ms editor-application time is one machine's measurement, not a guarantee, so delivery still depends on the existing bounded turn receipt and still fails closed with no automatic retry when that receipt does not arrive.
+
 ### Practical implications
 
 - Do not use Gemini's `--include-directories`, `--session-id`, or stream output assumptions for Antigravity.
@@ -96,7 +131,18 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 - Claude reads `CLAUDE.md`.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
+- Ordinary habitat preparation materializes existing owned common/class/agent
+  `CLAUDE.md` bridges from sibling canonical `AGENTS.md`; habitat generation and
+  the subsequent memory append also refresh the habitat bridge. These are
+  bootstrap snapshots, with no live refresh guarantee. Exact legacy stubs and
+  unchanged versioned/hash-marked projections are eligible; customized files and
+  links are preserved. Nested imports are copied verbatim and retain provider
+  consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
+- On Windows, publishing generated `CLAUDE.md` siblings supports long ASCII and
+  Unicode habitat and managed-root paths. The writer uses the existing parent's
+  canonical path for both temporary creation and the destination join, after
+  checking ownership and links; it does not resolve the destination leaf.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
 ### Approval handling
@@ -120,10 +166,20 @@ powershell -NoProfile -Command "wardian --version"
 bash -lc "wardian --version"
 ```
 
+### Headless result output
+
+Claude's verbose JSON output can contain an event array ending in a result.
+Wardian extracts that terminal answer and its provider session ID before
+passing the answer to automation. Intermediate messages remain diagnostic
+data. Existing single-object responses are also supported. Missing, ambiguous
+or unsuccessful terminal results fail the task instead of exposing event data
+as a successful answer.
+
 ## Codex
 
 ### Chat history
 
+- Startup host-context records do not start work or increment the query count. The status parser and Chat share the native content-kind classifier; explicit user content, legacy string prompts, and canonical user events retain their normal activity behavior. See [#1249](https://github.com/wardian-app/Wardian/issues/1249).
 - Codex emits a lightweight `agent_message` and a completed `response_item` for the same visible assistant response. The completed record can append an internal `<oai-mem-citation>` block. Wardian removes that block before storing or rendering the message, and applies the same normalization while replaying older archived rows, so one user-visible answer appears once.
 - Wardian memory rows are filtered to the active conversation boundary before they are merged into Chat, then receive the same chronological sequence assignment as provider and watch events. Agent-wide memory history must not be replayed into a later conversation.
 
@@ -221,7 +277,10 @@ Current sequence:
 1. Create or update the agent's projected `CODEX_HOME` under `.wardian/agents/<wardian-agent-id>/habitat/.codex`.
 2. Generate a distinct provider UUID and write a minimal `session_meta` rollout at `sessions/<year>/<month>/<day>/rollout-<timestamp>-<provider-id>.jsonl`.
 3. Validate that Codex resolves the rollout from that same projected home.
-4. Launch interactive Codex with the real workspace as `--cd` and resume the exact provider UUID.
+4. Start the Wardian-owned local daemon without loading a thread. The ordinary
+   TUI resumes the selected provider UUID under the same home and real workspace.
+   Wardian requires that exact thread to appear in the owned daemon before
+   subscribing and enabling peer delivery. No model bootstrap turn is required.
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
@@ -266,6 +325,42 @@ Wardian treats these as the important lifecycle markers:
 
 Codex commentary events like `agent_message` should not be used as hard status transitions.
 
+The shared app-server event reader observes turns started through either the
+TUI or Wardian. A named Wardian inbox output without an originating model
+call is non-waking context; it must not mark an idle agent as processing.
+V2 peer information, follow-up work, and interruption use native WebSocket
+operations through a private local socket and the configured Codex executable's
+`app-server proxy` tunnel. MCP exposes the model-facing
+tools and explicit receiver. See [agent messaging tools](./agent-messaging-tools.md).
+
+After an unclean exit, startup recovers an abandoned default socket only when
+a nonblocking connection is refused. It holds Codex's native startup lock,
+checks that the entry is a Unix socket, and verifies its filesystem identity
+before removal. Live listeners, busy startup locks, and ambiguous connection
+results remain untouched and produce a startup error.
+
+Owner attachment requests thread metadata and live input capability without
+hydrating archived turns, so large conversations do not exceed the control
+transport's frame limit. The ordinary TUI still owns history display. Its launch
+explicitly selects the configured workspace with `--cd`, avoiding Codex's resume
+directory picker when a saved conversation records another working directory.
+Attachment failures retain the transport reason and a bounded terminal tail.
+
+For long canonical homes, owner startup recovers pending launch settings and
+then prepares a private compact physical home before config/MCP projection.
+The logical habitat path remains an owned directory link. Matching agent and
+slot records authorize that link; arbitrary links remain invalid. A separate
+preparation lock fences migration against ordinary refresh and index writes.
+Refresh resolves completed mappings without moving homes or recovering a live
+startup overlay. The provider executable, normal TUI invocation and shell `HOME`
+are unchanged. See [the removal criteria](https://github.com/wardian-app/Wardian/issues/1235).
+
+On Windows, managed Codex MCP publication uses the existing parent's canonical
+verbatim path for both the temporary file and destination, including before
+compact-home mapping. It resolves only the parent. Configuration is written
+before ownership; interrupted publication leaves an unowned entry that retries
+preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
+
 ### Known operational edge cases
 
 - Codex skill discovery can be correct while shell execution is still blocked by the CLI sandbox. In that case, the agent sees the skill but fails when the skill tries to invoke shell tools.
@@ -292,9 +387,29 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 
 ### Session identity
 
-- OpenCode session IDs are discovered from JSON output during `opencode run --format json`, or captured from `opencode session list` while the interactive TUI runs.
+- OpenCode session IDs are discovered from JSON output during `opencode run --format json`. For interactive TUI launches, Wardian binds the provider's `created` log record to the same OpenCode run that loaded this agent's generated `.opencode/opencode.json`; if that ownership evidence is absent or ambiguous, Wardian leaves the session identity unset rather than adopting a global session-list match.
+- Interactive identity discovery also runs when the title remains idle. It checks log metadata between polls and reads the ownership evidence only when the source changes; a Processing title is not required to resume or link an already completed conversation.
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.
+- Wardian resolves OpenCode's database and rolling log from `XDG_DATA_HOME` first, then the platform data directories. This matters on Windows as well: OpenCode honors the XDG override, so using only `%LOCALAPPDATA%` can associate a session with another installation's transcript.
+- Once that launch-scoped identity is available, transcript refresh reads OpenCode's SQLite `message`/`part` rows and retains the database path as `source_path` provenance metadata; later rows are visible on the next refresh without restarting the agent.
+- SQLite tool parts expose native call IDs, names, structured input, and completed or failed output. Pending parts do not create placeholder results. Tool output has the Tool role; tool events never create human prompts. Tool IDs remain stable across refreshes, and adding previously omitted tools preserves existing text-event IDs. The retained fixture covers OpenCode 1.18.29; unknown states and conflicting native identities are omitted.
+
+### Headless prompt input
+
+Wardian sends the complete headless OpenCode prompt as UTF-8 on stdin, then
+closes the pipe to signal EOF. It supplies no positional message: OpenCode's
+`run` parser reconstructs positional messages with literal quotes. Whitespace,
+line endings, quotes, backslashes, and Unicode therefore remain part of the
+original prompt. Model, agent, session, output-format, and directory flags still
+use the ordinary argument path.
+
+The execution deadline and conversation-lease heartbeat also cover blocked
+stdin writes. Failed or cancelled delivery terminates the owned process tree;
+a failed write can represent partial delivery and is never automatically retried
+by this transport. OpenCode failure errors retain the exit code but omit raw
+provider stderr, which can echo private input. Input fidelity does not guarantee
+that the provider's answer satisfies the requested task.
 
 ### Practical implications
 
@@ -302,11 +417,15 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `<habitat>/.opencode/opencode.json` (`OPENCODE_CONFIG`) first, then verify the junctioned `skills/` entries resolve.
 - Interactive status comes from TUI window-title scraping ("OpenCode" idle, "OC | …" processing), while token/cost telemetry comes from OpenCode's shared SQLite store via wardian-core; both channels are expected to exist side by side.
+- OpenCode turn receipts for Wardian-delivered prompts come only from a new, session-bound user text part in OpenCode's read-only SQLite store. Title changes, including restored and approval titles, are status evidence rather than acceptance receipts.
+- The chat-log link and transcript source must resolve from the same provider data root as the running OpenCode process. If an isolated harness sets `XDG_DATA_HOME`, keep that setting for the Wardian process that reads telemetry and chat history as well.
 - TUI "Permission required" prompts never appear in the window title. Wardian detects them from the provider log (`message=asking id=per_…`) and raises Action Needed; the ask is attributed to a session only while its prompt loop is the sole open loop in the log, and clears once loop activity resumes after the prompt is answered.
-- On Windows, Wardian should launch the `opencode` command resolved from PATH,
-  matching how a user terminal starts OpenCode. Interactive and headless launch
-  wrap that command through the configured shell because npm and PowerShell
-  shims need shell dispatch semantics.
+- On Windows, Wardian resolves the `opencode` command from PATH. When an
+  npm-generated `.cmd` or `.ps1` shim points at the package's top-level native
+  launcher, Wardian launches that executable directly so the provider does not
+  acquire an avoidable configured-shell wrapper. Unrecognized or incomplete
+  shims still run through the configured shell, preserving compatibility with
+  the PATH command behavior described in [#568](https://github.com/wardian-app/Wardian/issues/568).
 
 ## Pi
 
