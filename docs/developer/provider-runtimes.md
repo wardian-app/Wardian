@@ -383,6 +383,7 @@ that the provider's answer satisfies the requested task.
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `<habitat>/.opencode/opencode.json` (`OPENCODE_CONFIG`) first, then verify the junctioned `skills/` entries resolve.
 - Interactive status comes from TUI window-title scraping ("OpenCode" idle, "OC | …" processing), while token/cost telemetry comes from OpenCode's shared SQLite store via wardian-core; both channels are expected to exist side by side.
+- OpenCode turn receipts for Wardian-delivered prompts come only from a new, session-bound user text part in OpenCode's read-only SQLite store. Title changes, including restored and approval titles, are status evidence rather than acceptance receipts.
 - The chat-log link and transcript source must resolve from the same provider data root as the running OpenCode process. If an isolated harness sets `XDG_DATA_HOME`, keep that setting for the Wardian process that reads telemetry and chat history as well.
 - TUI "Permission required" prompts never appear in the window title. Wardian detects them from the provider log (`message=asking id=per_…`) and raises Action Needed; the ask is attributed to a session only while its prompt loop is the sole open loop in the log, and clears once loop activity resumes after the prompt is answered.
 - On Windows, Wardian resolves the `opencode` command from PATH. When an
